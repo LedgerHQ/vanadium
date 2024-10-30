@@ -5,6 +5,7 @@ extern crate alloc;
 
 use alloc::{vec, vec::Vec};
 
+pub mod comm;
 pub mod ux;
 
 mod ecalls;
