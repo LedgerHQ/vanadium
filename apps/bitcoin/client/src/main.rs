@@ -8,6 +8,7 @@ use sdk::vanadium_client::{NativeAppClient, VanadiumAppClient};
 
 mod client;
 
+use std::io::{self, Write};
 use std::sync::Arc;
 
 #[derive(Parser)]
@@ -73,6 +74,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "Master fingerprint: {:08x}",
         bitcoin_client.get_master_fingerprint().await?
     );
+
+    print!("Please enter some text: ");
+    io::stdout().flush().unwrap();
+
+    let mut input = String::new();
+    io::stdin()
+        .read_line(&mut input)
+        .expect("Failed to read line");
+
+    println!("You entered: {}", input.trim());
 
     bitcoin_client.exit().await?;
 

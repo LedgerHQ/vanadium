@@ -1,6 +1,10 @@
-use core::{cell::RefCell, cmp::min, fmt};
+use core::{
+    cell::{RefCell, RefMut},
+    cmp::min,
+    fmt,
+};
 
-use alloc::{format, rc::Rc, string::String, vec};
+use alloc::{ffi::CString, format, rc::Rc, string::String, vec};
 use common::{
     client_commands::{
         Message, MessageDeserializationError, ReceiveBufferMessage, ReceiveBufferResponse,
@@ -10,12 +14,12 @@ use common::{
     manifest::Manifest,
     vm::{Cpu, CpuError, EcallHandler, MemoryError},
 };
-use ledger_device_sdk::hash::HashInit;
+use ledger_device_sdk::{buttons::get_button_event, hash::HashInit};
 use ledger_secure_sdk_sys::{
     cx_ripemd160_t, cx_sha256_t, cx_sha512_t, CX_OK, CX_RIPEMD160, CX_SHA256, CX_SHA512,
 };
 
-use crate::{AppSW, Instruction};
+use crate::{println, AppSW, Instruction};
 
 use super::outsourced_mem::OutsourcedMemory;
 
@@ -258,6 +262,26 @@ pub struct CommEcallHandler<'a> {
 }
 
 impl<'a> CommEcallHandler<'a> {
+    // Processes all the events until a command (apdu exchange) is received.
+    fn next_command(
+        &self,
+        comm: &mut RefMut<'_, &mut ledger_device_sdk::io::Comm>,
+    ) -> Result<Instruction, CommEcallError> {
+        loop {
+            let event: ledger_device_sdk::io::Event<Instruction> = comm.next_event();
+            match event {
+                ledger_device_sdk::io::Event::Command(e) => return Ok(e),
+                ledger_device_sdk::io::Event::TouchEvent => {
+                    println!("Touch event");
+                    // TODO:
+                }
+                ledger_device_sdk::io::Event::Ticker => {
+                    println!("Ticker event");
+                }
+            }
+        }
+    }
+
     pub fn new(
         comm: Rc<RefCell<&'a mut ledger_device_sdk::io::Comm>>,
         manifest: &'a Manifest,
@@ -280,7 +304,7 @@ impl<'a> CommEcallHandler<'a> {
             SendPanicBufferMessage::new(size as u32, vec![]).serialize_to_comm(&mut comm);
             comm.reply(AppSW::InterruptedExecution);
 
-            let Instruction::Continue(p1, p2) = comm.next_command() else {
+            let Instruction::Continue(p1, p2) = self.next_command(&mut comm)? else {
                 return Err(CommEcallError::WrongINS); // expected "Continue"
             };
 
@@ -309,7 +333,7 @@ impl<'a> CommEcallHandler<'a> {
             SendPanicBufferMessage::new(size as u32, buffer).serialize_to_comm(&mut comm);
             comm.reply(AppSW::InterruptedExecution);
 
-            let Instruction::Continue(p1, p2) = comm.next_command() else {
+            let Instruction::Continue(p1, p2) = self.next_command(&mut comm)? else {
                 return Err(CommEcallError::WrongINS); // expected "Continue"
             };
 
@@ -340,7 +364,7 @@ impl<'a> CommEcallHandler<'a> {
             SendBufferMessage::new(size as u32, vec![]).serialize_to_comm(&mut comm);
             comm.reply(AppSW::InterruptedExecution);
 
-            let Instruction::Continue(p1, p2) = comm.next_command() else {
+            let Instruction::Continue(p1, p2) = self.next_command(&mut comm)? else {
                 return Err(CommEcallError::WrongINS); // expected "Continue"
             };
 
@@ -369,7 +393,7 @@ impl<'a> CommEcallHandler<'a> {
             SendBufferMessage::new(size as u32, buffer).serialize_to_comm(&mut comm);
             comm.reply(AppSW::InterruptedExecution);
 
-            let Instruction::Continue(p1, p2) = comm.next_command() else {
+            let Instruction::Continue(p1, p2) = self.next_command(&mut comm)? else {
                 return Err(CommEcallError::WrongINS); // expected "Continue"
             };
 
@@ -403,7 +427,7 @@ impl<'a> CommEcallHandler<'a> {
             ReceiveBufferMessage::new().serialize_to_comm(&mut comm);
             comm.reply(AppSW::InterruptedExecution);
 
-            let Instruction::Continue(p1, p2) = comm.next_command() else {
+            let Instruction::Continue(p1, p2) = self.next_command(&mut comm)? else {
                 return Err(CommEcallError::WrongINS); // expected "Data"
             };
 
@@ -1255,6 +1279,11 @@ impl<'a> CommEcallHandler<'a> {
     }
 }
 
+// Here is the actual Rust function matching the required signature:
+unsafe extern "C" fn my_touch_callback(token: core::ffi::c_int, index: u8) {
+    crate::println!("Touch callback called with token={} index={}", token, index);
+}
+
 impl<'a> EcallHandler for CommEcallHandler<'a> {
     type Memory = OutsourcedMemory<'a>;
     type Error = CommEcallError;
@@ -1302,21 +1331,168 @@ impl<'a> EcallHandler for CommEcallHandler<'a> {
 
                 #[cfg(any(target_os = "stax", target_os = "flex"))]
                 {
-                    use include_gif::include_gif;
-                    const FERRIS: ledger_device_sdk::nbgl::NbglGlyph =
-                        ledger_device_sdk::nbgl::NbglGlyph::from_include(include_gif!(
-                            "crab_64x64.gif",
-                            NBGL
-                        ));
+                    // unsafe {
+                    //     ledger_secure_sdk_sys::nbgl_pageDrawSpinner(
+                    //         None,
+                    //         CString::new("Test...").unwrap().as_ptr(),
+                    //     );
+                    // }
 
-                    ledger_device_sdk::nbgl::NbglHomeAndSettings::new()
-                        .glyph(&FERRIS)
-                        .infos(
-                            self.manifest.get_app_name(),
-                            self.manifest.get_app_version(),
-                            "", // TODO
-                        )
-                        .show_and_return();
+                    // unsafe {
+                    //     let ticker_config =
+                    //         ledger_secure_sdk_sys::nbgl_screenTickerConfiguration_t {
+                    //             tickerCallback: None, // could put a callback here
+                    //             tickerValue: 3000,    // 3 seconds
+                    //             tickerIntervale: 0,   // not periodic
+                    //         };
+                    //     ledger_secure_sdk_sys::nbgl_pageDrawLedgerInfo(
+                    //         None,
+                    //         &ticker_config, // or core::ptr::null()
+                    //         CString::new("Text").unwrap().as_ptr(),
+                    //         0, // token
+                    //     );
+                    // }
+
+                    // unsafe {
+                    //     let ticker_config =
+                    //         ledger_secure_sdk_sys::nbgl_screenTickerConfiguration_t {
+                    //             tickerCallback: None, // could put a callback here
+                    //             tickerValue: 3000,    // 3 seconds
+                    //             tickerIntervale: 0,   // not periodic
+                    //         };
+                    //     let text1 = CString::new("text1").unwrap();
+                    //     let footer_text = CString::new("footerText").unwrap();
+                    //     let tap_action_text = CString::new("tapActionText").unwrap();
+                    //     let action_button_text = CString::new("actionButtonText").unwrap();
+                    //     let page_info = ledger_secure_sdk_sys::nbgl_pageInfoDescription_t {
+                    //         centeredInfo: ledger_secure_sdk_sys::nbgl_contentCenteredInfo_t {
+                    //             text1: text1.as_ptr(),
+                    //             text2: core::ptr::null(),
+                    //             text3: core::ptr::null(),
+                    //             icon: core::ptr::null(),
+                    //             onTop: false,
+                    //             style: ledger_secure_sdk_sys::LARGE_CASE_INFO,
+                    //             offsetY: 0,
+                    //         },
+                    //         topRightStyle: ledger_secure_sdk_sys::SETTINGS_ICON,
+                    //         bottomButtonStyle: ledger_secure_sdk_sys::QUIT_ICON,
+                    //         topRightToken: 0,
+                    //         bottomButtonsToken: 0,
+                    //         footerText: footer_text.as_ptr(),
+                    //         footerToken: 1,
+                    //         tapActionText: tap_action_text.as_ptr(),
+                    //         isSwipeable: true,
+                    //         tapActionToken: 2,
+                    //         actionButtonText: action_button_text.as_ptr(),
+                    //         actionButtonIcon: core::ptr::null(),
+                    //         actionButtonStyle: ledger_secure_sdk_sys::BLACK_BACKGROUND,
+                    //         tuneId: ledger_secure_sdk_sys::TUNE_TAP_CASUAL,
+                    //     };
+                    //     ledger_secure_sdk_sys::nbgl_pageDrawInfo(
+                    //         None,
+                    //         &ticker_config, // or core::ptr::null()
+                    //         &page_info,
+                    //     );
+                    // }
+
+                    unsafe {
+                        let text1 = CString::new("text1").unwrap();
+                        let text2 = CString::new("text2").unwrap();
+                        let text3 = CString::new("text3").unwrap();
+                        let confirmation_text = CString::new("confirmationText").unwrap();
+                        let cancel_text = CString::new("cancelText").unwrap();
+
+                        let page_confirmation_description =
+                            ledger_secure_sdk_sys::nbgl_pageConfirmationDescription_s {
+                                centeredInfo: ledger_secure_sdk_sys::nbgl_contentCenteredInfo_t {
+                                    text1: text1.as_ptr(),
+                                    text2: text2.as_ptr(), // not shown?
+                                    text3: text3.as_ptr(),
+                                    icon: core::ptr::null(),
+                                    onTop: false,
+                                    style: ledger_secure_sdk_sys::LARGE_CASE_INFO,
+                                    offsetY: 0,
+                                },
+                                confirmationText: confirmation_text.as_ptr(),
+                                cancelText: cancel_text.as_ptr(),
+                                confirmationToken: 0,
+                                cancelToken: 1,
+                                tuneId: ledger_secure_sdk_sys::TUNE_TAP_CASUAL,
+                                modal: false,
+                            };
+                        ledger_secure_sdk_sys::nbgl_pageDrawConfirmation(
+                            Some(my_touch_callback),
+                            &page_confirmation_description,
+                        );
+                    }
+
+                    // unsafe {
+                    //     let quit_text = CString::new("quitText").unwrap();
+
+                    //     let title = CString::new("title").unwrap();
+
+                    //     let item1 = CString::new("item1").unwrap();
+                    //     let value1 = CString::new("value1").unwrap();
+                    //     let item2 = CString::new("item2").unwrap();
+                    //     let value2 = CString::new(
+                    //         "value3, but this one is very long so it will wrap into multiple lines. Really, it is very long. I want to see what happens if it doesn't fit in the page.",
+                    //     )
+                    //     .unwrap();
+                    //     let mut tag_value_list = vec![
+                    //         ledger_secure_sdk_sys::nbgl_contentTagValue_t::default(),
+                    //         ledger_secure_sdk_sys::nbgl_contentTagValue_t::default(),
+                    //     ];
+                    //     tag_value_list[0].item = item1.as_ptr();
+                    //     tag_value_list[0].value = value1.as_ptr();
+                    //     tag_value_list[1].item = item2.as_ptr();
+                    //     tag_value_list[1].value = value2.as_ptr();
+
+                    //     ledger_secure_sdk_sys::nbgl_pageDrawGenericContent(
+                    //         None,
+                    //         &ledger_secure_sdk_sys::nbgl_pageNavigationInfo_t {
+                    //             activePage: 3,
+                    //             nbPages: 5,
+                    //             quitToken: 0,
+                    //             navType: ledger_secure_sdk_sys::NAV_WITH_BUTTONS,
+                    //             progressIndicator: true,
+                    //             tuneId: 0,
+                    //             skipText: core::ptr::null(),
+                    //             skipToken: 1,
+                    //             __bindgen_anon_1:
+                    //             ledger_secure_sdk_sys::nbgl_pageMultiScreensDescription_s__bindgen_ty_1 {
+                    //                 navWithButtons: ledger_secure_sdk_sys::nbgl_pageNavWithButtons_s {
+                    //                     quitButton: false,
+                    //                     backButton: true,
+                    //                     visiblePageIndicator: true,
+                    //                     navToken: 2,
+                    //                     quitText: core::ptr::null(),
+                    //                 }
+                    //             },
+                    //         },
+                    //         &mut ledger_secure_sdk_sys::nbgl_pageContent_t {
+                    //             title: title.as_ptr(),
+                    //             isTouchableTitle: true,
+                    //             titleToken: 3,
+                    //             tuneId: 0,
+                    //             topRightToken: 4,
+                    //             topRightIcon: core::ptr::null(),
+                    //             type_: ledger_secure_sdk_sys::TAG_VALUE_LIST,
+                    //             __bindgen_anon_1: ledger_secure_sdk_sys::nbgl_pageContent_s__bindgen_ty_1 {
+                    //                 tagValueList: ledger_secure_sdk_sys::nbgl_contentTagValueList_t {
+                    //                     pairs: tag_value_list.as_ptr(),
+                    //                     callback: None,
+                    //                     nbPairs: tag_value_list.len() as u8,
+                    //                     startIndex: 0, // unused if no callback
+                    //                     nbMaxLinesForValue: 0,
+                    //                     token: 0,
+                    //                     smallCaseForValue: false,
+                    //                     wrapping: true,
+                    //                     actionCallback: None,
+                    //                 }
+                    //             },
+                    //         },
+                    //     );
+                    // }
                 }
             }
             ECALL_MODM => {
