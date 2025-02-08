@@ -4,25 +4,8 @@ use crate::ecalls_riscv as ecalls_module;
 #[cfg(not(target_arch = "riscv32"))]
 use crate::ecalls_native as ecalls_module;
 
-#[repr(C)]
-#[derive(Copy, Clone)]
-pub(crate) union EventData {
-    pub ticker: TickerEvent,
-    // Reserve space for future expansions. Each event's raw data is exactly 16 bytes.
-    // For events that do not define the meaning of the raw data, the value of those bytes is undefined
-    // and could change in future versions.
-    pub raw: [u8; 16],
-}
-
-impl Default for EventData {
-    fn default() -> Self {
-        EventData { raw: [0; 16] }
-    }
-}
-
-#[repr(C)]
-#[derive(Debug, Copy, Clone)]
-pub(crate) struct TickerEvent {}
+use common::ux::EventData;
+pub(crate) use ecalls_module::*;
 
 /// Trait defining the interface for all the ecalls.
 pub(crate) trait EcallsInterface {
@@ -72,6 +55,16 @@ pub(crate) trait EcallsInterface {
     /// # Returns
     /// The event code.
     fn get_event(data: *mut EventData) -> u32;
+
+    /// Shows a page.
+    ///
+    /// # Parameters
+    /// - `page_desc`: Pointer to the serialized description of a page.
+    /// - `page_desc_len`: Length of the serialized description of a page.
+    ///
+    /// # Returns
+    /// 1 on success, 0 on error.
+    fn show_page(page_desc: *const u8, page_desc_len: usize) -> u32;
 
     /// Computes the remainder of dividing `n` by `m`, storing the result in `r`.
     ///
@@ -306,8 +299,6 @@ pub(crate) trait EcallsInterface {
         signature_len: usize,
     ) -> u32;
 }
-
-pub(crate) use ecalls_module::*;
 
 #[cfg(test)]
 mod tests {

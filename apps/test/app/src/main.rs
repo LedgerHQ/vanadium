@@ -46,7 +46,22 @@ fn main() {
 pub fn app_main() {
     sdk::rust_init_heap();
 
-    sdk::ux::ux_idle();
+    // sdk::ux::ux_idle();
+
+    let res = sdk::ux::show_confirm_reject("Title", "Text", "Confirm", "Reject");
+
+    if res {
+        sdk::ux::show_info(sdk::ux::Icon::Success, "Oh yeah!");
+    } else {
+        sdk::ux::show_info(sdk::ux::Icon::Failure, "Oh no!");
+    }
+    // for _ in 0..10 {
+    //     // wait about 1 seconds
+    //     sdk::ux::get_event();
+    // }
+
+    // sdk::ux::show_info(sdk::ux::Icon::Success, "Oh yes!");
+
     loop {
         let msg = sdk::xrecv(256);
 

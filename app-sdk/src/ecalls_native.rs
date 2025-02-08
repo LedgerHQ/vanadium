@@ -2,8 +2,9 @@ use core::panic;
 use std::io;
 use std::io::Write;
 
-use crate::ecalls::{EcallsInterface, EventData};
-use common::ecall_constants::{CurveKind, EventCode, MAX_BIGNUMBER_SIZE};
+use crate::ecalls::EcallsInterface;
+use common::ecall_constants::{CurveKind, MAX_BIGNUMBER_SIZE};
+use common::ux::{EventCode, EventData};
 
 use bip32::{ChildNumber, XPrv};
 use hex_literal::hex;
@@ -42,6 +43,8 @@ unsafe fn copy_result(r: *mut u8, result_bytes: &[u8], len: usize) -> () {
 }
 
 pub struct Ecall;
+
+static mut LAST_EVENT: Option<(EventCode, EventData)> = None;
 
 impl EcallsInterface for Ecall {
     fn ux_idle() {}
@@ -104,10 +107,62 @@ impl EcallsInterface for Ecall {
             panic!("The EventData pointer must not be null");
         }
 
+        unsafe {
+            if let Some((event_code, event_data)) = LAST_EVENT.take() {
+                std::ptr::write(data, event_data);
+                return event_code as u32;
+            }
+        }
+
         // for now there is no other type of event than the ticker.
         // We wait for TICKER_MS milliseconds and return a Ticker event.
         std::thread::sleep(std::time::Duration::from_millis(TICKER_MS));
         return EventCode::Ticker as u32;
+    }
+
+    fn show_page(page_desc: *const u8, page_desc_len: usize) -> u32 {
+        // make a slice from page_desc and page_desc_len
+        let page_desc_slice = unsafe { std::slice::from_raw_parts(page_desc, page_desc_len) };
+
+        let Ok(page_desc) = common::ux::Page::deserialize(page_desc_slice) else {
+            return 0;
+        };
+
+        match page_desc {
+            common::ux::Page::Spinner { text } => {
+                println!("{}...", text);
+            }
+            common::ux::Page::Info { icon, text } => match icon {
+                common::ux::Icon::None => println!("{}", text),
+                common::ux::Icon::Success => println!("✓ {}", text),
+                common::ux::Icon::Failure => println!("❌ {}", text),
+            },
+            common::ux::Page::ConfirmReject {
+                title,
+                text,
+                confirm,
+                reject,
+            } => {
+                println!("{}\n{}", title, text);
+                println!("Actions:\n - {}: C\n - {}: R", confirm, reject);
+                loop {
+                    let mut input = String::new();
+                    io::stdin()
+                        .read_line(&mut input)
+                        .expect("Failed to read line");
+
+                    match input.trim() {
+                        // TODO: wrong! Should create an event instead
+                        "C" => return 1,
+                        "R" => return 0,
+                        _ => continue,
+                    }
+                }
+                // wait for either Esc or Enter to be pressed
+            }
+        }
+
+        1
     }
 
     fn bn_modm(r: *mut u8, n: *const u8, len: usize, m: *const u8, len_m: usize) -> u32 {

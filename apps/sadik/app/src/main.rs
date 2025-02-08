@@ -292,9 +292,7 @@ pub fn main() {
                                 break;
                             }
                         }
-                        sdk::ux::Event::Unknown(data) => {
-                            panic!("Unknown event: {:?}", data);
-                        }
+                        _ => (), // ignore any other type of event
                     }
                 }
 

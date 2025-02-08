@@ -7,22 +7,7 @@ pub const ECALL_UX_IDLE: u32 = 12;
 // device handling, events, and UX
 
 pub const ECALL_GET_EVENT: u32 = 10;
-
-#[repr(u32)]
-#[derive(Debug, Copy, Clone, PartialEq, Eq)]
-pub enum EventCode {
-    Ticker = 0,
-    Unknown = 0xFFFFFFFF,
-}
-
-impl From<u32> for EventCode {
-    fn from(value: u32) -> Self {
-        match value {
-            0 => EventCode::Ticker,
-            _ => EventCode::Unknown,
-        }
-    }
-}
+pub const ECALL_SHOW_PAGE: u32 = 11;
 
 // Big numbers
 pub const ECALL_MODM: u32 = 110;

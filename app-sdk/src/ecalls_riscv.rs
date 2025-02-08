@@ -1,7 +1,8 @@
 use core::arch::asm;
 
-use crate::ecalls::{EcallsInterface, EventData};
+use crate::ecalls::EcallsInterface;
 use common::ecall_constants::*;
+use common::ux::EventData;
 
 macro_rules! ecall0v {
     // ECALL with no arguments and no return value
@@ -404,6 +405,7 @@ impl EcallsInterface for Ecall {
     ecall2!(xrecv, ECALL_XRECV, (buffer: *mut u8), (size: usize), usize);
 
     ecall1!(get_event, ECALL_GET_EVENT, (data: *mut EventData), u32);
+    ecall2!(show_page, ECALL_SHOW_PAGE, (page_desc: *const u8), (page_desc_len: usize), u32);
 
     ecall5!(bn_modm, ECALL_MODM, (r: *mut u8), (n: *const u8), (len: usize), (m: *const u8), (len_m: usize), u32);
     ecall5!(bn_addm, ECALL_ADDM, (r: *mut u8), (a: *const u8), (b: *const u8), (m: *const u8), (len: usize), u32);
