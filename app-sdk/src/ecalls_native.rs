@@ -4,7 +4,7 @@ use std::io::Write;
 
 use crate::ecalls::EcallsInterface;
 use common::ecall_constants::{CurveKind, MAX_BIGNUMBER_SIZE};
-use common::ux::{EventCode, EventData};
+use common::ux::{EventCode, EventData, Serializable};
 
 use bip32::{ChildNumber, XPrv};
 use hex_literal::hex;
@@ -124,7 +124,7 @@ impl EcallsInterface for Ecall {
         // make a slice from page_desc and page_desc_len
         let page_desc_slice = unsafe { std::slice::from_raw_parts(page_desc, page_desc_len) };
 
-        let Ok(page_desc) = common::ux::Page::deserialize(page_desc_slice) else {
+        let Ok(page_desc) = common::ux::Page::deserialize_full(page_desc_slice) else {
             return 0;
         };
 
@@ -160,6 +160,10 @@ impl EcallsInterface for Ecall {
                 }
                 // wait for either Esc or Enter to be pressed
             }
+            common::ux::Page::GenericPage {
+                navigation_info,
+                page_content_info,
+            } => todo!(),
         }
 
         1

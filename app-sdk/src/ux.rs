@@ -1,8 +1,11 @@
 use crate::ecalls::{Ecall, EcallsInterface};
-use alloc::string::ToString;
+use alloc::{string::ToString, vec::Vec};
 
-use common::ux::Action;
-pub use common::ux::{Event, EventCode, EventData, Icon, Page};
+use common::ux::{Action, Serializable};
+pub use common::ux::{
+    Event, EventCode, EventData, Icon, NavInfo, NavigationInfo, Page, PageContent, PageContentInfo,
+    TagValue,
+};
 
 /// Blocks until an event is received, then returns it.
 pub fn get_event() -> Event {
@@ -27,7 +30,8 @@ pub fn get_event() -> Event {
 }
 
 pub fn show_page(page: &Page) {
-    let serialized_page = page.serialize();
+    let mut serialized_page = Vec::new();
+    page.serialize(&mut serialized_page);
     Ecall::show_page(serialized_page.as_ptr(), serialized_page.len());
 }
 
