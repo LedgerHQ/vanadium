@@ -8,8 +8,9 @@ pub enum Action {
     Reject = 1,
     Quit = 2,
     Skip = 3,
-    Navigation = 4, // TODO: page index is part of the event data
-    Title = 5,
+    PreviousPage = 4, // TODO: page index is part of the event data
+    NextPage = 5,
+    Title = 6,
 }
 
 #[repr(u32)]
@@ -61,6 +62,12 @@ pub enum Event {
 pub trait Serializable: Sized {
     fn serialize(&self, buf: &mut Vec<u8>);
     fn deserialize(slice: &[u8]) -> Result<(Self, &[u8]), &'static str>;
+
+    fn serialized(&self) -> Vec<u8> {
+        let mut buf = Vec::new();
+        self.serialize(&mut buf);
+        buf
+    }
 
     fn deserialize_full(slice: &[u8]) -> Result<Self, &'static str> {
         let (value, rest) = Self::deserialize(slice)?;

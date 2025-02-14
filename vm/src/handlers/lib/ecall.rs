@@ -276,7 +276,7 @@ impl core::error::Error for CommEcallError {
 pub struct CommEcallHandler<'a> {
     comm: Rc<RefCell<&'a mut ledger_device_sdk::io::Comm>>,
     manifest: &'a Manifest,
-    ux_handler: UxHandler,
+    ux_handler: &'static mut UxHandler,
 }
 
 impl<'a> CommEcallHandler<'a> {
@@ -287,7 +287,7 @@ impl<'a> CommEcallHandler<'a> {
         Self {
             comm,
             manifest,
-            ux_handler: UxHandler::new(),
+            ux_handler: init_ux_handler(),
         }
     }
 

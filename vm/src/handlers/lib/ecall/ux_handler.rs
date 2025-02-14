@@ -1,4 +1,5 @@
 use alloc::{ffi::CString, string::String, vec::Vec};
+use core::{cell::UnsafeCell, mem::MaybeUninit, ptr};
 
 use ledger_secure_sdk_sys as sys;
 
@@ -83,11 +84,20 @@ unsafe extern "C" fn layout_touch_callback(token: core::ffi::c_int, index: u8) {
         }
         (TOKEN_NAVIGATION, idx) => {
             crate::println!("Navigation button; index={}", idx);
+            let cur_page = get_ux_handler().cur_page;
+
+            let diff = idx as isize - cur_page as isize;
+            let action = match diff {
+                -1 => common::ux::Action::PreviousPage,
+                1 => common::ux::Action::NextPage,
+                _ => {
+                    crate::println!("Unexpected index, cur_page is {}", cur_page);
+                    return;
+                }
+            };
             store_new_event(
                 common::ux::EventCode::Action,
-                common::ux::EventData {
-                    action: common::ux::Action::Navigation, // TODO: how to pass page index?
-                },
+                common::ux::EventData { action },
             );
         }
         (TOKEN_TITLE, _) => {
@@ -107,12 +117,41 @@ unsafe extern "C" fn layout_touch_callback(token: core::ffi::c_int, index: u8) {
 
 pub struct UxHandler {
     cstrings: Vec<CString>,
+    cur_page: u8,
+}
+
+// Global static variable to hold the singleton instance
+static mut UX_HANDLER: MaybeUninit<UxHandler> = MaybeUninit::uninit();
+static mut UX_HANDLER_INITIALIZED: bool = false;
+
+pub fn init_ux_handler() -> &'static mut UxHandler {
+    unsafe {
+        if UX_HANDLER_INITIALIZED {
+            panic!("UxHandler already initialized");
+        }
+
+        UX_HANDLER.write(UxHandler::new());
+        UX_HANDLER_INITIALIZED = true;
+
+        UX_HANDLER.assume_init_mut()
+    }
+}
+
+pub fn get_ux_handler() -> &'static mut UxHandler {
+    unsafe {
+        if !UX_HANDLER_INITIALIZED {
+            panic!("UxHandler not initialized");
+        }
+        UX_HANDLER.assume_init_mut()
+    }
 }
 
 impl UxHandler {
-    pub fn new() -> Self {
+    // We keep the constructor private in order to manage the singleton instance
+    fn new() -> Self {
         Self {
             cstrings: Vec::new(),
+            cur_page: 0,
         }
     }
 
@@ -251,6 +290,8 @@ impl UxHandler {
                         return Err(CommEcallError::InvalidParameters("Invalid navigation info"));
                     }
 
+                    get_ux_handler().cur_page = navigation_info.active_page as u8;
+
                     let common::ux::PageContent::TagValueList(tvl) =
                         &page_content_info.page_content;
                     let tag_value_list = tvl
@@ -312,5 +353,13 @@ impl UxHandler {
             },
         }
         Ok(())
+    }
+}
+
+impl Drop for UxHandler {
+    fn drop(&mut self) {
+        unsafe {
+            UX_HANDLER_INITIALIZED = false;
+        }
     }
 }
