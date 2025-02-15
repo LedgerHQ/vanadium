@@ -282,6 +282,22 @@ pub fn main() {
                     }
                 }
             },
+            Command::Sleep { n_ticks } => {
+                let mut count = 0;
+                loop {
+                    match sdk::ux::get_event() {
+                        sdk::ux::Event::Ticker => {
+                            count += 1;
+                            if count == n_ticks {
+                                break;
+                            }
+                        }
+                        _ => (), // ignore any other type of event
+                    }
+                }
+
+                vec![]
+            }
         };
 
         sdk::comm::send_message(&response);

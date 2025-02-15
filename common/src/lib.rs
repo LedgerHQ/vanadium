@@ -8,6 +8,7 @@ pub mod comm;
 pub mod constants;
 pub mod ecall_constants;
 pub mod manifest;
+pub mod ux;
 pub mod vm;
 
 pub mod riscv;

@@ -70,6 +70,9 @@ pub enum Command {
         msg: Vec<u8>,
         signature: Vec<u8>,
     },
+    Sleep {
+        n_ticks: u32,
+    },
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]

@@ -4,6 +4,11 @@ pub const ECALL_XRECV: u32 = 3;
 pub const ECALL_EXIT: u32 = 4;
 pub const ECALL_UX_IDLE: u32 = 12;
 
+// device handling, events, and UX
+
+pub const ECALL_GET_EVENT: u32 = 10;
+pub const ECALL_SHOW_PAGE: u32 = 11;
+
 // Big numbers
 pub const ECALL_MODM: u32 = 110;
 pub const ECALL_ADDM: u32 = 111;

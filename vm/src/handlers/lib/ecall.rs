@@ -1,4 +1,8 @@
-use core::{cell::RefCell, cmp::min, fmt};
+use core::{
+    cell::{RefCell, RefMut},
+    cmp::min,
+    fmt,
+};
 
 use alloc::{format, rc::Rc, string::String, vec};
 use common::{
@@ -8,11 +12,13 @@ use common::{
     },
     ecall_constants::{self, *},
     manifest::Manifest,
+    ux::Serializable,
     vm::{Cpu, CpuError, EcallHandler, MemoryError},
 };
 use ledger_device_sdk::hash::HashInit;
 use ledger_secure_sdk_sys::{
-    cx_ripemd160_t, cx_sha256_t, cx_sha512_t, CX_OK, CX_RIPEMD160, CX_SHA256, CX_SHA512,
+    self as sys, cx_ripemd160_t, cx_sha256_t, cx_sha512_t, seph as sys_seph, CX_OK, CX_RIPEMD160,
+    CX_SHA256, CX_SHA512,
 };
 
 use crate::{AppSW, Instruction};
@@ -21,8 +27,17 @@ use super::outsourced_mem::OutsourcedMemory;
 
 use zeroize::Zeroizing;
 
+mod ux_handler;
+
+#[cfg(any(target_os = "stax", target_os = "flex"))]
+mod bitmaps;
+
+use ux_handler::*;
+
 // BIP32 supports up to 255, but we don't want that many, and it would be very slow anyway
 const MAX_BIP32_PATH: usize = 16;
+
+const MAX_UX_PAGE_LEN: usize = 512;
 
 #[allow(dead_code)]
 #[derive(Debug, Clone, Copy)]
@@ -240,6 +255,12 @@ impl From<MessageDeserializationError> for CommEcallError {
     }
 }
 
+impl From<alloc::ffi::NulError> for CommEcallError {
+    fn from(_: alloc::ffi::NulError) -> Self {
+        CommEcallError::InvalidParameters("CString contains a null byte")
+    }
+}
+
 impl core::error::Error for CommEcallError {
     fn source(&self) -> Option<&(dyn core::error::Error + 'static)> {
         match self {
@@ -255,6 +276,7 @@ impl core::error::Error for CommEcallError {
 pub struct CommEcallHandler<'a> {
     comm: Rc<RefCell<&'a mut ledger_device_sdk::io::Comm>>,
     manifest: &'a Manifest,
+    ux_handler: &'static mut UxHandler,
 }
 
 impl<'a> CommEcallHandler<'a> {
@@ -262,7 +284,11 @@ impl<'a> CommEcallHandler<'a> {
         comm: Rc<RefCell<&'a mut ledger_device_sdk::io::Comm>>,
         manifest: &'a Manifest,
     ) -> Self {
-        Self { comm, manifest }
+        Self {
+            comm,
+            manifest,
+            ux_handler: init_ux_handler(),
+        }
     }
 
     // TODO: can we refactor this and handle_xsend? They are almost identical
@@ -471,12 +497,8 @@ impl<'a> CommEcallHandler<'a> {
             .read_buffer(m.0, &mut m_local[0..m_len])?;
 
         unsafe {
-            let res = ledger_secure_sdk_sys::cx_math_modm_no_throw(
-                r_local.as_mut_ptr(),
-                len,
-                m_local.as_ptr(),
-                m_len,
-            );
+            let res =
+                sys::cx_math_modm_no_throw(r_local.as_mut_ptr(), len, m_local.as_ptr(), m_len);
             if res != CX_OK {
                 return Err(CommEcallError::GenericError("modm failed"));
             }
@@ -514,7 +536,7 @@ impl<'a> CommEcallHandler<'a> {
 
         let mut r_local: [u8; MAX_BIGNUMBER_SIZE] = [0; MAX_BIGNUMBER_SIZE];
         unsafe {
-            let res = ledger_secure_sdk_sys::cx_math_addm_no_throw(
+            let res = sys::cx_math_addm_no_throw(
                 r_local.as_mut_ptr(),
                 a_local.as_ptr(),
                 b_local.as_ptr(),
@@ -558,7 +580,7 @@ impl<'a> CommEcallHandler<'a> {
 
         let mut r_local: [u8; MAX_BIGNUMBER_SIZE] = [0; MAX_BIGNUMBER_SIZE];
         unsafe {
-            let res = ledger_secure_sdk_sys::cx_math_subm_no_throw(
+            let res = sys::cx_math_subm_no_throw(
                 r_local.as_mut_ptr(),
                 a_local.as_ptr(),
                 b_local.as_ptr(),
@@ -602,7 +624,7 @@ impl<'a> CommEcallHandler<'a> {
 
         let mut r_local: [u8; MAX_BIGNUMBER_SIZE] = [0; MAX_BIGNUMBER_SIZE];
         unsafe {
-            let res = ledger_secure_sdk_sys::cx_math_multm_no_throw(
+            let res = sys::cx_math_multm_no_throw(
                 r_local.as_mut_ptr(),
                 a_local.as_ptr(),
                 b_local.as_ptr(),
@@ -650,7 +672,7 @@ impl<'a> CommEcallHandler<'a> {
 
         let mut r_local: [u8; MAX_BIGNUMBER_SIZE] = [0; MAX_BIGNUMBER_SIZE];
         unsafe {
-            let res = ledger_secure_sdk_sys::cx_math_powm_no_throw(
+            let res = sys::cx_math_powm_no_throw(
                 r_local.as_mut_ptr(),
                 a_local.as_ptr(),
                 e_local.as_ptr(),
@@ -686,8 +708,8 @@ impl<'a> CommEcallHandler<'a> {
             .read_buffer(ctx.0, &mut ctx_local[0..ctx_size])?;
 
         unsafe {
-            ledger_secure_sdk_sys::cx_hash_init(
-                ctx_local.as_mut_ptr() as *mut ledger_secure_sdk_sys::cx_hash_header_s,
+            sys::cx_hash_init(
+                ctx_local.as_mut_ptr() as *mut sys::cx_hash_header_s,
                 hash_id as u8,
             );
         }
@@ -731,8 +753,8 @@ impl<'a> CommEcallHandler<'a> {
             data_seg.read_buffer(data_ptr, &mut data_local[0..copy_size])?;
 
             unsafe {
-                ledger_secure_sdk_sys::cx_hash_update(
-                    ctx_local.as_mut_ptr() as *mut ledger_secure_sdk_sys::cx_hash_header_s,
+                sys::cx_hash_update(
+                    ctx_local.as_mut_ptr() as *mut sys::cx_hash_header_s,
                     data_local.as_ptr(),
                     copy_size as usize,
                 );
@@ -770,8 +792,8 @@ impl<'a> CommEcallHandler<'a> {
         let mut digest_local: [u8; 64] = [0; 64];
 
         unsafe {
-            ledger_secure_sdk_sys::cx_hash_final(
-                ctx_local.as_mut_ptr() as *mut ledger_secure_sdk_sys::cx_hash_header_s,
+            sys::cx_hash_final(
+                ctx_local.as_mut_ptr() as *mut sys::cx_hash_header_s,
                 digest_local.as_mut_ptr(),
             );
         }
@@ -818,7 +840,7 @@ impl<'a> CommEcallHandler<'a> {
         let mut private_key_local = Zeroizing::new([0u8; 32]);
         let mut chain_code_local: [u8; 32] = [0; 32];
         unsafe {
-            ledger_secure_sdk_sys::os_perso_derive_node_bip32(
+            sys::os_perso_derive_node_bip32(
                 curve as u8,
                 path_local.as_ptr(),
                 path_len as u32,
@@ -849,9 +871,9 @@ impl<'a> CommEcallHandler<'a> {
         let mut private_key_local = Zeroizing::new([0u8; 32]);
         let mut chain_code_local: [u8; 32] = [0; 32];
 
-        let mut pubkey: ledger_secure_sdk_sys::cx_ecfp_public_key_t = Default::default();
+        let mut pubkey: sys::cx_ecfp_public_key_t = Default::default();
         unsafe {
-            ledger_secure_sdk_sys::os_perso_derive_node_bip32(
+            sys::os_perso_derive_node_bip32(
                 CurveKind::Secp256k1 as u8,
                 [].as_ptr(),
                 0,
@@ -860,21 +882,17 @@ impl<'a> CommEcallHandler<'a> {
             );
 
             // generate the corresponding public key
-            let mut privkey: ledger_secure_sdk_sys::cx_ecfp_private_key_t = Default::default();
+            let mut privkey: sys::cx_ecfp_private_key_t = Default::default();
 
-            let ret1 = ledger_secure_sdk_sys::cx_ecfp_init_private_key_no_throw(
+            let ret1 = sys::cx_ecfp_init_private_key_no_throw(
                 curve as u8,
                 private_key_local.as_ptr(),
                 private_key_local.len(),
                 &mut privkey,
             );
 
-            let ret2 = ledger_secure_sdk_sys::cx_ecfp_generate_pair_no_throw(
-                curve as u8,
-                &mut pubkey,
-                &mut privkey,
-                true,
-            );
+            let ret2 =
+                sys::cx_ecfp_generate_pair_no_throw(curve as u8, &mut pubkey, &mut privkey, true);
 
             if ret1 != CX_OK || ret2 != CX_OK {
                 return Err(CommEcallError::GenericError("Failed to generate key pair"));
@@ -906,21 +924,21 @@ impl<'a> CommEcallHandler<'a> {
         }
 
         // copy inputs to local memory
-        let mut p_local: ledger_secure_sdk_sys::cx_ecfp_public_key_t = Default::default();
+        let mut p_local: sys::cx_ecfp_public_key_t = Default::default();
         p_local.curve = curve as u8;
         p_local.W_len = 65;
         cpu.get_segment::<E>(p.0)?
             .read_buffer(p.0, &mut p_local.W)?;
 
-        let mut q_local: ledger_secure_sdk_sys::cx_ecfp_public_key_t = Default::default();
+        let mut q_local: sys::cx_ecfp_public_key_t = Default::default();
         q_local.curve = curve as u8;
         q_local.W_len = 65;
         cpu.get_segment::<E>(q.0)?
             .read_buffer(q.0, &mut q_local.W)?;
 
-        let mut r_local: ledger_secure_sdk_sys::cx_ecfp_public_key_t = Default::default();
+        let mut r_local: sys::cx_ecfp_public_key_t = Default::default();
         unsafe {
-            let res = ledger_secure_sdk_sys::cx_ecfp_add_point_no_throw(
+            let res = sys::cx_ecfp_add_point_no_throw(
                 curve as u8,
                 r_local.W.as_mut_ptr(),
                 p_local.W.as_ptr(),
@@ -958,7 +976,7 @@ impl<'a> CommEcallHandler<'a> {
 
         // copy inputs to local memory
         // we use r_local also for the final result
-        let mut r_local: ledger_secure_sdk_sys::cx_ecfp_public_key_t = Default::default();
+        let mut r_local: sys::cx_ecfp_public_key_t = Default::default();
         r_local.curve = curve as u8;
         r_local.W_len = 65;
         cpu.get_segment::<E>(p.0)?
@@ -969,7 +987,7 @@ impl<'a> CommEcallHandler<'a> {
             .read_buffer(k.0, &mut k_local[0..k_len])?;
 
         unsafe {
-            let res = ledger_secure_sdk_sys::cx_ecfp_scalar_mult_no_throw(
+            let res = sys::cx_ecfp_scalar_mult_no_throw(
                 curve as u8,
                 r_local.W.as_mut_ptr(),
                 k_local.as_ptr(),
@@ -1015,7 +1033,7 @@ impl<'a> CommEcallHandler<'a> {
 
         // copy inputs to local memory
         // TODO: we should zeroize the private key after use
-        let mut privkey_local: ledger_secure_sdk_sys::cx_ecfp_private_key_t = Default::default();
+        let mut privkey_local: sys::cx_ecfp_private_key_t = Default::default();
         privkey_local.curve = curve as u8;
         privkey_local.d_len = 32;
         cpu.get_segment::<E>(privkey.0)?
@@ -1031,7 +1049,7 @@ impl<'a> CommEcallHandler<'a> {
         let mut info: u32 = 0; // will get the parity bit
 
         unsafe {
-            let res = ledger_secure_sdk_sys::cx_ecdsa_sign_no_throw(
+            let res = sys::cx_ecdsa_sign_no_throw(
                 &mut privkey_local,
                 ecall_constants::EcdsaSignMode::RFC6979 as u32,
                 ecall_constants::HashId::Sha256 as u8,
@@ -1075,7 +1093,7 @@ impl<'a> CommEcallHandler<'a> {
         }
 
         // copy inputs to local memory
-        let mut pubkey_local: ledger_secure_sdk_sys::cx_ecfp_public_key_t = Default::default();
+        let mut pubkey_local: sys::cx_ecfp_public_key_t = Default::default();
         pubkey_local.curve = curve as u8;
         pubkey_local.W_len = 65;
         cpu.get_segment::<E>(pubkey.0)?
@@ -1091,7 +1109,7 @@ impl<'a> CommEcallHandler<'a> {
 
         // verify the signature
         let res = unsafe {
-            ledger_secure_sdk_sys::cx_ecdsa_verify_no_throw(
+            sys::cx_ecdsa_verify_no_throw(
                 &pubkey_local,
                 msg_hash_local.as_ptr(),
                 msg_hash_local.len(),
@@ -1136,7 +1154,7 @@ impl<'a> CommEcallHandler<'a> {
 
         // copy inputs to local memory
         // TODO: we should zeroize the private key after use
-        let mut privkey_local: ledger_secure_sdk_sys::cx_ecfp_private_key_t = Default::default();
+        let mut privkey_local: sys::cx_ecfp_private_key_t = Default::default();
         privkey_local.curve = curve as u8;
         privkey_local.d_len = 32;
         cpu.get_segment::<E>(privkey.0)?
@@ -1155,7 +1173,7 @@ impl<'a> CommEcallHandler<'a> {
             // CX_RND_TRNG or CX_RND_PROVIDED to be provided. We just use CX_RND_TRNG for now.
             const CX_RND_TRNG: u32 = 2 << 9;
 
-            let res = ledger_secure_sdk_sys::cx_ecschnorr_sign_no_throw(
+            let res = sys::cx_ecschnorr_sign_no_throw(
                 &mut privkey_local,
                 mode | CX_RND_TRNG,
                 ecall_constants::HashId::Sha256 as u8,
@@ -1224,7 +1242,7 @@ impl<'a> CommEcallHandler<'a> {
         }
 
         // copy inputs to local memory
-        let mut pubkey_local: ledger_secure_sdk_sys::cx_ecfp_public_key_t = Default::default();
+        let mut pubkey_local: sys::cx_ecfp_public_key_t = Default::default();
         pubkey_local.curve = curve as u8;
         pubkey_local.W_len = 65;
         cpu.get_segment::<E>(pubkey.0)?
@@ -1240,7 +1258,7 @@ impl<'a> CommEcallHandler<'a> {
 
         // verify the signature
         let res = unsafe {
-            ledger_secure_sdk_sys::cx_ecschnorr_verify(
+            sys::cx_ecschnorr_verify(
                 &pubkey_local,
                 mode,
                 ecall_constants::HashId::Sha256 as u8,
@@ -1252,6 +1270,104 @@ impl<'a> CommEcallHandler<'a> {
         };
 
         Ok(res as u32)
+    }
+
+    fn handle_get_event<E: fmt::Debug>(
+        &self,
+        cpu: &mut Cpu<OutsourcedMemory<'_>>,
+        event_data_ptr: GuestPointer,
+    ) -> Result<u32, CommEcallError> {
+        // for now, the only supported event is the ticker. So we wait for a ticker event,
+        // and return it. Once UX functionalities are added, button presses would also be
+        // returned here.
+        if let Some((event_code, event_data)) = get_last_event() {
+            // transmute the EventData as a [u8]
+            let event_data_raw = unsafe {
+                core::slice::from_raw_parts(
+                    &event_data as *const _ as *const u8,
+                    core::mem::size_of::<common::ux::EventData>(),
+                )
+            };
+
+            // copy event data to guest pointer
+            cpu.get_segment::<E>(event_data_ptr.0)?
+                .write_buffer(event_data_ptr.0, &event_data_raw)?;
+
+            Ok(event_code as u32)
+        } else {
+            // if there's no stored event, wait for the next ticker and return it
+            let mut comm = self.comm.borrow_mut();
+            wait_for_ticker(&mut comm);
+
+            Ok(common::ux::EventCode::Ticker as u32)
+        }
+    }
+
+    fn handle_show_page<E: fmt::Debug>(
+        &mut self,
+        cpu: &mut Cpu<OutsourcedMemory<'_>>,
+        page_ptr: GuestPointer,
+        page_len: usize,
+    ) -> Result<u32, CommEcallError> {
+        if page_len > MAX_UX_PAGE_LEN {
+            return Err(CommEcallError::InvalidParameters("page_len is too large"));
+        }
+
+        let mut page_local: [u8; MAX_UX_PAGE_LEN] = [0; MAX_UX_PAGE_LEN];
+
+        cpu.get_segment::<E>(page_ptr.0)?
+            .read_buffer(page_ptr.0, &mut page_local[0..page_len])?;
+
+        let page = common::ux::Page::deserialize_full(&page_local[0..page_len]).map_err(|e| {
+            crate::println!("Failed to deserialize page: {:?}", e);
+            CommEcallError::InvalidParameters("Failed to deserialize page")
+        })?;
+
+        self.ux_handler.show_page(&page)?;
+        Ok(1)
+    }
+}
+
+// Processes all events until a ticker is received, then returns
+fn wait_for_ticker(comm: &mut RefMut<'_, &mut ledger_device_sdk::io::Comm>) {
+    loop {
+        let mut spi_buffer = [0u8; 256];
+
+        let event: ledger_device_sdk::io::Event<crate::ApduHeader> = loop {
+            // Signal end of command stream from SE to MCU
+            // And prepare reception
+            if !sys_seph::is_status_sent() {
+                sys_seph::send_general_status();
+            }
+
+            // Fetch the next message from the MCU
+            let _rx = sys_seph::seph_recv(&mut spi_buffer, 0);
+
+            // decode and process event
+            if let Some(e) = comm.process_event(&mut spi_buffer) {
+                break e;
+            }
+        };
+
+        match event {
+            ledger_device_sdk::io::Event::Command(_e) => {
+                // TODO: how to avoid receiving APDUs is we're not expecting it?
+                panic!("We actually don't want to receive commands here.");
+            }
+            #[cfg(not(any(target_os = "stax", target_os = "flex")))]
+            ledger_device_sdk::io::Event::Button(_button) => {
+                // nothing to do, we don't yet handle buttons
+                crate::println!("Button event. Unhandled");
+            }
+            #[cfg(any(target_os = "stax", target_os = "flex"))]
+            ledger_device_sdk::io::Event::TouchEvent => {
+                crate::println!("Touch event. Unhandled");
+                // nothing to do, we don't yet know how to handle them
+            }
+            ledger_device_sdk::io::Event::Ticker => {
+                return;
+            }
+        }
     }
 }
 
@@ -1318,6 +1434,14 @@ impl<'a> EcallHandler for CommEcallHandler<'a> {
                         )
                         .show_and_return();
                 }
+            }
+            ECALL_GET_EVENT => {
+                reg!(A0) = self.handle_get_event::<CommEcallError>(cpu, GPreg!(A0))?;
+            }
+            ECALL_SHOW_PAGE => {
+                self.handle_show_page::<CommEcallError>(cpu, GPreg!(A0), reg!(A1) as usize)?;
+
+                reg!(A0) = 1;
             }
             ECALL_MODM => {
                 self.handle_bn_modm::<CommEcallError>(
