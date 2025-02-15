@@ -292,63 +292,155 @@ impl UxHandler {
 
                     get_ux_handler().cur_page = navigation_info.active_page as u8;
 
-                    let common::ux::PageContent::TagValueList(tvl) =
-                        &page_content_info.page_content;
-                    let tag_value_list = tvl
-                        .iter()
-                        .map(|t| {
-                            let mut res = ledger_secure_sdk_sys::nbgl_contentTagValue_t::default();
-                            res.item = self.alloc_cstring(Some(&t.tag))?;
-                            res.value = self.alloc_cstring(Some(&t.value))?;
-                            Ok(res)
-                        })
-                        .collect::<Result<Vec<_>, CommEcallError>>()?;
+                    let nav_info = ledger_secure_sdk_sys::nbgl_pageNavigationInfo_t {
+                        activePage: navigation_info.active_page as u8,
+                        nbPages:  navigation_info.n_pages as u8,
+                        quitToken: TOKEN_QUIT,
+                        navType: ledger_secure_sdk_sys::NAV_WITH_BUTTONS,
+                        progressIndicator: true,
+                        tuneId: 0,
+                        skipText: self.alloc_cstring(navigation_info.skip_text.as_ref())?,
+                        skipToken: TOKEN_SKIP,
+                        __bindgen_anon_1:
+                        ledger_secure_sdk_sys::nbgl_pageMultiScreensDescription_s__bindgen_ty_1 {
+                            navWithButtons: ledger_secure_sdk_sys::nbgl_pageNavWithButtons_s {
+                                quitButton: quit_text.is_some(),
+                                backButton: *has_back_button,
+                                visiblePageIndicator: false,
+                                navToken: TOKEN_NAVIGATION,
+                                quitText: self.alloc_cstring(quit_text.as_ref())?,
+                            }
+                        },
+                    };
 
-                    ledger_secure_sdk_sys::nbgl_pageDrawGenericContent(
-                        Some(layout_touch_callback),
-                        &ledger_secure_sdk_sys::nbgl_pageNavigationInfo_t {
-                            activePage: navigation_info.active_page as u8,
-                            nbPages:  navigation_info.n_pages as u8,
-                            quitToken: TOKEN_QUIT,
-                            navType: ledger_secure_sdk_sys::NAV_WITH_BUTTONS,
-                            progressIndicator: true,
-                            tuneId: 0,
-                            skipText: self.alloc_cstring(navigation_info.skip_text.as_ref())?,
-                            skipToken: TOKEN_SKIP,
-                            __bindgen_anon_1:
-                            ledger_secure_sdk_sys::nbgl_pageMultiScreensDescription_s__bindgen_ty_1 {
-                                navWithButtons: ledger_secure_sdk_sys::nbgl_pageNavWithButtons_s {
-                                    quitButton: quit_text.is_some(),
-                                    backButton: *has_back_button,
-                                    visiblePageIndicator: false,
-                                    navToken: TOKEN_NAVIGATION,
-                                    quitText: self.alloc_cstring(quit_text.as_ref())?,
-                                }
-                            },
-                        },
-                        &mut ledger_secure_sdk_sys::nbgl_pageContent_t {
-                            title: self.alloc_cstring(page_content_info.title.as_ref())?,
-                            isTouchableTitle: page_content_info.is_title_touchable,
-                            titleToken: TOKEN_TITLE,
-                            tuneId: 0,
-                            topRightToken: 255, // not implemented
-                            topRightIcon: core::ptr::null(), // not implemented
-                            type_: ledger_secure_sdk_sys::TAG_VALUE_LIST,
-                            __bindgen_anon_1: ledger_secure_sdk_sys::nbgl_pageContent_s__bindgen_ty_1 {
-                                tagValueList: ledger_secure_sdk_sys::nbgl_contentTagValueList_t {
-                                    pairs: tag_value_list.as_ptr(),
-                                    callback: None,
-                                    nbPairs: tag_value_list.len() as u8,
-                                    startIndex: 0, // unused if no callback
-                                    nbMaxLinesForValue: 0,
-                                    token: 255,
-                                    smallCaseForValue: false,
-                                    wrapping: true,
-                                    actionCallback: None, // not implemented, no events from the tagvalues
-                                }
-                            },
-                        },
-                    );
+                    match &page_content_info.page_content {
+                        common::ux::PageContent::TextSubtext { text, subtext } => {
+                            ledger_secure_sdk_sys::nbgl_pageDrawGenericContent(
+                                Some(layout_touch_callback),
+                                &nav_info,
+                                &mut ledger_secure_sdk_sys::nbgl_pageContent_t {
+                                    title: self.alloc_cstring(page_content_info.title.as_ref())?,
+                                    isTouchableTitle: page_content_info.is_title_touchable,
+                                    titleToken: TOKEN_TITLE,
+                                    tuneId: 0,
+                                    topRightToken: 255, // not implemented
+                                    topRightIcon: core::ptr::null(), // not implemented
+                                    type_: ledger_secure_sdk_sys::CENTERED_INFO,
+                                    __bindgen_anon_1:
+                                        ledger_secure_sdk_sys::nbgl_pageContent_s__bindgen_ty_1 {
+                                            centeredInfo:
+                                                ledger_secure_sdk_sys::nbgl_contentCenteredInfo_t {
+                                                    text1: self.alloc_cstring(Some(text))?,
+                                                    text2: self.alloc_cstring(Some(subtext))?,
+                                                    text3: core::ptr::null(),
+                                                    icon: core::ptr::null(),
+                                                    onTop: false,
+                                                    style: ledger_secure_sdk_sys::LARGE_CASE_INFO,
+                                                    offsetY: 0,
+                                                },
+                                        },
+                                },
+                            );
+                        }
+                        common::ux::PageContent::TagValueList(tvl) => {
+                            let tag_value_list = tvl
+                                .iter()
+                                .map(|t| {
+                                    let mut res =
+                                        ledger_secure_sdk_sys::nbgl_contentTagValue_t::default();
+                                    res.item = self.alloc_cstring(Some(&t.tag))?;
+                                    res.value = self.alloc_cstring(Some(&t.value))?;
+                                    Ok(res)
+                                })
+                                .collect::<Result<Vec<_>, CommEcallError>>()?;
+
+                            ledger_secure_sdk_sys::nbgl_pageDrawGenericContent(
+                                Some(layout_touch_callback),
+                                &nav_info,
+                                &mut ledger_secure_sdk_sys::nbgl_pageContent_t {
+                                    title: self.alloc_cstring(page_content_info.title.as_ref())?,
+                                    isTouchableTitle: page_content_info.is_title_touchable,
+                                    titleToken: TOKEN_TITLE,
+                                    tuneId: 0,
+                                    topRightToken: 255, // not implemented
+                                    topRightIcon: core::ptr::null(), // not implemented
+                                    type_: ledger_secure_sdk_sys::TAG_VALUE_LIST,
+                                    __bindgen_anon_1:
+                                        ledger_secure_sdk_sys::nbgl_pageContent_s__bindgen_ty_1 {
+                                            tagValueList:
+                                                ledger_secure_sdk_sys::nbgl_contentTagValueList_t {
+                                                    pairs: tag_value_list.as_ptr(),
+                                                    callback: None,
+                                                    nbPairs: tag_value_list.len() as u8,
+                                                    startIndex: 0, // unused if no callback
+                                                    nbMaxLinesForValue: 0,
+                                                    token: 255,
+                                                    smallCaseForValue: false,
+                                                    wrapping: true,
+                                                    actionCallback: None, // not implemented, no events from the tagvalues
+                                                },
+                                        },
+                                },
+                            );
+                        }
+                        common::ux::PageContent::ConfirmationButton { text, button_text } => {
+                            ledger_secure_sdk_sys::nbgl_pageDrawGenericContent(
+                                Some(layout_touch_callback),
+                                &nav_info,
+                                &mut ledger_secure_sdk_sys::nbgl_pageContent_t {
+                                    title: self.alloc_cstring(page_content_info.title.as_ref())?,
+                                    isTouchableTitle: page_content_info.is_title_touchable,
+                                    titleToken: TOKEN_TITLE,
+                                    tuneId: 0,
+                                    topRightToken: 255, // not implemented
+                                    topRightIcon: core::ptr::null(), // not implemented
+                                    type_: ledger_secure_sdk_sys::INFO_BUTTON,
+                                    __bindgen_anon_1:
+                                        ledger_secure_sdk_sys::nbgl_pageContent_s__bindgen_ty_1 {
+                                            infoButton:
+                                                ledger_secure_sdk_sys::nbgl_contentInfoButton_t {
+                                                    text: self.alloc_cstring(Some(text))?,
+                                                    icon: core::ptr::null(),
+                                                    buttonText: self
+                                                        .alloc_cstring(Some(button_text))?,
+                                                    buttonToken: 0, // TODO,
+                                                    tuneId: 0,
+                                                },
+                                        },
+                                },
+                            );
+                        }
+                        common::ux::PageContent::ConfirmationLongPress {
+                            text,
+                            long_press_text,
+                        } => {
+                            ledger_secure_sdk_sys::nbgl_pageDrawGenericContent(
+                                Some(layout_touch_callback),
+                                &nav_info,
+                                &mut ledger_secure_sdk_sys::nbgl_pageContent_t {
+                                    title: self.alloc_cstring(page_content_info.title.as_ref())?,
+                                    isTouchableTitle: page_content_info.is_title_touchable,
+                                    titleToken: TOKEN_TITLE,
+                                    tuneId: 0,
+                                    topRightToken: 255, // not implemented
+                                    topRightIcon: core::ptr::null(), // not implemented
+                                    type_: ledger_secure_sdk_sys::INFO_LONG_PRESS,
+                                    __bindgen_anon_1:
+                                        ledger_secure_sdk_sys::nbgl_pageContent_s__bindgen_ty_1 {
+                                            infoLongPress:
+                                                ledger_secure_sdk_sys::nbgl_contentInfoLongPress_t {
+                                                    text: self.alloc_cstring(Some(text))?,
+                                                    icon: core::ptr::null(),
+                                                    longPressText: self
+                                                        .alloc_cstring(Some(long_press_text))?,
+                                                    longPressToken: 0, // TODO,
+                                                    tuneId: 0,
+                                                },
+                                        },
+                                },
+                            );
+                        }
+                    };
                 }
             },
         }

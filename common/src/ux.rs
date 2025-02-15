@@ -223,7 +223,22 @@ pub struct TagValue {
 
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub enum PageContent {
+    TextSubtext {
+        // first page of the review pages
+        text: String,
+        subtext: String,
+    },
     TagValueList(Vec<TagValue>),
+    ConfirmationButton {
+        // as in the useCaseReviewLight
+        text: String,
+        button_text: String,
+    },
+    ConfirmationLongPress {
+        // as in the useCaseReview
+        text: String,
+        long_press_text: String,
+    },
 }
 
 // nbgl_pageContent_t
@@ -251,9 +266,16 @@ impl Serializable for PageContentInfo {
         self.top_right_icon.serialize(buf);
         // Serialize the page content.
         match &self.page_content {
-            PageContent::TagValueList(list) => {
-                // variant tag for TagValueList.
+            PageContent::TextSubtext { text, subtext } => {
+                // Variant tag for TextSubtext.
                 buf.push(0x01);
+                // Write text and subtext.
+                write_string(text, buf);
+                write_string(subtext, buf);
+            }
+            PageContent::TagValueList(list) => {
+                // Variant tag for TagValueList.
+                buf.push(0x02);
                 // Write the list length as u16.
                 let len = list.len() as u16;
                 write_u16(len, buf);
@@ -262,6 +284,23 @@ impl Serializable for PageContentInfo {
                     write_string(&tv.tag, buf);
                     write_string(&tv.value, buf);
                 }
+            }
+            PageContent::ConfirmationButton { text, button_text } => {
+                // Variant tag for ConfirmationButton.
+                buf.push(0x03);
+                // Write text and long press text.
+                write_string(text, buf);
+                write_string(button_text, buf);
+            }
+            PageContent::ConfirmationLongPress {
+                text,
+                long_press_text,
+            } => {
+                // Variant tag for ConfirmationLongPress.
+                buf.push(0x04);
+                // Write text and long press text.
+                write_string(text, buf);
+                write_string(long_press_text, buf);
             }
         }
     }
@@ -294,6 +333,14 @@ impl Serializable for PageContentInfo {
         rem = r;
         let page_content = match content_tag {
             0x01 => {
+                // Deserialize TextSubtext: two strings.
+                let (text, r) = read_string(rem)?;
+                rem = r;
+                let (subtext, r) = read_string(rem)?;
+                rem = r;
+                PageContent::TextSubtext { text, subtext }
+            }
+            0x02 => {
                 // Deserialize TagValueList.
                 let (len, r) = read_u16(rem)?;
                 rem = r;
@@ -306,6 +353,25 @@ impl Serializable for PageContentInfo {
                     list.push(TagValue { tag, value });
                 }
                 PageContent::TagValueList(list)
+            }
+            0x03 => {
+                // Deserialize ConfirmationButton.
+                let (text, r) = read_string(rem)?;
+                rem = r;
+                let (button_text, r) = read_string(rem)?;
+                rem = r;
+                PageContent::ConfirmationButton { text, button_text }
+            }
+            0x04 => {
+                // Deserialize ConfirmationLongPress.
+                let (text, r) = read_string(rem)?;
+                rem = r;
+                let (long_press_text, r) = read_string(rem)?;
+                rem = r;
+                PageContent::ConfirmationLongPress {
+                    text,
+                    long_press_text,
+                }
             }
             _ => return Err("unknown PageContent tag"),
         };
