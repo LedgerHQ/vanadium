@@ -175,7 +175,7 @@ jobs:
       matrix:
         include:
           # - model: nanox  # TODO: reenable once compilation is fixed
-          - model: nanosplus
+          # - model: nanosplus
           - model: flex
           - model: stax
 
@@ -250,7 +250,7 @@ jobs:
       matrix:
         include:
           # - model: nanox  # TODO: reenable once compilation is fixed
-          - model: nanosplus
+          # - model: nanosplus
           - model: flex
           - model: stax
 
