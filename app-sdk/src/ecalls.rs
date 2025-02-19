@@ -9,9 +9,6 @@ pub(crate) use ecalls_module::*;
 
 /// Trait defining the interface for all the ecalls.
 pub(crate) trait EcallsInterface {
-    /// Displays the idle screen of the V-App.
-    fn ux_idle();
-
     /// Exits the V-App with the specified status code.
     ///
     /// # Parameters

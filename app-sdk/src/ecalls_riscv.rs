@@ -375,8 +375,6 @@ macro_rules! ecall8 {
 pub struct Ecall;
 
 impl EcallsInterface for Ecall {
-    ecall0v!(ux_idle, ECALL_UX_IDLE);
-
     fn exit(status: i32) -> ! {
         unsafe {
             asm!(

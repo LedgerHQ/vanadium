@@ -245,7 +245,6 @@ pub enum PageContent {
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub struct PageContentInfo {
     pub title: Option<String>,
-    pub is_title_touchable: bool,
     pub top_right_icon: Icon,
     pub page_content: PageContent,
 }
@@ -260,8 +259,6 @@ impl Serializable for PageContentInfo {
             }
             None => buf.push(0),
         }
-        // Serialize the boolean field.
-        buf.push(if self.is_title_touchable { 1 } else { 0 });
         // Serialize the top right icon.
         self.top_right_icon.serialize(buf);
         // Serialize the page content.
@@ -317,12 +314,6 @@ impl Serializable for PageContentInfo {
         } else {
             None
         };
-        // Deserialize is_title_touchable.
-        let (touch_flag, r) = rem
-            .split_first()
-            .ok_or("slice too short for is_title_touchable")?;
-        rem = r;
-        let is_title_touchable = *touch_flag != 0;
         // Deserialize top_right_icon.
         let (top_right_icon, r) = Icon::deserialize(rem)?;
         rem = r;
@@ -378,7 +369,6 @@ impl Serializable for PageContentInfo {
         Ok((
             PageContentInfo {
                 title,
-                is_title_touchable,
                 top_right_icon,
                 page_content,
             },
@@ -435,7 +425,7 @@ pub enum Page {
     },
     /// A generic page with navigation, implementing a subset of the pages supported by nbgl_pageDrawGenericContent
     GenericPage {
-        navigation_info: NavigationInfo,
+        navigation_info: Option<NavigationInfo>,
         page_content_info: PageContentInfo,
     },
 }
@@ -476,7 +466,12 @@ impl Serializable for Page {
                 page_content_info,
             } => {
                 buf.push(0x04);
-                navigation_info.serialize(buf);
+                if let Some(navigation_info) = navigation_info {
+                    buf.push(0x01);
+                    navigation_info.serialize(buf);
+                } else {
+                    buf.push(0x00);
+                }
                 page_content_info.serialize(buf);
             }
         }
@@ -527,8 +522,16 @@ impl Serializable for Page {
                 ))
             }
             0x04 => {
+                let (has_navigation, rest) = rest.split_first().unwrap();
                 // Generic page: expect a NavigationInfo and a PageContentInfo.
-                let (navigation_info, rest) = NavigationInfo::deserialize(rest)?;
+                let (navigation_info, rest) = if *has_navigation == 0 {
+                    (None, rest)
+                } else if *has_navigation == 1 {
+                    let (nav_info, rest) = NavigationInfo::deserialize(rest)?;
+                    (Some(nav_info), rest)
+                } else {
+                    return Err("unexpected byte, expecting 0 or 1");
+                };
                 let (page_content_info, rest) = PageContentInfo::deserialize(rest)?;
                 Ok((
                     Page::GenericPage {

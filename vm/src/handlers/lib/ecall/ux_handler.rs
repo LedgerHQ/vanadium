@@ -278,49 +278,57 @@ impl UxHandler {
                 {
                     self.clear_cstrings();
 
-                    let common::ux::NavInfo::NavWithButtons {
-                        has_back_button,
-                        has_page_indicator: _,
-                        quit_text,
-                    } = &navigation_info.nav_info;
+                    let nav_info = navigation_info.as_ref().map(|ni| {
+                        get_ux_handler().cur_page = ni.active_page as u8;
 
-                    if navigation_info.n_pages > 255
-                        || navigation_info.active_page >= navigation_info.n_pages
-                    {
-                        return Err(CommEcallError::InvalidParameters("Invalid navigation info"));
-                    }
+                        let common::ux::NavInfo::NavWithButtons {
+                            has_back_button,
+                            has_page_indicator: _,
+                            quit_text,
+                        } = &ni.nav_info;
 
-                    get_ux_handler().cur_page = navigation_info.active_page as u8;
+                        if ni.n_pages > 255
+                            || ni.active_page >= ni.n_pages
+                        {
+                            return Err(CommEcallError::InvalidParameters(
+                                "Invalid navigation info",
+                            ));
+                        }
 
-                    let nav_info = ledger_secure_sdk_sys::nbgl_pageNavigationInfo_t {
-                        activePage: navigation_info.active_page as u8,
-                        nbPages:  navigation_info.n_pages as u8,
-                        quitToken: TOKEN_QUIT,
-                        navType: ledger_secure_sdk_sys::NAV_WITH_BUTTONS,
-                        progressIndicator: true,
-                        tuneId: 0,
-                        skipText: self.alloc_cstring(navigation_info.skip_text.as_ref())?,
-                        skipToken: TOKEN_SKIP,
-                        __bindgen_anon_1:
-                        ledger_secure_sdk_sys::nbgl_pageMultiScreensDescription_s__bindgen_ty_1 {
-                            navWithButtons: ledger_secure_sdk_sys::nbgl_pageNavWithButtons_s {
-                                quitButton: quit_text.is_some(),
-                                backButton: *has_back_button,
-                                visiblePageIndicator: false,
-                                navToken: TOKEN_NAVIGATION,
-                                quitText: self.alloc_cstring(quit_text.as_ref())?,
-                            }
-                        },
+                        Ok(ledger_secure_sdk_sys::nbgl_pageNavigationInfo_t {
+                            activePage: ni.active_page as u8,
+                            nbPages:  ni.n_pages as u8,
+                            quitToken: TOKEN_QUIT,
+                            navType: ledger_secure_sdk_sys::NAV_WITH_BUTTONS,
+                            progressIndicator: true,
+                            tuneId: 0,
+                            skipText: self.alloc_cstring(ni.skip_text.as_ref())?,
+                            skipToken: TOKEN_SKIP,
+                            __bindgen_anon_1:
+                            ledger_secure_sdk_sys::nbgl_pageMultiScreensDescription_s__bindgen_ty_1 {
+                                navWithButtons: ledger_secure_sdk_sys::nbgl_pageNavWithButtons_s {
+                                    quitButton: quit_text.is_some(),
+                                    backButton: *has_back_button,
+                                    visiblePageIndicator: false,
+                                    navToken: TOKEN_NAVIGATION,
+                                    quitText: self.alloc_cstring(quit_text.as_ref())?,
+                                }
+                            },
+                        })
+                    }).transpose()?;
+                    let navigation_info = match nav_info {
+                        Some(ref ni) => ni as *const _,
+                        None => core::ptr::null(),
                     };
 
                     match &page_content_info.page_content {
                         common::ux::PageContent::TextSubtext { text, subtext } => {
                             ledger_secure_sdk_sys::nbgl_pageDrawGenericContent(
                                 Some(layout_touch_callback),
-                                &nav_info,
+                                navigation_info,
                                 &mut ledger_secure_sdk_sys::nbgl_pageContent_t {
                                     title: self.alloc_cstring(page_content_info.title.as_ref())?,
-                                    isTouchableTitle: page_content_info.is_title_touchable,
+                                    isTouchableTitle: false, // unused in nbgl
                                     titleToken: TOKEN_TITLE,
                                     tuneId: 0,
                                     topRightToken: 255, // not implemented
@@ -356,10 +364,10 @@ impl UxHandler {
 
                             ledger_secure_sdk_sys::nbgl_pageDrawGenericContent(
                                 Some(layout_touch_callback),
-                                &nav_info,
+                                navigation_info,
                                 &mut ledger_secure_sdk_sys::nbgl_pageContent_t {
                                     title: self.alloc_cstring(page_content_info.title.as_ref())?,
-                                    isTouchableTitle: page_content_info.is_title_touchable,
+                                    isTouchableTitle: false, // unused in nbgl
                                     titleToken: TOKEN_TITLE,
                                     tuneId: 0,
                                     topRightToken: 255, // not implemented
@@ -386,10 +394,10 @@ impl UxHandler {
                         common::ux::PageContent::ConfirmationButton { text, button_text } => {
                             ledger_secure_sdk_sys::nbgl_pageDrawGenericContent(
                                 Some(layout_touch_callback),
-                                &nav_info,
+                                navigation_info,
                                 &mut ledger_secure_sdk_sys::nbgl_pageContent_t {
                                     title: self.alloc_cstring(page_content_info.title.as_ref())?,
-                                    isTouchableTitle: page_content_info.is_title_touchable,
+                                    isTouchableTitle: false, // unused in nbgl
                                     titleToken: TOKEN_TITLE,
                                     tuneId: 0,
                                     topRightToken: 255, // not implemented
@@ -416,10 +424,10 @@ impl UxHandler {
                         } => {
                             ledger_secure_sdk_sys::nbgl_pageDrawGenericContent(
                                 Some(layout_touch_callback),
-                                &nav_info,
+                                navigation_info,
                                 &mut ledger_secure_sdk_sys::nbgl_pageContent_t {
                                     title: self.alloc_cstring(page_content_info.title.as_ref())?,
-                                    isTouchableTitle: page_content_info.is_title_touchable,
+                                    isTouchableTitle: false, // unused in nbgl
                                     titleToken: TOKEN_TITLE,
                                     tuneId: 0,
                                     topRightToken: 255, // not implemented

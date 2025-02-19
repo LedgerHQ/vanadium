@@ -1405,36 +1405,6 @@ impl<'a> EcallHandler for CommEcallHandler<'a> {
                     .map_err(|_| CommEcallError::GenericError("xrecv failed"))?;
                 reg!(A0) = ret as u32;
             }
-            ECALL_UX_IDLE => {
-                #[cfg(not(any(target_os = "stax", target_os = "flex")))]
-                {
-                    ledger_device_sdk::ui::gadgets::clear_screen();
-                    let page = ledger_device_sdk::ui::gadgets::Page::from((
-                        [self.manifest.get_app_name(), "is ready"],
-                        false,
-                    ));
-                    page.place();
-                }
-
-                #[cfg(any(target_os = "stax", target_os = "flex"))]
-                {
-                    use include_gif::include_gif;
-                    const FERRIS: ledger_device_sdk::nbgl::NbglGlyph =
-                        ledger_device_sdk::nbgl::NbglGlyph::from_include(include_gif!(
-                            "crab_64x64.gif",
-                            NBGL
-                        ));
-
-                    ledger_device_sdk::nbgl::NbglHomeAndSettings::new()
-                        .glyph(&FERRIS)
-                        .infos(
-                            self.manifest.get_app_name(),
-                            self.manifest.get_app_version(),
-                            "", // TODO
-                        )
-                        .show_and_return();
-                }
-            }
             ECALL_GET_EVENT => {
                 reg!(A0) = self.handle_get_event::<CommEcallError>(cpu, GPreg!(A0))?;
             }

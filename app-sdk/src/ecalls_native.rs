@@ -47,8 +47,6 @@ pub struct Ecall;
 static mut LAST_EVENT: Option<(EventCode, EventData)> = None;
 
 impl EcallsInterface for Ecall {
-    fn ux_idle() {}
-
     fn exit(status: i32) -> ! {
         std::process::exit(status);
     }
