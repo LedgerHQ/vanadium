@@ -414,3 +414,11 @@ async fn test_secp256k1_schnorr_verify() {
 
     assert_eq!(result, vec![0]);
 }
+
+#[tokio::test]
+async fn test_ticker() {
+    // a simple test that verifies that ticker events are indeed received.
+    let mut setup = test_common::setup().await;
+    let result = setup.client.sleep(10).await.expect("Should not fail");
+    assert_eq!(result, vec![]);
+}

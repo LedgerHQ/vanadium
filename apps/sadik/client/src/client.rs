@@ -220,6 +220,14 @@ impl SadikClient {
             .expect("Error sending message"))
     }
 
+    pub async fn sleep(&mut self, n_ticks: u32) -> Result<Vec<u8>, SadikClientError> {
+        let cmd = Command::Sleep { n_ticks };
+        let msg = postcard::to_allocvec(&cmd).expect("Serialization failed");
+        Ok(send_message(&mut self.app_client, &msg)
+            .await
+            .expect("Error sending message"))
+    }
+
     pub async fn exit(&mut self) -> Result<i32, &'static str> {
         match send_message(&mut self.app_client, &[]).await {
             Ok(_) => Err("Exit message shouldn't return!"),

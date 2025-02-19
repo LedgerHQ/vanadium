@@ -4,11 +4,11 @@ use crate::ecalls_riscv as ecalls_module;
 #[cfg(not(target_arch = "riscv32"))]
 use crate::ecalls_native as ecalls_module;
 
+use common::ux::EventData;
+pub(crate) use ecalls_module::*;
+
 /// Trait defining the interface for all the ecalls.
 pub(crate) trait EcallsInterface {
-    /// Displays the idle screen of the V-App.
-    fn ux_idle();
-
     /// Exits the V-App with the specified status code.
     ///
     /// # Parameters
@@ -44,6 +44,24 @@ pub(crate) trait EcallsInterface {
     /// # Returns
     /// The number of bytes received.
     fn xrecv(buffer: *mut u8, max_size: usize) -> usize;
+
+    /// Waits for the next event.
+    ///
+    /// # Parameters
+    /// - `data`: Pointer to a 16-byte buffer to receive the event data (if any).
+    /// # Returns
+    /// The event code.
+    fn get_event(data: *mut EventData) -> u32;
+
+    /// Shows a page.
+    ///
+    /// # Parameters
+    /// - `page_desc`: Pointer to the serialized description of a page.
+    /// - `page_desc_len`: Length of the serialized description of a page.
+    ///
+    /// # Returns
+    /// 1 on success, 0 on error.
+    fn show_page(page_desc: *const u8, page_desc_len: usize) -> u32;
 
     /// Computes the remainder of dividing `n` by `m`, storing the result in `r`.
     ///
@@ -279,4 +297,13 @@ pub(crate) trait EcallsInterface {
     ) -> u32;
 }
 
-pub(crate) use ecalls_module::*;
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_event_data_size() {
+        // make sure that the size of the EventData union is exactly 16 bytes
+        assert_eq!(core::mem::size_of::<EventData>(), 16);
+    }
+}
