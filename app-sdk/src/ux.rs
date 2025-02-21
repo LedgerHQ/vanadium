@@ -99,7 +99,7 @@ pub fn review_pairs(
                 page_content_info: PageContentInfo {
                     title: None,
                     top_right_icon: Icon::None, // TODO: support icons
-                    page_content: PageContent::TagValueList(pair_list),
+                    page_content: PageContent::TagValueList { list: pair_list },
                 },
             }
             .serialized(),

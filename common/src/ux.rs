@@ -226,227 +226,6 @@ impl<T: Serializable> Serializable for Vec<T> {
     }
 }
 
-#[derive(Debug, PartialEq, Eq, Clone)]
-pub enum NavInfo {
-    // nbgl_pageNavWithButtons_s
-    NavWithButtons {
-        has_back_button: bool,
-        has_page_indicator: bool,
-        quit_text: Option<String>,
-    },
-}
-
-impl Serializable for NavInfo {
-    #[inline(always)]
-    fn serialize(&self, buf: &mut Vec<u8>) {
-        match self {
-            NavInfo::NavWithButtons {
-                has_back_button,
-                has_page_indicator,
-                quit_text,
-            } => {
-                buf.push(0x01); // tag for NavWithButtons
-                has_back_button.serialize(buf);
-                has_page_indicator.serialize(buf);
-                quit_text.serialize(buf);
-            }
-        }
-    }
-
-    fn deserialize(slice: &[u8]) -> Result<(Self, &[u8]), &'static str> {
-        if slice.is_empty() {
-            return Err("slice too short for NavInfo tag");
-        }
-        let (tag, rest) = slice.split_first().unwrap();
-        match tag {
-            0x01 => {
-                let (has_back_button, rest) = bool::deserialize(rest)?;
-                let (has_page_indicator, rest) = bool::deserialize(rest)?;
-                let (quit_text, rest) = Option::<String>::deserialize(rest)?;
-                Ok((
-                    NavInfo::NavWithButtons {
-                        has_back_button,
-                        has_page_indicator,
-                        quit_text,
-                    },
-                    rest,
-                ))
-            }
-            _ => Err("unknown NavInfo tag"),
-        }
-    }
-}
-
-#[derive(Debug, PartialEq, Eq, Clone)]
-pub struct NavigationInfo {
-    pub active_page: u32,
-    pub n_pages: u32,
-    pub skip_text: Option<String>,
-    pub nav_info: NavInfo,
-}
-
-impl Serializable for NavigationInfo {
-    #[inline(always)]
-    fn serialize(&self, buf: &mut Vec<u8>) {
-        self.active_page.serialize(buf);
-        self.n_pages.serialize(buf);
-        self.skip_text.serialize(buf);
-        self.nav_info.serialize(buf);
-    }
-
-    fn deserialize(slice: &[u8]) -> Result<(Self, &[u8]), &'static str> {
-        let (active_page_bytes, rest) = u32::deserialize(slice)?;
-        let (n_pages_bytes, rest) = u32::deserialize(rest)?;
-        let (skip_text, rest) = Option::<String>::deserialize(rest)?;
-        let (nav_info, rest) = NavInfo::deserialize(rest)?;
-        Ok((
-            NavigationInfo {
-                active_page: active_page_bytes,
-                n_pages: n_pages_bytes,
-                skip_text,
-                nav_info,
-            },
-            rest,
-        ))
-    }
-}
-
-#[derive(Debug, PartialEq, Eq, Clone)]
-pub struct TagValue {
-    pub tag: String,
-    pub value: String,
-}
-
-impl Serializable for TagValue {
-    #[inline(always)]
-    fn serialize(&self, buf: &mut Vec<u8>) {
-        self.tag.serialize(buf);
-        self.value.serialize(buf);
-    }
-
-    fn deserialize(slice: &[u8]) -> Result<(Self, &[u8]), &'static str> {
-        let (tag, rest) = String::deserialize(slice)?;
-        let (value, rest) = String::deserialize(rest)?;
-        Ok((TagValue { tag, value }, rest))
-    }
-}
-
-#[derive(Debug, PartialEq, Eq, Clone)]
-pub enum PageContent {
-    TextSubtext {
-        // first page of the review pages
-        text: String,
-        subtext: String,
-    },
-    TagValueList(Vec<TagValue>),
-    ConfirmationButton {
-        // as in the useCaseReviewLight
-        text: String,
-        button_text: String,
-    },
-    ConfirmationLongPress {
-        // as in the useCaseReview
-        text: String,
-        long_press_text: String,
-    },
-}
-
-impl Serializable for PageContent {
-    #[inline(always)]
-    fn serialize(&self, buf: &mut Vec<u8>) {
-        match self {
-            PageContent::TextSubtext { text, subtext } => {
-                buf.push(0x01);
-                text.serialize(buf);
-                subtext.serialize(buf);
-            }
-            PageContent::TagValueList(list) => {
-                buf.push(0x02);
-                list.serialize(buf);
-            }
-            PageContent::ConfirmationButton { text, button_text } => {
-                buf.push(0x03);
-                text.serialize(buf);
-                button_text.serialize(buf);
-            }
-            PageContent::ConfirmationLongPress {
-                text,
-                long_press_text,
-            } => {
-                buf.push(0x04); //variant tag
-                text.serialize(buf);
-                long_press_text.serialize(buf);
-            }
-        }
-    }
-
-    fn deserialize(slice: &[u8]) -> Result<(Self, &[u8]), &'static str> {
-        if slice.is_empty() {
-            return Err("slice too short for PageContent tag");
-        }
-        let (tag, rest) = slice.split_first().unwrap();
-        match tag {
-            0x01 => {
-                let (text, rest) = String::deserialize(rest)?;
-                let (subtext, rest) = String::deserialize(rest)?;
-                Ok((PageContent::TextSubtext { text, subtext }, rest))
-            }
-            0x02 => {
-                let (list, rest) = Vec::<TagValue>::deserialize(rest)?;
-                Ok((PageContent::TagValueList(list), rest))
-            }
-            0x03 => {
-                let (text, rest) = String::deserialize(rest)?;
-                let (button_text, rest) = String::deserialize(rest)?;
-                Ok((PageContent::ConfirmationButton { text, button_text }, rest))
-            }
-            0x04 => {
-                let (text, rest) = String::deserialize(rest)?;
-                let (long_press_text, rest) = String::deserialize(rest)?;
-                Ok((
-                    PageContent::ConfirmationLongPress {
-                        text,
-                        long_press_text,
-                    },
-                    rest,
-                ))
-            }
-            _ => Err("unknown PageContent tag"),
-        }
-    }
-}
-
-// nbgl_pageContent_t
-#[derive(Debug, PartialEq, Eq, Clone)]
-pub struct PageContentInfo {
-    pub title: Option<String>,
-    pub top_right_icon: Icon,
-    pub page_content: PageContent,
-}
-
-impl Serializable for PageContentInfo {
-    #[inline(always)]
-    fn serialize(&self, buf: &mut Vec<u8>) {
-        self.title.serialize(buf);
-        self.top_right_icon.serialize(buf);
-        self.page_content.serialize(buf);
-    }
-
-    fn deserialize(slice: &[u8]) -> Result<(Self, &[u8]), &'static str> {
-        let (title, rest) = Option::<String>::deserialize(slice)?;
-        let (top_right_icon, rest) = Icon::deserialize(rest)?;
-        let (page_content, rest) = PageContent::deserialize(rest)?;
-        Ok((
-            PageContentInfo {
-                title,
-                top_right_icon,
-                page_content,
-            },
-            rest,
-        ))
-    }
-}
-
 /// For the Icon page, define whether the icon indicates success or failure.
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub enum Icon {
@@ -480,106 +259,142 @@ impl Serializable for Icon {
     }
 }
 
-/// The various types of pages.
-#[derive(Debug, PartialEq)]
-pub enum Page {
-    /// A page showing a spinner and some text.
-    Spinner { text: String },
-    /// A page showing an icon (either success or failure) and some text.
-    Info { icon: Icon, text: String },
-    /// A page with a title, text, a "confirm" button, and a "reject" button.
-    ConfirmReject {
-        title: String,
-        text: String,
-        confirm: String,
-        reject: String,
-    },
-    /// A generic page with navigation, implementing a subset of the pages supported by nbgl_pageDrawGenericContent
-    GenericPage {
-        navigation_info: Option<NavigationInfo>,
-        page_content_info: PageContentInfo,
-    },
-}
+// MACROS
 
-impl Serializable for Page {
-    #[inline(always)]
-    fn serialize(&self, buf: &mut Vec<u8>) {
-        match self {
-            Page::Spinner { text } => {
-                buf.push(0x01);
-                text.serialize(buf);
+macro_rules! define_serializable_struct {
+    (
+        $name:ident {
+            $($field:ident : $field_ty:ty),* $(,)?
+        }
+    ) => {
+        #[derive(Debug, PartialEq, Eq, Clone)]
+        pub struct $name {
+            $(pub $field : $field_ty),*
+        }
+
+        impl Serializable for $name {
+            #[inline(always)]
+            fn serialize(&self, buf: &mut Vec<u8>) {
+                $( self.$field.serialize(buf); )*
             }
-            Page::Info { icon, text } => {
-                buf.push(0x02);
-                icon.serialize(buf);
-                text.serialize(buf);
-            }
-            Page::ConfirmReject {
-                title,
-                text,
-                confirm,
-                reject,
-            } => {
-                buf.push(0x03);
-                title.serialize(buf);
-                text.serialize(buf);
-                confirm.serialize(buf);
-                reject.serialize(buf);
-            }
-            Page::GenericPage {
-                navigation_info,
-                page_content_info,
-            } => {
-                buf.push(0x04);
-                navigation_info.serialize(buf);
-                page_content_info.serialize(buf);
+
+            fn deserialize(slice: &[u8]) -> Result<(Self, &[u8]), &'static str> {
+                let mut slice = slice;
+                $(
+                    let ($field, new_slice) = <$field_ty>::deserialize(slice)?;
+                    slice = new_slice;
+                )*
+                Ok((Self { $($field),* }, slice))
             }
         }
     }
+}
 
-    fn deserialize(slice: &[u8]) -> Result<(Self, &[u8]), &'static str> {
-        if slice.is_empty() {
-            return Err("slice too short for Page tag");
+macro_rules! define_serializable_enum {
+    (
+        $name:ident {
+            $(
+                $tag:expr => $variant:ident { $($field:ident : $field_ty:ty),* $(,)? }
+            ),* $(,)?
         }
-        let (tag, rest) = slice.split_first().unwrap();
-        match tag {
-            0x01 => {
-                let (text, rest) = String::deserialize(rest)?;
-                Ok((Page::Spinner { text }, rest))
-            }
-            0x02 => {
-                let (icon, rest) = Icon::deserialize(rest)?;
-                let (text, rest) = String::deserialize(rest)?;
-                Ok((Page::Info { icon, text }, rest))
-            }
-            0x03 => {
-                let (title, rest) = String::deserialize(rest)?;
-                let (text, rest) = String::deserialize(rest)?;
-                let (confirm, rest) = String::deserialize(rest)?;
-                let (reject, rest) = String::deserialize(rest)?;
-                Ok((
-                    Page::ConfirmReject {
-                        title,
-                        text,
-                        confirm,
-                        reject,
-                    },
-                    rest,
-                ))
-            }
-            0x04 => {
-                let (navigation_info, rest) = Option::<NavigationInfo>::deserialize(rest)?;
-                let (page_content_info, rest) = PageContentInfo::deserialize(rest)?;
-                Ok((
-                    Page::GenericPage {
-                        navigation_info,
-                        page_content_info,
-                    },
-                    rest,
-                ))
-            }
-            _ => Err("unknown Page tag"),
+    ) => {
+        #[derive(Debug, PartialEq, Eq, Clone)]
+        pub enum $name {
+            $(
+                $variant { $($field : $field_ty),* },
+            )*
         }
+
+        impl Serializable for $name {
+            #[inline(always)]
+            fn serialize(&self, buf: &mut Vec<u8>) {
+                match self {
+                    $(
+                        Self::$variant { $($field),* } => {
+                            buf.push($tag);
+                            $(
+                                $field.serialize(buf);
+                            )*
+                        }
+                    ),*
+                }
+            }
+
+            fn deserialize(slice: &[u8]) -> Result<(Self, &[u8]), &'static str> {
+                if slice.is_empty() {
+                    return Err(concat!(stringify!($name), " slice too short for tag"));
+                }
+                let (tag, rest) = slice.split_first().unwrap();
+                match tag {
+                    $(
+                        x if *x == $tag => {
+                            let r = rest;
+                            $(
+                                let ($field, r) = <$field_ty>::deserialize(r)?;
+                            )*
+                            Ok((Self::$variant { $($field),* }, r))
+                        }
+                    ),*,
+                    _ => Err("unknown tag"),
+                }
+            }
+        }
+    }
+}
+
+// Structured types
+
+define_serializable_enum! {
+    NavInfo {
+        0x01 => NavWithButtons {
+            has_back_button: bool,
+            has_page_indicator: bool,
+            quit_text: Option<String>,
+        },
+    }
+}
+
+define_serializable_struct! {
+    NavigationInfo {
+        active_page: u32,
+        n_pages: u32,
+        skip_text: Option<String>,
+        nav_info: NavInfo,
+    }
+}
+
+define_serializable_struct! {
+    TagValue { tag: String, value: String }
+}
+
+define_serializable_enum! {
+    PageContent {
+        0x01 => TextSubtext { text: String, subtext: String },
+        0x02 => TagValueList { list: Vec<TagValue> },
+        0x03 => ConfirmationButton { text: String, button_text: String },
+        0x04 => ConfirmationLongPress { text: String, long_press_text: String },
+    }
+}
+
+// nbgl_pageContent_t
+define_serializable_struct! {
+    PageContentInfo {
+        title: Option<String>,
+        top_right_icon: Icon,
+        page_content: PageContent,
+    }
+}
+
+define_serializable_enum! {
+    Page {
+        // A page showing a spinner and some text.
+        0x01 => Spinner { text: String },
+        // A page showing an icon (either success or failure) and some text.
+        0x02 => Info { icon: Icon, text: String },
+        // A page with a title, text, a "confirm" button, and a "reject" button.
+        0x03 => ConfirmReject { title: String, text: String, confirm: String, reject: String },
+        // A generic page with navigation, implementing a subset of the pages supported by nbgl_pageDrawGenericContent
+        0x04 => GenericPage { navigation_info: Option<NavigationInfo>, page_content_info: PageContentInfo },
     }
 }
 
