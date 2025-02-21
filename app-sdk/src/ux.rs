@@ -46,10 +46,10 @@ pub fn review_pairs(
     final_button_text: &str,
     long_press: bool,
 ) -> bool {
-    let n_pair_pages = (pairs.len() + 1) / 2;
+    let n_pair_pages = ((pairs.len() + 1) / 2) as u32;
     let n_pages = 1 + n_pair_pages + 1; // intro page + pair pages + final page
 
-    let mut serialized_pages = Vec::with_capacity(n_pages);
+    let mut serialized_pages = Vec::with_capacity(n_pages as usize);
 
     // create intro page
     serialized_pages.push(
@@ -78,10 +78,10 @@ pub fn review_pairs(
 
     // create a page for each pair of tag-value
     for i in 0..n_pair_pages {
-        let mut pair_list = Vec::with_capacity(n_pair_pages);
-        pair_list.push(pairs[i * 2].clone());
-        if i * 2 + 1 < pairs.len() {
-            pair_list.push(pairs[i * 2 + 1].clone());
+        let mut pair_list = Vec::with_capacity(n_pair_pages as usize);
+        pair_list.push(pairs[(i * 2) as usize].clone());
+        if i * 2 + 1 < pairs.len() as u32 {
+            pair_list.push(pairs[(i * 2 + 1) as usize].clone());
         }
 
         serialized_pages.push(
