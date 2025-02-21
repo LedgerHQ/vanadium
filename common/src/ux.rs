@@ -79,301 +79,150 @@ pub trait Serializable: Sized {
     }
 }
 
-#[derive(Debug, PartialEq, Eq, Clone)]
-pub enum NavInfo {
-    // nbgl_pageNavWithButtons_s
-    NavWithButtons {
-        has_back_button: bool,
-        has_page_indicator: bool,
-        quit_text: Option<String>,
-    },
+impl Serializable for bool {
+    #[inline(always)]
+    fn serialize(&self, buf: &mut Vec<u8>) {
+        buf.push(if *self { 1 } else { 0 });
+    }
+
+    fn deserialize(slice: &[u8]) -> Result<(Self, &[u8]), &'static str> {
+        if let Some((&byte, rest)) = slice.split_first() {
+            match byte {
+                0 => Ok((false, rest)),
+                1 => Ok((true, rest)),
+                _ => Err("invalid boolean value"),
+            }
+        } else {
+            Err("slice too short for bool")
+        }
+    }
 }
 
-impl Serializable for NavInfo {
+impl Serializable for u8 {
+    #[inline(always)]
+    fn serialize(&self, buf: &mut Vec<u8>) {
+        buf.push(*self);
+    }
+
+    fn deserialize(slice: &[u8]) -> Result<(Self, &[u8]), &'static str> {
+        if let Some((&byte, rest)) = slice.split_first() {
+            Ok((byte, rest))
+        } else {
+            Err("slice too short for u8")
+        }
+    }
+}
+
+impl Serializable for u16 {
+    #[inline(always)]
+    fn serialize(&self, buf: &mut Vec<u8>) {
+        buf.extend_from_slice(&self.to_be_bytes());
+    }
+
+    fn deserialize(slice: &[u8]) -> Result<(Self, &[u8]), &'static str> {
+        if slice.len() < 2 {
+            Err("slice too short for u16")
+        } else {
+            let (bytes, rest) = slice.split_at(2);
+            let arr: [u8; 2] = bytes.try_into().unwrap();
+            Ok((u16::from_be_bytes(arr), rest))
+        }
+    }
+}
+
+impl Serializable for u32 {
+    #[inline(always)]
+    fn serialize(&self, buf: &mut Vec<u8>) {
+        buf.extend_from_slice(&self.to_be_bytes());
+    }
+
+    fn deserialize(slice: &[u8]) -> Result<(Self, &[u8]), &'static str> {
+        if slice.len() < 4 {
+            Err("slice too short for u32")
+        } else {
+            let (bytes, rest) = slice.split_at(4);
+            let arr: [u8; 4] = bytes.try_into().unwrap();
+            Ok((u32::from_be_bytes(arr), rest))
+        }
+    }
+}
+
+impl Serializable for String {
+    #[inline(always)]
+    fn serialize(&self, buf: &mut Vec<u8>) {
+        let bytes = self.as_bytes();
+        let len = bytes.len();
+        if len > u16::MAX as usize {
+            panic!("string too long");
+        }
+        (len as u16).serialize(buf);
+        buf.extend_from_slice(bytes);
+    }
+
+    fn deserialize(slice: &[u8]) -> Result<(Self, &[u8]), &'static str> {
+        let (len, rest) = u16::deserialize(slice)?;
+        let len = len as usize;
+        if rest.len() < len {
+            return Err("slice too short for string");
+        }
+        let (string_bytes, rest) = rest.split_at(len);
+        let s = String::from_utf8(string_bytes.to_vec()).map_err(|_| "invalid utf8")?;
+        Ok((s, rest))
+    }
+}
+
+impl<T: Serializable> Serializable for Option<T> {
+    #[inline(always)]
     fn serialize(&self, buf: &mut Vec<u8>) {
         match self {
-            NavInfo::NavWithButtons {
-                has_back_button,
-                has_page_indicator,
-                quit_text,
-            } => {
-                buf.push(0x01); // tag for NavWithButtons
-                buf.push(if *has_back_button { 1 } else { 0 });
-                buf.push(if *has_page_indicator { 1 } else { 0 });
-                match quit_text {
-                    Some(text) => {
-                        buf.push(1);
-                        write_string(text, buf);
-                    }
-                    None => {
-                        buf.push(0);
-                    }
-                }
-            }
-        }
-    }
-
-    fn deserialize(slice: &[u8]) -> Result<(Self, &[u8]), &'static str> {
-        if slice.is_empty() {
-            return Err("slice too short for NavInfo tag");
-        }
-        let (tag, rest) = slice.split_first().unwrap();
-        match tag {
-            0x01 => {
-                if rest.len() < 3 {
-                    return Err("slice too short for NavWithButtons");
-                }
-                let (back_flag, rest) = rest.split_first().unwrap();
-                let (page_flag, rest) = rest.split_first().unwrap();
-                let (quit_flag, rest) = rest.split_first().unwrap();
-                let has_back_button = *back_flag != 0;
-                let has_page_indicator = *page_flag != 0;
-                if *quit_flag == 1 {
-                    let (quit_text, rest) = read_string(rest)?;
-                    Ok((
-                        NavInfo::NavWithButtons {
-                            has_back_button,
-                            has_page_indicator,
-                            quit_text: Some(quit_text),
-                        },
-                        rest,
-                    ))
-                } else {
-                    Ok((
-                        NavInfo::NavWithButtons {
-                            has_back_button,
-                            has_page_indicator,
-                            quit_text: None,
-                        },
-                        rest,
-                    ))
-                }
-            }
-            _ => Err("unknown NavInfo tag"),
-        }
-    }
-}
-
-#[derive(Debug, PartialEq, Eq, Clone)]
-pub struct NavigationInfo {
-    pub active_page: usize,
-    pub n_pages: usize,
-    pub skip_text: Option<String>,
-    pub nav_info: NavInfo,
-}
-
-impl Serializable for NavigationInfo {
-    fn serialize(&self, buf: &mut Vec<u8>) {
-        // Serialize active_page and n_pages as u32 little-endian
-        buf.extend_from_slice(&(self.active_page as u32).to_le_bytes());
-        buf.extend_from_slice(&(self.n_pages as u32).to_le_bytes());
-        // Serialize skip_text with a flag: 1 if Some, 0 if None.
-        match &self.skip_text {
-            Some(text) => {
+            Some(value) => {
                 buf.push(1);
-                write_string(text, buf);
+                value.serialize(buf);
             }
-            None => buf.push(0),
+            None => {
+                buf.push(0);
+            }
         }
-        // Serialize nav_info using its implementation.
-        self.nav_info.serialize(buf);
     }
 
     fn deserialize(slice: &[u8]) -> Result<(Self, &[u8]), &'static str> {
-        // Check for active_page and n_pages (each 4 bytes).
-        if slice.len() < 8 {
-            return Err("slice too short for NavigationInfo numeric fields");
-        }
-        let (active_page_bytes, rest) = slice.split_at(4);
-        let active_page = u32::from_le_bytes(active_page_bytes.try_into().unwrap()) as usize;
-        let (n_pages_bytes, rest) = rest.split_at(4);
-        let n_pages = u32::from_le_bytes(n_pages_bytes.try_into().unwrap()) as usize;
-
-        // Check for the skip_text flag.
-        if rest.is_empty() {
-            return Err("slice too short for NavigationInfo skip_text flag");
-        }
-        let (flag, rest) = rest.split_first().unwrap();
-        let (skip_text, rest) = if *flag == 1 {
-            let (text, rest) = read_string(rest)?;
-            (Some(text), rest)
+        if let Some((&tag, rest)) = slice.split_first() {
+            match tag {
+                1 => {
+                    let (value, rest) = T::deserialize(rest)?;
+                    Ok((Some(value), rest))
+                }
+                0 => Ok((None, rest)),
+                _ => Err("invalid Option tag"),
+            }
         } else {
-            (None, rest)
-        };
-
-        // Deserialize nav_info.
-        let (nav_info, rest) = NavInfo::deserialize(rest)?;
-        Ok((
-            NavigationInfo {
-                active_page,
-                n_pages,
-                skip_text,
-                nav_info,
-            },
-            rest,
-        ))
+            Err("slice too short for Option tag")
+        }
     }
 }
 
-#[derive(Debug, PartialEq, Eq, Clone)]
-pub struct TagValue {
-    pub tag: String,
-    pub value: String,
-}
-
-#[derive(Debug, PartialEq, Eq, Clone)]
-pub enum PageContent {
-    TextSubtext {
-        // first page of the review pages
-        text: String,
-        subtext: String,
-    },
-    TagValueList(Vec<TagValue>),
-    ConfirmationButton {
-        // as in the useCaseReviewLight
-        text: String,
-        button_text: String,
-    },
-    ConfirmationLongPress {
-        // as in the useCaseReview
-        text: String,
-        long_press_text: String,
-    },
-}
-
-// nbgl_pageContent_t
-#[derive(Debug, PartialEq, Eq, Clone)]
-pub struct PageContentInfo {
-    pub title: Option<String>,
-    pub top_right_icon: Icon,
-    pub page_content: PageContent,
-}
-
-impl Serializable for PageContentInfo {
+impl<T: Serializable> Serializable for Vec<T> {
+    #[inline(always)]
     fn serialize(&self, buf: &mut Vec<u8>) {
-        // Serialize title option: 1 indicates Some then string, 0 indicates None.
-        match &self.title {
-            Some(title) => {
-                buf.push(1);
-                write_string(title, buf);
-            }
-            None => buf.push(0),
+        let len = self.len();
+        if len > (u32::MAX as usize) {
+            panic!("vector too long");
         }
-        // Serialize the top right icon.
-        self.top_right_icon.serialize(buf);
-        // Serialize the page content.
-        match &self.page_content {
-            PageContent::TextSubtext { text, subtext } => {
-                // Variant tag for TextSubtext.
-                buf.push(0x01);
-                // Write text and subtext.
-                write_string(text, buf);
-                write_string(subtext, buf);
-            }
-            PageContent::TagValueList(list) => {
-                // Variant tag for TagValueList.
-                buf.push(0x02);
-                // Write the list length as u16.
-                let len = list.len() as u16;
-                write_u16(len, buf);
-                // Write each TagValue's tag and value.
-                for tv in list {
-                    write_string(&tv.tag, buf);
-                    write_string(&tv.value, buf);
-                }
-            }
-            PageContent::ConfirmationButton { text, button_text } => {
-                // Variant tag for ConfirmationButton.
-                buf.push(0x03);
-                // Write text and long press text.
-                write_string(text, buf);
-                write_string(button_text, buf);
-            }
-            PageContent::ConfirmationLongPress {
-                text,
-                long_press_text,
-            } => {
-                // Variant tag for ConfirmationLongPress.
-                buf.push(0x04);
-                // Write text and long press text.
-                write_string(text, buf);
-                write_string(long_press_text, buf);
-            }
+        (len as u32).serialize(buf);
+        for item in self {
+            item.serialize(buf);
         }
     }
 
     fn deserialize(slice: &[u8]) -> Result<(Self, &[u8]), &'static str> {
-        let mut rem = slice;
-        // Deserialize title option.
-        let (title_flag, r) = rem.split_first().ok_or("slice too short for title flag")?;
-        rem = r;
-        let title = if *title_flag == 1 {
-            let (t, r) = read_string(rem)?;
-            rem = r;
-            Some(t)
-        } else {
-            None
-        };
-        // Deserialize top_right_icon.
-        let (top_right_icon, r) = Icon::deserialize(rem)?;
-        rem = r;
-        // Deserialize page_content.
-        let (content_tag, r) = rem
-            .split_first()
-            .ok_or("slice too short for PageContent tag")?;
-        rem = r;
-        let page_content = match content_tag {
-            0x01 => {
-                // Deserialize TextSubtext: two strings.
-                let (text, r) = read_string(rem)?;
-                rem = r;
-                let (subtext, r) = read_string(rem)?;
-                rem = r;
-                PageContent::TextSubtext { text, subtext }
-            }
-            0x02 => {
-                // Deserialize TagValueList.
-                let (len, r) = read_u16(rem)?;
-                rem = r;
-                let mut list = Vec::with_capacity(len as usize);
-                for _ in 0..len {
-                    let (tag, r_new) = read_string(rem)?;
-                    rem = r_new;
-                    let (value, r_new) = read_string(rem)?;
-                    rem = r_new;
-                    list.push(TagValue { tag, value });
-                }
-                PageContent::TagValueList(list)
-            }
-            0x03 => {
-                // Deserialize ConfirmationButton.
-                let (text, r) = read_string(rem)?;
-                rem = r;
-                let (button_text, r) = read_string(rem)?;
-                rem = r;
-                PageContent::ConfirmationButton { text, button_text }
-            }
-            0x04 => {
-                // Deserialize ConfirmationLongPress.
-                let (text, r) = read_string(rem)?;
-                rem = r;
-                let (long_press_text, r) = read_string(rem)?;
-                rem = r;
-                PageContent::ConfirmationLongPress {
-                    text,
-                    long_press_text,
-                }
-            }
-            _ => return Err("unknown PageContent tag"),
-        };
-        Ok((
-            PageContentInfo {
-                title,
-                top_right_icon,
-                page_content,
-            },
-            rem,
-        ))
+        let (len, mut rem) = u32::deserialize(slice)?;
+        let mut vec = Vec::with_capacity(len as usize);
+        for _ in 0..len {
+            let (item, next) = T::deserialize(rem)?;
+            vec.push(item);
+            rem = next;
+        }
+        Ok((vec, rem))
     }
 }
 
@@ -386,6 +235,7 @@ pub enum Icon {
 }
 
 impl Serializable for Icon {
+    #[inline(always)]
     fn serialize(&self, buf: &mut Vec<u8>) {
         let tag: u8 = match self {
             Icon::None => 0,
@@ -409,182 +259,143 @@ impl Serializable for Icon {
     }
 }
 
-/// The various types of pages.
-#[derive(Debug, PartialEq)]
-pub enum Page {
-    /// A page showing a spinner and some text.
-    Spinner { text: String },
-    /// A page showing an icon (either success or failure) and some text.
-    Info { icon: Icon, text: String },
-    /// A page with a title, text, a "confirm" button, and a "reject" button.
-    ConfirmReject {
-        title: String,
-        text: String,
-        confirm: String,
-        reject: String,
-    },
-    /// A generic page with navigation, implementing a subset of the pages supported by nbgl_pageDrawGenericContent
-    GenericPage {
-        navigation_info: Option<NavigationInfo>,
-        page_content_info: PageContentInfo,
-    },
-}
+// MACROS
 
-impl Serializable for Page {
-    /// Serialize the page to a Vec<u8> using the following format:
-    ///
-    /// - 1 byte: page tag (0x01 for Spinner, 0x02 for Icon, 0x03 for ConfirmReject)
-    /// - The rest of the bytes depend on the page type.
-    ///   - For Spinner: one string (the text)
-    ///   - For Icon: one byte for the icon (0=Success, 1=Failure) then one string (the text)
-    ///   - For ConfirmReject: four strings (title, text, confirm, reject)
-    fn serialize(&self, buf: &mut Vec<u8>) {
-        match self {
-            Page::Spinner { text } => {
-                buf.push(0x01);
-                write_string(text, buf);
-            }
-            Page::Info { icon, text } => {
-                buf.push(0x02);
-                icon.serialize(buf);
-                write_string(text, buf);
-            }
-            Page::ConfirmReject {
-                title,
-                text,
-                confirm,
-                reject,
-            } => {
-                buf.push(0x03);
-                write_string(title, buf);
-                write_string(text, buf);
-                write_string(confirm, buf);
-                write_string(reject, buf);
-            }
-            Page::GenericPage {
-                navigation_info,
-                page_content_info,
-            } => {
-                buf.push(0x04);
-                if let Some(navigation_info) = navigation_info {
-                    buf.push(0x01);
-                    navigation_info.serialize(buf);
-                } else {
-                    buf.push(0x00);
-                }
-                page_content_info.serialize(buf);
-            }
+macro_rules! define_serializable_struct {
+    (
+        $name:ident {
+            $($field:ident : $field_ty:ty),* $(,)?
         }
-    }
+    ) => {
+        #[derive(Debug, PartialEq, Eq, Clone)]
+        pub struct $name {
+            $(pub $field : $field_ty),*
+        }
 
-    /// Deserialize a Page from a slice.
-    /// Returns an error if the slice is too short or contains extra bytes.
-    fn deserialize(slice: &[u8]) -> Result<(Self, &[u8]), &'static str> {
-        if slice.is_empty() {
-            return Err("slice too short for page tag");
-        }
-        let (tag, rest) = slice.split_first().unwrap();
-        match tag {
-            0x01 => {
-                // Spinner page: expect one string.
-                let (text, rest) = read_string(rest)?;
-                if !rest.is_empty() {
-                    return Err("extra bytes after spinner page");
-                }
-                Ok((Page::Spinner { text }, rest))
+        impl Serializable for $name {
+            #[inline(always)]
+            fn serialize(&self, buf: &mut Vec<u8>) {
+                $( self.$field.serialize(buf); )*
             }
-            0x02 => {
-                // Icon page: first a single byte for the icon, then one string.
-                let (icon, rest) = Icon::deserialize(rest)?;
-                let (text, rest) = read_string(rest)?;
-                if !rest.is_empty() {
-                    return Err("extra bytes after icon page");
-                }
-                Ok((Page::Info { icon, text }, rest))
+
+            fn deserialize(slice: &[u8]) -> Result<(Self, &[u8]), &'static str> {
+                let mut slice = slice;
+                $(
+                    let ($field, new_slice) = <$field_ty>::deserialize(slice)?;
+                    slice = new_slice;
+                )*
+                Ok((Self { $($field),* }, slice))
             }
-            0x03 => {
-                // ConfirmReject page: expect four strings.
-                let (title, rest) = read_string(rest)?;
-                let (text, rest) = read_string(rest)?;
-                let (confirm, rest) = read_string(rest)?;
-                let (reject, rest) = read_string(rest)?;
-                if !rest.is_empty() {
-                    return Err("extra bytes after confirm/reject page");
-                }
-                Ok((
-                    Page::ConfirmReject {
-                        title,
-                        text,
-                        confirm,
-                        reject,
-                    },
-                    rest,
-                ))
-            }
-            0x04 => {
-                let (has_navigation, rest) = rest.split_first().unwrap();
-                // Generic page: expect a NavigationInfo and a PageContentInfo.
-                let (navigation_info, rest) = if *has_navigation == 0 {
-                    (None, rest)
-                } else if *has_navigation == 1 {
-                    let (nav_info, rest) = NavigationInfo::deserialize(rest)?;
-                    (Some(nav_info), rest)
-                } else {
-                    return Err("unexpected byte, expecting 0 or 1");
-                };
-                let (page_content_info, rest) = PageContentInfo::deserialize(rest)?;
-                Ok((
-                    Page::GenericPage {
-                        navigation_info,
-                        page_content_info,
-                    },
-                    rest,
-                ))
-            }
-            _ => Err("unknown page tag"),
         }
     }
 }
 
-/// Writes a u16 (length) in little-endian into the buffer.
-fn write_u16(value: u16, buf: &mut Vec<u8>) {
-    buf.extend_from_slice(&value.to_le_bytes());
+macro_rules! define_serializable_enum {
+    (
+        $name:ident {
+            $(
+                $tag:expr => $variant:ident { $($field:ident : $field_ty:ty),* $(,)? }
+            ),* $(,)?
+        }
+    ) => {
+        #[derive(Debug, PartialEq, Eq, Clone)]
+        pub enum $name {
+            $(
+                $variant { $($field : $field_ty),* },
+            )*
+        }
+
+        impl Serializable for $name {
+            #[inline(always)]
+            fn serialize(&self, buf: &mut Vec<u8>) {
+                match self {
+                    $(
+                        Self::$variant { $($field),* } => {
+                            buf.push($tag);
+                            $(
+                                $field.serialize(buf);
+                            )*
+                        }
+                    ),*
+                }
+            }
+
+            fn deserialize(slice: &[u8]) -> Result<(Self, &[u8]), &'static str> {
+                if slice.is_empty() {
+                    return Err(concat!(stringify!($name), " slice too short for tag"));
+                }
+                let (tag, rest) = slice.split_first().unwrap();
+                match tag {
+                    $(
+                        x if *x == $tag => {
+                            let r = rest;
+                            $(
+                                let ($field, r) = <$field_ty>::deserialize(r)?;
+                            )*
+                            Ok((Self::$variant { $($field),* }, r))
+                        }
+                    ),*,
+                    _ => Err("unknown tag"),
+                }
+            }
+        }
+    }
 }
 
-/// Writes a string as a u16 length followed by its UTF-8 bytes.
-/// Panics if the string is longer than u16::MAX bytes.
-fn write_string(s: &str, buf: &mut Vec<u8>) {
-    let bytes = s.as_bytes();
-    let len = bytes.len();
-    if len > u16::MAX as usize {
-        panic!("string too long");
+// Structured types
+
+define_serializable_enum! {
+    NavInfo {
+        0x01 => NavWithButtons {
+            has_back_button: bool,
+            has_page_indicator: bool,
+            quit_text: Option<String>,
+        },
     }
-    write_u16(len as u16, buf);
-    buf.extend_from_slice(bytes);
 }
 
-/// Reads a u16 from the slice (in little-endian order).
-/// Returns the u16 and the remaining slice.
-fn read_u16(slice: &[u8]) -> Result<(u16, &[u8]), &'static str> {
-    if slice.len() < 2 {
-        return Err("slice too short for u16");
+define_serializable_struct! {
+    NavigationInfo {
+        active_page: u32,
+        n_pages: u32,
+        skip_text: Option<String>,
+        nav_info: NavInfo,
     }
-    let (int_bytes, rest) = slice.split_at(2);
-    let arr: [u8; 2] = int_bytes.try_into().unwrap();
-    let value = u16::from_le_bytes(arr);
-    Ok((value, rest))
 }
 
-/// Reads a string that was encoded as a u16 length followed by UTF-8 bytes.
-fn read_string(slice: &[u8]) -> Result<(String, &[u8]), &'static str> {
-    let (len, slice) = read_u16(slice)?;
-    let len = len as usize;
-    if slice.len() < len {
-        return Err("slice too short for string");
+define_serializable_struct! {
+    TagValue { tag: String, value: String }
+}
+
+define_serializable_enum! {
+    PageContent {
+        0x01 => TextSubtext { text: String, subtext: String },
+        0x02 => TagValueList { list: Vec<TagValue> },
+        0x03 => ConfirmationButton { text: String, button_text: String },
+        0x04 => ConfirmationLongPress { text: String, long_press_text: String },
     }
-    let (string_bytes, rest) = slice.split_at(len);
-    let s = String::from_utf8(string_bytes.to_vec()).map_err(|_| "invalid utf8")?;
-    Ok((s, rest))
+}
+
+// nbgl_pageContent_t
+define_serializable_struct! {
+    PageContentInfo {
+        title: Option<String>,
+        top_right_icon: Icon,
+        page_content: PageContent,
+    }
+}
+
+define_serializable_enum! {
+    Page {
+        // A page showing a spinner and some text.
+        0x01 => Spinner { text: String },
+        // A page showing an icon (either success or failure) and some text.
+        0x02 => Info { icon: Icon, text: String },
+        // A page with a title, text, a "confirm" button, and a "reject" button.
+        0x03 => ConfirmReject { title: String, text: String, confirm: String, reject: String },
+        // A generic page with navigation, implementing a subset of the pages supported by nbgl_pageDrawGenericContent
+        0x04 => GenericPage { navigation_info: Option<NavigationInfo>, page_content_info: PageContentInfo },
+    }
 }
 
 #[cfg(test)]

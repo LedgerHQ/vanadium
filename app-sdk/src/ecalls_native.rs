@@ -221,8 +221,8 @@ impl EcallsInterface for Ecall {
                     common::ux::PageContent::TextSubtext { text, subtext } => {
                         println!("{}\n{}", text, subtext);
                     }
-                    common::ux::PageContent::TagValueList(tag_values) => {
-                        for tag_value in tag_values {
+                    common::ux::PageContent::TagValueList { list } => {
+                        for tag_value in list {
                             println!("{}: {}", tag_value.tag, tag_value.value);
                         }
                     }
