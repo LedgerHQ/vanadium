@@ -193,6 +193,89 @@ pub trait WrappedSerializable {
     fn serialize_wrapped(&self) -> Vec<SerializedPart>;
 }
 
+#[cfg(feature = "wrapped_serializable")]
+pub trait Wrappable {
+    type Wrapped;
+}
+
+#[cfg(feature = "wrapped_serializable")]
+impl Wrappable for bool {
+    type Wrapped = MaybeConst<bool>;
+}
+
+#[cfg(feature = "wrapped_serializable")]
+impl Wrappable for u8 {
+    type Wrapped = MaybeConst<u8>;
+}
+
+#[cfg(feature = "wrapped_serializable")]
+impl Wrappable for u16 {
+    type Wrapped = MaybeConst<u16>;
+}
+
+#[cfg(feature = "wrapped_serializable")]
+impl Wrappable for u32 {
+    type Wrapped = MaybeConst<u32>;
+}
+
+#[cfg(feature = "wrapped_serializable")]
+impl<T: Wrappable> Wrappable for Option<T> {
+    type Wrapped = Option<T::Wrapped>;
+}
+
+#[cfg(feature = "wrapped_serializable")]
+impl<T: Serializable> Wrappable for Vec<T> {
+    // for vectors, we can't really wrap individual elements,
+    // as the length of the vector is not statically known
+    type Wrapped = MaybeConst<Vec<T>>;
+}
+
+#[cfg(feature = "wrapped_serializable")]
+impl Wrappable for String {
+    type Wrapped = MaybeConstStr;
+}
+
+#[cfg(feature = "wrapped_serializable")]
+impl Wrappable for Icon {
+    type Wrapped = MaybeConst<Icon>;
+}
+
+pub trait Makeable<'a> {
+    type ArgType;
+}
+
+impl Makeable<'_> for bool {
+    type ArgType = bool;
+}
+
+impl Makeable<'_> for u8 {
+    type ArgType = u8;
+}
+
+impl Makeable<'_> for u16 {
+    type ArgType = u16;
+}
+
+impl Makeable<'_> for u32 {
+    type ArgType = u32;
+}
+
+impl Makeable<'_> for Icon {
+    type ArgType = Icon;
+}
+
+impl<'a, T: Makeable<'a> + 'a> Makeable<'a> for Vec<T> {
+    type ArgType = &'a [T];
+}
+
+impl<'a> Makeable<'a> for String {
+    type ArgType = &'a str;
+}
+
+impl<'a, T: Makeable<'a>> Makeable<'a> for Option<T> {
+    type ArgType = Option<T::ArgType>;
+}
+
 impl Serializable for bool {
     #[inline(always)]
     fn get_serialized_length(&self) -> usize {
@@ -536,7 +619,7 @@ impl Serializable for Icon {
 macro_rules! define_serializable_struct {
     (
         $name:ident {
-            $($field:ident : $field_ty:ty => $wrapped_field_ty:ty),* $(,)?
+            $($field:ident : $field_ty:ty),* $(,)?
         },
         wrapped: $wrapped_name:ident
     ) => {
@@ -571,7 +654,7 @@ macro_rules! define_serializable_struct {
         #[cfg(feature = "wrapped_serializable")]
         #[derive(Debug, PartialEq, Eq, Clone)]
         pub struct $wrapped_name {
-            $(pub $field: $wrapped_field_ty),*
+            $(pub $field: <$field_ty as Wrappable>::Wrapped),*
         }
 
         #[cfg(feature = "wrapped_serializable")]
@@ -584,6 +667,15 @@ macro_rules! define_serializable_struct {
                 parts
             }
         }
+
+        #[cfg(feature = "wrapped_serializable")]
+        impl Wrappable for $name {
+            type Wrapped = $wrapped_name;
+        }
+
+        impl Makeable<'_> for $name {
+            type ArgType = $name;
+        }
     };
 }
 
@@ -592,7 +684,7 @@ macro_rules! define_serializable_enum {
         $name:ident {
             $(
                 $tag:expr => $variant:ident {
-                    $($field:ident : $make_ty:ty => $enum_ty:ty => $wrapped_ty:ty),* $(,)?
+                    $($field:ident : $enum_ty:ty),* $(,)?
                 } as ($fn_maker:ident, $fn_maker_wrapped:ident)
             ),* $(,)?
         },
@@ -655,7 +747,7 @@ macro_rules! define_serializable_enum {
         impl $name {
             $(
                 #[inline(always)]
-                pub fn $fn_maker($($field: $make_ty),*) -> Vec<u8> {
+                pub fn $fn_maker($($field: <$enum_ty as Makeable>::ArgType),*) -> Vec<u8> {
                     let len = {
                         let mut len = $tag.get_serialized_length();
                         $( len += $field.get_serialized_length(); )*
@@ -676,7 +768,7 @@ macro_rules! define_serializable_enum {
         #[derive(Debug, PartialEq, Eq, Clone)]
         pub enum $wrapped_name {
             $(
-                $variant { $($field: $wrapped_ty),* },
+                $variant { $($field: <$enum_ty as Wrappable>::Wrapped),* },
             )*
         }
 
@@ -697,6 +789,15 @@ macro_rules! define_serializable_enum {
                 parts
             }
         }
+
+        #[cfg(feature = "wrapped_serializable")]
+        impl Wrappable for $name {
+            type Wrapped = $wrapped_name;
+        }
+
+        impl Makeable<'_> for $name {
+            type ArgType = $name;
+        }
     };
 }
 
@@ -705,9 +806,9 @@ macro_rules! define_serializable_enum {
 define_serializable_enum! {
     NavInfo {
         0x01u8 => NavWithButtons {
-            has_back_button: bool => bool => MaybeConst<bool>,
-            has_page_indicator: bool => bool => MaybeConst<bool>,
-            quit_text: Option<&str> => Option<String> => Option<MaybeConstStr>,
+            has_back_button: bool,
+            has_page_indicator: bool,
+            quit_text: Option<String>,
         } as (make_nav_with_buttons, make_nav_with_buttons_wrapped),
     },
     wrapped: WrappedNavInfo
@@ -715,18 +816,18 @@ define_serializable_enum! {
 
 define_serializable_struct! {
     NavigationInfo {
-        active_page: u32 => MaybeConst<u32>,
-        n_pages: u32 => MaybeConst<u32>,
-        skip_text: Option<String> => Option<MaybeConstStr>,
-        nav_info: NavInfo => WrappedNavInfo
+        active_page: u32,
+        n_pages: u32,
+        skip_text: Option<String>,
+        nav_info: NavInfo
     },
     wrapped: WrappedNavigationInfo
 }
 
 define_serializable_struct! {
     TagValue {
-        tag: String => MaybeConstStr,
-        value: String => MaybeConstStr,
+        tag: String,
+        value: String,
     },
     wrapped: WrappedTagValue
 }
@@ -734,19 +835,19 @@ define_serializable_struct! {
 define_serializable_enum! {
     PageContent {
         0x01u8 => TextSubtext {
-            text: &str => String => MaybeConstStr,
-            subtext: &str => String => MaybeConstStr,
+            text: String,
+            subtext: String,
         } as (make_text_subtext, make_text_subtext_wrapped),
         0x02u8 => TagValueList {
-            list: Vec<TagValue> => Vec<TagValue> => MaybeConst<Vec<TagValue>>,
+            list: Vec<TagValue>,
         } as (make_tag_value_list, make_tag_value_list_wrapped),
         0x03u8 => ConfirmationButton {
-            text: &str => String => MaybeConstStr,
-            button_text: &str => String => MaybeConstStr,
+            text: String,
+            button_text: String,
         } as (make_confirmation_button, make_confirmation_button_wrapped),
         0x04u8 => ConfirmationLongPress {
-            text: &str => String => MaybeConstStr,
-            long_press_text: &str => String => MaybeConstStr,
+            text: String,
+            long_press_text: String,
         } as (make_confirmation_long_press, make_confirmation_long_press_wrapped),
     },
     wrapped: WrappedPageContent
@@ -755,9 +856,9 @@ define_serializable_enum! {
 // nbgl_pageContent_t
 define_serializable_struct! {
     PageContentInfo {
-        title: Option<String> => MaybeConst<Option<String>>,
-        top_right_icon: Icon => MaybeConst<Icon>,
-        page_content: PageContent => WrappedPageContent,
+        title: Option<String>,
+        top_right_icon: Icon,
+        page_content: PageContent,
     },
     wrapped: WrappedPageContentInfo
 }
@@ -766,24 +867,24 @@ define_serializable_enum! {
     Page {
         // A page showing a spinner and some text.
         0x01u8 => Spinner {
-            text: &str => String => MaybeConstStr,
+            text: String,
         } as (make_spinner, make_spinner_wrapped),
         // A page showing an icon (either success or failure) and some text.
         0x02u8 => Info {
-            icon: Icon => Icon => MaybeConst<Icon>,
-            text: &str => String => MaybeConstStr,
+            icon: Icon,
+            text: String,
         } as (make_info, make_info_wrapped),
         // A page with a title, text, a "confirm" button, and a "reject" button.
         0x03u8 => ConfirmReject {
-            title: &str => String => MaybeConstStr,
-            text: &str => String => MaybeConstStr,
-            confirm: &str => String => MaybeConstStr,
-            reject: &str => String => MaybeConstStr,
+            title: String,
+            text: String,
+            confirm: String,
+            reject: String,
         } as (make_confirm_reject, make_confirm_reject_wrapped),
         // A generic page with navigation, implementing a subset of the pages supported by nbgl_pageDrawGenericContent
         0x04u8 => GenericPage {
-            navigation_info: Option<NavigationInfo> => Option<NavigationInfo> => Option<WrappedNavigationInfo>,
-            page_content_info: PageContentInfo => PageContentInfo => WrappedPageContentInfo }
+            navigation_info: Option<NavigationInfo>,
+            page_content_info: PageContentInfo }
             as (make_generic_page, make_generic_page_wrapped),
     },
     wrapped: WrappedPage
