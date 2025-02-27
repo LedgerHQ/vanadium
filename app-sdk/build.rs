@@ -43,7 +43,7 @@ const PAGE_MAKERS: &[(&'static str, WrappedPage)] = &[
                 },
             }),
             page_content_info: WrappedPageContentInfo {
-                title: ct(None),
+                title: None,
                 top_right_icon: ct(Icon::None), // TODO: support icons
                 page_content: WrappedPageContent::TextSubtext {
                     text: rt_str("intro_text", "&str"),
@@ -66,7 +66,7 @@ const PAGE_MAKERS: &[(&'static str, WrappedPage)] = &[
                 },
             }),
             page_content_info: WrappedPageContentInfo {
-                title: ct(None),
+                title: None,
                 top_right_icon: ct(Icon::None), // TODO: support icons
                 page_content: WrappedPageContent::TagValueList {
                     list: rt("pairs", "&[TagValue]"),
@@ -88,7 +88,7 @@ const PAGE_MAKERS: &[(&'static str, WrappedPage)] = &[
                 },
             }),
             page_content_info: WrappedPageContentInfo {
-                title: ct(None),
+                title: None,
                 top_right_icon: ct(Icon::None), // TODO: support icons
                 page_content: WrappedPageContent::ConfirmationLongPress {
                     text: rt_str("final_text", "&str"),
@@ -111,7 +111,7 @@ const PAGE_MAKERS: &[(&'static str, WrappedPage)] = &[
                 },
             }),
             page_content_info: WrappedPageContentInfo {
-                title: ct(None),
+                title: None,
                 top_right_icon: ct(Icon::None), // TODO: support icons
                 page_content: WrappedPageContent::ConfirmationButton {
                     text: rt_str("final_text", "&str"),
