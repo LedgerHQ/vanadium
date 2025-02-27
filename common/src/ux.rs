@@ -240,6 +240,42 @@ impl Wrappable for Icon {
     type Wrapped = MaybeConst<Icon>;
 }
 
+pub trait Makeable<'a> {
+    type ArgType;
+}
+
+impl Makeable<'_> for bool {
+    type ArgType = bool;
+}
+
+impl Makeable<'_> for u8 {
+    type ArgType = u8;
+}
+
+impl Makeable<'_> for u16 {
+    type ArgType = u16;
+}
+
+impl Makeable<'_> for u32 {
+    type ArgType = u32;
+}
+
+impl Makeable<'_> for Icon {
+    type ArgType = Icon;
+}
+
+impl<'a, T: Makeable<'a> + 'a> Makeable<'a> for Vec<T> {
+    type ArgType = &'a [T];
+}
+
+impl<'a> Makeable<'a> for String {
+    type ArgType = &'a str;
+}
+
+impl<'a, T: Makeable<'a>> Makeable<'a> for Option<T> {
+    type ArgType = Option<T::ArgType>;
+}
+
 impl Serializable for bool {
     #[inline(always)]
     fn get_serialized_length(&self) -> usize {
@@ -636,6 +672,10 @@ macro_rules! define_serializable_struct {
         impl Wrappable for $name {
             type Wrapped = $wrapped_name;
         }
+
+        impl Makeable<'_> for $name {
+            type ArgType = $name;
+        }
     };
 }
 
@@ -644,7 +684,7 @@ macro_rules! define_serializable_enum {
         $name:ident {
             $(
                 $tag:expr => $variant:ident {
-                    $($field:ident : $make_ty:ty => $enum_ty:ty),* $(,)?
+                    $($field:ident : $enum_ty:ty),* $(,)?
                 } as ($fn_maker:ident, $fn_maker_wrapped:ident)
             ),* $(,)?
         },
@@ -707,7 +747,7 @@ macro_rules! define_serializable_enum {
         impl $name {
             $(
                 #[inline(always)]
-                pub fn $fn_maker($($field: $make_ty),*) -> Vec<u8> {
+                pub fn $fn_maker($($field: <$enum_ty as Makeable>::ArgType),*) -> Vec<u8> {
                     let len = {
                         let mut len = $tag.get_serialized_length();
                         $( len += $field.get_serialized_length(); )*
@@ -754,6 +794,10 @@ macro_rules! define_serializable_enum {
         impl Wrappable for $name {
             type Wrapped = $wrapped_name;
         }
+
+        impl Makeable<'_> for $name {
+            type ArgType = $name;
+        }
     };
 }
 
@@ -762,9 +806,9 @@ macro_rules! define_serializable_enum {
 define_serializable_enum! {
     NavInfo {
         0x01u8 => NavWithButtons {
-            has_back_button: bool => bool,
-            has_page_indicator: bool => bool,
-            quit_text: Option<&str> => Option<String>,
+            has_back_button: bool,
+            has_page_indicator: bool,
+            quit_text: Option<String>,
         } as (make_nav_with_buttons, make_nav_with_buttons_wrapped),
     },
     wrapped: WrappedNavInfo
@@ -791,19 +835,19 @@ define_serializable_struct! {
 define_serializable_enum! {
     PageContent {
         0x01u8 => TextSubtext {
-            text: &str => String,
-            subtext: &str => String,
+            text: String,
+            subtext: String,
         } as (make_text_subtext, make_text_subtext_wrapped),
         0x02u8 => TagValueList {
-            list: Vec<TagValue> => Vec<TagValue>,
+            list: Vec<TagValue>,
         } as (make_tag_value_list, make_tag_value_list_wrapped),
         0x03u8 => ConfirmationButton {
-            text: &str => String,
-            button_text: &str => String,
+            text: String,
+            button_text: String,
         } as (make_confirmation_button, make_confirmation_button_wrapped),
         0x04u8 => ConfirmationLongPress {
-            text: &str => String,
-            long_press_text: &str => String,
+            text: String,
+            long_press_text: String,
         } as (make_confirmation_long_press, make_confirmation_long_press_wrapped),
     },
     wrapped: WrappedPageContent
@@ -823,24 +867,24 @@ define_serializable_enum! {
     Page {
         // A page showing a spinner and some text.
         0x01u8 => Spinner {
-            text: &str => String,
+            text: String,
         } as (make_spinner, make_spinner_wrapped),
         // A page showing an icon (either success or failure) and some text.
         0x02u8 => Info {
-            icon: Icon => Icon,
-            text: &str => String,
+            icon: Icon,
+            text: String,
         } as (make_info, make_info_wrapped),
         // A page with a title, text, a "confirm" button, and a "reject" button.
         0x03u8 => ConfirmReject {
-            title: &str => String,
-            text: &str => String,
-            confirm: &str => String,
-            reject: &str => String,
+            title: String,
+            text: String,
+            confirm: String,
+            reject: String,
         } as (make_confirm_reject, make_confirm_reject_wrapped),
         // A generic page with navigation, implementing a subset of the pages supported by nbgl_pageDrawGenericContent
         0x04u8 => GenericPage {
-            navigation_info: Option<NavigationInfo> => Option<NavigationInfo>,
-            page_content_info: PageContentInfo => PageContentInfo }
+            navigation_info: Option<NavigationInfo>,
+            page_content_info: PageContentInfo }
             as (make_generic_page, make_generic_page_wrapped),
     },
     wrapped: WrappedPage

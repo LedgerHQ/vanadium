@@ -1318,8 +1318,12 @@ impl<'a> CommEcallHandler<'a> {
         cpu.get_segment::<E>(page_ptr.0)?
             .read_buffer(page_ptr.0, &mut page_local[0..page_len])?;
 
+        crate::println!("\nRaw page: {:?}\n\n", &page_local[0..page_len]);
+
         let page = common::ux::Page::deserialize_full(&page_local[0..page_len])
             .map_err(|_| CommEcallError::InvalidParameters("Failed to deserialize page"))?;
+
+        crate::println!("\n\nShowing a page: {:?}\n\n", page);
 
         self.ux_handler.show_page(&page)?;
         Ok(1)
