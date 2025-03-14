@@ -134,10 +134,6 @@ impl Default for HashEngine {
 }
 
 impl crate::HashEngine for HashEngine {
-    type MidState = State;
-
-    fn midstate(&self) -> State { self.state.clone() }
-
     const BLOCK_SIZE: usize = 8;
 
     #[inline]

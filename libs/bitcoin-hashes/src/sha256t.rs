@@ -84,7 +84,7 @@ fn from_engine<T: Tag>(e: sha256::HashEngine) -> Hash<T> {
 /// The syntax is:
 ///
 /// ```
-/// # use bitcoin_hashes::sha256t_hash_newtype;
+/// # use vlib_bitcoin_hashes::sha256t_hash_newtype;
 /// sha256t_hash_newtype! {
 ///     /// Optional documentation details here.
 ///     /// Summary is always generated.
@@ -120,10 +120,7 @@ macro_rules! sha256t_hash_newtype {
         impl $crate::sha256t::Tag for $tag {
             #[inline]
             fn engine() -> $crate::sha256::HashEngine {
-                const MIDSTATE: ($crate::sha256::Midstate, usize) = $crate::sha256t_hash_newtype_tag_constructor!($constructor, $($tag_value)+);
-                #[allow(unused)]
-                const _LENGTH_CHECK: () = [(); 1][MIDSTATE.1 % 64];
-                $crate::sha256::HashEngine::from_midstate(MIDSTATE.0, MIDSTATE.1)
+                todo!()
             }
         }
 
@@ -180,8 +177,7 @@ mod tests {
     impl sha256t::Tag for TestHashTag {
         fn engine() -> sha256::HashEngine {
             // The TapRoot TapLeaf midstate.
-            let midstate = sha256::Midstate::from_byte_array(TEST_MIDSTATE);
-            sha256::HashEngine::from_midstate(midstate, 64)
+            todo!()
         }
     }
 

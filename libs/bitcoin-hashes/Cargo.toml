@@ -27,6 +27,8 @@ all-features = true
 rustdoc-args = ["--cfg", "docsrs"]
 
 [dependencies]
+sdk = { package = "vanadium-app-sdk", path = "../../app-sdk"}
+
 hex = { package = "hex-conservative", version = "0.2.0", default-features = false }
 
 bitcoin-io = { version = "0.1.1", default-features = false, optional = true }

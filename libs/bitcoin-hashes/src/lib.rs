@@ -12,8 +12,8 @@
 //! Hashing a single byte slice or a string:
 //!
 //! ```rust
-//! use bitcoin_hashes::sha256;
-//! use bitcoin_hashes::Hash;
+//! use vlib_bitcoin_hashes::sha256;
+//! use vlib_bitcoin_hashes::Hash;
 //!
 //! let bytes = [0u8; 5];
 //! let hash_of_bytes = sha256::Hash::hash(&bytes);
@@ -24,8 +24,8 @@
 //! Hashing content from a reader:
 //!
 //! ```rust
-//! use bitcoin_hashes::sha256;
-//! use bitcoin_hashes::Hash;
+//! use vlib_bitcoin_hashes::sha256;
+//! use vlib_bitcoin_hashes::Hash;
 //!
 //! #[cfg(std)]
 //! # fn main() -> std::io::Result<()> {
@@ -44,8 +44,8 @@
 //! Hashing content by [`std::io::Write`] on HashEngine:
 //!
 //! ```rust
-//! use bitcoin_hashes::sha256;
-//! use bitcoin_hashes::Hash;
+//! use vlib_bitcoin_hashes::sha256;
+//! use vlib_bitcoin_hashes::Hash;
 //! use std::io::Write;
 //!
 //! #[cfg(std)]
@@ -66,17 +66,13 @@
 //! ```
 
 #![cfg_attr(all(not(test), not(feature = "std")), no_std)]
-
 // Experimental features we need.
 #![cfg_attr(docsrs, feature(doc_auto_cfg))]
 #![cfg_attr(bench, feature(test))]
-
 // Coding conventions.
 #![warn(missing_docs)]
-
 // Instead of littering the codebase for non-fuzzing code just globally allow.
 #![cfg_attr(hashes_fuzz, allow(dead_code, unused_imports))]
-
 // Exclude lints we don't think are valuable.
 #![allow(clippy::needless_question_mark)] // https://github.com/rust-bitcoin/rust-bitcoin/pull/2134
 #![allow(clippy::manual_range_contains)] // More readable than clippy's format.
@@ -120,13 +116,10 @@ pub mod hmac;
 #[cfg(feature = "bitcoin-io")]
 mod impls;
 pub mod ripemd160;
-pub mod sha1;
 pub mod sha256;
 pub mod sha256d;
 pub mod sha256t;
-pub mod sha384;
 pub mod sha512;
-pub mod sha512_256;
 pub mod siphash24;
 
 use core::{borrow, fmt, hash, ops};
@@ -135,13 +128,6 @@ pub use hmac::{Hmac, HmacEngine};
 
 /// A hashing engine which bytes can be serialized into.
 pub trait HashEngine: Clone + Default {
-    /// Byte array representing the internal state of the hash engine.
-    type MidState;
-
-    /// Outputs the midstate of the hash engine. This function should not be
-    /// used directly unless you really know what you're doing.
-    fn midstate(&self) -> Self::MidState;
-
     /// Length of the hash's internal block size, in bytes.
     const BLOCK_SIZE: usize;
 

@@ -7,16 +7,7 @@
 
 use bitcoin_io::impl_write;
 
-use crate::{hmac, ripemd160, sha1, sha256, sha512, siphash24, HashEngine};
-
-impl_write!(
-    sha1::HashEngine,
-    |us: &mut sha1::HashEngine, buf| {
-        us.input(buf);
-        Ok(buf.len())
-    },
-    |_us| { Ok(()) }
-);
+use crate::{hmac, ripemd160, sha256, sha512, siphash24, HashEngine};
 
 impl_write!(
     sha256::HashEngine,
@@ -68,7 +59,7 @@ impl_write!(
 mod tests {
     use bitcoin_io::Write;
 
-    use crate::{hash160, hmac, ripemd160, sha1, sha256, sha256d, sha512, siphash24, Hash};
+    use crate::{hash160, hmac, ripemd160, sha256, sha256d, sha512, siphash24, Hash};
 
     macro_rules! write_test {
         ($mod:ident, $exp_empty:expr, $exp_256:expr, $exp_64k:expr,) => {
@@ -88,13 +79,6 @@ mod tests {
             }
         };
     }
-
-    write_test!(
-        sha1,
-        "da39a3ee5e6b4b0d3255bfef95601890afd80709",
-        "ac458b067c6b021c7e9358229b636e9d1e4cb154",
-        "e4b66838f9f7b6f91e5be32a02ae78094df402e7",
-    );
 
     write_test!(
         sha256,
