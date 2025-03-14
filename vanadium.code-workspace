@@ -19,6 +19,10 @@
       "path": "docs",
     },
     {
+      "path": "libs/bitcoin-hashes",
+      "name": "₿ vlib-bitcoin-hashes"
+    },
+    {
       "path": "libs/secp256k1",
       "name": "₿ vlib-secp256k1"
     },

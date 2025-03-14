@@ -20,6 +20,7 @@ mod hashers {
 
     macro_rules! impl_hash {
         ($name:ident, $real:ty, $digest_size:expr) => {
+            #[derive(Clone, Debug)]
             pub struct $name {
                 hasher: $real,
             }
