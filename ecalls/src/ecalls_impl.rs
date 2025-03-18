@@ -337,6 +337,9 @@ ecall2v!(xsend, ECALL_XSEND, (buffer: *const u8), (size: usize));
 ecall2!(xrecv, ECALL_XRECV, (buffer: *mut u8), (size: usize), usize);
 ecall2v!(print, ECALL_PRINT, (buffer: *const u8), (size: usize));
 
+ecall3!(sys_memset, ECALL_MEMSET, (dest: *mut u8), (ch: i32), (n: usize), *mut u8);
+ecall3!(sys_memcpy, ECALL_MEMCPY, (dest: *mut u8), (src: *const u8), (n: usize), *mut u8);
+
 ecall1!(get_event, ECALL_GET_EVENT, (data: *mut EventData), u32);
 ecall2!(show_page, ECALL_SHOW_PAGE, (page_desc: *const u8), (page_desc_len: usize), u32);
 ecall2!(show_step, ECALL_SHOW_STEP, (step_desc: *const u8), (step_desc_len: usize), u32);

@@ -46,6 +46,9 @@ delegate_ecall!(ecdsa_verify, u32, (curve: u32), (pubkey: *const u8), (msg_hash:
 delegate_ecall!(schnorr_sign, usize, (curve: u32), (mode: u32), (hash_id: u32), (privkey: *const u8), (msg: *const u8), (msg_len: usize), (signature: *mut u8), (entropy: *const [u8; 32]));
 delegate_ecall!(schnorr_verify, u32, (curve: u32), (mode: u32), (hash_id: u32), (pubkey: *const u8), (msg: *const u8), (msg_len: usize), (signature: *const u8), (signature_len: usize));
 
+delegate_ecall!(sys_memcpy, *mut u8, (dest: *mut u8), (src: *const u8), (n: usize));
+delegate_ecall!(sys_memset, *mut u8, (dest: *mut u8), (ch: i32), (n: usize));
+
 // The following ecalls are specific to this target
 delegate_ecall!(hash_init, (hash_id: u32), (ctx: *mut u8));
 delegate_ecall!(hash_update, u32, (hash_id: u32), (ctx: *mut u8), (data: *const u8), (len: usize));
