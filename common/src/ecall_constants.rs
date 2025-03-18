@@ -3,10 +3,14 @@ pub const ECALL_XSEND: u32 = 2;
 pub const ECALL_XRECV: u32 = 3;
 pub const ECALL_EXIT: u32 = 4;
 
+// other system calls
+pub const ECALL_MEMCPY: u32 = 20;
+pub const ECALL_MEMSET: u32 = 21;
+
 // device handling, events, and UX
 
-pub const ECALL_GET_EVENT: u32 = 10;
-pub const ECALL_SHOW_PAGE: u32 = 11;
+pub const ECALL_GET_EVENT: u32 = 50;
+pub const ECALL_SHOW_PAGE: u32 = 51;
 
 // Big numbers
 pub const ECALL_MODM: u32 = 110;
