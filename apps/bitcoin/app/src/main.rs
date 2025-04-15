@@ -40,7 +40,7 @@ fn handle_request(app: &mut App, request: &Request) -> Result<Response, &'static
 
             handle_get_address(app, name.as_deref(), account, hmac, coordinates, *display)
         }
-        Request::SignPsbt { psbt: _ } => todo!(),
+        Request::SignPsbt { psbt } => handle_sign_psbt(app, psbt),
     }
 }
 

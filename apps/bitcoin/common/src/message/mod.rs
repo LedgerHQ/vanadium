@@ -80,17 +80,16 @@ pub enum Request {
     },
     SignPsbt {
         psbt: Vec<u8>,
-        // TODO
     },
 }
 
 // Partial signature for PSBT signing
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct PartialSignature {
-    input_index: u32,
-    signature: Vec<u8>,
-    pubkey: Vec<u8>,
-    leaf_hash: Option<Vec<u8>>, // Explicitly optional
+    pub input_index: u32,
+    pub signature: Vec<u8>,
+    pub pubkey: Vec<u8>,
+    pub leaf_hash: Option<Vec<u8>>, // Explicitly optional
 }
 
 // Response types
