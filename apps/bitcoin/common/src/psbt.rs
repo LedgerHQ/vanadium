@@ -64,8 +64,7 @@ pub trait PsbtAccountGlobal {
 pub trait PsbtAccountInput {
     fn get_account_coordinates(
         &self,
-        id: u32,
-    ) -> Result<Option<PsbtAccountCoordinates>, &'static str>;
+    ) -> Result<Option<(u32, PsbtAccountCoordinates)>, &'static str>;
     fn set_account_coordinates(
         &mut self,
         id: u32,
@@ -76,8 +75,7 @@ pub trait PsbtAccountInput {
 pub trait PsbtAccountOutput {
     fn get_account_coordinates(
         &self,
-        id: u32,
-    ) -> Result<Option<PsbtAccountCoordinates>, &'static str>;
+    ) -> Result<Option<(u32, PsbtAccountCoordinates)>, &'static str>;
     fn set_account_coordinates(
         &mut self,
         id: u32,
@@ -238,31 +236,32 @@ impl PsbtAccountGlobal for Psbt {
 impl PsbtAccountInput for psbt::Input {
     fn get_account_coordinates(
         &self,
-        id: u32,
-    ) -> Result<Option<PsbtAccountCoordinates>, &'static str> {
-        let mut id_raw = Vec::with_capacity(1); // unlikely to be more than 1 byte
-        let _ = id.consensus_encode(&mut id_raw).unwrap();
-        let key = ProprietaryKey {
-            prefix: PSBT_ACCOUNT_PROPRIETARY_IDENTIFIER.to_vec(),
-            subtype: PSBT_ACCOUNT_IN_COORDINATES,
-            key: id_raw,
-        };
-
-        if let Some(value) = self.proprietary.get(&key) {
-            if value.len() < 1 {
-                return Err("Empty account value");
-            }
-            match value[0] {
-                0 => {
-                    let coords = AccountCoordinates::deserialize(&mut &value[1..])
-                        .map_err(|_| "Failed to deserialize AccountCoordinates")?;
-                    Ok(Some(PsbtAccountCoordinates::WalletPolicy(coords)))
+    ) -> Result<Option<(u32, PsbtAccountCoordinates)>, &'static str> {
+        for (key, value) in &self.proprietary {
+            if key.prefix == PSBT_ACCOUNT_PROPRIETARY_IDENTIFIER
+                && key.subtype == PSBT_ACCOUNT_IN_COORDINATES
+            {
+                if value.len() < 2 {
+                    return Err("Invalid account value");
                 }
-                _ => Err("Unknown account type"),
+                let account_id = value[0] as u32;
+                if account_id > 252 {
+                    return Err("Account ID exceeds valid range");
+                }
+                match value[1] {
+                    0 => {
+                        let coords = AccountCoordinates::deserialize(&mut &value[2..])
+                            .map_err(|_| "Failed to deserialize AccountCoordinates")?;
+                        return Ok(Some((
+                            account_id,
+                            PsbtAccountCoordinates::WalletPolicy(coords),
+                        )));
+                    }
+                    _ => return Err("Unknown account type"),
+                }
             }
-        } else {
-            Ok(None)
         }
+        Ok(None)
     }
 
     fn set_account_coordinates(
@@ -270,22 +269,23 @@ impl PsbtAccountInput for psbt::Input {
         id: u32,
         coordinates: PsbtAccountCoordinates,
     ) -> Result<(), &'static str> {
-        let mut id_raw = Vec::with_capacity(1); // unlikely to be more than 1 byte
-        let _ = id.consensus_encode(&mut id_raw).unwrap();
+        if id > 252 {
+            return Err("Account ID exceeds valid range");
+        }
         let key = ProprietaryKey {
             prefix: PSBT_ACCOUNT_PROPRIETARY_IDENTIFIER.to_vec(),
             subtype: PSBT_ACCOUNT_IN_COORDINATES,
-            key: id_raw,
+            key: Vec::new(),
         };
 
         match coordinates {
             PsbtAccountCoordinates::WalletPolicy(coords) => {
                 let serialized_coords = coords.serialize();
-                let mut serialized_coords_with_tag =
-                    Vec::with_capacity(1 + serialized_coords.len());
-                serialized_coords_with_tag.push(0); // tag
-                serialized_coords_with_tag.extend_from_slice(&serialized_coords);
-                self.proprietary.insert(key, serialized_coords_with_tag);
+                let mut serialized_value = Vec::with_capacity(1 + 1 + serialized_coords.len());
+                serialized_value.push(id as u8);
+                serialized_value.push(0); // tag
+                serialized_value.extend_from_slice(&serialized_coords);
+                self.proprietary.insert(key, serialized_value);
             }
         }
 
@@ -296,31 +296,33 @@ impl PsbtAccountInput for psbt::Input {
 impl PsbtAccountOutput for psbt::Output {
     fn get_account_coordinates(
         &self,
-        id: u32,
-    ) -> Result<Option<PsbtAccountCoordinates>, &'static str> {
-        let mut id_raw = Vec::with_capacity(1); // unlikely to be more than 1 byte
-        let _ = id.consensus_encode(&mut id_raw).unwrap();
-        let key = ProprietaryKey {
-            prefix: PSBT_ACCOUNT_PROPRIETARY_IDENTIFIER.to_vec(),
-            subtype: PSBT_ACCOUNT_OUT_COORDINATES,
-            key: id_raw,
-        };
-
-        if let Some(value) = self.proprietary.get(&key) {
-            if value.len() < 1 {
-                return Err("Empty account value");
-            }
-            match value[0] {
-                0 => {
-                    let coords = AccountCoordinates::deserialize(&mut &value[1..])
-                        .map_err(|_| "Failed to deserialize AccountCoordinates")?;
-                    Ok(Some(PsbtAccountCoordinates::WalletPolicy(coords)))
+    ) -> Result<Option<(u32, PsbtAccountCoordinates)>, &'static str> {
+        for (key, value) in &self.proprietary {
+            if key.prefix == PSBT_ACCOUNT_PROPRIETARY_IDENTIFIER
+                && key.subtype == PSBT_ACCOUNT_OUT_COORDINATES
+            {
+                if value.len() < 2 {
+                    return Err("Invalid account value");
                 }
-                _ => Err("Unknown account type"),
+                let account_id = value[0] as u32;
+                if account_id > 252 {
+                    // specs would want a compact size, but we use 1 byte for simplicity
+                    return Err("No more than 253 accounts are supported");
+                }
+                match value[1] {
+                    0 => {
+                        let coords = AccountCoordinates::deserialize(&mut &value[2..])
+                            .map_err(|_| "Failed to deserialize AccountCoordinates")?;
+                        return Ok(Some((
+                            account_id,
+                            PsbtAccountCoordinates::WalletPolicy(coords),
+                        )));
+                    }
+                    _ => return Err("Unknown account type"),
+                }
             }
-        } else {
-            Ok(None)
         }
+        Ok(None)
     }
 
     fn set_account_coordinates(
@@ -328,22 +330,24 @@ impl PsbtAccountOutput for psbt::Output {
         id: u32,
         coordinates: PsbtAccountCoordinates,
     ) -> Result<(), &'static str> {
-        let mut id_raw = Vec::with_capacity(1); // unlikely to be more than 1 byte
-        let _ = id.consensus_encode(&mut id_raw).unwrap();
+        if id > 252 {
+            // specs would want a compact size, but we use 1 byte for simplicity
+            return Err("No more than 253 accounts are supported");
+        }
         let key = ProprietaryKey {
             prefix: PSBT_ACCOUNT_PROPRIETARY_IDENTIFIER.to_vec(),
             subtype: PSBT_ACCOUNT_OUT_COORDINATES,
-            key: id_raw,
+            key: Vec::new(),
         };
 
         match coordinates {
             PsbtAccountCoordinates::WalletPolicy(coords) => {
                 let serialized_coords = coords.serialize();
-                let mut serialized_coords_with_tag =
-                    Vec::with_capacity(1 + serialized_coords.len());
-                serialized_coords_with_tag.push(0); // tag
-                serialized_coords_with_tag.extend_from_slice(&serialized_coords);
-                self.proprietary.insert(key, serialized_coords_with_tag);
+                let mut serialized_value = Vec::with_capacity(1 + 1 + serialized_coords.len());
+                serialized_value.push(id as u8);
+                serialized_value.push(0); // tag
+                serialized_value.extend_from_slice(&serialized_coords);
+                self.proprietary.insert(key, serialized_value);
             }
         }
 
@@ -564,8 +568,8 @@ mod tests {
         input
             .set_account_coordinates(account_id, coords.clone())
             .unwrap();
-        let retrieved = input.get_account_coordinates(account_id).unwrap();
-        assert_eq!(retrieved, Some(coords));
+        let retrieved = input.get_account_coordinates().unwrap();
+        assert_eq!(retrieved, Some((account_id, coords)));
     }
 
     #[test]
@@ -580,8 +584,8 @@ mod tests {
         output
             .set_account_coordinates(account_id, coords.clone())
             .unwrap();
-        let retrieved = output.get_account_coordinates(account_id).unwrap();
-        assert_eq!(retrieved, Some(coords));
+        let retrieved = output.get_account_coordinates().unwrap();
+        assert_eq!(retrieved, Some((account_id, coords)));
     }
 
     #[test]
@@ -615,23 +619,26 @@ mod tests {
         assert_eq!(accounts.len(), 1);
 
         assert_eq!(
-            psbt.inputs[0].get_account_coordinates(0).unwrap(),
-            Some(PsbtAccountCoordinates::WalletPolicy(
-                WalletPolicyCoordinates::new(false, 1)
+            psbt.inputs[0].get_account_coordinates().unwrap(),
+            Some((
+                0,
+                PsbtAccountCoordinates::WalletPolicy(WalletPolicyCoordinates::new(false, 1))
             ))
         );
         assert_eq!(
-            psbt.inputs[1].get_account_coordinates(0).unwrap(),
-            Some(PsbtAccountCoordinates::WalletPolicy(
-                WalletPolicyCoordinates::new(true, 0)
+            psbt.inputs[1].get_account_coordinates().unwrap(),
+            Some((
+                0,
+                PsbtAccountCoordinates::WalletPolicy(WalletPolicyCoordinates::new(true, 0))
             ))
         );
         assert_eq!(
-            psbt.outputs[0].get_account_coordinates(0).unwrap(),
-            Some(PsbtAccountCoordinates::WalletPolicy(
-                WalletPolicyCoordinates::new(true, 10)
+            psbt.outputs[0].get_account_coordinates().unwrap(),
+            Some((
+                0,
+                PsbtAccountCoordinates::WalletPolicy(WalletPolicyCoordinates::new(true, 10))
             ))
         );
-        assert_eq!(psbt.outputs[1].get_account_coordinates(0).unwrap(), None);
+        assert_eq!(psbt.outputs[1].get_account_coordinates().unwrap(), None);
     }
 }

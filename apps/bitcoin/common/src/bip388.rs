@@ -808,6 +808,12 @@ pub enum SegwitVersion {
     Taproot,
 }
 
+impl SegwitVersion {
+    pub fn is_segwit(&self) -> bool {
+        matches!(self, SegwitVersion::SegwitV0 | SegwitVersion::Taproot)
+    }
+}
+
 impl WalletPolicy {
     pub fn new(
         descriptor_template_str: &str,
@@ -869,6 +875,7 @@ impl WalletPolicy {
     pub fn get_segwit_version(&self) -> Result<SegwitVersion, &'static str> {
         match &self.descriptor_template {
             DescriptorTemplate::Tr(_, _) => Ok(SegwitVersion::Taproot),
+            DescriptorTemplate::Pkh(_) => Ok(SegwitVersion::Legacy),
             DescriptorTemplate::Wpkh(_) | DescriptorTemplate::Wsh(_) => Ok(SegwitVersion::SegwitV0),
             DescriptorTemplate::Sh(inner) => match inner.as_ref() {
                 DescriptorTemplate::Wpkh(_) | DescriptorTemplate::Wsh(_) => {
