@@ -66,7 +66,7 @@ pub extern crate ordered;
 // and it should only be used in vlib-bitcoin at this time.
 // However, we need to at least export a few types that are part of the public API of vlib-bitcoin.
 pub mod secp256k1 {
-    pub use secp256k1::{PublicKey, Secp256k1, XOnlyPublicKey};
+    pub use secp256k1::{ecdsa, schnorr, Message, PublicKey, Secp256k1, XOnlyPublicKey};
 }
 
 #[cfg(feature = "serde")]
