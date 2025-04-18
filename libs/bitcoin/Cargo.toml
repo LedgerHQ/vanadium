@@ -35,7 +35,7 @@ io = { package = "bitcoin-io", version = "0.1.1", default-features = false, feat
 sdk = { package = "vanadium-app-sdk", path = "../../app-sdk"}
 units = { package = "bitcoin-units", version = "0.1.0", default-features = false, features = ["alloc"] }
 
-base64 = { version = "0.21.3", optional = true }
+base64 = { version = "0.21.3", optional = true, default-features = false, features = ["alloc"] }
 ordered = { version = "0.2.0", optional = true }
 bitcoinconsensus = { version = "0.105.0+25.1", default-features = false, optional = true }
 
