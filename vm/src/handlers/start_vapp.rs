@@ -15,6 +15,10 @@ use crate::handlers::lib::ecall::{CommEcallError, CommEcallHandler};
 use crate::handlers::lib::vapp::get_vapp_hmac;
 use crate::{println, AppSW};
 
+const BASE_N_CODE_PAGES: usize = 8;
+const BASE_N_DATA_PAGES: usize = 8;
+const BASE_N_STACK_PAGES: usize = 8;
+
 pub fn handler_start_vapp(comm: &mut io::Comm) -> Result<Vec<u8>, AppSW> {
     let data_raw = comm.get_data().map_err(|_| AppSW::WrongApduLength)?;
 
@@ -41,9 +45,17 @@ pub fn handler_start_vapp(comm: &mut io::Comm) -> Result<Vec<u8>, AppSW> {
         AesKey::new_random().map_err(|_| AppSW::VMRuntimeError)?,
     )));
 
+    let n_extra_pages: usize = env!("VANADIUM_N_EXTRA_CACHE_PAGES")
+        .parse::<usize>()
+        .unwrap_or(0);
+
+    let extra_code_pages = n_extra_pages / 3;
+    let extra_data_pages = n_extra_pages / 3;
+    let extra_stack_pages = n_extra_pages - extra_code_pages - extra_data_pages;
+
     let mut code_mem = OutsourcedMemory::new(
         comm.clone(),
-        12,
+        BASE_N_CODE_PAGES + extra_code_pages,
         true,
         SectionKind::Code,
         manifest.n_code_pages(),
@@ -59,7 +71,7 @@ pub fn handler_start_vapp(comm: &mut io::Comm) -> Result<Vec<u8>, AppSW> {
 
     let mut data_mem = OutsourcedMemory::new(
         comm.clone(),
-        12,
+        BASE_N_DATA_PAGES + extra_data_pages,
         false,
         SectionKind::Data,
         manifest.n_data_pages(),
@@ -75,7 +87,7 @@ pub fn handler_start_vapp(comm: &mut io::Comm) -> Result<Vec<u8>, AppSW> {
 
     let mut stack_mem = OutsourcedMemory::new(
         comm.clone(),
-        12,
+        BASE_N_STACK_PAGES + extra_stack_pages,
         false,
         SectionKind::Stack,
         manifest.n_stack_pages(),

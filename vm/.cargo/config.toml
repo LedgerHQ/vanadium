@@ -4,9 +4,6 @@ runner = "speculos -a=1 --model=nanosp"
 [build]
 target = "nanosplus"
 
-[env]
-HEAP_SIZE = "14336"
-
 [unstable]
 build-std = ["core", "alloc"]
 build-std-features = ["compiler-builtins-mem"]
