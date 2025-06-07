@@ -427,6 +427,8 @@ impl EcallsInterface for Ecall {
 
 // The following ecalls are specific to this target
 impl Ecall {
+    ecall3_pub!(sys_memcpy, ECALL_MEMCPY, (dest: *mut u8), (src: *const u8), (n: usize), *mut u8);
+    ecall3_pub!(sys_memset, ECALL_MEMSET, (dest: *mut u8), (ch: i32), (n: usize), *mut u8);
     ecall2v_pub!(hash_init, ECALL_HASH_INIT, (hash_id: u32), (ctx: *mut u8));
     ecall4_pub!(hash_update, ECALL_HASH_UPDATE, (hash_id: u32), (ctx: *mut u8), (data: *const u8), (len: usize), u32);
     ecall3_pub!(hash_final, ECALL_HASH_DIGEST, (hash_id: u32), (ctx: *mut u8), (digest: *const u8), u32);
