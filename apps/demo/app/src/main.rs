@@ -2,8 +2,8 @@
 
 extern crate alloc;
 
-use alloc::{vec, vec::Vec};
-use sdk::{hash::Hasher, App};
+use alloc::{format, vec, vec::Vec};
+use sdk::{hash::Hasher, ux::Icon, App};
 use serde::{Deserialize, Serialize};
 
 sdk::bootstrap!();
@@ -32,6 +32,50 @@ static mut GAME_STATE: RPSGame = RPSGame {
     c_a: [0; 32],
     m_b: 0,
 };
+
+fn display_move(move_num: u8) -> &'static str {
+    match move_num {
+        0 => "Rock",
+        1 => "Paper",
+        2 => "Scissors",
+        _ => panic!("Invalid move number: {}", move_num),
+    }
+}
+
+// Shows the game summary and the app's chosen move
+// Returns true if the user accepts
+fn show_game_ui(c_a: &[u8; 32], m_b: u8) -> bool {
+    sdk::ux::show_confirm_reject(
+        "Game started",
+        &format!(
+            "Alice's commitment: {}\n\nWe'll play: {}",
+            hex::encode(c_a),
+            display_move(m_b)
+        ),
+        "Continue game",
+        "Cancel",
+    )
+}
+
+// Shows the game's outcome
+fn show_game_result(m_a: u8, result: u8) {
+    let alice_move = display_move(m_a);
+    match result {
+        0 => sdk::ux::show_info(
+            Icon::None,
+            &format!("It's a tie! Both played: {}", alice_move),
+        ),
+        1 => sdk::ux::show_info(
+            Icon::Success,
+            &format!("Alice played: {}\nWe win!", alice_move),
+        ),
+        2 => sdk::ux::show_info(
+            Icon::Failure,
+            &format!("Alice played: {}\nWe lose!", alice_move),
+        ),
+        _ => panic!("Invalid game result"),
+    }
+}
 
 // generate a uniform random number in [0, 2]
 fn random_move() -> u8 {
@@ -78,8 +122,13 @@ fn process_commit_command(c_a: [u8; 32]) -> Vec<u8> {
     // store the game state to the global state
     unsafe { GAME_STATE = game_state };
 
-    // Respond with our move
-    vec![m_b]
+    if show_game_ui(&c_a, m_b) {
+        // Respond with our move
+        vec![m_b]
+    } else {
+        // If the user rejects, we don't play
+        vec![]
+    }
 }
 
 fn process_reveal_command(m_a: u8, r_a: [u8; 32]) -> Vec<u8> {
@@ -107,7 +156,10 @@ fn process_reveal_command(m_a: u8, r_a: [u8; 32]) -> Vec<u8> {
 
     unsafe { GAME_STATE = RPSGame::default() }; // Reset the game state
 
-    vec![compute_winner(m_a, game_state.m_b)]
+    let winner = compute_winner(m_a, game_state.m_b);
+    show_game_result(m_a, winner);
+
+    vec![winner]
 }
 
 fn process_message(_app: &mut App, msg: &[u8]) -> Vec<u8> {
