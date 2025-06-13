@@ -1,9 +1,50 @@
+// Alice (client)                                Bob (V-App)
+//
+// choose m_a <-- {0, 1, 2}
+// r_a <$-- {0, 1}^256
+// c_a = SHA256(m_a || r_a)
+//
+//                            c_a
+//                |---------COMMIT--------->
+//
+//                                             Choose m_b <-- {0, 1, 2}
+//
+//                            m_b
+//                <---------BOB_MOVE-------|
+//
+//
+//                         m_a, r_a
+//                |---------REVEAL--------->
+//                                              Verify that c_a = SHA256(m_a || r_a)
+//                                              Compute winner
+//
+
 use clap::Parser;
+use sha2::Digest;
 use vnd_demo_client::DemoClient;
 
 use sdk::vanadium_client::client_utils::{create_default_client, ClientType};
 
+use core::panic;
 use std::io::BufRead;
+
+fn display_move(move_num: u8) -> &'static str {
+    match move_num {
+        0 => "Rock 🪨",
+        1 => "Paper ✋",
+        2 => "Scissors ✂️",
+        _ => panic!("Invalid move number: {}", move_num),
+    }
+}
+
+fn parse_winner(winner: u8) -> &'static str {
+    match winner {
+        0 => "Tie 😐",
+        1 => "Bob wins 🤕",
+        2 => "Alice wins 😀",
+        _ => panic!("Invalid winner value"),
+    }
+}
 
 #[derive(Parser)]
 #[command(name = "Demo", about = "Run the Demo V-App on Vanadium")]
@@ -39,28 +80,59 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut demo_client =
         DemoClient::new(create_default_client("vnd-demo", client_type, None).await?);
 
+    println!("Playing as Alice");
+
     loop {
-        println!("Say something: ");
+        println!("Choose the move (R)ock, (P)aper, (S)cissors. Leave empty to exit:");
+        let m_a = loop {
+            let mut move_choice = String::new();
+            std::io::stdin()
+                .lock()
+                .read_line(&mut move_choice)
+                .expect("Failed to read line");
+            let move_choice = move_choice.trim().to_uppercase();
+            match move_choice.as_str() {
+                "R" => break 0,
+                "P" => break 1,
+                "S" => break 2,
+                "" => break 0xff, // signal to exit
+                _ => {
+                    println!("Invalid choice. Please choose R, P, or S.");
+                    continue;
+                }
+            };
+        };
 
-        let mut line = String::new();
-        std::io::stdin()
-            .lock()
-            .read_line(&mut line)
-            .expect("Failed to read line");
-
-        if line.trim().is_empty() {
+        if m_a == 0xff {
             println!("Exiting...");
-            let exit_code = demo_client.exit().await?;
-            println!("App exited with code {}", exit_code);
             break;
         }
 
-        let response = demo_client.echo(line.trim().as_bytes()).await?;
+        // genreate a random r_a
+        let r_a: [u8; 32] = rand::random();
+        // compute c_a = SHA256(m_a || r_a)
+        let c_a = sha2::Sha256::new()
+            .chain_update(&[m_a])
+            .chain_update(&r_a)
+            .finalize()
+            .into();
 
-        println!(
-            "Response: {}\n",
-            String::from_utf8(response).expect("Invalid UTF-8 response")
-        );
+        println!("Your move: {}", display_move(m_a));
+        println!("Your random nonce: {}", hex::encode(r_a));
+
+        let b_m = demo_client.commit(c_a).await?;
+        if b_m > 2 {
+            eprintln!("Invalid move received from Bob: {}", b_m);
+            std::process::exit(1);
+        }
+
+        println!("Bob chose move: {}", display_move(b_m));
+
+        let winner = demo_client.reveal(m_a, r_a).await?;
+
+        println!("Winner according to Bob: {}\n\n", parse_winner(winner));
     }
+    let exit_code = demo_client.exit().await?;
+    println!("V-App exited with code: {}", exit_code);
     Ok(())
 }
