@@ -291,7 +291,7 @@ pub fn show_info(icon: Icon, text: &str) {
         ux_generated::show_step_info_single(text);
     }
 
-    wait(20); // Wait for 20 ticker events (about 2 seconds)
+    wait(50); // Wait for 50 ticker events (about 5 seconds)
 }
 
 // computes the correct constant among SINGLE_STEP, FIRST_STEP, LAST_STEP, NEITHER_FIRST_NOR_LAST_STEP
