@@ -1,0 +1,13 @@
+[build]
+target = "x86_64-unknown-linux-gnu"
+
+
+[target.riscv32imc-unknown-none-elf]
+rustflags = [
+  # The VM expects ELF binaries with 2 segments (rx and rw). Don't put
+  # read-only non-executable sections in their own segment.
+  "-Clink-arg=--no-rosegment",
+]
+
+[env]
+RUST_TEST_THREADS = "1"

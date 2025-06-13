@@ -1,0 +1,13 @@
+[package]
+name = "vnd-demo"
+version = "0.1.0"
+edition = "2021"
+
+[package.metadata.vapp]
+name = "Hello BtcPrague"
+stack_size = 65536
+
+[dependencies]
+sdk = { package = "vanadium-app-sdk", path = "../../../app-sdk"}
+
+[workspace]
