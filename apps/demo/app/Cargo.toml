@@ -8,6 +8,8 @@ name = "Hello BtcPrague"
 stack_size = 65536
 
 [dependencies]
+postcard = { version = "1.1.1", default-features = false, features = ["alloc"] }
 sdk = { package = "vanadium-app-sdk", path = "../../../app-sdk"}
+serde = { version = "1.0.215", default-features = false, features = ["alloc", "derive"] }
 
 [workspace]
