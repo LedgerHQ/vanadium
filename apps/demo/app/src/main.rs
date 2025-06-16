@@ -2,8 +2,13 @@
 
 extern crate alloc;
 
-use alloc::{format, vec, vec::Vec};
-use sdk::{hash::Hasher, ux::Icon, App};
+#[cfg(not(test))]
+use alloc::format;
+#[cfg(not(test))]
+use sdk::ux::Icon;
+
+use alloc::{vec, vec::Vec};
+use sdk::{hash::Hasher, App};
 use serde::{Deserialize, Serialize};
 
 sdk::bootstrap!();
@@ -33,6 +38,7 @@ static mut GAME_STATE: RPSGame = RPSGame {
     m_b: 0,
 };
 
+#[cfg(not(test))]
 fn display_move(move_num: u8) -> &'static str {
     match move_num {
         0 => "Rock",
@@ -44,6 +50,7 @@ fn display_move(move_num: u8) -> &'static str {
 
 // Shows the game summary and the app's chosen move
 // Returns true if the user accepts
+#[cfg(not(test))]
 fn show_game_ui(c_a: &[u8; 32], m_b: u8) -> bool {
     sdk::ux::show_confirm_reject(
         "Game started",
@@ -57,7 +64,13 @@ fn show_game_ui(c_a: &[u8; 32], m_b: u8) -> bool {
     )
 }
 
+#[cfg(test)]
+fn show_game_ui(_c_a: &[u8; 32], _m_b: u8) -> bool {
+    true
+}
+
 // Shows the game's outcome
+#[cfg(not(test))]
 fn show_game_result(m_a: u8, result: u8) {
     let alice_move = display_move(m_a);
     match result {
@@ -76,6 +89,9 @@ fn show_game_result(m_a: u8, result: u8) {
         _ => panic!("Invalid game result"),
     }
 }
+
+#[cfg(test)]
+fn show_game_result(_m_a: u8, _result: u8) {}
 
 // generate a uniform random number in [0, 2]
 fn random_move() -> u8 {
@@ -180,4 +196,39 @@ fn process_message(_app: &mut App, msg: &[u8]) -> Vec<u8> {
 
 pub fn main() {
     App::new(process_message).run();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_e2e() {
+        let r_a = [0x11u8; 32];
+        let m_a = 1;
+        let c_a = hex::decode("c2ad0a997751e04066912fa490a9976d6135d221c0df197dfb8c8a7a7e04da0e")
+            .unwrap()
+            .try_into()
+            .unwrap();
+
+        let res = process_commit_command(c_a);
+        assert!(res.len() == 1);
+        let m_b = res[0];
+        assert!(m_b <= 2, "Invalid move: {}", m_b);
+
+        let winner = process_reveal_command(m_a, r_a);
+        assert!(
+            winner.len() == 1,
+            "Invalid response length: {}",
+            winner.len()
+        );
+        let result = winner[0];
+        assert!(result <= 2, "Invalid game result: {}", result);
+        let expected_result = compute_winner(m_a, m_b);
+        assert_eq!(
+            result, expected_result,
+            "Expected result: {}, got: {}",
+            expected_result, result
+        );
+    }
 }
