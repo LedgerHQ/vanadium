@@ -158,6 +158,8 @@ extern crate test;
 
 #[cfg(feature = "hashes")]
 pub extern crate hashes;
+#[cfg(feature = "rand")]
+pub extern crate rand;
 
 #[macro_use]
 mod macros;
@@ -186,6 +188,13 @@ pub use crate::context::{All, SignOnly, VerifyOnly};
 pub use crate::context::{AllPreallocated, Context, Signing, Verification};
 pub use crate::key::{InvalidParityValue, Keypair, Parity, PublicKey, SecretKey, XOnlyPublicKey};
 pub use crate::scalar::Scalar;
+
+/// The global context.
+///
+/// This context is usable everywhere. Note that unlike upstream, this doesn't require `std` but it
+/// still does require enabling the feature for consistency.
+#[cfg(feature = "global-context")]
+pub static SECP256K1: &Secp256k1<All> = &Secp256k1 { phantom: PhantomData };
 
 /// Trait describing something that promises to be a 32-byte random number; in particular,
 /// it has negligible probability of being zero or overflowing the group order. Such objects

@@ -1,6 +1,6 @@
 [package]
-name = "vlib-secp256k1"
-version = "0.29.0"
+name = "secp256k1"
+version = "0.29.1"
 authors = [ "Dawid Ciężarkiewicz <dpc@ucore.info>",
             "Andrew Poelstra <apoelstra@wpsoftware.net>" ]
 license = "CC0-1.0"
@@ -22,6 +22,8 @@ default = ["alloc"]
 # allow use of Secp256k1::new and related API that requires an allocator
 alloc = []
 lowmemory = []
+# Note that unlike upstream, this doesn't require `std` on vanadium
+global-context = []
 
 [dependencies]
 
@@ -31,8 +33,9 @@ serde = { version = "1.0.103", default-features = false, optional = true }
 
 # You likely only want to enable these if you explicitly do not want to use "std", otherwise enable
 # the respective -std feature e.g., hashes-std
-hashes = { package = "vlib-bitcoin-hashes", path = "../bitcoin-hashes", optional = true, default-features = false }
+hashes = { package = "bitcoin_hashes", version = "0.14.0", optional = true, default-features = false }
 subtle = { version = "2.6.1", default-features = false }
+rand = { version = "0.8", default-features = false, optional = true }
 
 [dev-dependencies]
 serde_cbor = "0.10.0"

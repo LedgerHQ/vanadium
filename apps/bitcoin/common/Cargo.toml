@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-bitcoin = { package = "vlib-bitcoin", path = "../../../libs/bitcoin", features = ["serde", "base64"] }
+bitcoin = { version = "0.32.0", features = ["serde", "base64"], default-features = false }
 hex = { version = "0.4.3", default-features = false, features = ["alloc"] }
 nom = { version = "7.1.3", default-features = false, features = ["alloc"] }
 serde = { version = "1.0.219", default-features = false, features = ["alloc"] }

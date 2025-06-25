@@ -653,6 +653,13 @@ impl core::hash::Hash for Keypair {
 impl_display_secret!(Keypair);
 
 impl Keypair {
+    /// Generates a new random secret key using the global [`SECP256K1`] context.
+    #[cfg(all(feature = "rand", feature = "global-context"))]
+    pub fn new_global<R: rand::Rng + rand::CryptoRng>(rng: &mut R) -> Self {
+        let key: [u8; 32] = rng.gen();
+        Self::from_seckey_slice(crate::SECP256K1, &key).expect("cryptographically impossible")
+    }
+
     /// Creates a [`Keypair`] directly from a Secp256k1 secret key.
     #[inline]
     pub fn from_secret_key<C: Signing>(secp: &Secp256k1<C>, sk: &SecretKey) -> Keypair {

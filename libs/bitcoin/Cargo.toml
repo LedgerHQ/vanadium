@@ -1,5 +1,5 @@
 [package]
-name = "vlib-bitcoin"
+name = "bitcoin"
 version = "0.32.5"
 edition = "2021"
 license = "CC0-1.0"
@@ -20,9 +20,9 @@ name = "bitcoin"
 
 [dependencies]
 
-hashes = { path = "../bitcoin-hashes", package = "vlib-bitcoin-hashes", default-features = false, features = ["alloc", "io"] }
-secp256k1 = { path = "../secp256k1", package="vlib-secp256k1", default-features = false, features = ["hashes", "alloc"] }
-base58 = { path = "../base58", package = "vlib-base58ck", default-features = false }
+hashes = { version = "0.14", package = "bitcoin_hashes", default-features = false, features = ["alloc", "io"] }
+secp256k1 = { version = "0.29", package="secp256k1", default-features = false, features = ["hashes", "alloc"] }
+base58 = { version = "0.1", package = "base58ck", default-features = false }
 
 # TBD if we need to replace these with implementantions based on ecalls
 bech32 = { version = "0.11.0", default-features = false, features = ["alloc"] }

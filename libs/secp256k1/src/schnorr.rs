@@ -91,7 +91,7 @@ impl<C: Signing> Secp256k1<C> {
         let privkey = sdk::curve::EcfpPrivateKey::<sdk::curve::Secp256k1, 32>::new(
             *keypair.secret_key().as_ref(),
         );
-        let sig_raw = privkey.schnorr_sign(msg.as_ref()).unwrap();
+        let sig_raw = privkey.schnorr_sign(msg.as_ref(), None).unwrap();
         Signature::from_slice(&sig_raw).unwrap()
     }
 
@@ -102,8 +102,22 @@ impl<C: Signing> Secp256k1<C> {
         keypair: &Keypair,
         aux_rand: &[u8; 32],
     ) -> Signature {
-        todo!()
-        // self.sign_schnorr_helper(msg, keypair, aux_rand)
+        let privkey = sdk::curve::EcfpPrivateKey::<sdk::curve::Secp256k1, 32>::new(
+            *keypair.secret_key().as_ref(),
+        );
+        let sig_raw = privkey.schnorr_sign(msg.as_ref(), Some(aux_rand)).unwrap();
+        Signature::from_slice(&sig_raw).unwrap()
+    }
+
+    /// Creates a schnorr signature using the given auxiliary random data.
+    #[cfg(feature = "rand")]
+    pub fn sign_schnorr_with_rng<R: rand::Rng + rand::CryptoRng>(
+        &self,
+        msg: &Message,
+        keypair: &Keypair,
+        rng: &mut R,
+    ) -> Signature {
+        self.sign_schnorr_with_aux_rand(msg, keypair, &rng.gen())
     }
 }
 

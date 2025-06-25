@@ -15,6 +15,7 @@ common = { path = "../common", features = ["wrapped_serializable"] }
 
 [target.'cfg(target_arch = "riscv32")'.dependencies]
 embedded-alloc = "0.5.1"
+vanadium-ecalls = { path = "../ecalls" }
 
 [target.'cfg(not(target_arch = "riscv32"))'.dependencies]
 bip32 = "0.5.2"

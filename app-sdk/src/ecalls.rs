@@ -266,6 +266,7 @@ pub(crate) trait EcallsInterface {
     /// - `msg`: Pointer to the message buffer.
     /// - `msg_len`: Length of the message buffer.
     /// - `signature`: Pointer to the buffer to store the signature.
+    /// - `entropy`: Additional entropy to use during signing or null if not needed
     ///
     /// # Returns
     /// The length of the signature (always 64) on success, 0 on error.
@@ -277,6 +278,7 @@ pub(crate) trait EcallsInterface {
         msg: *const u8,
         msg_len: usize,
         signature: *mut u8,
+        entropy: *const [u8; 32],
     ) -> usize;
 
     /// Verifies a Schnorr signature for a message.

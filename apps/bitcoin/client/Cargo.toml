@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-bitcoin = { package = "vlib-bitcoin", path = "../../../libs/bitcoin" }
+bitcoin = { version = "0.32.0" }
 common = { package = "vnd-bitcoin-common", path = "../common"}
 hex = "0.4.3"
 hidapi = "2.6.3"
@@ -33,3 +33,12 @@ path = "src/main.rs"
 
 
 [workspace]
+
+[patch.crates-io.bitcoin]
+path = "../../../libs/bitcoin"
+[patch.crates-io.bitcoin_hashes]
+path = "../../../libs/bitcoin_hashes"
+[patch.crates-io.secp256k1]
+path = "../../../libs/secp256k1"
+[patch.crates-io.getrandom]
+path = "../../../libs/getrandom"

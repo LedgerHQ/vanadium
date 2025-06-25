@@ -8,7 +8,7 @@ name = "Bitcoin"
 stack_size = 65536
 
 [dependencies]
-bitcoin = { package = "vlib-bitcoin", path = "../../../libs/bitcoin", features = ["serde"] }
+bitcoin = { version = "0.32.0", features = ["serde"], default-features = false }
 common = { package = "vnd-bitcoin-common", path = "../common"}
 hex = { version = "0.4.3", default-features = false, features = ["alloc"] }
 hex-literal = "0.4.1"
@@ -21,3 +21,12 @@ opt-level = 3
 lto = true
 
 [workspace]
+
+[patch.crates-io.bitcoin]
+path = "../../../libs/bitcoin"
+[patch.crates-io.bitcoin_hashes]
+path = "../../../libs/bitcoin_hashes"
+[patch.crates-io.secp256k1]
+path = "../../../libs/secp256k1"
+[patch.crates-io.getrandom]
+path = "../../../libs/getrandom"

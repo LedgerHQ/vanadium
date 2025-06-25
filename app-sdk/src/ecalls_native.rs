@@ -717,6 +717,7 @@ impl EcallsInterface for Ecall {
         msg: *const u8,
         msg_len: usize,
         signature: *mut u8,
+        entropy: *const [u8; 32],
     ) -> usize {
         if curve != CurveKind::Secp256k1 as u32 {
             panic!("Unsupported curve");
@@ -742,11 +743,17 @@ impl EcallsInterface for Ecall {
         let signing_key =
             schnorr::SigningKey::from_bytes(&privkey_bytes).expect("Invalid private key");
 
-        // generate 32 random bytes
-        let mut aux_rand = [0u8; 32];
-        rand::rngs::OsRng::default()
-            .try_fill_bytes(&mut aux_rand)
-            .expect("Failed to generate random bytes");
+        let aux_rand = if entropy.is_null() {
+            // generate 32 random bytes
+            let mut aux_rand = [0u8; 32];
+            rand::rngs::OsRng::default()
+                .try_fill_bytes(&mut aux_rand)
+                .expect("Failed to generate random bytes");
+            aux_rand
+        } else {
+            unsafe { *entropy }
+        };
+
         let signature_bytes = signing_key
             .sign_raw(msg_slice, &aux_rand)
             .unwrap()

@@ -29,9 +29,6 @@ compile_error!("The `std` feature is not supported.");
 #[cfg(feature = "rand-std")]
 compile_error!("The `rand-std` feature is not supported.");
 
-#[cfg(feature = "rand")]
-compile_error!("The `rand` feature is not supported.");
-
 #[macro_use]
 extern crate alloc;
 

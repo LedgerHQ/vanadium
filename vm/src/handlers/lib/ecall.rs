@@ -120,6 +120,12 @@ impl Register {
 #[derive(Debug, Clone, Copy)]
 struct GuestPointer(pub u32);
 
+impl GuestPointer {
+    pub fn is_null(self) -> bool {
+        self.0 == 0
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 pub enum LedgerHashContextError {
     InvalidHashId,
@@ -1171,6 +1177,7 @@ impl<'a> CommEcallHandler<'a> {
         msg: GuestPointer,
         msg_len: usize,
         signature: GuestPointer,
+        entropy: GuestPointer,
     ) -> Result<usize, CommEcallError> {
         if curve != CurveKind::Secp256k1 as u32 {
             return Err(CommEcallError::InvalidParameters("Unsupported curve"));
@@ -1210,12 +1217,22 @@ impl<'a> CommEcallHandler<'a> {
 
         unsafe {
             // We don't expose this, but cx_ecschnorr_sign_no_throw requires one of
-            // CX_RND_TRNG or CX_RND_PROVIDED to be provided. We just use CX_RND_TRNG for now.
+            // CX_RND_TRNG or CX_RND_PROVIDED to be provided. We use `entropy` if it's provided,
+            // CX_RND_TRNG  otherwise.
             const CX_RND_TRNG: u32 = 2 << 9;
+            const CX_RND_PROVIDED: u32 = 4 << 9;
+
+            let mode = if entropy.is_null() {
+                mode | CX_RND_TRNG
+            } else {
+                cpu.get_segment::<E>(entropy.0)?
+                    .read_buffer(entropy.0, &mut signature_local[..32])?;
+                mode | CX_RND_PROVIDED
+            };
 
             let res = sys::cx_ecschnorr_sign_no_throw(
                 &mut privkey_local,
-                mode | CX_RND_TRNG,
+                mode,
                 ecall_constants::HashId::Sha256 as u8,
                 msg_local.as_ptr(),
                 msg_len,
@@ -1603,6 +1620,7 @@ impl<'a> EcallHandler for CommEcallHandler<'a> {
                     GPreg!(A4),
                     reg!(A5) as usize,
                     GPreg!(A6),
+                    GPreg!(A7),
                 )? as u32;
             }
             ECALL_SCHNORR_VERIFY => {
