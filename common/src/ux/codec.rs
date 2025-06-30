@@ -9,12 +9,12 @@ pub trait Serializable {
     fn serialized(&self) -> Vec<u8> {
         let len = self.get_serialized_length();
         let mut buf = Vec::with_capacity(len);
-        unsafe {
-            // we don't bother initializing the content, since it will be overwritten
-            buf.set_len(len);
-        }
+        // we don't bother initializing the content, since it will be overwritten
         let mut pos = 0;
         self.serialize(&mut buf, &mut pos);
+        unsafe {
+            buf.set_len(len);
+        }
         buf
     }
 }

@@ -97,11 +97,10 @@ pub fn xrecv(size: usize) -> Vec<u8> {
     // xrecv guarantees that recv_size have been overwritten with the received data, and we
     // do not access any further data.
     let mut buffer = Vec::with_capacity(size);
+    let recv_size = Ecall::xrecv(buffer.as_mut_ptr(), size);
     unsafe {
         buffer.set_len(size);
     }
-
-    let recv_size = Ecall::xrecv(buffer.as_mut_ptr(), buffer.len());
     buffer[0..recv_size].to_vec()
 }
 

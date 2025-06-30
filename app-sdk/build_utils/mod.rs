@@ -74,11 +74,11 @@ pub fn make_page_maker(file: &mut File, parts: &[SerializedPart], fn_name: &str)
                     file,
                     "    let total_len: usize = {}.get_serialized_length();
     let mut serialized = Vec::<u8>::with_capacity(total_len);
+    let mut cur: usize = 0;
+    {}.serialize(&mut serialized, &mut cur);
     unsafe {{
         serialized.set_len(total_len);
-    }}
-    let mut cur: usize = 0;
-    {}.serialize(&mut serialized, &mut cur);",
+    }}",
                     arg_name, arg_name
                 )
                 .expect("Could not write");

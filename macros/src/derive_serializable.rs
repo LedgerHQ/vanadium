@@ -315,11 +315,11 @@ fn derive_enum(
                 pub fn #fn_make_ident(#args) -> Vec<u8> {
                     let __len = #get_len;
                     let mut __buff = Vec::with_capacity(__len);
+                    let mut __pos = 0;
+                    #serialize
                     unsafe {
                         __buff.set_len(__len);
                     }
-                    let mut __pos = 0;
-                    #serialize
                     __buff
                 }
             }
@@ -563,11 +563,11 @@ fn derive_struct(vis: &Visibility, ident: &Ident, data: &DataStruct, wrapped_ide
                 pub fn #make_fn_ident(#args) -> Vec<u8> {
                     let __len = #get_len;
                     let mut __buff = Vec::with_capacity(__len);
+                    let mut __pos = 0;
+                    #serialize
                     unsafe {
                         __buff.set_len(__len);
                     }
-                    let mut __pos = 0;
-                    #serialize
                     __buff
                 }
             }
