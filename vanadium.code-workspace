@@ -34,10 +34,6 @@
       "name": "₿ libs/secp256k1"
     },
     {
-      "path": "libs/bitcoin",
-      "name": "₿ libs/bitcoin"
-    },
-    {
       "path": "apps/bitcoin/docs",
       "name": "₿ vnd-bitcoin documentation"
     },

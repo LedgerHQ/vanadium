@@ -132,25 +132,6 @@ jobs:
         run: |
           cargo +nightly test --target x86_64-unknown-linux-gnu
 
-  # Native tests for libraries in the libs folder
-  test_vlib_bitcoin:
-    name: Run vlib-bitcoin tests
-    runs-on: ubuntu-latest
-    steps:
-      - name: Set up Rust toolchain
-        uses: actions-rs/toolchain@v1
-        with:
-          toolchain: nightly
-          target: x86_64-unknown-linux-gnu
-          components: rustfmt, clippy
-          profile: minimal
-      - name: Clone
-        uses: actions/checkout@v4
-      - name: Unit tests
-        working-directory: libs/bitcoin
-        run: |
-          cargo +nightly test --target x86_64-unknown-linux-gnu --features serde
-        
   # build Vanadium VM app
 
   build_vanadium_app:
