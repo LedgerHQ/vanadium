@@ -364,3 +364,5 @@ ecall8!(schnorr_verify, ECALL_SCHNORR_VERIFY, (curve: u32), (mode: u32), (hash_i
 ecall2v!(hash_init, ECALL_HASH_INIT, (hash_id: u32), (ctx: *mut u8));
 ecall4!(hash_update, ECALL_HASH_UPDATE, (hash_id: u32), (ctx: *mut u8), (data: *const u8), (len: usize), u32);
 ecall3!(hash_final, ECALL_HASH_DIGEST, (hash_id: u32), (ctx: *mut u8), (digest: *const u8), u32);
+ecall3!(sys_memset, ECALL_MEMSET, (dest: *mut u8), (ch: i32), (n: usize), *mut u8);
+ecall3!(sys_memcpy, ECALL_MEMCPY, (dest: *mut u8), (src: *const u8), (n: usize), *mut u8);
