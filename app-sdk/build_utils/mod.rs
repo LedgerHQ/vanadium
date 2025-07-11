@@ -35,7 +35,12 @@ fn merge_static_parts(parts: &[SerializedPart]) -> Vec<SerializedPart> {
     result
 }
 
-pub fn make_page_maker(file: &mut File, parts: &[SerializedPart], fn_name: &str) {
+pub fn make_object_maker(
+    object_type: &str,
+    file: &mut File,
+    parts: &[SerializedPart],
+    fn_name: &str,
+) {
     let parts = merge_static_parts(parts);
     // make a list of all the Runtime parts
     let mut runtime_parts = Vec::new();
@@ -51,9 +56,20 @@ pub fn make_page_maker(file: &mut File, parts: &[SerializedPart], fn_name: &str)
         .collect::<Vec<String>>()
         .join(", ");
 
+    let show_function = match object_type {
+        "page" => "show_page_raw",
+        "step" => "show_step_raw",
+        _ => panic!("Invalid object_type: must be 'page' or 'step'"),
+    };
+
     writeln!(file, "#[allow(dead_code)]").expect("Could not write");
     writeln!(file, "#[inline(always)]").expect("Could not write");
-    writeln!(file, "pub fn show_{}({}) {{", fn_name, fn_args).expect("Could not write");
+    writeln!(
+        file,
+        "pub fn show_{}_{}({}) {{",
+        object_type, fn_name, fn_args
+    )
+    .expect("Could not write");
     if parts.len() == 1 {
         // special case, can be optimized slightly
         match &parts[0] {
@@ -87,7 +103,7 @@ pub fn make_page_maker(file: &mut File, parts: &[SerializedPart], fn_name: &str)
         // https://github.com/rust-lang/rust/issues/63569
         writeln!(file, "    let bytes = unsafe {{ core::mem::transmute::<&[MaybeUninit<u8>], &[u8]>(&serialized[0..total_len]) }};").expect("Could not write");
 
-        writeln!(file, "    show_page_raw(bytes);").expect("Could not write");
+        writeln!(file, "    {}(bytes);", show_function).expect("Could not write");
     } else {
         writeln!(file, "    let mut total_len: usize = 0;").expect("Could not write");
 
@@ -166,7 +182,7 @@ pub fn make_page_maker(file: &mut File, parts: &[SerializedPart], fn_name: &str)
         // https://github.com/rust-lang/rust/issues/63569
         writeln!(file, "        let bytes = unsafe {{ core::mem::transmute::<&[MaybeUninit<u8>], &[u8]>(&serialized[0..total_len]) }};").expect("Could not write");
 
-        writeln!(file, "        show_page_raw(bytes);").expect("Could not write");
+        writeln!(file, "        {}(bytes);", show_function).expect("Could not write");
 
         writeln!(file, "    }} else {{").expect("Could not write");
 
@@ -217,7 +233,7 @@ pub fn make_page_maker(file: &mut File, parts: &[SerializedPart], fn_name: &str)
         }
         writeln!(file, "        unsafe {{ serialized.set_len(total_len); }}")
             .expect("Could not write");
-        writeln!(file, "        show_page_raw(&serialized);").expect("Could not write");
+        writeln!(file, "        {}(&serialized);", show_function).expect("Could not write");
         writeln!(file, "    }}").expect("Could not write");
     }
     writeln!(file, "}}\n").expect("Could not write");

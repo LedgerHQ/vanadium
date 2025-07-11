@@ -1,3 +1,5 @@
+use core::panic;
+
 use crate::{
     ecalls,
     ux_generated::{
@@ -7,6 +9,7 @@ use crate::{
 };
 use alloc::vec::Vec;
 
+use common::ecall_constants::DEVICE_PROPERTY_ID;
 pub use common::ux::{
     Action, Deserializable, Event, EventCode, EventData, Icon, NavInfo, NavigationInfo, Page,
     PageContent, PageContentInfo, TagValue,
@@ -14,9 +17,27 @@ pub use common::ux::{
 
 use crate::ux_generated;
 
+// Returns true if the device supports the page UX model, false if it supports the step UX model.
+// It panics for unsupported devices
+fn has_page_api() -> bool {
+    match ecalls::get_device_property(DEVICE_PROPERTY_ID) {
+        0 => true,           // native target
+        0x2c970060 => true,  // Ledger Stax
+        0x2c970070 => true,  // Ledger Flex
+        0x2c970040 => false, // Ledger Nano X
+        0x2c970050 => false, // Ledger Nano S+
+        _ => panic!("Unsupported device"),
+    }
+}
+
 #[inline(always)]
 fn show_page_raw(page: &[u8]) {
     ecalls::show_page(page.as_ptr(), page.len());
+}
+
+#[inline(always)]
+fn show_step_raw(step: &[u8]) {
+    ecalls::show_step(step.as_ptr(), step.len());
 }
 
 /// Blocks until an event is received, then returns it.
@@ -157,34 +178,81 @@ pub fn review_pairs(
 }
 
 pub fn show_spinner(text: &str) {
-    ux_generated::show_spinner(text);
+    ux_generated::show_page_spinner(text);
 }
 
 pub fn show_info(icon: Icon, text: &str) {
-    ux_generated::show_info(icon, text);
+    ux_generated::show_page_info(icon, text);
     wait(20); // Wait for 20 ticker events (about 2 seconds)
+}
+
+// computes the correct constant among SINGLE_STEP, FIRST_STEP, LAST_STEP, NEITHER_FIRST_NOR_LAST_STEP
+const fn step_pos(n_steps: u32, cur_step: u32) -> u8 {
+    let has_left_arrow = (cur_step > 0) as u8;
+    let has_right_arrow = (cur_step + 1 < n_steps) as u8;
+
+    has_left_arrow << 1 | has_right_arrow
 }
 
 #[inline(always)]
 pub fn show_confirm_reject(title: &str, text: &str, confirm: &str, reject: &str) -> bool {
-    ux_generated::show_confirm_reject(title, text, confirm, reject);
+    if has_page_api() {
+        ux_generated::show_page_confirm_reject(title, text, confirm, reject);
 
-    // wait until a button is pressed
-    loop {
-        match get_event() {
-            Event::Action(action) => {
-                if action == Action::Reject {
-                    return false;
-                } else if action == Action::Confirm {
-                    return true;
+        // wait until a button is pressed
+        loop {
+            match get_event() {
+                Event::Action(action) => {
+                    if action == Action::Reject {
+                        return false;
+                    } else if action == Action::Confirm {
+                        return true;
+                    }
+                }
+                _ => {}
+            }
+        }
+    } else {
+        let n_steps = 3;
+        let mut cur_step = 0;
+
+        loop {
+            match cur_step {
+                0 => {
+                    ux_generated::show_step_text_subtext(step_pos(n_steps, cur_step), title, text);
+                }
+                1 => ux_generated::show_step_confirm(step_pos(n_steps, cur_step)),
+                2 => ux_generated::show_step_reject(step_pos(n_steps, cur_step)),
+                _ => {
+                    panic!("Invalid step");
                 }
             }
-            _ => {}
+
+            match get_event() {
+                Event::Action(action) => {
+                    if action == Action::NextPage && cur_step < n_steps - 1 {
+                        cur_step += 1;
+                    } else if action == Action::PreviousPage && cur_step > 0 {
+                        cur_step -= 1;
+                    } else if action == Action::Confirm {
+                        if cur_step == 1 {
+                            return true; // Confirm
+                        } else if cur_step == 2 {
+                            return false; // Reject
+                        }
+                    }
+                }
+                _ => {}
+            }
         }
     }
 }
 
 #[inline(always)]
 pub fn ux_idle() {
-    show_page_raw(&ux_generated::RAW_PAGE_APP_DASHBOARD);
+    if has_page_api() {
+        show_page_raw(&ux_generated::RAW_PAGE_APP_DASHBOARD);
+    } else {
+        show_step_raw(&ux_generated::RAW_STEP_APP_DASHBOARD);
+    }
 }

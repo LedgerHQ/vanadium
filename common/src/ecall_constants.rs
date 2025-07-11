@@ -6,7 +6,8 @@ pub const ECALL_EXIT: u32 = 4;
 // device handling, events, and UX
 
 pub const ECALL_GET_EVENT: u32 = 10;
-pub const ECALL_SHOW_PAGE: u32 = 11;
+pub const ECALL_SHOW_PAGE: u32 = 11; // Flex / Stax
+pub const ECALL_SHOW_STEP: u32 = 12; // Nano X / Nano S+
 pub const ECALL_GET_DEVICE_PROPERTY: u32 = 15;
 
 // Constants used for GET_DEVICE_PROPERTY

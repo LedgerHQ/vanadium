@@ -339,6 +339,7 @@ ecall2!(xrecv, ECALL_XRECV, (buffer: *mut u8), (size: usize), usize);
 
 ecall1!(get_event, ECALL_GET_EVENT, (data: *mut EventData), u32);
 ecall2!(show_page, ECALL_SHOW_PAGE, (page_desc: *const u8), (page_desc_len: usize), u32);
+ecall2!(show_step, ECALL_SHOW_STEP, (step_desc: *const u8), (step_desc_len: usize), u32);
 ecall1!(get_device_property, ECALL_GET_DEVICE_PROPERTY, (property: u32), u32);
 
 ecall5!(bn_modm, ECALL_MODM, (r: *mut u8), (n: *const u8), (len: usize), (m: *const u8), (len_m: usize), u32);

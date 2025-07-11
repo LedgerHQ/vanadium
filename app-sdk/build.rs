@@ -4,7 +4,7 @@ use common::ux::*;
 
 mod build_utils;
 
-use build_utils::{gen_u8_slice, make_page_maker};
+use build_utils::{gen_u8_slice, make_object_maker};
 
 const PAGE_MAKERS: &[(&'static str, WrappedPage)] = &[
     (
@@ -122,6 +122,33 @@ const PAGE_MAKERS: &[(&'static str, WrappedPage)] = &[
     ),
 ];
 
+const STEP_MAKERS: &[(&'static str, WrappedStep)] = &[
+    (
+        "text_subtext",
+        WrappedStep::TextSubtext {
+            pos: rt("pos", "u8"),
+            text: rt_str("text", "&str"),
+            subtext: rt_str("subtext", "&str"),
+        },
+    ),
+    (
+        "confirm",
+        WrappedStep::CenteredInfo {
+            pos: rt("pos", "u8"),
+            text: Some(ct_str("Confirm")),
+            subtext: None,
+        },
+    ),
+    (
+        "reject",
+        WrappedStep::CenteredInfo {
+            pos: rt("pos", "u8"),
+            text: Some(ct_str("Reject")),
+            subtext: None,
+        },
+    ),
+];
+
 // Precomputed pages with no variable part, so they can be directly
 // embedded in the binary as constants.
 fn make_const_pages(file: &mut File) {
@@ -157,6 +184,35 @@ fn make_const_pages(file: &mut File) {
     writeln!(file).expect("Could not write");
 }
 
+// Precomputed steps with no variable part, so they can be directly
+// embedded in the binary as constants.
+fn make_const_steps(file: &mut File) {
+    let default_steps: &[(&'static str, Step)] = &[(
+        // "Application is ready"
+        "APP_DASHBOARD",
+        Step::TextSubtext {
+            pos: 0, // SINGLE_STEP
+            text: "Application".into(),
+            subtext: "is ready".into(),
+        },
+    )];
+
+    for (step_name, step) in default_steps {
+        let serialized = step.serialized();
+
+        writeln!(
+            file,
+            "pub const RAW_STEP_{}: [u8; {}] = {};",
+            step_name,
+            serialized.len(),
+            gen_u8_slice(&serialized)
+        )
+        .expect("Could not write");
+    }
+
+    writeln!(file).expect("Could not write");
+}
+
 fn main() {
     let dest_path = Path::new("src/ux_generated.rs");
     let mut file = File::create(&dest_path).expect("Could not create file");
@@ -174,13 +230,33 @@ use core::mem::MaybeUninit;
 fn show_page_raw(page: &[u8]) {{
     ecalls::show_page(page.as_ptr(), page.len());
 }}
+
+#[inline(always)]
+fn show_step_raw(page: &[u8]) {{
+    ecalls::show_step(page.as_ptr(), page.len());
+}}
 "
     )
     .expect("Could not write");
 
     make_const_pages(&mut file);
+    make_const_steps(&mut file);
 
     for (fn_name, wrapped_page) in PAGE_MAKERS.iter() {
-        make_page_maker(&mut file, &wrapped_page.serialize_wrapped(), fn_name);
+        make_object_maker(
+            "page",
+            &mut file,
+            &wrapped_page.serialize_wrapped(),
+            fn_name,
+        );
+    }
+
+    for (fn_name, wrapped_step) in STEP_MAKERS.iter() {
+        make_object_maker(
+            "step",
+            &mut file,
+            &wrapped_step.serialize_wrapped(),
+            fn_name,
+        );
     }
 }
