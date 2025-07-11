@@ -1,8 +1,11 @@
+#[cfg(not(any(target_os = "stax", target_os = "flex")))]
+use core::ffi::c_void;
+
 use alloc::{ffi::CString, string::String, vec::Vec};
 
 use ledger_secure_sdk_sys as sys;
 
-use common::ux::Page;
+use common::ux::{Page, Step};
 
 #[cfg(any(target_os = "stax", target_os = "flex"))]
 use super::bitmaps;
@@ -25,7 +28,7 @@ pub fn get_last_event() -> Option<(common::ux::EventCode, common::ux::EventData)
     }
 }
 
-fn store_new_event(event_code: common::ux::EventCode, event_data: common::ux::EventData) {
+pub fn store_new_event(event_code: common::ux::EventCode, event_data: common::ux::EventData) {
     // We store the new event if there was no stored event, or there is just a ticker
     // Otherwise we drop the new event
     #[allow(static_mut_refs)]
@@ -37,6 +40,7 @@ fn store_new_event(event_code: common::ux::EventCode, event_data: common::ux::Ev
 }
 
 // nbgl_layoutTouchCallback_t
+#[cfg(any(target_os = "stax", target_os = "flex"))]
 unsafe extern "C" fn layout_touch_callback(token: core::ffi::c_int, index: u8) {
     crate::println!(
         "layout_touch_callback with token={} and index={}",
@@ -79,6 +83,9 @@ unsafe extern "C" fn layout_touch_callback(token: core::ffi::c_int, index: u8) {
 
 pub struct UxHandler {
     cstrings: Vec<CString>,
+    #[cfg(not(any(target_os = "stax", target_os = "flex")))]
+    step_handle: *mut c_void, // handle returned by nbgl when drawing a step; should be freed before drawing a new step
+    #[cfg(any(target_os = "stax", target_os = "flex"))]
     cur_page: u8,
     #[cfg(any(target_os = "stax", target_os = "flex"))]
     page_handle: *mut sys::nbgl_page_t, // handle returned by nbgl when drawing a page; should be freed before drawing a new page
@@ -122,7 +129,7 @@ pub fn drop_ux_handler() {
 
         #[allow(static_mut_refs)] // it's safe as we are in single-threaded mode
         let handler = UX_HANDLER.assume_init_mut();
-        handler.release_page();
+        handler.release_handle();
         handler.clear_cstrings();
 
         UX_HANDLER_INITIALIZED = false;
@@ -135,7 +142,7 @@ impl UxHandler {
         #[cfg(not(any(target_os = "stax", target_os = "flex")))]
         return Self {
             cstrings: Vec::new(),
-            cur_page: 0,
+            step_handle: core::ptr::null_mut(),
         };
         #[cfg(any(target_os = "stax", target_os = "flex"))]
         return Self {
@@ -161,14 +168,22 @@ impl UxHandler {
         Ok(core::ptr::null())
     }
 
-    // This should always be called before drawing a new page, in order to
-    // make sure that the resources of the previous page are released
-    fn release_page(&mut self) {
+    // This should always be called before drawing a new step or page, in order to
+    // make sure that the resources of the previous step/page are released
+    fn release_handle(&mut self) {
         #[cfg(any(target_os = "stax", target_os = "flex"))]
         unsafe {
             if !self.page_handle.is_null() {
                 sys::nbgl_pageRelease(self.page_handle);
                 self.page_handle = core::ptr::null_mut();
+            }
+        }
+
+        #[cfg(not(any(target_os = "stax", target_os = "flex")))]
+        unsafe {
+            if !self.step_handle.is_null() {
+                sys::nbgl_stepRelease(self.step_handle);
+                self.step_handle = core::ptr::null_mut();
             }
         }
     }
@@ -182,12 +197,12 @@ impl UxHandler {
     pub fn show_page(&mut self, page: &Page) -> Result<(), CommEcallError> {
         match page {
             common::ux::Page::Spinner { text } => unsafe {
-                self.release_page();
+                self.release_handle();
                 self.page_handle = sys::nbgl_pageDrawSpinner(self.alloc_cstring(Some(text))?, 0);
             },
             common::ux::Page::Info { icon, text } => unsafe {
                 self.clear_cstrings();
-                self.release_page();
+                self.release_handle();
 
                 let ticker_config = sys::nbgl_screenTickerConfiguration_t {
                     tickerCallback: None, // we could put a callback here if we had a timer
@@ -237,7 +252,7 @@ impl UxHandler {
                 reject,
             } => unsafe {
                 self.clear_cstrings();
-                self.release_page();
+                self.release_handle();
 
                 let page_confirmation_description =
                     ledger_secure_sdk_sys::nbgl_pageConfirmationDescription_s {
@@ -267,7 +282,7 @@ impl UxHandler {
                 page_content_info,
             } => unsafe {
                 self.clear_cstrings();
-                self.release_page();
+                self.release_handle();
 
                 let nav_info = navigation_info.as_ref().map(|ni| {
                         get_ux_handler().cur_page = ni.active_page as u8;
@@ -447,5 +462,55 @@ impl UxHandler {
             ledger_secure_sdk_sys::nbgl_refresh();
         }
         Ok(())
+    }
+
+    #[cfg(any(target_os = "stax", target_os = "flex"))]
+    pub fn show_step(&mut self, step: &Step) -> Result<(), CommEcallError> {
+        Err(CommEcallError::UnhandledEcall)
+    }
+
+    #[cfg(not(any(target_os = "stax", target_os = "flex")))]
+    pub fn show_step(&mut self, step: &Step) -> Result<(), CommEcallError> {
+        match step {
+            Step::TextSubtext { pos, text, subtext } => {
+                self.clear_cstrings();
+                self.release_handle();
+                unsafe {
+                    self.step_handle = sys::nbgl_stepDrawText(
+                        *pos,
+                        None,                  // callback (todo)
+                        core::ptr::null_mut(), // ticker (todo)
+                        self.alloc_cstring(Some(text))?,
+                        self.alloc_cstring(Some(subtext))?,
+                        0,     // style
+                        false, // not modal
+                    );
+                }
+
+                Ok(())
+            }
+            Step::CenteredInfo { pos, text, subtext } => {
+                self.clear_cstrings();
+                self.release_handle();
+
+                unsafe {
+                    self.step_handle = sys::nbgl_stepDrawCenteredInfo(
+                        *pos,
+                        None,                  // callback (todo)
+                        core::ptr::null_mut(), // ticker (todo)
+                        &mut ledger_secure_sdk_sys::nbgl_layoutCenteredInfo_t {
+                            icon: core::ptr::null(), // icon (TODO)
+                            text1: self.alloc_cstring(text.as_ref())?,
+                            text2: self.alloc_cstring(subtext.as_ref())?,
+                            onTop: false,
+                            style: 0,
+                        }, // info
+                        false,                 // not modal
+                    );
+                }
+
+                Ok(())
+            }
+        }
     }
 }

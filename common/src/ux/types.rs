@@ -149,6 +149,27 @@ pub enum Page {
     },
 }
 
+#[derive(Debug, PartialEq, Eq, Clone, Serializable)]
+#[cfg_attr(feature = "wrapped_serializable", wrapped(name = WrappedStep))]
+pub enum Step {
+    /// A step showing a spinner and some text.
+    #[maker(make_text_subtext)]
+    TextSubtext {
+        pos: u8,
+        text: String,
+        subtext: String,
+        // TODO: style
+    },
+    #[maker(make_centered_info)]
+    CenteredInfo {
+        pos: u8,
+        text: Option<String>,
+        subtext: Option<String>,
+        // TODO: icon
+        // TODO: style
+    },
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

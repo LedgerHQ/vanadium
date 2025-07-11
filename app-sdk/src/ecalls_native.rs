@@ -343,6 +343,10 @@ pub fn show_page(page_desc: *const u8, page_desc_len: usize) -> u32 {
     1
 }
 
+pub fn show_step(_step_desc: *const u8, _step_desc_len: usize) -> u32 {
+    panic!("The native target implements the page UX model, not the step UX model.");
+}
+
 pub fn get_device_property(property: u32) -> u32 {
     match property {
         common::ecall_constants::DEVICE_PROPERTY_ID => 0,

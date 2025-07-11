@@ -80,6 +80,16 @@ forward_to_ecall! {
     /// 1 on success, 0 on error.
     pub fn show_page(page_desc: *const u8, page_desc_len: usize) -> u32;
 
+    /// Shows a step.
+    ///
+    /// # Parameters
+    /// - `step_desc`: Pointer to the serialized description of a step.
+    /// - `step_desc_len`: Length of the serialized description of a step.
+    ///
+    /// # Returns
+    /// 1 on success, 0 on error.
+    pub fn show_step(step_desc: *const u8, step_desc_len: usize) -> u32;
+
     /// Retrieves device information based on the requested property type.
     ///
     /// # Parameters
