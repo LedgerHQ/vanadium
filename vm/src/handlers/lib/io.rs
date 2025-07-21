@@ -1,5 +1,9 @@
 use ledger_device_sdk::io;
 
+// We use the same static buffer each time for efficiency.
+// Safety: this is safe because we are in a single-threaded context.
+static mut SPI_BUFFER: [u8; 256] = [0; 256];
+
 // Sends an APDU, and receives the reply, without processing other events in between.
 // Similar to io_exchange fron the C sdk.
 // Using the normal SDK functionalities (Comm::reply and Comm::next_command) was causing
@@ -25,7 +29,8 @@ where
     comm.tx += 2;
 
     // apdu_send
-    let mut spi_buffer = [0u8; 256];
+    let spi_buffer = &raw mut SPI_BUFFER;
+
     match unsafe { G_io_app.apdu_state } {
         APDU_USB_HID => unsafe {
             ledger_secure_sdk_sys::io_usb_hid_send(
@@ -63,9 +68,9 @@ where
             }
 
             // Fetch the next message from the MCU
-            let _rx = sys_seph::seph_recv(&mut spi_buffer, 0);
+            let _rx = sys_seph::seph_recv(unsafe { &mut *spi_buffer }, 0);
 
-            if let Some(value) = comm.decode_event(&mut spi_buffer) {
+            if let Some(value) = comm.decode_event(unsafe { &mut *spi_buffer }) {
                 break value;
             }
         };

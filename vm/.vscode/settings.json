@@ -7,7 +7,7 @@
         "dockerRunArgs": "-v '${workspaceFolder}/../common:/common' -v '${workspaceFolder}/../macros:/macros'"
     },
     "ledgerDevTools.appSettings": {
-        "selectedDevice": "Flex",
+        "selectedDevice": "Nano S Plus",
         "selectedUseCase": "release"
     }
 }
