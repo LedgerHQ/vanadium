@@ -1,6 +1,7 @@
 use common::client_commands::Message;
 
 pub mod ecall;
+pub mod io;
 pub mod outsourced_mem;
 pub mod vapp;
 
