@@ -1,4 +1,4 @@
-use ledger_device_sdk::io;
+use crate::io;
 
 // We use the same static buffer each time for efficiency.
 // Safety: this is safe because we are in a single-threaded context.

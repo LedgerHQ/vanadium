@@ -22,17 +22,18 @@ mod aes;
 mod app_ui;
 mod handlers;
 mod hash;
+mod io;
 
 #[cfg(feature = "run_tests")]
 mod app_tests;
 
+use crate::io::{ApduHeader, Comm, Reply, StatusWords};
 use alloc::{string::ToString, vec, vec::Vec};
 use app_ui::menu::ui_menu_main;
 use handlers::{
     get_version::handler_get_version, register_vapp::handler_register_vapp,
     start_vapp::handler_start_vapp,
 };
-use ledger_device_sdk::io::{ApduHeader, Comm, Reply, StatusWords};
 
 extern crate alloc;
 
@@ -79,8 +80,8 @@ fn handle_panic(info: &core::panic::PanicInfo) -> ! {
     };
     println!("{}", message);
 
-    let mut comm = ledger_device_sdk::io::Comm::new();
-    comm.reply(ledger_device_sdk::io::StatusWords::Panic);
+    let mut comm = crate::io::Comm::new();
+    comm.reply(crate::io::StatusWords::Panic);
 
     ledger_device_sdk::exit_app(0x01)
 }
@@ -158,7 +159,7 @@ extern "C" fn sample_main() {
     // If any APDU with a wrong class value is received, comm will respond automatically with
     // BadCla status word.
     let mut comm = Comm::new().set_expected_cla(0xe0);
-    init_comm(&mut comm);
+    init_comm(unsafe { core::mem::transmute(&mut comm) });
 
     let mut home = ui_menu_main(&mut comm);
     home.show_and_return();

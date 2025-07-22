@@ -3,12 +3,9 @@ use crate::{hash::Sha256Hasher, AppSW};
 use alloc::{vec, vec::Vec};
 use common::manifest::Manifest;
 use include_gif::include_gif;
-use ledger_device_sdk::{
-    io,
-    nbgl::{Field, NbglGlyph, NbglReview},
-};
+use ledger_device_sdk::nbgl::{Field, NbglGlyph, NbglReview};
 
-pub fn handler_register_vapp(comm: &mut io::Comm) -> Result<Vec<u8>, AppSW> {
+pub fn handler_register_vapp(comm: &mut crate::io::Comm) -> Result<Vec<u8>, AppSW> {
     let data_raw = comm.get_data().map_err(|_| AppSW::WrongApduLength)?;
 
     let (manifest, rest) =

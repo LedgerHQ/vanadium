@@ -1,8 +1,8 @@
 use core::cell::RefCell;
 
+use crate::io;
 use alloc::rc::Rc;
 use common::client_commands::SectionKind;
-use ledger_device_sdk::io;
 use subtle::ConstantTimeEq;
 
 use alloc::vec::Vec;

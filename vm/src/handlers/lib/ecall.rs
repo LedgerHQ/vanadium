@@ -324,16 +324,13 @@ impl core::error::Error for CommEcallError {
 }
 
 pub struct CommEcallHandler<'a> {
-    comm: Rc<RefCell<&'a mut ledger_device_sdk::io::Comm>>,
+    comm: Rc<RefCell<&'a mut crate::io::Comm>>,
     manifest: &'a Manifest,
     ux_handler: &'static mut UxHandler,
 }
 
 impl<'a> CommEcallHandler<'a> {
-    pub fn new(
-        comm: Rc<RefCell<&'a mut ledger_device_sdk::io::Comm>>,
-        manifest: &'a Manifest,
-    ) -> Self {
+    pub fn new(comm: Rc<RefCell<&'a mut crate::io::Comm>>, manifest: &'a Manifest) -> Self {
         Self {
             comm,
             manifest,
@@ -1467,11 +1464,11 @@ impl<'a> CommEcallHandler<'a> {
 }
 
 // Processes all events until a ticker is received, then returns
-fn wait_for_ticker(comm: &mut RefMut<'_, &mut ledger_device_sdk::io::Comm>) {
+fn wait_for_ticker(comm: &mut RefMut<'_, &mut crate::io::Comm>) {
     loop {
         let mut spi_buffer = [0u8; 256];
 
-        let event: ledger_device_sdk::io::Event<crate::ApduHeader> = loop {
+        let event: crate::io::Event<crate::ApduHeader> = loop {
             // Signal end of command stream from SE to MCU
             // And prepare reception
             if !sys_seph::is_status_sent() {
@@ -1488,19 +1485,19 @@ fn wait_for_ticker(comm: &mut RefMut<'_, &mut ledger_device_sdk::io::Comm>) {
         };
 
         match event {
-            ledger_device_sdk::io::Event::Command(_e) => {
+            crate::io::Event::Command(_e) => {
                 panic!("We don't expect to receive APDUs here.");
             }
             #[cfg(not(any(target_os = "stax", target_os = "flex")))]
-            ledger_device_sdk::io::Event::Button(_button) => {
+            crate::io::Event::Button(_button) => {
                 // nothing to do here; we handle button events using the callbacks
             }
             #[cfg(any(target_os = "stax", target_os = "flex"))]
-            ledger_device_sdk::io::Event::TouchEvent => {
+            crate::io::Event::TouchEvent => {
                 crate::println!("Touch event. Unhandled");
                 // nothing to do, we don't yet know how to handle them
             }
-            ledger_device_sdk::io::Event::Ticker => {
+            crate::io::Event::Ticker => {
                 return;
             }
         }

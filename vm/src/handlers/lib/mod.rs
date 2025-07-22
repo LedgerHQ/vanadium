@@ -6,11 +6,11 @@ pub mod outsourced_mem;
 pub mod vapp;
 
 trait SerializeToComm {
-    fn serialize_to_comm(&self, comm: &mut ledger_device_sdk::io::Comm);
+    fn serialize_to_comm(&self, comm: &mut crate::io::Comm);
 }
 
 impl<'a, T: Message<'a>> SerializeToComm for T {
-    fn serialize_to_comm(&self, comm: &mut ledger_device_sdk::io::Comm) {
+    fn serialize_to_comm(&self, comm: &mut crate::io::Comm) {
         self.serialize_with(|data| comm.append(data));
     }
 }

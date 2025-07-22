@@ -1,7 +1,8 @@
 use include_gif::include_gif;
-use ledger_device_sdk::{io::Comm, nbgl::NbglHomeAndSettings};
-
 use ledger_device_sdk::nbgl::NbglGlyph;
+use ledger_device_sdk::nbgl::NbglHomeAndSettings;
+
+use crate::io::Comm;
 
 pub fn ui_menu_main(_: &mut Comm) -> NbglHomeAndSettings {
     // Load glyph from 64x64 4bpp gif file with include_gif macro. Creates an NBGL compatible glyph.

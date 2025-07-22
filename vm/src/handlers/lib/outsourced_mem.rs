@@ -1,12 +1,12 @@
 use core::cell::RefCell;
 
+use crate::io;
 use alloc::{rc::Rc, vec, vec::Vec};
 use common::accumulator::{
     HashOutput, Hasher, InclusionProofVerifier, MerkleAccumulator, StreamingVectorAccumulator,
     UpdateProofVerifier,
 };
 use common::vm::{Page, PagedMemory};
-use ledger_device_sdk::io;
 
 use common::client_commands::{
     CommitPageContentMessage, CommitPageMessage, CommitPageProofContinuedMessage,
