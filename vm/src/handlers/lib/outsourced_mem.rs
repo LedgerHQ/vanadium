@@ -6,7 +6,7 @@ use common::accumulator::{
     UpdateProofVerifier,
 };
 use common::vm::{Page, PagedMemory};
-use ledger_device_sdk::io;
+use ledger_device_sdk::{io, random::Random};
 
 use common::client_commands::{
     CommitPageContentMessage, CommitPageMessage, CommitPageProofContinuedMessage,
@@ -123,6 +123,12 @@ where
     }
 }
 
+#[derive(Clone, Debug)]
+pub enum EvictionStrategy {
+    Random,
+    LRU, // Least Recently Used
+}
+
 pub struct OutsourcedMemory<'c> {
     comm: Rc<RefCell<&'c mut io::Comm>>,
     cached_pages: Vec<CachedPage>,
@@ -132,6 +138,7 @@ pub struct OutsourcedMemory<'c> {
     is_readonly: bool,
     section_kind: SectionKind,
     usage_counter: u32,
+    eviction_strategy: EvictionStrategy,
     #[cfg(feature = "metrics")]
     pub n_page_loads: usize,
     #[cfg(feature = "metrics")]
@@ -177,6 +184,7 @@ impl<'c> OutsourcedMemory<'c> {
         n_pages: u32,
         merkle_root: HashOutput<32>,
         aes_ctr: Rc<RefCell<AesCtr>>,
+        eviction_strategy: EvictionStrategy,
     ) -> Self {
         Self {
             comm,
@@ -187,6 +195,7 @@ impl<'c> OutsourcedMemory<'c> {
             is_readonly,
             section_kind,
             usage_counter: 0,
+            eviction_strategy,
             #[cfg(feature = "metrics")]
             n_page_loads: 0,
             #[cfg(feature = "metrics")]
@@ -553,16 +562,23 @@ impl<'c> PagedMemory for OutsourcedMemory<'c> {
             }
         }
 
-        // If no free slot, evict the least recently used page
+        // If no free slot, evict a page based on the selected strategy
         if slot.is_none() {
-            let mut oldest_usage = u32::MAX;
-            let mut evict_index = 0;
-            for i in 0..self.cached_pages.len() {
-                if self.cached_pages[i].usage_counter < oldest_usage {
-                    oldest_usage = self.cached_pages[i].usage_counter;
-                    evict_index = i;
+            let evict_index = match self.eviction_strategy {
+                EvictionStrategy::Random => u32::random() as usize % self.cached_pages.len(),
+                EvictionStrategy::LRU => {
+                    // Find the least recently used page
+                    let mut oldest_usage = u32::MAX;
+                    let mut lru_index = 0;
+                    for i in 0..self.cached_pages.len() {
+                        if self.cached_pages[i].usage_counter < oldest_usage {
+                            oldest_usage = self.cached_pages[i].usage_counter;
+                            lru_index = i;
+                        }
+                    }
+                    lru_index
                 }
-            }
+            };
 
             // Commit the page if this memory is not readonly and the page was modified
             if !self.is_readonly && self.cached_pages[evict_index].modified {
