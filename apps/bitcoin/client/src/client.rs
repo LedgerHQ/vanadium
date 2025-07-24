@@ -90,22 +90,20 @@ impl<'a> BitcoinClient {
     pub async fn exit(&mut self) -> Result<i32, BitcoinClientError> {
         let msg = postcard::to_allocvec(&Request::Exit)
             .map_err(|_| BitcoinClientError::GenericError("Failed to serialize Exit request"))?;
-        let response_raw = self.send_message(&msg).await?;
 
-        match Self::parse_response(&response_raw).await {
-            Ok(_) => Err(BitcoinClientError::InvalidResponse(
-                "Exit message shouldn't return!",
-            )),
+        match self.send_message(&msg).await {
+            Ok(_) => {
+                return Err(BitcoinClientError::GenericError(
+                    "exit shouldn't return a response",
+                ));
+            }
             Err(e) => match e {
-                BitcoinClientError::VAppExecutionError(VAppExecutionError::AppExited(status)) => {
-                    Ok(status)
-                }
-                e => {
-                    println!("Unexpected error on exit: {:?}", e);
-                    Err(BitcoinClientError::InvalidResponse(
-                        "Unexpected error on exit",
-                    ))
-                }
+                BitcoinClientError::SendMessageError(SendMessageError::VAppExecutionError(
+                    VAppExecutionError::AppExited(status),
+                )) => Ok(status),
+                _ => Err(BitcoinClientError::InvalidResponse(
+                    "Unexpected error on exit",
+                )),
             },
         }
     }
