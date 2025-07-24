@@ -59,7 +59,6 @@ enum CliCommand {
         #[clap(long)]
         psbt: String,
     },
-    Exit,
 }
 
 // Command completer
@@ -304,9 +303,6 @@ async fn handle_cli_command(
                 }
             }
         }
-        CliCommand::Exit => {
-            return Err("Exiting".into());
-        }
     }
     Ok(())
 }
@@ -341,6 +337,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 if line.trim().is_empty() {
                     continue;
                 }
+
+                if line.trim() == "exit" {
+                    println!("Exiting");
+                    break;
+                }
+
                 rl.add_history_entry(line.as_str())?;
 
                 let clap_args = match prepare_prompt_for_clap(&line) {
@@ -374,7 +376,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     rl.save_history("history.txt")?;
 
-    bitcoin_client.exit().await?;
+    let exit_status = bitcoin_client.exit().await?;
+    if exit_status != 0 {
+        println!("V-App exited with status: {}", exit_status);
+    }
 
     Ok(())
 }
