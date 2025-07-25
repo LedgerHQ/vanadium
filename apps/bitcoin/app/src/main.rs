@@ -23,7 +23,7 @@ fn handle_request(app: &mut App, request: &Request) -> Result<Response, &'static
         Request::GetExtendedPubkey { path, display } => {
             handle_get_extended_pubkey(app, path, *display)
         }
-        Request::RegisterAccount(_account) => todo!(),
+        Request::RegisterAccount { name, account } => handle_register_account(app, name, account),
         Request::GetAddress {
             name,
             account,

@@ -35,11 +35,11 @@ enum CliCommand {
     },
     RegisterAccount {
         #[clap(long)]
-        name: Option<String>,
+        name: String,
         #[clap(long)]
-        descriptor_template: Option<String>,
+        descriptor_template: String,
         #[clap(long)]
-        keys_info: Option<String>,
+        keys_info: String,
     },
     GetAddress {
         #[clap(long, default_missing_value = "true", num_args = 0..=1)]
@@ -209,6 +209,36 @@ fn parse_keys_info(keys_info: &str) -> Result<Vec<common::bip388::KeyInformation
     Ok(keys_info)
 }
 
+fn parse_wallet_policy(
+    descriptor_template: &str,
+    keys_info: &str,
+) -> Result<common::message::WalletPolicy, &'static str> {
+    let keys_info = parse_keys_info(keys_info)?;
+    let wallet_policy_msg = common::message::WalletPolicy {
+        template: descriptor_template.to_string(),
+        keys_info: keys_info
+            .iter()
+            .map(|ki| common::message::PubkeyInfo {
+                pubkey: ki.pubkey.encode().to_vec(),
+                origin: ki
+                    .origin_info
+                    .as_ref()
+                    .map(|origin_info| common::message::KeyOrigin {
+                        fingerprint: origin_info.fingerprint,
+                        path: common::message::Bip32Path(
+                            origin_info
+                                .derivation_path
+                                .iter()
+                                .map(|step| u32::from(*step))
+                                .collect(),
+                        ),
+                    }),
+            })
+            .collect(),
+    };
+    Ok(wallet_policy_msg)
+}
+
 async fn handle_cli_command(
     bitcoin_client: &mut BitcoinClient,
     cli: &Cli,
@@ -235,7 +265,16 @@ async fn handle_cli_command(
                 "Executing register_account for {:?} account: {:?} {:?}",
                 name, descriptor_template, keys_info
             );
-            println!("(Not implemented)");
+
+            let wallet_policy_msg = parse_wallet_policy(descriptor_template, keys_info)?;
+            let account = common::message::Account::WalletPolicy(wallet_policy_msg);
+            let (hmac, account_id) = bitcoin_client.register_account(name, &account).await?;
+            println!(
+                "Account {} registered.\nAccount ID: {}\nHMAC: {}",
+                name,
+                hex::encode(account_id),
+                hex::encode(hmac)
+            );
         }
         CliCommand::GetAddress {
             display,
@@ -245,35 +284,10 @@ async fn handle_cli_command(
             descriptor_template,
             keys_info,
         } => {
-            // parse keys_info in the format "key_info1, key_info2, ..."
-            // TODO: conversion should either be done using the structs from common::bip388 directly,
-            //       or implementing From/TryFrom for the various types involved
-
-            let keys_info = parse_keys_info(&keys_info)?;
+            let wallet_policy_msg = parse_wallet_policy(descriptor_template, keys_info)?;
             let wallet_policy_coords = common::message::WalletPolicyCoordinates {
                 is_change: *is_change,
                 address_index: *address_index,
-            };
-            let wallet_policy_msg = common::message::WalletPolicy {
-                template: descriptor_template.to_string(),
-                keys_info: keys_info
-                    .iter()
-                    .map(|ki| common::message::PubkeyInfo {
-                        pubkey: ki.pubkey.encode().to_vec(),
-                        origin: ki.origin_info.as_ref().map(|origin_info| {
-                            common::message::KeyOrigin {
-                                fingerprint: origin_info.fingerprint,
-                                path: common::message::Bip32Path(
-                                    origin_info
-                                        .derivation_path
-                                        .iter()
-                                        .map(|step| u32::from(*step))
-                                        .collect(),
-                                ),
-                            }
-                        }),
-                    })
-                    .collect(),
             };
 
             let addr = bitcoin_client
@@ -331,6 +345,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let _ = rl.load_history("history.txt");
 
+    let mut with_error = false;
     loop {
         match rl.readline("₿ ") {
             Ok(line) => {
@@ -357,6 +372,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     Ok(cli) => {
                         if let Err(e) = handle_cli_command(&mut bitcoin_client, &cli).await {
                             println!("Error: {}", e);
+                            with_error = true;
+                            break;
                         }
                     }
                     Err(e) => println!("Invalid command: {}", e),
@@ -368,17 +385,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 break;
             }
             Err(err) => {
-                println!("Error: {:?}", err);
-                break;
+                println!("Error reading the line: {:?}", err);
+                continue;
             }
         }
     }
 
     rl.save_history("history.txt")?;
 
-    let exit_status = bitcoin_client.exit().await?;
-    if exit_status != 0 {
-        println!("V-App exited with status: {}", exit_status);
+    if !with_error {
+        // close the client gracefully
+        let exit_status = bitcoin_client.exit().await?;
+        if exit_status != 0 {
+            println!("V-App exited with status: {}", exit_status);
+        }
     }
 
     Ok(())
