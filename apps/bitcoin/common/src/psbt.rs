@@ -1,5 +1,5 @@
 use crate::{
-    account::{Account, AccountCoordinates, WalletPolicy, WalletPolicyCoordinates},
+    account::{AccountCoordinates, WalletPolicy, WalletPolicyCoordinates},
     bip388::{KeyOrigin, KeyPlaceholder},
 };
 

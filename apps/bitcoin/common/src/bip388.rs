@@ -25,7 +25,12 @@ use nom::{
     IResult,
 };
 
-use bitcoin::bip32::{ChildNumber, Xpub};
+use bitcoin::{
+    bip32::{ChildNumber, Xpub},
+    consensus::{encode, Decodable, Encodable},
+    io::Read,
+    VarInt,
+};
 
 const HARDENED_INDEX: u32 = 0x80000000u32;
 const MAX_OLDER_AFTER: u32 = 2147483647; // maximum allowed in older/after
@@ -283,7 +288,7 @@ impl core::fmt::Display for KeyOrigin {
             .map(|x| x.to_string())
             .collect::<Vec<String>>()
             .join("/");
-        write!(f, "[{:08x}]{}/", self.fingerprint, path)
+        write!(f, "{:08x}/{}", self.fingerprint, path)
     }
 }
 
@@ -833,44 +838,105 @@ impl WalletPolicy {
         &self.descriptor_template_raw
     }
 
-    // TODO: this will probably move elsewhere
-    // pub fn serialize(&self) -> Vec<u8> {
-    //     let mut res: Vec<u8> = vec![2];
-    //     res.extend(encode::serialize(&VarInt(
-    //         self.descriptor_template_raw.as_bytes().len() as u64,
-    //     )));
+    pub fn serialize(&self) -> Vec<u8> {
+        let mut result = Vec::<u8>::new();
 
-    //     let desc_tmp_hash = Sha256::hash(&self.descriptor_template_raw.as_bytes());
+        let len = VarInt(self.descriptor_template_raw().len() as u64);
+        len.consensus_encode(&mut result).unwrap();
+        result.extend_from_slice(self.descriptor_template_raw().as_bytes());
 
-    //     res.extend_from_slice(&desc_tmp_hash);
+        // number of keys
+        VarInt(self.key_information.len() as u64)
+            .consensus_encode(&mut result)
+            .unwrap();
+        for key_info in &self.key_information {
+            // serialize key information
+            match &key_info.origin_info {
+                None => {
+                    result.push(0);
+                }
+                Some(k) => {
+                    result.push(1);
+                    result.extend_from_slice(&k.fingerprint.to_be_bytes());
+                    VarInt(k.derivation_path.len() as u64)
+                        .consensus_encode(&mut result)
+                        .unwrap();
+                    for step in k.derivation_path.iter() {
+                        result.extend_from_slice(&u32::from(*step).to_le_bytes());
+                    }
+                }
+            }
+            // serialize pubkey
+            result.extend_from_slice(&key_info.pubkey.encode());
+        }
 
-    //     res.extend(encode::serialize(
-    //         &VarInt(self.key_information.len() as u64),
-    //     ));
+        result
+    }
 
-    //     res.extend_from_slice(
-    //         MerkleTree::new(
-    //             self.key_information
-    //                 .iter()
-    //                 .map(|key| {
-    //                     let mut sha256hasher = Sha256::new();
-    //                     sha256hasher.update(&[0x00]);
-    //                     sha256hasher.update(&key.pubkey.encode());
-    //                     let mut res = [0u8; 32];
-    //                     sha256hasher.digest(&mut res);
-    //                     res
-    //                 })
-    //                 .collect(),
-    //         )
-    //         .root_hash(),
-    //     );
+    pub fn deserialize<R: Read + ?Sized>(r: &mut R) -> Result<Self, encode::Error> {
+        // Deserialize descriptor template.
+        let VarInt(desc_len) = VarInt::consensus_decode(r)?;
+        let mut desc_bytes = vec![0u8; desc_len as usize];
+        r.read_exact(&mut desc_bytes)?;
+        let descriptor_template_str = String::from_utf8(desc_bytes)
+            .map_err(|_| encode::Error::ParseFailed("Invalid UTF-8 in descriptor"))?;
 
-    //     res
-    // }
+        // Deserialize key_information vector.
+        let VarInt(key_count) = VarInt::consensus_decode(r)?;
+        let mut key_information = Vec::with_capacity(key_count as usize);
+        for _ in 0..key_count {
+            let mut flag = [0u8; 1];
+            r.read_exact(&mut flag)?;
+            let origin_info = match flag[0] {
+                0 => None,
+                1 => {
+                    let mut fp_buf = [0; 4];
+                    r.read_exact(&mut fp_buf)?;
+                    let fingerprint = u32::from_be_bytes(fp_buf);
+                    let VarInt(dp_len) = VarInt::consensus_decode(r)?;
+                    let mut derivation_path = Vec::with_capacity(dp_len as usize);
+                    for _ in 0..dp_len {
+                        let mut step_bytes = [0u8; 4];
+                        r.read_exact(&mut step_bytes)?;
+                        derivation_path.push(ChildNumber::from(u32::from_le_bytes(step_bytes)));
+                    }
+                    Some(KeyOrigin {
+                        fingerprint,
+                        derivation_path,
+                    })
+                }
+                _ => {
+                    return Err(encode::Error::ParseFailed("Invalid key information flag"));
+                }
+            };
+            // Deserialize pubkey.
+            let mut xpub_bytes = vec![0u8; 78];
+            r.read_exact(&mut xpub_bytes)?;
 
-    // pub fn id(&self) -> [u8; 32] {
-    //     Sha256::hash(&self.serialize())
-    // }
+            key_information.push(KeyInformation {
+                origin_info,
+                pubkey: Xpub::decode(&xpub_bytes)
+                    .map_err(|_| encode::Error::ParseFailed("Invalid xpub"))?,
+            });
+        }
+
+        // test that the stream is indeed exhausted
+        let mut buf = [0u8; 1];
+        match r.read(&mut buf)? {
+            0 => {}
+            _ => {
+                return Err(encode::Error::ParseFailed(
+                    "Extra data after deserializing WalletPolicy",
+                ));
+            }
+        }
+
+        Ok(
+            WalletPolicy::new(&descriptor_template_str, key_information).map_err(|_| {
+                encode::Error::ParseFailed("Invalid descriptor template or key information")
+            })?,
+        )
+    }
 
     pub fn get_segwit_version(&self) -> Result<SegwitVersion, &'static str> {
         match &self.descriptor_template {

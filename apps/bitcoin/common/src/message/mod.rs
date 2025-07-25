@@ -70,7 +70,10 @@ pub enum Request {
         display: bool,
         path: Bip32Path,
     },
-    RegisterAccount(Account),
+    RegisterAccount {
+        name: String,
+        account: Account,
+    },
     GetAddress {
         display: bool,
         name: Option<String>,
@@ -98,7 +101,10 @@ pub enum Response {
     Version(String),
     MasterFingerprint(u32),
     ExtendedPubkey(Vec<u8>),
-    AccountRegistered { account_id: Vec<u8>, hmac: Vec<u8> },
+    AccountRegistered {
+        account_id: [u8; 32],
+        hmac: [u8; 32],
+    },
     Address(String),
     PsbtSigned(Vec<PartialSignature>),
     Error(String),
