@@ -148,6 +148,26 @@ impl<'a> BitcoinClient {
         }
     }
 
+    pub async fn register_account(
+        &mut self,
+        name: &str,
+        account: &message::Account,
+    ) -> Result<([u8; 32], [u8; 32]), BitcoinClientError> {
+        let msg = postcard::to_allocvec(&Request::RegisterAccount {
+            name: name.into(),
+            account: account.clone(),
+        })
+        .map_err(|_| {
+            BitcoinClientError::GenericError("Failed to serialize RegisterAccount request")
+        })?;
+
+        let response_raw = self.send_message(&msg).await?;
+        match Self::parse_response(&response_raw).await? {
+            Response::AccountRegistered { account_id, hmac } => Ok((account_id, hmac)),
+            _ => Err(BitcoinClientError::InvalidResponse("Invalid response")),
+        }
+    }
+
     pub async fn get_address(
         &mut self,
         account: &message::Account,
