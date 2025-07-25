@@ -288,7 +288,7 @@ impl core::fmt::Display for KeyOrigin {
             .map(|x| x.to_string())
             .collect::<Vec<String>>()
             .join("/");
-        write!(f, "[{:08x}]{}/", self.fingerprint, path)
+        write!(f, "{:08x}/{}", self.fingerprint, path)
     }
 }
 
