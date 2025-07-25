@@ -25,7 +25,10 @@ use nom::{
     IResult,
 };
 
-use bitcoin::bip32::{ChildNumber, Xpub};
+use bitcoin::{
+    bip32::{ChildNumber, Xpub},
+    consensus::Encodable,
+};
 
 const HARDENED_INDEX: u32 = 0x80000000u32;
 const MAX_OLDER_AFTER: u32 = 2147483647; // maximum allowed in older/after
@@ -833,44 +836,60 @@ impl WalletPolicy {
         &self.descriptor_template_raw
     }
 
-    // TODO: this will probably move elsewhere
-    // pub fn serialize(&self) -> Vec<u8> {
-    //     let mut res: Vec<u8> = vec![2];
-    //     res.extend(encode::serialize(&VarInt(
-    //         self.descriptor_template_raw.as_bytes().len() as u64,
-    //     )));
+    pub fn serialize(&self) -> Vec<u8> {
+        fn push_varint(vec: &mut Vec<u8>, value: u64) {
+            bitcoin::VarInt(value)
+                .consensus_encode(vec)
+                .expect("Cannot fail");
+        }
 
-    //     let desc_tmp_hash = Sha256::hash(&self.descriptor_template_raw.as_bytes());
+        // Estimate an upper bound for the serialized length:
+        // - 1 byte for the version
+        // - up to 3 bytes for the length of the descriptor template (assuming it is not longer than 65535 bytes,
+        //   since the length is encoded as a Varint)
+        // - 1 byte for the length of the number of key (unlikely to be more than 252!)
+        // - for each key:
+        //   - 1 byte for the flag indicating whether key origin info is present
+        //   - If the key origin info is present:
+        //     - 4 bytes for the fingerprint
+        //     - 1 byte for the number of derivation steps (unlikely to be more than 252, so usually 1 byte is enough!)
+        //     - 4 bytes for each derivation step
+        let mut serialized_length = 1 + 3 + 1 + self.descriptor_template_raw.as_bytes().len();
+        // for each key, 1 byte to label whether key origin is present, and fixed 78 bytes for the xpub
+        for key in &self.key_information {
+            // for each key with key origin, 4 bytes for fingerprint and 4 bytes for each derivation path step
+            if let Some(origin_info) = &key.origin_info {
+                serialized_length += 4 + 1 + 4 * origin_info.derivation_path.len();
+            }
+        }
+        let mut res = Vec::with_capacity(serialized_length);
+        res.push(0x01); // version byte
+        push_varint(
+            &mut res,
+            self.descriptor_template_raw.as_bytes().len() as u64,
+        );
 
-    //     res.extend_from_slice(&desc_tmp_hash);
+        res.extend_from_slice(&self.descriptor_template_raw.as_bytes());
 
-    //     res.extend(encode::serialize(
-    //         &VarInt(self.key_information.len() as u64),
-    //     ));
+        push_varint(&mut res, self.key_information.len() as u64);
 
-    //     res.extend_from_slice(
-    //         MerkleTree::new(
-    //             self.key_information
-    //                 .iter()
-    //                 .map(|key| {
-    //                     let mut sha256hasher = Sha256::new();
-    //                     sha256hasher.update(&[0x00]);
-    //                     sha256hasher.update(&key.pubkey.encode());
-    //                     let mut res = [0u8; 32];
-    //                     sha256hasher.digest(&mut res);
-    //                     res
-    //                 })
-    //                 .collect(),
-    //         )
-    //         .root_hash(),
-    //     );
+        for key in &self.key_information {
+            // 1 byte to indicate whether key origin info is present
+            if let Some(origin_info) = &key.origin_info {
+                res.push(0x01); // key origin info is present
+                res.extend_from_slice(&origin_info.fingerprint.to_be_bytes());
+                push_varint(&mut res, origin_info.derivation_path.len() as u64);
+                for step in &origin_info.derivation_path {
+                    res.extend_from_slice(&u32::from(*step).to_be_bytes());
+                }
+            } else {
+                res.push(0x00); // key origin info is not present
+            }
+            res.extend_from_slice(&key.pubkey.encode());
+        }
 
-    //     res
-    // }
-
-    // pub fn id(&self) -> [u8; 32] {
-    //     Sha256::hash(&self.serialize())
-    // }
+        res
+    }
 
     pub fn get_segwit_version(&self) -> Result<SegwitVersion, &'static str> {
         match &self.descriptor_template {
