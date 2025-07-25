@@ -5,6 +5,8 @@ use bitcoin::consensus::{encode, Decodable, Encodable};
 use bitcoin::io::Read;
 use bitcoin::VarInt;
 
+use sdk::hash::{Hasher, Sha256};
+
 use crate::bip388::KeyOrigin;
 // re-export, as we use this both as a message and as an internal data type
 pub use crate::message::WalletPolicyCoordinates;
@@ -40,6 +42,10 @@ impl AccountCoordinates for WalletPolicyCoordinates {
     }
 }
 
+const ACCOUNT_MAGIC: [u8; 14] = [
+    13, b'N', b'A', b'M', b'E', b'D', b'_', b'A', b'C', b'C', b'O', b'U', b'N', b'T',
+];
+
 /// A generic trait for "accounts", parameterized by the type of coordinates.
 ///
 /// Each implementer will define how to turn its coordinates into an address.
@@ -47,15 +53,46 @@ impl AccountCoordinates for WalletPolicyCoordinates {
 pub trait Account: Sized {
     type Coordinates: AccountCoordinates;
 
-    fn serialize(&self) -> Vec<u8>;
+    /// Each implementation of Account should define a different version number
+    const VERSION: u32;
+
+    fn serialize(&self) -> Vec<u8>; // TODO: avoid Vec
     fn deserialize<R: Read + ?Sized>(bytes: &mut R) -> Result<Self, encode::Error>;
 
     fn get_address(&self, coords: &Self::Coordinates) -> Result<String, &'static str>;
+
+    /// Returns a unique identifier for the named account.
+    ///
+    /// The identifier is the hash of:
+    /// - the magic constant `ACCOUNT_MAGIC`
+    /// - the version of the account
+    /// - the length of the name, encoded as a bitcoin-style VarInt (if longer than 252 bytes)
+    /// - the name itself
+    /// - the serialization of the account.
+    fn get_id(&self, name: &str) -> [u8; 32] {
+        let mut hasher = Sha256::new();
+        hasher.update(&ACCOUNT_MAGIC);
+        hasher.update(&Self::VERSION.to_be_bytes());
+
+        let mut name_len_bytes = Vec::with_capacity(1);
+        VarInt(name.len() as u64)
+            .consensus_encode(&mut name_len_bytes)
+            .expect("Cannot fail");
+        hasher.update(&name_len_bytes);
+
+        hasher.update(name.as_bytes());
+
+        hasher.update(&self.serialize());
+        hasher.finalize().into()
+    }
 }
 
 // Implement the generic trait for `WalletPolicy` with its corresponding coordinates.
 impl Account for WalletPolicy {
     type Coordinates = WalletPolicyCoordinates;
+
+    const VERSION: u32 = 1;
+
     fn serialize(&self) -> Vec<u8> {
         let mut result = Vec::<u8>::new();
 
