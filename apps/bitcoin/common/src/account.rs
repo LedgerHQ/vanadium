@@ -1,13 +1,11 @@
 use alloc::string::{String, ToString};
-use alloc::{vec, vec::Vec};
-use bitcoin::bip32::{ChildNumber, Xpub};
+use alloc::vec::Vec;
 use bitcoin::consensus::{encode, Decodable, Encodable};
 use bitcoin::io::Read;
 use bitcoin::VarInt;
 
 use sdk::hash::{Hasher, Sha256};
 
-use crate::bip388::KeyOrigin;
 // re-export, as we use this both as a message and as an internal data type
 pub use crate::message::WalletPolicyCoordinates;
 
@@ -94,91 +92,18 @@ impl Account for WalletPolicy {
     const VERSION: u32 = 1;
 
     fn serialize(&self) -> Vec<u8> {
-        let mut result = Vec::<u8>::new();
-
-        let len = VarInt(self.descriptor_template_raw().len() as u64);
-        len.consensus_encode(&mut result).unwrap();
-        result.extend_from_slice(self.descriptor_template_raw().as_bytes());
-
-        // number of keys
-        VarInt(self.key_information.len() as u64)
-            .consensus_encode(&mut result)
-            .unwrap();
-        for key_info in &self.key_information {
-            // serialize key information
-            match &key_info.origin_info {
-                None => {
-                    result.push(0);
-                }
-                Some(k) => {
-                    result.push(1);
-                    result.extend_from_slice(&k.fingerprint.to_be_bytes());
-                    result.push(k.derivation_path.len() as u8);
-                    for step in k.derivation_path.iter() {
-                        result.extend_from_slice(&u32::from(*step).to_le_bytes());
-                    }
-                }
-            }
-            // serialize pubkey
-            result.extend_from_slice(&key_info.pubkey.encode());
-        }
-
-        result
+        let mut res = Vec::new();
+        res.extend_from_slice(&Self::VERSION.to_le_bytes());
+        res.extend(WalletPolicy::serialize(self));
+        res
     }
 
     fn deserialize<R: Read + ?Sized>(r: &mut R) -> Result<Self, encode::Error> {
-        // Deserialize descriptor template.
-        let VarInt(desc_len) = VarInt::consensus_decode(r)?;
-        let mut desc_bytes = vec![0u8; desc_len as usize];
-        r.read_exact(&mut desc_bytes)?;
-        let descriptor_template_str = String::from_utf8(desc_bytes)
-            .map_err(|_| encode::Error::ParseFailed("Invalid UTF-8 in descriptor"))?;
-
-        // Deserialize key_information vector.
-        let VarInt(key_count) = VarInt::consensus_decode(r)?;
-        let mut key_information = Vec::with_capacity(key_count as usize);
-        for _ in 0..key_count {
-            let mut flag = [0u8; 1];
-            r.read_exact(&mut flag)?;
-            let origin_info = match flag[0] {
-                0 => None,
-                1 => {
-                    let mut fp_buf = [0; 4];
-                    r.read_exact(&mut fp_buf)?;
-                    let fingerprint = u32::from_be_bytes(fp_buf);
-                    let mut len_buf = [0u8; 1];
-                    r.read_exact(&mut len_buf)?;
-                    let dp_len = len_buf[0] as usize;
-                    let mut derivation_path = Vec::with_capacity(dp_len);
-                    for _ in 0..dp_len {
-                        let mut step_bytes = [0u8; 4];
-                        r.read_exact(&mut step_bytes)?;
-                        derivation_path.push(ChildNumber::from(u32::from_le_bytes(step_bytes)));
-                    }
-                    Some(KeyOrigin {
-                        fingerprint,
-                        derivation_path,
-                    })
-                }
-                _ => {
-                    return Err(encode::Error::ParseFailed("Invalid key information flag"));
-                }
-            };
-            // Deserialize pubkey.
-            let mut xpub_bytes = vec![0u8; 78];
-            r.read_exact(&mut xpub_bytes)?;
-
-            key_information.push(KeyInformation {
-                origin_info,
-                pubkey: Xpub::decode(&xpub_bytes)
-                    .map_err(|_| encode::Error::ParseFailed("Invalid xpub"))?,
-            });
+        let version = u32::consensus_decode(r)?;
+        if version != Self::VERSION {
+            return Err(encode::Error::ParseFailed("Unsupported version"));
         }
-        Ok(
-            WalletPolicy::new(&descriptor_template_str, key_information).map_err(|_| {
-                encode::Error::ParseFailed("Invalid descriptor template or key information")
-            })?,
-        )
+        WalletPolicy::deserialize(r)
     }
 
     fn get_address(&self, coords: &WalletPolicyCoordinates) -> Result<String, &'static str> {

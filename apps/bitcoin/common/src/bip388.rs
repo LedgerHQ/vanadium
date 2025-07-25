@@ -27,7 +27,9 @@ use nom::{
 
 use bitcoin::{
     bip32::{ChildNumber, Xpub},
-    consensus::Encodable,
+    consensus::{encode, Decodable, Encodable},
+    io::Read,
+    VarInt,
 };
 
 const HARDENED_INDEX: u32 = 0x80000000u32;
@@ -837,58 +839,103 @@ impl WalletPolicy {
     }
 
     pub fn serialize(&self) -> Vec<u8> {
-        fn push_varint(vec: &mut Vec<u8>, value: u64) {
-            bitcoin::VarInt(value)
-                .consensus_encode(vec)
-                .expect("Cannot fail");
-        }
+        let mut result = Vec::<u8>::new();
 
-        // Estimate an upper bound for the serialized length:
-        // - 1 byte for the version
-        // - up to 3 bytes for the length of the descriptor template (assuming it is not longer than 65535 bytes,
-        //   since the length is encoded as a Varint)
-        // - 1 byte for the length of the number of key (unlikely to be more than 252!)
-        // - for each key:
-        //   - 1 byte for the flag indicating whether key origin info is present
-        //   - If the key origin info is present:
-        //     - 4 bytes for the fingerprint
-        //     - 1 byte for the number of derivation steps (unlikely to be more than 252, so usually 1 byte is enough!)
-        //     - 4 bytes for each derivation step
-        let mut serialized_length = 1 + 3 + 1 + self.descriptor_template_raw.as_bytes().len();
-        // for each key, 1 byte to label whether key origin is present, and fixed 78 bytes for the xpub
-        for key in &self.key_information {
-            // for each key with key origin, 4 bytes for fingerprint and 4 bytes for each derivation path step
-            if let Some(origin_info) = &key.origin_info {
-                serialized_length += 4 + 1 + 4 * origin_info.derivation_path.len();
-            }
-        }
-        let mut res = Vec::with_capacity(serialized_length);
-        res.push(0x01); // version byte
-        push_varint(
-            &mut res,
-            self.descriptor_template_raw.as_bytes().len() as u64,
-        );
+        let len = VarInt(self.descriptor_template_raw().len() as u64);
+        len.consensus_encode(&mut result).unwrap();
+        result.extend_from_slice(self.descriptor_template_raw().as_bytes());
 
-        res.extend_from_slice(&self.descriptor_template_raw.as_bytes());
-
-        push_varint(&mut res, self.key_information.len() as u64);
-
-        for key in &self.key_information {
-            // 1 byte to indicate whether key origin info is present
-            if let Some(origin_info) = &key.origin_info {
-                res.push(0x01); // key origin info is present
-                res.extend_from_slice(&origin_info.fingerprint.to_be_bytes());
-                push_varint(&mut res, origin_info.derivation_path.len() as u64);
-                for step in &origin_info.derivation_path {
-                    res.extend_from_slice(&u32::from(*step).to_be_bytes());
+        // number of keys
+        VarInt(self.key_information.len() as u64)
+            .consensus_encode(&mut result)
+            .unwrap();
+        for key_info in &self.key_information {
+            // serialize key information
+            match &key_info.origin_info {
+                None => {
+                    result.push(0);
                 }
-            } else {
-                res.push(0x00); // key origin info is not present
+                Some(k) => {
+                    result.push(1);
+                    result.extend_from_slice(&k.fingerprint.to_be_bytes());
+                    VarInt(k.derivation_path.len() as u64)
+                        .consensus_encode(&mut result)
+                        .unwrap();
+                    for step in k.derivation_path.iter() {
+                        result.extend_from_slice(&u32::from(*step).to_le_bytes());
+                    }
+                }
             }
-            res.extend_from_slice(&key.pubkey.encode());
+            // serialize pubkey
+            result.extend_from_slice(&key_info.pubkey.encode());
         }
 
-        res
+        result
+    }
+
+    pub fn deserialize<R: Read + ?Sized>(r: &mut R) -> Result<Self, encode::Error> {
+        // Deserialize descriptor template.
+        let VarInt(desc_len) = VarInt::consensus_decode(r)?;
+        let mut desc_bytes = vec![0u8; desc_len as usize];
+        r.read_exact(&mut desc_bytes)?;
+        let descriptor_template_str = String::from_utf8(desc_bytes)
+            .map_err(|_| encode::Error::ParseFailed("Invalid UTF-8 in descriptor"))?;
+
+        // Deserialize key_information vector.
+        let VarInt(key_count) = VarInt::consensus_decode(r)?;
+        let mut key_information = Vec::with_capacity(key_count as usize);
+        for _ in 0..key_count {
+            let mut flag = [0u8; 1];
+            r.read_exact(&mut flag)?;
+            let origin_info = match flag[0] {
+                0 => None,
+                1 => {
+                    let mut fp_buf = [0; 4];
+                    r.read_exact(&mut fp_buf)?;
+                    let fingerprint = u32::from_be_bytes(fp_buf);
+                    let VarInt(dp_len) = VarInt::consensus_decode(r)?;
+                    let mut derivation_path = Vec::with_capacity(dp_len as usize);
+                    for _ in 0..dp_len {
+                        let mut step_bytes = [0u8; 4];
+                        r.read_exact(&mut step_bytes)?;
+                        derivation_path.push(ChildNumber::from(u32::from_le_bytes(step_bytes)));
+                    }
+                    Some(KeyOrigin {
+                        fingerprint,
+                        derivation_path,
+                    })
+                }
+                _ => {
+                    return Err(encode::Error::ParseFailed("Invalid key information flag"));
+                }
+            };
+            // Deserialize pubkey.
+            let mut xpub_bytes = vec![0u8; 78];
+            r.read_exact(&mut xpub_bytes)?;
+
+            key_information.push(KeyInformation {
+                origin_info,
+                pubkey: Xpub::decode(&xpub_bytes)
+                    .map_err(|_| encode::Error::ParseFailed("Invalid xpub"))?,
+            });
+        }
+
+        // test that the stream is indeed exhausted
+        let mut buf = [0u8; 1];
+        match r.read(&mut buf)? {
+            0 => {}
+            _ => {
+                return Err(encode::Error::ParseFailed(
+                    "Extra data after deserializing WalletPolicy",
+                ));
+            }
+        }
+
+        Ok(
+            WalletPolicy::new(&descriptor_template_str, key_information).map_err(|_| {
+                encode::Error::ParseFailed("Invalid descriptor template or key information")
+            })?,
+        )
     }
 
     pub fn get_segwit_version(&self) -> Result<SegwitVersion, &'static str> {
