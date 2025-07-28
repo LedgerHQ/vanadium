@@ -1,3 +1,4 @@
+use std::env;
 use std::process::{Child, Command};
 use std::sync::Arc;
 use std::thread::sleep;
@@ -6,40 +7,63 @@ use vnd_sadik_client::SadikClient;
 
 use sdk::{
     transport::{Transport, TransportTcp, TransportWrapper},
-    vanadium_client::VanadiumAppClient,
+    vanadium_client::{
+        client_utils::{create_default_client, ClientType},
+        VanadiumAppClient,
+    },
 };
 
 pub struct TestSetup {
     pub client: SadikClient,
-    child: Child,
+    child: Option<Child>,
 }
 
 impl TestSetup {
     async fn new() -> Self {
+        let args: Vec<String> = env::args().collect();
+        let has_hid = args.contains(&"--hid".to_string());
+
         let vanadium_binary = std::env::var("VANADIUM_BINARY")
             .unwrap_or_else(|_| "../../../vm/target/flex/release/app-vanadium".to_string());
         let vapp_binary = std::env::var("VAPP_BINARY").unwrap_or_else(|_| {
             "../app/target/riscv32imc-unknown-none-elf/release/vnd-sadik".to_string()
         });
 
-        let (child, transport) = spawn_speculos_and_transport(&vanadium_binary).await;
+        let args: Vec<String> = env::args().collect();
+        let has_hid = args.contains(&"--hid".to_string());
+        if has_hid {
+            // run the tests against the real device
+            let vanadium_client = create_default_client("vnd-sadik", ClientType::Hid)
+                .await
+                .expect("Failed to create HID client");
+            TestSetup {
+                client: SadikClient::new(vanadium_client),
+                child: None,
+            }
+        } else {
+            let (child, transport) = spawn_speculos_and_transport(&vanadium_binary).await;
 
-        let (vanadium_client, _) = VanadiumAppClient::new(&vapp_binary, transport, None)
-            .await
-            .expect("Failed to create client");
+            let (vanadium_client, _) = VanadiumAppClient::new(&vapp_binary, transport, None)
+                .await
+                .expect("Failed to create client");
 
-        let client = SadikClient::new(Box::new(vanadium_client));
+            let client = SadikClient::new(Box::new(vanadium_client));
 
-        TestSetup { client, child }
+            TestSetup {
+                client,
+                child: Some(child),
+            }
+        }
     }
 }
 
 impl Drop for TestSetup {
     fn drop(&mut self) {
-        self.child.kill().expect("Failed to kill speculos process");
-        self.child
-            .wait()
-            .expect("Failed to wait on speculos process");
+        if let Some(ref mut child) = &mut self.child {
+            eprintln!("Killing speculos process...");
+            child.kill().expect("Failed to kill speculos process");
+            child.wait().expect("Failed to wait on speculos process");
+        }
     }
 }
 
