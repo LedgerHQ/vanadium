@@ -20,6 +20,7 @@ vanadium-ecalls = { path = "../ecalls" }
 [target.'cfg(not(target_arch = "riscv32"))'.dependencies]
 bip32 = "0.5.2"
 hex = "0.4.3"
+hmac = "0.12.1"
 k256 = { version = "0.13.4", default-features = false, features = ["alloc", "ecdsa-core", "schnorr"] }
 lazy_static = "1.5.0"
 num-bigint = "0.4.6"

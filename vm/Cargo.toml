@@ -46,6 +46,7 @@ run_tests = []  # Run the test suite instead of the app
 curve = ["secp256k1"]
 flags = "0x10"  # DERIVE_MASTER
 path = [""]
+# TODO: add "VANADIUM" among the allowed SLIP21 paths once cargo-ledger supports it
 name = "Vanadium"
 
 [package.metadata.ledger.nanox]

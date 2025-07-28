@@ -9,6 +9,9 @@ use std::{
     time::Duration,
 };
 
+use hmac::{Hmac, Mac};
+use sha2::Sha512;
+
 use common::ecall_constants::{CurveKind, MAX_BIGNUMBER_SIZE};
 use common::ux::{Deserializable, EventCode, EventData};
 
@@ -25,6 +28,11 @@ use k256::{
 
 use num_bigint::BigUint;
 use num_traits::Zero;
+
+// default seed used in Speculos, corresponding to the mnemonic "glory promote mansion idle axis finger extra february uncover one trip resource lawn turtle enact monster seven myth punch hobby comfort wild raise skin"
+const DEFAULT_SEED: [u8; 64] = hex!("b11997faff420a331bb4a4ffdc8bdc8ba7c01732a99a30d83dbbebd469666c84b47d09d3f5f472b3b9384ac634beba2a440ba36ec7661144132f35e206873564");
+
+const SLIP21_MAGIC: &'static str = "Symmetric key seed";
 
 const TICKER_MS: u64 = 100;
 
@@ -570,6 +578,57 @@ pub fn get_master_fingerprint(curve: u32) -> u32 {
     u32::from_be_bytes(get_master_bip32_key().public_key().fingerprint())
 }
 
+pub fn derive_slip21_node(labels: *const u8, labels_len: usize, out: *mut u8) -> u32 {
+    if out.is_null() {
+        return 0;
+    }
+
+    // Vanadium uses a custom seed for its SLIP-21 hierarchy, for compatibility with Bolos
+    // The seed is derived from a master secret using the standard SLIP-21 derivation.
+    let custom_slip21_seed = slip21_custom_get_seed();
+
+    let mut current_node = slip21_get_master_node(&custom_slip21_seed);
+
+    if labels_len > 256 {
+        return 0;
+    }
+
+    let labels: &[u8] = unsafe { std::slice::from_raw_parts(labels, labels_len) };
+
+    // parse the `labels` buffer as the concatenation of a list of labels, each prefixed by its length
+    // The length of each label is between 0 and 252 bytes, and the total length of the labels buffer must be
+    // at most 256 bytes.
+
+    let mut offset = 0;
+    while offset < labels_len {
+        if offset >= labels_len {
+            return 0; // Buffer underrun
+        }
+
+        let label_len = labels[offset] as usize;
+        offset += 1;
+
+        if label_len > 252 {
+            return 0; // Label too long
+        }
+
+        if offset + label_len > labels_len {
+            return 0; // Buffer overrun
+        }
+
+        let label = &labels[offset..offset + label_len];
+        offset += label_len;
+
+        current_node = slip21_derive_child_node(&current_node, label);
+    }
+
+    unsafe {
+        std::ptr::copy_nonoverlapping(current_node.as_ptr(), out, current_node.len());
+    }
+
+    1
+}
+
 pub fn ecfp_add_point(curve: u32, r: *mut u8, p: *const u8, q: *const u8) -> u32 {
     if curve != CurveKind::Secp256k1 as u32 {
         panic!("Unsupported curve");
@@ -822,9 +881,64 @@ pub fn schnorr_verify(
     }
 }
 
-// default seed used in Speculos, corrseponding to the mnemonic "glory promote mansion idle axis finger extra february uncover one trip resource lawn turtle enact monster seven myth punch hobby comfort wild raise skin"
-const DEFAULT_SEED: [u8; 64] = hex!("b11997faff420a331bb4a4ffdc8bdc8ba7c01732a99a30d83dbbebd469666c84b47d09d3f5f472b3b9384ac634beba2a440ba36ec7661144132f35e206873564");
-
 fn get_master_bip32_key() -> XPrv {
     XPrv::new(&DEFAULT_SEED).expect("Failed to create master key from seed")
+}
+
+// custom master seed used in Vanadium's version of SLIP-21 for compatibility with Bolos
+const SEED_MASTER_PATH: &'static str = "VANADIUM";
+fn slip21_custom_get_seed() -> [u8; 32] {
+    let m = slip21_get_master_node(&DEFAULT_SEED);
+    let c = slip21_derive_child_node(&m, SEED_MASTER_PATH.as_bytes());
+    let mut seed = [0u8; 32];
+    seed.copy_from_slice(&c[32..64]);
+    seed
+}
+
+fn slip21_get_master_node(seed: &[u8]) -> [u8; 64] {
+    // compute HMAC-SHA512(key = SLIP21_MAGIC, msg = seed)
+    let mut mac = Hmac::<Sha512>::new_from_slice(SLIP21_MAGIC.as_bytes())
+        .expect("HMAC can take key of any size");
+    mac.update(seed);
+    mac.finalize().into_bytes().into()
+}
+
+fn slip21_derive_child_node(cur_node: &[u8; 64], label: &[u8]) -> [u8; 64] {
+    // compute HMAC-SHA512(key = cur_node[:32], msg = [0] + label)
+    let mut mac =
+        Hmac::<Sha512>::new_from_slice(&cur_node[..32]).expect("HMAC can take key of any size");
+    mac.update(&[0u8]);
+    mac.update(label);
+    mac.finalize().into_bytes().into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_slip21() {
+        // testcases from https://github.com/satoshilabs/slips/blob/master/slip-0021.md
+        const TEST_SEED: [u8; 64] = hex!("c76c4ac4f4e4a00d6b274d5c39c700bb4a7ddc04fbc6f78e85ca75007b5b495f74a9043eeb77bdd53aa6fc3a0e31462270316fa04b8c19114c8798706cd02ac8");
+        let m = slip21_get_master_node(&TEST_SEED);
+        assert_eq!(
+            m[32..],
+            hex!("dbf12b44133eaab506a740f6565cc117228cbf1dd70635cfa8ddfdc9af734756")
+        );
+
+        let c = slip21_derive_child_node(&m, b"SLIP-0021");
+        assert_eq!(
+            c[32..],
+            hex!("1d065e3ac1bbe5c7fad32cf2305f7d709dc070d672044a19e610c77cdf33de0d")
+        );
+
+        assert_eq!(
+            slip21_derive_child_node(&c, b"Master encryption key")[32..],
+            hex!("ea163130e35bbafdf5ddee97a17b39cef2be4b4f390180d65b54cf05c6a82fde")
+        );
+        assert_eq!(
+            slip21_derive_child_node(&c, b"Authentication key")[32..],
+            hex!("47194e938ab24cc82bfa25f6486ed54bebe79c40ae2a5a32ea6db294d81861a6")
+        );
+    }
 }

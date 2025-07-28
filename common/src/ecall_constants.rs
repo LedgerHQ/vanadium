@@ -58,6 +58,7 @@ pub enum SchnorrSignMode {
 
 pub const ECALL_DERIVE_HD_NODE: u32 = 130;
 pub const ECALL_GET_MASTER_FINGERPRINT: u32 = 131;
+pub const ECALL_DERIVE_SLIP21_KEY: u32 = 132;
 
 // Hash functions
 pub const ECALL_HASH_INIT: u32 = 150;

@@ -350,6 +350,7 @@ ecall6!(bn_powm, ECALL_POWM, (r: *mut u8), (a: *const u8), (e: *const u8), (len_
 
 ecall5!(derive_hd_node, ECALL_DERIVE_HD_NODE, (curve: u32), (path: *const u32), (path_len: usize), (privkey: *mut u8), (chain_code: *mut u8), u32);
 ecall1!(get_master_fingerprint, ECALL_GET_MASTER_FINGERPRINT, (curve: u32), u32);
+ecall3!(derive_slip21_node, ECALL_DERIVE_SLIP21_KEY, (labels: *const u8), (labels_len: usize), (out: *mut u8), u32);
 
 ecall4!(ecfp_add_point, ECALL_ECFP_ADD_POINT, (curve: u32), (r: *mut u8), (p: *const u8), (q: *const u8), u32);
 ecall5!(ecfp_scalar_mult, ECALL_ECFP_SCALAR_MULT, (curve: u32), (r: *mut u8), (p: *const u8), (k: *const u8), (k_len: usize), u32);

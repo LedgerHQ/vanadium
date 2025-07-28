@@ -207,6 +207,25 @@ forward_to_ecall! {
     /// This function panics if the curve is not supported.
     pub fn get_master_fingerprint(curve: u32) -> u32;
 
+    /// Derives the root SLIP-21 node m/<label1>/<label2>/.../<labelN>, saving it to the provided 64-byte buffer.
+    /// The last 32 bytes of the node are the SLIP-21 key, while the first 32 bytes are the chain code.
+    ///
+    /// The `labels` buffer (with length `labels_len`) must contain the concatenated labels, each prefixed by its length.
+    /// `labels_len` must be at most 256 bytes. Each of the labels must not be longer than 252 bytes.
+    ///
+    /// Ledger-specific limitations:
+    /// - The `labels` buffer must not be empty (no master key derivation).
+    /// - Each label must not contain a '/' character.
+    ///
+    /// # Parameters
+    /// - `labels`: Pointer to the label used for SLIP-21 derivation.
+    /// - `labels_len`: Length of the label.
+    /// - `out`: Pointer to the buffer where the result will be written. It must be at least 64 bytes long.
+    ///
+    /// # Returns
+    /// 1 on success, 0 on error.
+    pub fn derive_slip21_node(label: *const u8, label_len: usize, out: *mut u8) -> u32;
+
     /// Adds two elliptic curve points `p` and `q`, storing the result in `r`.
     ///
     /// # Parameters

@@ -4,7 +4,7 @@ use core::{
     fmt,
 };
 
-use alloc::{format, rc::Rc, string::String, vec};
+use alloc::{format, rc::Rc, string::String, vec, vec::Vec};
 use common::{
     client_commands::{
         Message, MessageDeserializationError, ReceiveBufferMessage, ReceiveBufferResponse,
@@ -30,6 +30,8 @@ use zeroize::Zeroizing;
 mod ux_handler;
 
 mod bitmaps;
+
+mod slip21;
 
 use ux_handler::*;
 
@@ -972,6 +974,46 @@ impl<'a> CommEcallHandler<'a> {
         Ok(u32::from_be_bytes([rip[0], rip[1], rip[2], rip[3]]))
     }
 
+    fn handle_derive_slip21_node<E: fmt::Debug>(
+        &self,
+        cpu: &mut Cpu<OutsourcedMemory<'_>>,
+        labels: GuestPointer,
+        labels_len: usize,
+        out: GuestPointer,
+    ) -> Result<u32, CommEcallError> {
+        // copy label to a local buffer
+        if labels_len > 256 {
+            return Err(CommEcallError::InvalidParameters("labels_len is too large"));
+        }
+
+        // bolos expects the first byte to be 0, and the label actually starts at index 1
+        let mut labels_local: [u8; 256] = [0; 256];
+        cpu.get_segment::<E>(labels.0)?
+            .read_buffer(labels.0, &mut labels_local[0..labels_len])?;
+
+        let mut slices = Vec::<&[u8]>::new();
+        let mut offset = 0;
+        while offset < labels_len {
+            let label_len = labels_local[offset] as usize;
+            offset += 1;
+
+            if offset + label_len > labels_len {
+                return Err(CommEcallError::InvalidParameters("Invalid labels format"));
+            }
+
+            slices.push(&labels_local[offset..offset + label_len]);
+            offset += label_len;
+        }
+
+        let out_node = slip21::get_custom_slip21_node(&slices);
+
+        // copy the result to the V-App memory
+        let segment = cpu.get_segment::<E>(out.0).unwrap();
+        segment.write_buffer(out.0, &out_node).unwrap();
+
+        Ok(1)
+    }
+
     fn handle_ecfp_add_point<E: fmt::Debug>(
         &self,
         cpu: &mut Cpu<OutsourcedMemory<'_>>,
@@ -1528,6 +1570,7 @@ fn get_ecall_name(ecall_code: u32) -> String {
         ECALL_HASH_DIGEST => "hash_digest".into(),
         ECALL_DERIVE_HD_NODE => "derive_hd_node".into(),
         ECALL_GET_MASTER_FINGERPRINT => "get_master_fingerprint".into(),
+        ECALL_DERIVE_SLIP21_KEY => "derive_slip21_key".into(),
         ECALL_ECFP_ADD_POINT => "ecfp_add_point".into(),
         ECALL_ECFP_SCALAR_MULT => "ecfp_scalar_mult".into(),
         ECALL_GET_RANDOM_BYTES => "get_random_bytes".into(),
@@ -1692,6 +1735,14 @@ impl<'a> EcallHandler for CommEcallHandler<'a> {
             }
             ECALL_GET_MASTER_FINGERPRINT => {
                 reg!(A0) = self.handle_get_master_fingerprint::<CommEcallError>(cpu, reg!(A0))?;
+            }
+            ECALL_DERIVE_SLIP21_KEY => {
+                reg!(A0) = self.handle_derive_slip21_node::<CommEcallError>(
+                    cpu,
+                    GPreg!(A0),
+                    reg!(A1) as usize,
+                    GPreg!(A2),
+                )?;
             }
 
             ECALL_ECFP_ADD_POINT => {
