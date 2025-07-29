@@ -109,6 +109,16 @@ impl SadikClient {
             .await
             .expect("Error sending message"))
     }
+    pub async fn get_slip21_key(&mut self, labels: &[&[u8]]) -> Result<Vec<u8>, SadikClientError> {
+        let cmd = Command::DeriveSlip21Key {
+            labels: labels.iter().map(|s| s.to_vec()).collect(),
+        };
+
+        let msg = postcard::to_allocvec(&cmd).expect("Serialization failed");
+        Ok(send_message(&mut self.app_client, &msg)
+            .await
+            .expect("Error sending message"))
+    }
 
     pub async fn ecpoint_add(
         &mut self,

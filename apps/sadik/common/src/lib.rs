@@ -44,6 +44,9 @@ pub enum Command {
         curve: Curve,
         path: Vec<u32>,
     },
+    DeriveSlip21Key {
+        labels: Vec<Vec<u8>>,
+    },
     ECPointOperation {
         curve: Curve,
         operation: ECPointOperation,
