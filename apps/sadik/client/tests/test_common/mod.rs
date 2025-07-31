@@ -29,7 +29,6 @@ impl TestSetup {
             "../app/target/riscv32imc-unknown-none-elf/release/vnd-sadik".to_string()
         });
 
-        let args: Vec<String> = env::args().collect();
         let has_hid = args.contains(&"--hid".to_string());
         if has_hid {
             // run the tests against the real device

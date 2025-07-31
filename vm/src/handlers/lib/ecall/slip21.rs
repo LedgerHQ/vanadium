@@ -7,7 +7,8 @@
 // - All the required paths must be specified in the Ledger app manifest.
 //
 // Therefore, we instead use a single, standard SLIP-21 key that is accessible to ledger apps, and use it
-// as the root secret for the
+// as the root secret for the SLIP-21 key hierarchy. This allows to make sure that we can derive these keys
+// from the seed in Vanadium today, without depending on the OS updates.
 //
 // In the notation of SLIP-21, we set:
 //   S_v = m/"VANADIUM"
