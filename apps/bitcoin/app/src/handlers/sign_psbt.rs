@@ -6,6 +6,7 @@ use alloc::{
 };
 
 use common::{
+    account::{Account, ProofOfRegistration},
     bip388::{DescriptorTemplate, SegwitVersion},
     message::{PartialSignature, Response},
     psbt::{PsbtAccountCoordinates, PsbtAccountOutput},
@@ -209,6 +210,32 @@ pub fn handle_sign_psbt(_app: &mut sdk::App, psbt: &[u8]) -> Result<Response, &'
     let mut outputs_total_amount: u64 = 0;
 
     let mut warn_unverified_inputs: bool = false;
+
+    /***** verify accounts *****/
+    for (account_id, account) in accounts.iter().enumerate() {
+        let account_name = psbt
+            .get_account_name(account_id as u32)?
+            .unwrap_or("".to_string());
+
+        let por = psbt.get_account_proof_of_registration(account_id as u32)?;
+        // verify that por is 32 bytes, and convert to ProofOfRegistration
+
+        let por = por.ok_or("Default accounts are not supported yet")?;
+        let por = ProofOfRegistration::from_bytes(
+            por.try_into()
+                .map_err(|_| "Invalid Proof of Registration length")?,
+        );
+
+        match account {
+            PsbtAccount::WalletPolicy(wallet_policy) => {
+                // verify proof of registration
+                let id = wallet_policy.get_id(&account_name);
+                if por != ProofOfRegistration::new(&id) {
+                    return Err("Invalid proof of registration");
+                }
+            }
+        }
+    }
 
     /***** input checks *****/
 
@@ -557,18 +584,27 @@ mod tests {
     };
     use hex_literal::hex;
 
-    fn prepare_psbt(psbt: &mut Psbt, wallet_policy: &WalletPolicy) {
-        let placeholders: Vec<KeyPlaceholder> = wallet_policy
-            .descriptor_template
-            .placeholders()
-            .map(|(k, _)| k.clone())
-            .collect();
+    fn prepare_psbt(psbt: &mut Psbt, named_accounts: &[(&WalletPolicy, &str, &[u8; 32])]) {
+        for (wallet_policy, account_name, por) in named_accounts {
+            let placeholders: Vec<KeyPlaceholder> = wallet_policy
+                .descriptor_template
+                .placeholders()
+                .map(|(k, _)| k.clone())
+                .collect();
 
-        assert!(placeholders.len() == 1);
-        let key_placeholder = placeholders[0];
+            assert!(placeholders.len() == 1);
+            let key_placeholder = placeholders[0];
 
-        fill_psbt_with_bip388_coordinates(psbt, wallet_policy, None, None, &key_placeholder, 0)
+            fill_psbt_with_bip388_coordinates(
+                psbt,
+                wallet_policy,
+                Some(&account_name),
+                Some(*por),
+                &key_placeholder,
+                0,
+            )
             .unwrap();
+        }
     }
 
     #[test]
@@ -582,7 +618,12 @@ mod tests {
                 "[f5acc2fd/44'/1'/0']tpubDCwYjpDhUdPGP5rS3wgNg13mTrrjBuG8V9VpWbyptX6TRPbNoZVXsoVUSkCjmQ8jJycjuDKBb9eataSymXakTTaGifxR6kmVsfFehH1ZgJT".try_into().unwrap()
             ]
         ).unwrap();
-        prepare_psbt(&mut psbt, &wallet_policy);
+
+        let account_name = "My legacy account #0";
+        let por =
+            ProofOfRegistration::new(&wallet_policy.get_id(account_name)).dangerous_as_bytes();
+
+        prepare_psbt(&mut psbt, &[(&wallet_policy, account_name, &por)]);
         let mut psbt_final = String::new();
         STANDARD.encode_string(psbt.serialize(), &mut psbt_final);
         println!("Psbt with wallet policies:\n{}", psbt_final);
@@ -610,7 +651,10 @@ mod tests {
                 "[f5acc2fd/84'/1'/0']tpubDCtKfsNyRhULjZ9XMS4VKKtVcPdVDi8MKUbcSD9MJDyjRu1A2ND5MiipozyyspBT9bg8upEp7a8EAgFxNxXn1d7QkdbL52Ty5jiSLcxPt1P".try_into().unwrap()
             ]
         ).unwrap();
-        prepare_psbt(&mut psbt, &wallet_policy);
+        let account_name = "My segwit account #0";
+        let por =
+            ProofOfRegistration::new(&wallet_policy.get_id(account_name)).dangerous_as_bytes();
+        prepare_psbt(&mut psbt, &[(&wallet_policy, &account_name, &por)]);
 
         let response = handle_sign_psbt(&mut sdk::App::singleton(), &psbt.serialize()).unwrap();
 
@@ -635,7 +679,11 @@ mod tests {
                 "[f5acc2fd/86'/1'/0']tpubDDKYE6BREvDsSWMazgHoyQWiJwYaDDYPbCFjYxN3HFXJP5fokeiK4hwK5tTLBNEDBwrDXn8cQ4v9b2xdW62Xr5yxoQdMu1v6c7UDXYVH27U".try_into().unwrap()
             ]
         ).unwrap();
-        prepare_psbt(&mut psbt, &wallet_policy);
+
+        let account_name = "My taproot account #0";
+        let por =
+            ProofOfRegistration::new(&wallet_policy.get_id(account_name)).dangerous_as_bytes();
+        prepare_psbt(&mut psbt, &[(&wallet_policy, &account_name, &por)]);
 
         let response = handle_sign_psbt(&mut sdk::App::singleton(), &psbt.serialize()).unwrap();
 

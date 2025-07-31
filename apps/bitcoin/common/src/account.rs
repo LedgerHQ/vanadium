@@ -1,6 +1,7 @@
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use bitcoin::consensus::{encode, Decodable, Encodable};
+use bitcoin::hashes::{Hash, HashEngine, Hmac, HmacEngine};
 use bitcoin::io::Read;
 use bitcoin::VarInt;
 
@@ -15,6 +16,7 @@ pub use crate::bip388::{
 use bitcoin::{params::Params, Address};
 
 use crate::script::ToScript;
+use subtle::ConstantTimeEq;
 
 // TODO: maybe we can modify the serialize() methods to use bitcoin::io::Write instead
 
@@ -116,4 +118,46 @@ impl Account for WalletPolicy {
     }
 }
 
-// TODO: add some tests
+// m/POR_MAGIC computed with SLIP21 is the hmac key for Proofs of Registration.
+const POR_MAGIC: &[u8] = b"Proof of Registration";
+
+#[repr(transparent)]
+#[derive(Debug, Clone, Copy)]
+pub struct ProofOfRegistration([u8; 32]);
+
+impl PartialEq for ProofOfRegistration {
+    /// Uses constant-time comparison to prevent timing attacks.
+    fn eq(&self, other: &Self) -> bool {
+        self.0.ct_eq(&other.0).into()
+    }
+}
+impl Eq for ProofOfRegistration {}
+
+impl ProofOfRegistration {
+    // TODO: This function should really only be available if compiling inside a Vanadium V-App,
+    //       regardless if natively or for the riscv targets.
+    //       How to gate this properly?
+    pub fn new(id: &[u8; 32]) -> Self {
+        let por_key = sdk::slip21::derive_slip21_key(&[&POR_MAGIC]);
+
+        let mut mac = HmacEngine::<bitcoin::hashes::sha256::Hash>::new(&por_key);
+        mac.input(id);
+        Self(Hmac::<bitcoin::hashes::sha256::Hash>::from_engine(mac).to_byte_array())
+    }
+
+    pub fn from_bytes(bytes: [u8; 32]) -> Self {
+        Self(bytes)
+    }
+
+    /// Returns the raw bytes of the proof of registration.
+    ///
+    /// This is necessary for example to serialize and return the proof externally. However,
+    /// it is generally dangerous to use the serialized form of proofs of registrations, as
+    /// incorrect use might lead to side-channel attacks.
+    ///
+    /// In order to verify the proof, build a new instance using the `from_bytes` method
+    /// before comparing it with the expected proof.
+    pub fn dangerous_as_bytes(&self) -> [u8; 32] {
+        self.0
+    }
+}

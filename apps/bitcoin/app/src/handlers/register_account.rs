@@ -1,4 +1,8 @@
-use common::{account::Account, bip388, message::Response};
+use common::{
+    account::{Account, ProofOfRegistration},
+    bip388,
+    message::Response,
+};
 
 #[cfg(not(test))]
 fn display_wallet_policy(name: &str, wallet_policy: &bip388::WalletPolicy) -> bool {
@@ -56,10 +60,65 @@ pub fn handle_register_account(
         return Err("Rejected by the user");
     }
 
-    // TODO: compute the correct HMAC
+    let id = wallet_policy.get_id(name);
+    let por = ProofOfRegistration::new(&id);
 
     Ok(Response::AccountRegistered {
-        account_id: wallet_policy.get_id(name),
-        hmac: [42u8; 32], // TODO
+        account_id: id,
+        hmac: por.dangerous_as_bytes(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use common::{
+        account::{KeyInformation, ProofOfRegistration},
+        bip388,
+        message::{self, Response},
+    };
+
+    fn ki(key_info_str: &str) -> message::PubkeyInfo {
+        let info = KeyInformation::try_from(key_info_str).unwrap();
+
+        let origin = info.origin_info.map(|info| message::KeyOrigin {
+            fingerprint: info.fingerprint,
+            path: message::Bip32Path(
+                info.derivation_path
+                    .iter()
+                    .map(|step| u32::from(*step))
+                    .collect(),
+            ),
+        });
+
+        message::PubkeyInfo {
+            pubkey: info.pubkey.encode().to_vec(),
+            origin,
+        }
+    }
+
+    #[test]
+    fn test_register_account() {
+        let account_name = "My Test Account";
+        let account = message::Account::WalletPolicy(message::WalletPolicy {
+            template: "wpkh(@0/**)".into(),
+            keys_info: vec![ki(
+                "[f5acc2fd/84'/1'/0']tpubDCtKfsNyRhULjZ9XMS4VKKtVcPdVDi8MKUbcSD9MJDyjRu1A2ND5MiipozyyspBT9bg8upEp7a8EAgFxNxXn1d7QkdbL52Ty5jiSLcxPt1P",
+            )],
+        });
+
+        let wallet_policy: bip388::WalletPolicy = (&account).try_into().unwrap();
+        let expected_account_id = wallet_policy.get_id(account_name);
+
+        let resp = handle_register_account(&mut sdk::App::singleton(), account_name, &account);
+
+        assert_eq!(
+            resp,
+            Ok(Response::AccountRegistered {
+                account_id: expected_account_id,
+                // can't really test the hmac here, so we duplicate the app's logic
+                hmac: ProofOfRegistration::new(&expected_account_id).dangerous_as_bytes(),
+            })
+        );
+    }
 }

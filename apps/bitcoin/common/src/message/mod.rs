@@ -78,7 +78,7 @@ pub enum Request {
         display: bool,
         name: Option<String>,
         account: Account,
-        hmac: Vec<u8>,
+        por: Vec<u8>,
         coordinates: AccountCoordinates,
     },
     SignPsbt {

@@ -27,19 +27,10 @@ fn handle_request(app: &mut App, request: &Request) -> Result<Response, &'static
         Request::GetAddress {
             name,
             account,
-            hmac,
+            por,
             coordinates,
             display,
-        } => {
-            // hmac should be empty or a 32 byte vector; if not, give an error, otherwise convert to Option<[u8; 32]>
-            let hmac = match hmac.len() {
-                0 => None,
-                32 => Some(hmac.as_slice().try_into().unwrap()),
-                _ => return Err("Invalid HMAC length"),
-            };
-
-            handle_get_address(app, name.as_deref(), account, hmac, coordinates, *display)
-        }
+        } => handle_get_address(app, name.as_deref(), account, por, coordinates, *display),
         Request::SignPsbt { psbt } => handle_sign_psbt(app, psbt),
     }
 }

@@ -1,4 +1,8 @@
-use common::{account::Account, bip388, message::Response};
+use common::{
+    account::{Account, ProofOfRegistration},
+    bip388,
+    message::Response,
+};
 
 #[cfg(not(test))]
 fn display_address(account_name: Option<&str>, addr: &str) -> bool {
@@ -44,13 +48,27 @@ pub fn handle_get_address(
     _app: &mut sdk::App,
     name: Option<&str>,
     account: &common::message::Account,
-    _hmac: Option<&[u8; 32]>,
+    por: &[u8],
     coordinates: &common::message::AccountCoordinates,
     display: bool,
 ) -> Result<Response, &'static str> {
-    // TODO: check hmac if appropriate
-
     let wallet_policy: bip388::WalletPolicy = account.try_into()?;
+
+    // hmac should be empty or a 32 byte vector; if not, give an error, otherwise convert to Option<[u8; 32]>
+    let hmac: Option<&[u8; 32]> = match por.len() {
+        0 => None,
+        32 => Some(por.try_into().unwrap()),
+        _ => return Err("Invalid Proof of Registration length"),
+    };
+
+    let hmac = hmac.ok_or("Default wallets are not supported yet")?;
+
+    let id = wallet_policy.get_id(name.unwrap_or(""));
+    let por = common::account::ProofOfRegistration::from_bytes(*hmac);
+    if por != ProofOfRegistration::new(&id) {
+        return Err("Invalid proof of registration");
+    }
+
     let common::message::AccountCoordinates::WalletPolicy(coordinates) = coordinates;
     let address = wallet_policy.get_address(&common::account::WalletPolicyCoordinates {
         is_change: coordinates.is_change,
@@ -100,11 +118,17 @@ mod tests {
             )],
         });
 
+        // default wallet accounts are not supported yet, so we simulate registration
+        let account_name = "Segwit account";
+        let wallet_policy: bip388::WalletPolicy = (&account).try_into().unwrap();
+        let hmac =
+            ProofOfRegistration::new(&wallet_policy.get_id(account_name)).dangerous_as_bytes();
+
         let resp = handle_get_address(
             &mut sdk::App::singleton(),
-            None,
+            Some(account_name),
             &account,
-            None,
+            &hmac,
             &message::AccountCoordinates::WalletPolicy(message::WalletPolicyCoordinates {
                 is_change: false,
                 address_index: 0,

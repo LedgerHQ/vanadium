@@ -1,6 +1,7 @@
 use base64::Engine as _;
 
 use clap::{CommandFactory, Parser, Subcommand};
+use common::account::ProofOfRegistration;
 use rustyline::completion::{Completer, Pair};
 use rustyline::error::ReadlineError;
 use rustyline::highlight::{CmdKind, Highlighter};
@@ -50,6 +51,8 @@ enum CliCommand {
         descriptor_template: String,
         #[clap(long)]
         keys_info: String,
+        #[clap(long)]
+        por: Option<String>,
         #[clap(long, default_missing_value = "false", num_args = 0..=1)]
         is_change: bool,
         #[clap(long, default_missing_value = "0")]
@@ -268,12 +271,12 @@ async fn handle_cli_command(
 
             let wallet_policy_msg = parse_wallet_policy(descriptor_template, keys_info)?;
             let account = common::message::Account::WalletPolicy(wallet_policy_msg);
-            let (hmac, account_id) = bitcoin_client.register_account(name, &account).await?;
+            let (account_id, hmac) = bitcoin_client.register_account(name, &account).await?;
             println!(
                 "Account {} registered.\nAccount ID: {}\nHMAC: {}",
                 name,
                 hex::encode(account_id),
-                hex::encode(hmac)
+                hex::encode(hmac.dangerous_as_bytes())
             );
         }
         CliCommand::GetAddress {
@@ -282,6 +285,7 @@ async fn handle_cli_command(
             address_index,
             name,
             descriptor_template,
+            por,
             keys_info,
         } => {
             let wallet_policy_msg = parse_wallet_policy(descriptor_template, keys_info)?;
@@ -289,13 +293,27 @@ async fn handle_cli_command(
                 is_change: *is_change,
                 address_index: *address_index,
             };
+            // convert por from hex to bytes if provided
+            let proof_of_registration = por
+                .as_ref()
+                .map(|s| -> Result<ProofOfRegistration, &'static str> {
+                    let bytes =
+                        hex::decode(s).map_err(|_| "Failed to decode proof of registration")?;
+
+                    let array: [u8; 32] = bytes
+                        .try_into()
+                        .map_err(|_| "Proof of registration must be 32 bytes long")?;
+
+                    Ok(ProofOfRegistration::from_bytes(array))
+                })
+                .transpose()?; // Result<Option<ProofOfRegistration>, _>
 
             let addr = bitcoin_client
                 .get_address(
                     &common::message::Account::WalletPolicy(wallet_policy_msg),
                     name.as_deref().unwrap_or(""),
                     &common::message::AccountCoordinates::WalletPolicy(wallet_policy_coords),
-                    &[42u8; 32], // TODO: placeholder
+                    proof_of_registration.as_ref(),
                     *display,
                 )
                 .await?;

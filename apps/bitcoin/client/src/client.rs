@@ -1,6 +1,7 @@
 use std::str::FromStr;
 
 use bitcoin::bip32::DerivationPath;
+use common::account::ProofOfRegistration;
 use common::message::{self, PartialSignature, Request, Response};
 use sdk::vanadium_client::{VAppClient, VAppExecutionError};
 
@@ -152,7 +153,7 @@ impl<'a> BitcoinClient {
         &mut self,
         name: &str,
         account: &message::Account,
-    ) -> Result<([u8; 32], [u8; 32]), BitcoinClientError> {
+    ) -> Result<([u8; 32], ProofOfRegistration), BitcoinClientError> {
         let msg = postcard::to_allocvec(&Request::RegisterAccount {
             name: name.into(),
             account: account.clone(),
@@ -163,7 +164,9 @@ impl<'a> BitcoinClient {
 
         let response_raw = self.send_message(&msg).await?;
         match Self::parse_response(&response_raw).await? {
-            Response::AccountRegistered { account_id, hmac } => Ok((account_id, hmac)),
+            Response::AccountRegistered { account_id, hmac } => {
+                Ok((account_id, ProofOfRegistration::from_bytes(hmac)))
+            }
             _ => Err(BitcoinClientError::InvalidResponse("Invalid response")),
         }
     }
@@ -173,14 +176,16 @@ impl<'a> BitcoinClient {
         account: &message::Account,
         name: &str,
         coords: &message::AccountCoordinates,
-        hmac: &[u8],
+        por: Option<&ProofOfRegistration>,
         display: bool,
     ) -> Result<String, BitcoinClientError> {
         let msg = postcard::to_allocvec(&Request::GetAddress {
             display,
             name: Some(name.to_string()),
             account: account.clone(),
-            hmac: hmac.to_vec(),
+            por: por
+                .map(|p| p.dangerous_as_bytes().to_vec())
+                .unwrap_or(vec![]),
             coordinates: coords.clone(),
         })
         .map_err(|_| BitcoinClientError::GenericError("Failed to serialize GetAddress request"))?;
