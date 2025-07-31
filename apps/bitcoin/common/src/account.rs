@@ -41,10 +41,7 @@ impl AccountCoordinates for WalletPolicyCoordinates {
         })
     }
 }
-
-const ACCOUNT_MAGIC: [u8; 14] = [
-    13, b'N', b'A', b'M', b'E', b'D', b'_', b'A', b'C', b'C', b'O', b'U', b'N', b'T',
-];
+const ACCOUNT_MAGIC: [u8; 14] = *b"\x0DNAMED_ACCOUNT";
 
 /// A generic trait for "accounts", parameterized by the type of coordinates.
 ///
