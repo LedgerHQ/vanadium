@@ -1,0 +1,37 @@
+[package]
+name = "ledger_device_sdk"
+version = "1.23.0"
+authors = ["yhql", "yogh333", "agrojean-ledger", "kingofpayne"]
+edition = "2021"
+license = "Apache-2.0" 
+description = "Ledger device Rust SDK"
+
+[dev-dependencies]
+# enable the 'speculos' feature when testing
+# https://github.com/rust-lang/cargo/issues/2911#issuecomment-749580481
+ledger_device_sdk = { path = ".", features = ["speculos"] }
+
+testmacro = { path = "../testmacro", version = "0.1.0"}
+
+[dependencies]
+include_gif = {path = "../include_gif", version = "1.2.2"}
+num-traits = { version = "0.2.14", default-features = false }
+rand_core = { version = "0.6.3", default-features = false }
+zeroize = { version = "1.6.0", default-features = false }
+numtoa = "0.2.4"
+const-zero = "0.1.1"
+ledger_secure_sdk_sys = "=1.9.0"
+
+[features]
+debug = []
+speculos = []
+heap = [ "ledger_secure_sdk_sys/heap" ]
+nano_nbgl = [ "ledger_secure_sdk_sys/nano_nbgl" ]
+
+default = [ "heap" ]
+
+[lints.rust.unexpected_cfgs]
+level = "warn" 
+check-cfg = ['cfg(target_os, values("stax", "flex", "nanox", "nanosplus"))']
+
+[workspace]
