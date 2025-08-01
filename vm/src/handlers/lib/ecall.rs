@@ -1511,39 +1511,22 @@ impl<'a> CommEcallHandler<'a> {
 // Processes all events until a ticker is received, then returns
 fn wait_for_ticker(comm: &mut RefMut<'_, &mut ledger_device_sdk::io::Comm>) {
     loop {
-        let mut spi_buffer = [0u8; 256];
+        let mut buffer: [u8; 273] = [0; 273];
+        let status = sys_seph::io_rx(&mut buffer, false);
+        if status > 0 {
+            // TODO: yikes. But this needs to be fixed in the rust-sdk, rather
+            let spi_buffer: [u8; 272] = buffer[1..273].try_into().unwrap();
+            comm.process_event::<Instruction>(spi_buffer, status - 1);
 
-        let event: ledger_device_sdk::io::Event<crate::ApduHeader> = loop {
-            // Signal end of command stream from SE to MCU
-            // And prepare reception
-            if !sys_seph::is_status_sent() {
-                sys_seph::send_general_status();
-            }
+            // TODO: we're ignoring the return value, so we might potentially miss an APDU if it comes at
+            // the wrong time.
+            // We should either find a solution to avoid receiving APDUs here, or have a way to handle them.
 
-            // Fetch the next message from the MCU
-            let _rx = sys_seph::seph_recv(&mut spi_buffer, 0);
-
-            // decode and process event
-            if let Some(e) = comm.process_event(&mut spi_buffer) {
-                break e;
-            }
-        };
-
-        match event {
-            ledger_device_sdk::io::Event::Command(_e) => {
-                panic!("We don't expect to receive APDUs here.");
-            }
-            #[cfg(not(any(target_os = "stax", target_os = "flex")))]
-            ledger_device_sdk::io::Event::Button(_button) => {
-                // nothing to do here; we handle button events using the callbacks
-            }
-            #[cfg(any(target_os = "stax", target_os = "flex"))]
-            ledger_device_sdk::io::Event::TouchEvent => {
-                crate::println!("Touch event. Unhandled");
-                // nothing to do, we don't yet know how to handle them
-            }
-            ledger_device_sdk::io::Event::Ticker => {
-                return;
+            if buffer[0] == ledger_secure_sdk_sys::OS_IO_PACKET_TYPE_SEPH
+                && buffer[1] == ledger_secure_sdk_sys::SEPROXYHAL_TAG_TICKER_EVENT as u8
+            {
+                // we received a ticker event, so we can return
+                break;
             }
         }
     }

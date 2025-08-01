@@ -46,12 +46,6 @@ fn store_new_event(event_code: common::ux::EventCode, event_data: common::ux::Ev
 // nbgl_layoutTouchCallback_t
 #[cfg(any(target_os = "stax", target_os = "flex"))]
 unsafe extern "C" fn layout_touch_callback(token: core::ffi::c_int, index: u8) {
-    crate::println!(
-        "layout_touch_callback with token={} and index={}",
-        token,
-        index
-    );
-
     let action = match (token as u8, index) {
         (TOKEN_CONFIRM_REJECT, 0) => common::ux::Action::Confirm,
         (TOKEN_CONFIRM_REJECT, 1) => common::ux::Action::Reject,
@@ -89,8 +83,6 @@ unsafe extern "C" fn step_button_callback(
     _layout: *mut c_void,
     button_event: ledger_secure_sdk_sys::nbgl_buttonEvent_t,
 ) {
-    // crate::println!("step_button_callback with button={}", button_event as u8);
-
     let action = match button_event {
         // see nbgl_buttonEvent_t
         0 => common::ux::Action::PreviousPage,
