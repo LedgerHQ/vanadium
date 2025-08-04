@@ -22,6 +22,7 @@ use crate::{AppSW, Instruction};
 
 use super::SerializeToComm;
 use crate::handlers::lib::evict::PageEvictionStrategy;
+use crate::io::CommExt;
 
 #[derive(Clone, Debug)]
 struct CachedPage {
@@ -44,31 +45,6 @@ impl Default for CachedPage {
             modified: false,
         }
     }
-}
-
-// TODO: this is problematic because the SDK's handling of ticker events causes
-// throttling of the communication. A better solution is necessary.
-fn io_exchange<R, T>(comm: &mut io::Comm, reply: R) -> T
-where
-    R: Into<io::Reply>,
-    T: TryFrom<io::ApduHeader>,
-    io::Reply: From<<T as TryFrom<io::ApduHeader>>::Error>,
-{
-    let sw = reply.into().0;
-    comm.io_buffer[comm.tx_length] = (sw >> 8) as u8;
-    comm.io_buffer[comm.tx_length + 1] = sw as u8;
-    comm.tx_length += 2;
-
-    if comm.tx != 0 {
-        ledger_secure_sdk_sys::seph::io_tx(comm.apdu_type, &comm.apdu_buffer, comm.tx);
-        comm.tx = 0;
-    } else {
-        ledger_secure_sdk_sys::seph::io_tx(comm.apdu_type, &comm.io_buffer, comm.tx_length);
-    }
-    comm.tx_length = 0;
-    comm.rx_length = 0;
-
-    comm.next_command()
 }
 
 pub struct OutsourcedMemory<'c> {
@@ -182,8 +158,7 @@ impl<'c> OutsourcedMemory<'c> {
         CommitPageMessage::new(self.section_kind, cached_page.idx, true, nonce)
             .serialize_to_comm(&mut comm);
 
-        let Instruction::Continue(p1, p2) = io_exchange(&mut comm, AppSW::InterruptedExecution)
-        else {
+        let Instruction::Continue(p1, p2) = comm.io_exchange(AppSW::InterruptedExecution) else {
             return Err(common::vm::MemoryError::GenericError("INS not supported"));
             // expected "Continue"
         };
@@ -195,8 +170,7 @@ impl<'c> OutsourcedMemory<'c> {
         // Second message: communicate the updated page content
         CommitPageContentMessage::new(&payload).serialize_to_comm(&mut comm);
 
-        let Instruction::Continue(p1, p2) = io_exchange(&mut comm, AppSW::InterruptedExecution)
-        else {
+        let Instruction::Continue(p1, p2) = comm.io_exchange(AppSW::InterruptedExecution) else {
             return Err(common::vm::MemoryError::GenericError("INS not supported"));
             // expected "Continue"
         };
@@ -246,7 +220,7 @@ impl<'c> OutsourcedMemory<'c> {
         while n_processed_elements < n as usize {
             CommitPageProofContinuedMessage::new().serialize_to_comm(&mut comm);
 
-            let Instruction::Continue(p1, p2) = io_exchange(&mut comm, AppSW::InterruptedExecution)
+            let Instruction::Continue(p1, p2) = comm.io_exchange(AppSW::InterruptedExecution)
             else {
                 return Err(common::vm::MemoryError::GenericError(
                     "INS not supported during continued proof request",
@@ -314,8 +288,7 @@ impl<'c> OutsourcedMemory<'c> {
         let mut comm = self.comm.borrow_mut();
         GetPageMessage::new(self.section_kind, page_index).serialize_to_comm(&mut comm);
 
-        let Instruction::Continue(p1, p2) = io_exchange(&mut comm, AppSW::InterruptedExecution)
-        else {
+        let Instruction::Continue(p1, p2) = comm.io_exchange(AppSW::InterruptedExecution) else {
             // expected "Continue"
             return Err(common::vm::MemoryError::GenericError("INS not supported"));
         };
@@ -338,8 +311,7 @@ impl<'c> OutsourcedMemory<'c> {
         // Request the Merkle proof for the page
         GetPageProofMessage::new().serialize_to_comm(&mut comm);
 
-        let Instruction::Continue(p1, p2) = io_exchange(&mut comm, AppSW::InterruptedExecution)
-        else {
+        let Instruction::Continue(p1, p2) = comm.io_exchange(AppSW::InterruptedExecution) else {
             return Err(common::vm::MemoryError::GenericError(
                 "INS not supported during proof request",
             ));
@@ -393,7 +365,7 @@ impl<'c> OutsourcedMemory<'c> {
         while n_processed_elements < n as usize {
             GetPageProofContinuedMessage::new().serialize_to_comm(&mut comm);
 
-            let Instruction::Continue(p1, p2) = io_exchange(&mut comm, AppSW::InterruptedExecution)
+            let Instruction::Continue(p1, p2) = comm.io_exchange(AppSW::InterruptedExecution)
             else {
                 return Err(common::vm::MemoryError::GenericError(
                     "INS not supported during continued proof request",
