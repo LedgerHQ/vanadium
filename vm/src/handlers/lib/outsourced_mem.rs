@@ -54,7 +54,20 @@ where
     T: TryFrom<io::ApduHeader>,
     io::Reply: From<<T as TryFrom<io::ApduHeader>>::Error>,
 {
-    comm.reply(reply);
+    let sw = reply.into().0;
+    comm.io_buffer[comm.tx_length] = (sw >> 8) as u8;
+    comm.io_buffer[comm.tx_length + 1] = sw as u8;
+    comm.tx_length += 2;
+
+    if comm.tx != 0 {
+        ledger_secure_sdk_sys::seph::io_tx(comm.apdu_type, &comm.apdu_buffer, comm.tx);
+        comm.tx = 0;
+    } else {
+        ledger_secure_sdk_sys::seph::io_tx(comm.apdu_type, &comm.io_buffer, comm.tx_length);
+    }
+    comm.tx_length = 0;
+    comm.rx_length = 0;
+
     comm.next_command()
 }
 
