@@ -328,17 +328,21 @@ impl Comm {
         None
     }
 
-    pub fn process_event<T>(&mut self, mut seph_buffer: [u8; 272], length: i32) -> Option<Event<T>>
+    pub fn process_event<T>(&self, seph_buffer: &[u8]) -> Result<Option<Event<T>>, StatusWords>
     where
         T: TryFrom<ApduHeader>,
         Reply: From<<T as TryFrom<ApduHeader>>::Error>,
     {
+        let length = seph_buffer.len();
+        if length < 3 {
+            return Err(StatusWords::BadLen);
+        }
+
         let tag = seph_buffer[0];
         let _len: usize = u16::from_be_bytes([seph_buffer[1], seph_buffer[2]]) as usize;
 
-        if (length as usize) < _len + 3 {
-            self.reply(StatusWords::BadLen);
-            return None;
+        if length < _len + 3 {
+            return Err(StatusWords::BadLen);
         }
 
         match seph::Events::from(tag) {
@@ -347,19 +351,19 @@ impl Comm {
             seph::Events::ButtonPushEvent => {
                 #[cfg(feature = "nano_nbgl")]
                 unsafe {
-                    ux_process_button_event(seph_buffer.as_mut_ptr());
+                    ux_process_button_event(seph_buffer.as_ptr() as *mut u8); // mutable not required once updated in the C SDK
                 }
                 let button_info = seph_buffer[3] >> 1;
                 if let Some(btn_evt) = get_button_event(&mut self.buttons, button_info) {
-                    return Some(Event::Button(btn_evt));
+                    return Ok(Some(Event::Button(btn_evt)));
                 }
             }
 
             // SCREEN TOUCH EVENT
             #[cfg(any(target_os = "stax", target_os = "flex"))]
             seph::Events::ScreenTouchEvent => unsafe {
-                ux_process_finger_event(seph_buffer.as_mut_ptr());
-                return Some(Event::TouchEvent);
+                ux_process_finger_event(seph_buffer.as_ptr() as *mut u8); // mutable not required once updated in the C SDK
+                return Ok(Some(Event::TouchEvent));
             },
 
             // TICKER EVENT
@@ -368,7 +372,7 @@ impl Comm {
                 unsafe {
                     ux_process_ticker_event();
                 }
-                return Some(Event::Ticker);
+                return Ok(Some(Event::Ticker));
             }
 
             // ITC EVENT
@@ -405,9 +409,9 @@ impl Comm {
                         }
                     }
 
-                    _ => return None,
+                    _ => return Ok(None),
                 }
-                return None;
+                return Ok(None);
             }
 
             // DEFAULT EVENT
@@ -422,7 +426,7 @@ impl Comm {
                 }
             }
         }
-        None
+        Ok(None)
     }
 
     pub fn decode_event<T>(&mut self, length: i32) -> Option<Event<T>>
@@ -435,10 +439,13 @@ impl Comm {
         match seph::PacketTypes::from(packet_type) {
             seph::PacketTypes::PacketTypeSeph | seph::PacketTypes::PacketTypeSeEvent => {
                 // SE or SEPH event
-                let mut seph_buffer = [0u8; 272];
-                seph_buffer[0..272].copy_from_slice(&self.io_buffer[1..273]);
-                if let Some(event) = self.process_event(seph_buffer, length - 1) {
-                    return Some(event);
+                match self.process_event(&self.io_buffer[1..273]) {
+                    Ok(Some(event)) => return Some(event),
+                    Ok(None) => {}
+                    Err(sw) => {
+                        self.reply(sw);
+                        return None;
+                    }
                 }
             }
 
