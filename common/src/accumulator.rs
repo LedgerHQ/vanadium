@@ -379,15 +379,16 @@ impl<
 }
 
 /// Verifier for streaming inclusion proof verification in a Merkle tree.
-pub struct MerkleInclusionProofVerifier<H: Hasher<OUTPUT_SIZE>, const OUTPUT_SIZE: usize> {
+pub struct MerkleInclusionProofVerifier<H: ResettableHasher<OUTPUT_SIZE>, const OUTPUT_SIZE: usize>
+{
     current_hash: HashOutput<OUTPUT_SIZE>, // Current computed hash
     pos: usize,                            // Current position in the tree
     root: HashOutput<OUTPUT_SIZE>,         // Expected root hash
     verified: bool,                        // Whether the proof has been verified
-    _marker: PhantomData<H>,               // For hasher type
+    hasher: H,                             // The hasher
 }
 
-impl<H: Hasher<OUTPUT_SIZE>, const OUTPUT_SIZE: usize>
+impl<H: ResettableHasher<OUTPUT_SIZE>, const OUTPUT_SIZE: usize>
     InclusionProofVerifier<HashOutput<OUTPUT_SIZE>>
     for MerkleInclusionProofVerifier<H, OUTPUT_SIZE>
 {
@@ -407,11 +408,11 @@ impl<H: Hasher<OUTPUT_SIZE>, const OUTPUT_SIZE: usize>
         };
 
         // Compute the parent hash
-        let mut hasher = H::new();
-        hasher.update(&[0x01]); // Internal node prefix
-        hasher.update(&left.0);
-        hasher.update(&right.0);
-        self.current_hash = hasher.finalize().into();
+        self.hasher.reset();
+        self.hasher.update(&[0x01]); // Internal node prefix
+        self.hasher.update(&left.0);
+        self.hasher.update(&right.0);
+        self.hasher.digest_inplace(&mut self.current_hash.0);
 
         // Move up the tree
         self.pos = (self.pos - 1) / 2;
@@ -430,13 +431,13 @@ impl<H: Hasher<OUTPUT_SIZE>, const OUTPUT_SIZE: usize>
 /// Verifier for streaming update proof verification in a Merkle tree.
 /// An update proof is just a pair of inclusion proofs, one for the old element value and root, the other for
 /// the new ones.
-pub struct MerkleUpdateProofVerifier<H: Hasher<OUTPUT_SIZE>, const OUTPUT_SIZE: usize> {
+pub struct MerkleUpdateProofVerifier<H: ResettableHasher<OUTPUT_SIZE>, const OUTPUT_SIZE: usize> {
     old_verifier: MerkleInclusionProofVerifier<H, OUTPUT_SIZE>,
     new_verifier: MerkleInclusionProofVerifier<H, OUTPUT_SIZE>,
 }
 
-impl<H: Hasher<OUTPUT_SIZE>, const OUTPUT_SIZE: usize> UpdateProofVerifier<HashOutput<OUTPUT_SIZE>>
-    for MerkleUpdateProofVerifier<H, OUTPUT_SIZE>
+impl<H: ResettableHasher<OUTPUT_SIZE>, const OUTPUT_SIZE: usize>
+    UpdateProofVerifier<HashOutput<OUTPUT_SIZE>> for MerkleUpdateProofVerifier<H, OUTPUT_SIZE>
 {
     fn feed(&mut self, sibling_hash: &HashOutput<OUTPUT_SIZE>) {
         self.old_verifier.feed(sibling_hash);
@@ -482,7 +483,7 @@ impl<
             root: root.clone(),
             // a zero-length proof (for a single-element tree) is only valid if the value hash is equal to the root
             verified: size == 1 && value_hash == root,
-            _marker: PhantomData,
+            hasher: H::new(),
         }
     }
 
