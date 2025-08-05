@@ -65,6 +65,32 @@ pub trait Hasher<const OUTPUT_SIZE: usize>: Sized {
     }
 }
 
+/// A trait for implementations to allow reusing the same hasher instance.
+pub trait ResettableHasher<const OUTPUT_SIZE: usize>: Hasher<OUTPUT_SIZE> {
+    /// Reset to the same state as `Self::new()`.
+    ///
+    /// Note: it is not guaranteed that the result will be byte-for-byte identical to
+    /// a new instance produced by `Self::new()`, but it is guaranteed that the
+    /// hasher will produce the same output after `reset()` as a new instance would,
+    /// if fed the same input data.
+    fn reset(&mut self);
+
+    /// Finalize the hashing process, saving the output in the provided array.
+    /// If the hasher will be reused for a new hash, the `reset` method MUST be called
+    /// before the next `update` call.
+    fn digest_inplace<'a, 'b>(&'a mut self, out: &'b mut [u8; OUTPUT_SIZE]);
+
+    /// Finalize the hashing process, returning the output as an array of bytes.
+    /// If the hasher will be reused for a new hash, the `reset` method MUST be called
+    /// before the next `update` call.
+    fn finalize_inplace(&mut self) -> [u8; OUTPUT_SIZE] {
+        let mut out = MaybeUninit::<[u8; OUTPUT_SIZE]>::uninit();
+        let out_ref = unsafe { &mut *out.as_mut_ptr() };
+        self.digest_inplace(out_ref);
+        unsafe { out.assume_init() }
+    }
+}
+
 /// A wrapper type for fixed-size byte arrays used to represent hash outputs.
 ///
 /// This wrapper allows implementing serialization and deserialization traits
@@ -424,7 +450,7 @@ impl<H: Hasher<OUTPUT_SIZE>, const OUTPUT_SIZE: usize> UpdateProofVerifier<HashO
 
 /// A Merkle tree-based implementation of the `VectorAccumulator` trait.
 pub struct MerkleAccumulator<
-    H: Hasher<OUTPUT_SIZE>,
+    H: ResettableHasher<OUTPUT_SIZE>,
     T: AsRef<[u8]> + Clone + Serialize + DeserializeOwned,
     const OUTPUT_SIZE: usize,
 > {
@@ -434,7 +460,7 @@ pub struct MerkleAccumulator<
 }
 
 impl<
-        H: Hasher<OUTPUT_SIZE>,
+        H: ResettableHasher<OUTPUT_SIZE>,
         T: AsRef<[u8]> + Clone + Serialize + DeserializeOwned,
         const OUTPUT_SIZE: usize,
     > StreamingVectorAccumulator<T, HashOutput<OUTPUT_SIZE>>
@@ -479,7 +505,7 @@ impl<
 }
 
 impl<
-        H: Hasher<OUTPUT_SIZE>,
+        H: ResettableHasher<OUTPUT_SIZE>,
         T: AsRef<[u8]> + Clone + Serialize + DeserializeOwned,
         const OUTPUT_SIZE: usize,
     > VectorAccumulator<T, HashOutput<OUTPUT_SIZE>> for MerkleAccumulator<H, T, OUTPUT_SIZE>
@@ -590,7 +616,7 @@ impl<
 }
 
 impl<
-        H: Hasher<OUTPUT_SIZE>,
+        H: ResettableHasher<OUTPUT_SIZE>,
         T: AsRef<[u8]> + Clone + Serialize + DeserializeOwned,
         const OUTPUT_SIZE: usize,
     > MerkleAccumulator<H, T, OUTPUT_SIZE>
@@ -659,6 +685,19 @@ mod tests {
 
         fn digest(self, out: &mut [u8; 32]) {
             let result = self.hasher.finalize();
+            out.copy_from_slice(&result);
+        }
+    }
+
+    // implementation by cloning, just for the sake of the tests
+    impl ResettableHasher<32> for Sha256Hasher {
+        fn reset(&mut self) {
+            self.hasher = Sha256::new();
+        }
+
+        fn digest_inplace<'a, 'b>(&'a mut self, out: &'b mut [u8; 32]) {
+            let h = self.hasher.clone();
+            let result = h.finalize();
             out.copy_from_slice(&result);
         }
     }

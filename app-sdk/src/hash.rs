@@ -1,4 +1,4 @@
-pub use common::accumulator::Hasher;
+pub use common::accumulator::{Hasher, ResettableHasher};
 
 #[cfg(not(target_arch = "riscv32"))]
 mod hashers {
@@ -27,6 +27,16 @@ mod hashers {
 
                 fn digest(self, digest: &mut [u8; $digest_size]) {
                     digest.copy_from_slice(&self.hasher.finalize());
+                }
+            }
+
+            impl ResettableHasher<$digest_size> for $name {
+                fn reset(&mut self) {
+                    self.hasher = <$real>::new();
+                }
+
+                fn digest_inplace<'a, 'b>(&'a mut self, out: &'b mut [u8; $digest_size]) {
+                    out.copy_from_slice(&self.hasher.clone().finalize());
                 }
             }
         };
@@ -112,6 +122,25 @@ mod hashers {
                         HashId::$name as u32,
                         &mut self_clone.0 as *mut _ as *mut u8,
                         digest.as_mut_ptr(),
+                    ) {
+                        panic!("Failed to finalize hash");
+                    }
+                }
+            }
+
+            impl ResettableHasher<$digest_size> for $name {
+                fn reset(&mut self) {
+                    ecalls::hash_init(HashId::$name as u32, &mut self.0 as *mut _ as *mut u8);
+                }
+
+                fn digest_inplace<'a, 'b>(&'a mut self, out: &'b mut [u8; $digest_size]) {
+                    if out.len() != $digest_size {
+                        panic!("Invalid digest size");
+                    }
+                    if 0 == ecalls::hash_final(
+                        HashId::$name as u32,
+                        &mut self.0 as *mut _ as *mut u8,
+                        out.as_mut_ptr(),
                     ) {
                         panic!("Failed to finalize hash");
                     }
