@@ -61,9 +61,7 @@ pub trait Hasher<const OUTPUT_SIZE: usize>: Sized {
     fn hash(data: &[u8]) -> [u8; OUTPUT_SIZE] {
         let mut hasher = Self::new();
         hasher.update(data);
-        let mut out = [0u8; OUTPUT_SIZE];
-        hasher.digest(&mut out);
-        out
+        hasher.finalize()
     }
 }
 
@@ -619,9 +617,7 @@ impl<
         let mut hasher = H::new();
         hasher.update(&[0x00]);
         hasher.update(data.as_ref());
-        let mut digest = [0u8; OUTPUT_SIZE];
-        hasher.digest(&mut digest);
-        HashOutput(digest)
+        HashOutput(hasher.finalize())
     }
 
     /// Computes the hash for an internal node. A 0x01 byte is prepended to the data before hashing the child nodes.
@@ -634,9 +630,7 @@ impl<
         hasher.update(&[0x01]);
         hasher.update(&left.0);
         hasher.update(&right.0);
-        let mut digest = [0u8; OUTPUT_SIZE];
-        hasher.digest(&mut digest);
-        HashOutput(digest)
+        HashOutput(hasher.finalize())
     }
 }
 
