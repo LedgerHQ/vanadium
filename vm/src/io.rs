@@ -3,6 +3,8 @@ use ledger_device_sdk::io;
 // This trait encapsulates some customized functions that the Ledger Vanadium app
 // implements on top of the io::Comm
 pub trait CommExt {
+    fn reply_fast<T: Into<io::Reply>>(&mut self, reply: T);
+
     fn io_exchange<R, T>(&mut self, reply: R) -> T
     where
         R: Into<io::Reply>,
@@ -11,12 +13,7 @@ pub trait CommExt {
 }
 
 impl CommExt for io::Comm {
-    fn io_exchange<R, T>(&mut self, reply: R) -> T
-    where
-        R: Into<io::Reply>,
-        T: TryFrom<io::ApduHeader>,
-        io::Reply: From<<T as TryFrom<io::ApduHeader>>::Error>,
-    {
+    fn reply_fast<T: Into<io::Reply>>(&mut self, reply: T) {
         let sw = reply.into().0;
         self.io_buffer[self.tx_length] = (sw >> 8) as u8;
         self.io_buffer[self.tx_length + 1] = sw as u8;
@@ -30,7 +27,15 @@ impl CommExt for io::Comm {
         }
         self.tx_length = 0;
         self.rx_length = 0;
+    }
 
+    fn io_exchange<R, T>(&mut self, reply: R) -> T
+    where
+        R: Into<io::Reply>,
+        T: TryFrom<io::ApduHeader>,
+        io::Reply: From<<T as TryFrom<io::ApduHeader>>::Error>,
+    {
+        self.reply_fast(reply);
         self.next_command()
     }
 }
