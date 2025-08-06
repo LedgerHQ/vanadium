@@ -1,11 +1,11 @@
 use core::cell::RefCell;
 
+use alloc::vec::Vec;
 use alloc::{boxed::Box, rc::Rc};
-use common::client_commands::SectionKind;
 use ledger_device_sdk::io;
 use subtle::ConstantTimeEq;
 
-use alloc::vec::Vec;
+use common::client_commands::SectionKind;
 use common::manifest::Manifest;
 use common::vm::{Cpu, MemorySegment};
 

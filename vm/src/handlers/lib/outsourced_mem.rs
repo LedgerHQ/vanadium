@@ -2,8 +2,8 @@ use core::cell::RefCell;
 
 use alloc::{boxed::Box, rc::Rc, vec, vec::Vec};
 use common::accumulator::{
-    HashOutput, Hasher, InclusionProofVerifier, MerkleAccumulator, StreamingVectorAccumulator,
-    UpdateProofVerifier,
+    HashOutput, Hasher, InclusionProofVerifier, MerkleAccumulator, ResettableHasher,
+    StreamingVectorAccumulator, UpdateProofVerifier,
 };
 use common::vm::{Page, PagedMemory};
 use ledger_device_sdk::io;
@@ -77,6 +77,7 @@ pub struct OutsourcedMemory<'c> {
     n_pages: u32,
     merkle_root: HashOutput<32>,
     aes_ctr: Rc<RefCell<AesCtr>>,
+    hasher: Sha256Hasher,
     is_readonly: bool,
     section_kind: SectionKind,
     eviction_strategy: Box<dyn PageEvictionStrategy + 'c>,
@@ -98,12 +99,15 @@ impl<'c> core::fmt::Debug for OutsourcedMemory<'c> {
     }
 }
 
-#[inline]
 /// Computes the hash of a page as a MerkleAccumulator element.
 /// Note that this assumes that a 0 byte is prepended to the hash of the serialized content of the page.
 /// Therefore, it would be incorrect if an accumulator different than the MerkleAccumulator is used.
-fn get_page_hash(data: &[u8], nonce: Option<&[u8; 12]>) -> HashOutput<32> {
-    let mut hasher = Sha256Hasher::new();
+fn get_page_hash(
+    hasher: &mut Sha256Hasher,
+    data: &[u8],
+    nonce: Option<&[u8; 12]>,
+) -> HashOutput<32> {
+    hasher.reset();
     hasher.update(&[0x0u8]); // leaves in the Merkle tree have the 0x00 prefix
     match nonce {
         Some(nonce) => {
@@ -113,7 +117,7 @@ fn get_page_hash(data: &[u8], nonce: Option<&[u8; 12]>) -> HashOutput<32> {
         None => hasher.update(&[0x0u8; 13]),
     };
     hasher.update(data);
-    hasher.finalize().into()
+    hasher.finalize_inplace().into()
 }
 
 impl<'c> OutsourcedMemory<'c> {
@@ -136,6 +140,7 @@ impl<'c> OutsourcedMemory<'c> {
             is_readonly,
             section_kind,
             eviction_strategy,
+            hasher: Sha256Hasher::new(),
             last_accessed_page: None,
             #[cfg(feature = "metrics")]
             n_page_loads: 0,
@@ -169,7 +174,7 @@ impl<'c> OutsourcedMemory<'c> {
         let (nonce, payload) = aes_ctr
             .encrypt(&cached_page.page.data)
             .map_err(|_| common::vm::MemoryError::GenericError("AES encryption failed"))?;
-        let new_page_hash = get_page_hash(&payload, Some(&nonce));
+        let new_page_hash = get_page_hash(&mut self.hasher, &payload, Some(&nonce));
 
         assert!(payload.len() == PAGE_SIZE);
 
@@ -233,7 +238,7 @@ impl<'c> OutsourcedMemory<'c> {
         );
 
         for el in proof_response.proof.iter() {
-            verifier.feed(HashOutput::<32>::as_hash_output(el));
+            verifier.feed(&mut self.hasher, HashOutput::<32>::as_hash_output(el));
         }
         let mut n_processed_elements = proof_response.t as usize;
 
@@ -271,7 +276,7 @@ impl<'c> OutsourcedMemory<'c> {
                 ));
             }
             for el in continued_response.proof.iter() {
-                verifier.feed(HashOutput::<32>::as_hash_output(el));
+                verifier.feed(&mut self.hasher, HashOutput::<32>::as_hash_output(el));
             }
             n_processed_elements += continued_response.t as usize;
         }
@@ -355,9 +360,9 @@ impl<'c> OutsourcedMemory<'c> {
             .map_err(|_| common::vm::MemoryError::GenericError("Invalid proof data"))?;
 
         let page_hash = if proof_response.is_encrypted {
-            get_page_hash(&data, Some(&proof_response.nonce))
+            get_page_hash(&mut self.hasher, &data, Some(&proof_response.nonce))
         } else {
-            get_page_hash(&data, None)
+            get_page_hash(&mut self.hasher, &data, None)
         };
 
         let n = proof_response.n; // Total number of elements in the proof
@@ -376,7 +381,7 @@ impl<'c> OutsourcedMemory<'c> {
         );
 
         for el in proof_response.proof.iter() {
-            verifier.feed(HashOutput::<32>::as_hash_output(el));
+            verifier.feed(&mut self.hasher, HashOutput::<32>::as_hash_output(el));
         }
 
         let nonce = proof_response.nonce.clone();
@@ -419,7 +424,7 @@ impl<'c> OutsourcedMemory<'c> {
             }
 
             for el in continued_response.proof.iter() {
-                verifier.feed(HashOutput::<32>::as_hash_output(el));
+                verifier.feed(&mut self.hasher, HashOutput::<32>::as_hash_output(el));
             }
             n_processed_elements += continued_response.t as usize;
         }

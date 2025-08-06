@@ -150,7 +150,7 @@ impl<'de, const N: usize> Deserialize<'de> for HashOutput<N> {
 /// proofs of inclusion and updates.
 pub trait VectorAccumulator<
     T: AsRef<[u8]> + Clone + Serialize + DeserializeOwned,
-    H: PartialEq + Clone + Serialize + DeserializeOwned,
+    const OUTPUT_SIZE: usize,
 >
 {
     /// The type representing an inclusion proof.
@@ -175,14 +175,14 @@ pub trait VectorAccumulator<
     fn size(&self) -> usize;
 
     /// Returns the root hash of the accumulator.
-    fn root(&self) -> &H;
+    fn root(&self) -> &HashOutput<OUTPUT_SIZE>;
 
     /// Generates a proof of inclusion for an element at the given index.
     /// Returns the inclusion proof, or an error string if the index is out of bounds.
     fn prove(&self, index: usize) -> Result<Self::InclusionProof, AccumulatorError>;
 
     /// Computes the hash of an element.
-    fn hash_element<T_: AsRef<[u8]>>(element: &T_) -> H;
+    fn hash_element<T_: AsRef<[u8]>>(element: &T_) -> HashOutput<OUTPUT_SIZE>;
 
     /// Updates the accumulator by replacing the element at the given index.
     ///
@@ -198,23 +198,20 @@ pub trait VectorAccumulator<
         &mut self,
         index: usize,
         value: T,
-    ) -> Result<(Self::UpdateProof, H), AccumulatorError>;
+    ) -> Result<(Self::UpdateProof, HashOutput<OUTPUT_SIZE>), AccumulatorError>;
 }
 
 pub trait VectorAccumulatorVerifier<
     T: AsRef<[u8]> + Clone + Serialize + DeserializeOwned,
-    H: PartialEq + Clone + Serialize + DeserializeOwned,
+    const OUTPUT_SIZE: usize,
+    H: ResettableHasher<OUTPUT_SIZE>,
 >
 {
     /// The type representing a reference to an inclusion proof.
-    type InclusionProofRef<'a>
-    where
-        H: 'a;
+    type InclusionProofRef<'a>;
 
     /// The type representing a reference to an update proof.
-    type UpdateProofRef<'a>
-    where
-        H: 'a;
+    type UpdateProofRef<'a>;
 
     /// Verifies an inclusion proof. This associated function is called by the verifier,
     /// rather than the owner of the instance.
@@ -231,14 +228,12 @@ pub trait VectorAccumulatorVerifier<
     ///
     /// `true` if the proof is valid, `false` otherwise.
     fn verify_inclusion_proof<'a>(
-        root: &H,
+        root: &HashOutput<OUTPUT_SIZE>,
         proof: Self::InclusionProofRef<'a>,
-        value_hash: &H,
+        value_hash: &HashOutput<OUTPUT_SIZE>,
         index: usize,
         size: usize,
-    ) -> bool
-    where
-        H: 'a;
+    ) -> bool;
 
     /// Verifies an update proof. This associated function is called by the verifier,
     /// rather than the owner of the instance.
@@ -257,31 +252,29 @@ pub trait VectorAccumulatorVerifier<
     ///
     /// `true` if the update proof is valid, `false` otherwise.
     fn verify_update_proof<'a>(
-        old_root: &H,
-        new_root: &H,
+        old_root: &HashOutput<OUTPUT_SIZE>,
+        new_root: &HashOutput<OUTPUT_SIZE>,
         update_proof: Self::UpdateProofRef<'a>,
-        old_value_hash: &H,
-        new_value_hash: &H,
+        old_value_hash: &HashOutput<OUTPUT_SIZE>,
+        new_value_hash: &HashOutput<OUTPUT_SIZE>,
         index: usize,
         size: usize,
-    ) -> bool
-    where
-        H: 'a;
+    ) -> bool;
 }
 
 /// Trait for incrementally verifying an inclusion proof.
-pub trait InclusionProofVerifier<H> {
+pub trait InclusionProofVerifier<const OUTPUT_SIZE: usize, H: ResettableHasher<OUTPUT_SIZE>> {
     /// Feeds a single proof element into the verifier.
-    fn feed(&mut self, element: &H);
+    fn feed(&mut self, hasher: &mut H, element: &HashOutput<OUTPUT_SIZE>);
 
     /// Returns `true` if the proof has been verified, `false` otherwise.
     fn verified(&self) -> bool;
 }
 
 /// Trait for incrementally verifying an update proof.
-pub trait UpdateProofVerifier<H> {
+pub trait UpdateProofVerifier<const OUTPUT_SIZE: usize, H: ResettableHasher<OUTPUT_SIZE>> {
     /// Feeds a single proof element into the verifier.
-    fn feed(&mut self, element: &H);
+    fn feed(&mut self, hasher: &mut H, element: &HashOutput<OUTPUT_SIZE>);
 
     /// Returns `true` if the proof has been verified, `false` otherwise.
     fn verified(&self) -> bool;
@@ -291,26 +284,27 @@ pub trait UpdateProofVerifier<H> {
 /// Assumes that the proofs are just lists of hashes.
 pub trait StreamingVectorAccumulator<
     T: AsRef<[u8]> + Clone + Serialize + DeserializeOwned,
-    H: PartialEq + Clone + Serialize + DeserializeOwned,
->: VectorAccumulator<T, H>
+    const OUTPUT_SIZE: usize,
+    H: ResettableHasher<OUTPUT_SIZE>,
+>: VectorAccumulator<T, OUTPUT_SIZE>
 {
-    type InclusionProofVerifier: InclusionProofVerifier<H>;
-    type UpdateProofVerifier: UpdateProofVerifier<H>;
+    type InclusionProofVerifier: InclusionProofVerifier<OUTPUT_SIZE, H>;
+    type UpdateProofVerifier: UpdateProofVerifier<OUTPUT_SIZE, H>;
 
     /// Initiates an inclusion proof verifier with the given parameters.
     fn begin_inclusion_proof(
-        root: &H,
-        value_hash: &H,
+        root: &HashOutput<OUTPUT_SIZE>,
+        value_hash: &HashOutput<OUTPUT_SIZE>,
         index: usize,
         size: usize,
     ) -> Self::InclusionProofVerifier;
 
     /// Initiates an update proof verifier with the given parameters.
     fn begin_update_proof(
-        old_root: &H,
-        new_root: &H,
-        old_value_hash: &H,
-        new_value_hash: &H,
+        old_root: &HashOutput<OUTPUT_SIZE>,
+        new_root: &HashOutput<OUTPUT_SIZE>,
+        old_value_hash: &HashOutput<OUTPUT_SIZE>,
+        new_value_hash: &HashOutput<OUTPUT_SIZE>,
         index: usize,
         size: usize,
     ) -> Self::UpdateProofVerifier;
@@ -319,49 +313,38 @@ pub trait StreamingVectorAccumulator<
 // blanket implementation of verify_inclusion_proof and verify_update_proof for a StreamingVectorAccumulator
 impl<
         T: AsRef<[u8]> + Clone + Serialize + DeserializeOwned,
-        H: PartialEq + Clone + Serialize + DeserializeOwned,
-        S: StreamingVectorAccumulator<T, H>,
-    > VectorAccumulatorVerifier<T, H> for S
+        const OUTPUT_SIZE: usize,
+        H: ResettableHasher<OUTPUT_SIZE>,
+        S: StreamingVectorAccumulator<T, OUTPUT_SIZE, H>,
+    > VectorAccumulatorVerifier<T, OUTPUT_SIZE, H> for S
 {
-    type InclusionProofRef<'a>
-        = &'a [H]
-    where
-        H: 'a;
-    type UpdateProofRef<'a>
-        = &'a [H]
-    where
-        H: 'a;
+    type InclusionProofRef<'a> = &'a [HashOutput<OUTPUT_SIZE>];
+    type UpdateProofRef<'a> = &'a [HashOutput<OUTPUT_SIZE>];
 
     fn verify_inclusion_proof<'a>(
-        root: &H,
+        root: &HashOutput<OUTPUT_SIZE>,
         proof: Self::InclusionProofRef<'a>,
-        value_hash: &H,
+        value_hash: &HashOutput<OUTPUT_SIZE>,
         index: usize,
         size: usize,
-    ) -> bool
-    where
-        H: 'a,
-    {
+    ) -> bool {
+        let mut hasher = H::new();
         let mut verifier = Self::begin_inclusion_proof(root, value_hash, index, size);
-
         for el in proof.iter() {
-            verifier.feed(el);
+            verifier.feed(&mut hasher, el);
         }
         verifier.verified()
     }
 
     fn verify_update_proof<'a>(
-        old_root: &H,
-        new_root: &H,
+        old_root: &HashOutput<OUTPUT_SIZE>,
+        new_root: &HashOutput<OUTPUT_SIZE>,
         update_proof: Self::UpdateProofRef<'a>,
-        old_value_hash: &H,
-        new_value_hash: &H,
+        old_value_hash: &HashOutput<OUTPUT_SIZE>,
+        new_value_hash: &HashOutput<OUTPUT_SIZE>,
         index: usize,
         size: usize,
-    ) -> bool
-    where
-        H: 'a,
-    {
+    ) -> bool {
         let mut verifier = Self::begin_update_proof(
             old_root,
             new_root,
@@ -371,8 +354,9 @@ impl<
             size,
         );
 
+        let mut hasher = H::new();
         for el in update_proof.iter() {
-            verifier.feed(el);
+            verifier.feed(&mut hasher, el);
         }
         verifier.verified()
     }
@@ -385,14 +369,13 @@ pub struct MerkleInclusionProofVerifier<H: ResettableHasher<OUTPUT_SIZE>, const 
     pos: usize,                            // Current position in the tree
     root: HashOutput<OUTPUT_SIZE>,         // Expected root hash
     verified: bool,                        // Whether the proof has been verified
-    hasher: H,                             // The hasher
+    _marker: PhantomData<H>,
 }
 
 impl<H: ResettableHasher<OUTPUT_SIZE>, const OUTPUT_SIZE: usize>
-    InclusionProofVerifier<HashOutput<OUTPUT_SIZE>>
-    for MerkleInclusionProofVerifier<H, OUTPUT_SIZE>
+    InclusionProofVerifier<OUTPUT_SIZE, H> for MerkleInclusionProofVerifier<H, OUTPUT_SIZE>
 {
-    fn feed(&mut self, sibling_hash: &HashOutput<OUTPUT_SIZE>) {
+    fn feed(&mut self, hasher: &mut H, sibling_hash: &HashOutput<OUTPUT_SIZE>) {
         if self.pos == 0 {
             // Verification already completed; extra elements make the proof invalid
 
@@ -408,11 +391,11 @@ impl<H: ResettableHasher<OUTPUT_SIZE>, const OUTPUT_SIZE: usize>
         };
 
         // Compute the parent hash
-        self.hasher.reset();
-        self.hasher.update(&[0x01]); // Internal node prefix
-        self.hasher.update(&left.0);
-        self.hasher.update(&right.0);
-        self.hasher.digest_inplace(&mut self.current_hash.0);
+        hasher.reset();
+        hasher.update(&[0x01]); // Internal node prefix
+        hasher.update(&left.0);
+        hasher.update(&right.0);
+        hasher.digest_inplace(&mut self.current_hash.0);
 
         // Move up the tree
         self.pos = (self.pos - 1) / 2;
@@ -436,12 +419,12 @@ pub struct MerkleUpdateProofVerifier<H: ResettableHasher<OUTPUT_SIZE>, const OUT
     new_verifier: MerkleInclusionProofVerifier<H, OUTPUT_SIZE>,
 }
 
-impl<H: ResettableHasher<OUTPUT_SIZE>, const OUTPUT_SIZE: usize>
-    UpdateProofVerifier<HashOutput<OUTPUT_SIZE>> for MerkleUpdateProofVerifier<H, OUTPUT_SIZE>
+impl<H: ResettableHasher<OUTPUT_SIZE>, const OUTPUT_SIZE: usize> UpdateProofVerifier<OUTPUT_SIZE, H>
+    for MerkleUpdateProofVerifier<H, OUTPUT_SIZE>
 {
-    fn feed(&mut self, sibling_hash: &HashOutput<OUTPUT_SIZE>) {
-        self.old_verifier.feed(sibling_hash);
-        self.new_verifier.feed(sibling_hash);
+    fn feed(&mut self, hasher: &mut H, sibling_hash: &HashOutput<OUTPUT_SIZE>) {
+        self.old_verifier.feed(hasher, sibling_hash);
+        self.new_verifier.feed(hasher, sibling_hash);
     }
 
     fn verified(&self) -> bool {
@@ -464,8 +447,7 @@ impl<
         H: ResettableHasher<OUTPUT_SIZE>,
         T: AsRef<[u8]> + Clone + Serialize + DeserializeOwned,
         const OUTPUT_SIZE: usize,
-    > StreamingVectorAccumulator<T, HashOutput<OUTPUT_SIZE>>
-    for MerkleAccumulator<H, T, OUTPUT_SIZE>
+    > StreamingVectorAccumulator<T, OUTPUT_SIZE, H> for MerkleAccumulator<H, T, OUTPUT_SIZE>
 {
     type InclusionProofVerifier = MerkleInclusionProofVerifier<H, OUTPUT_SIZE>;
     type UpdateProofVerifier = MerkleUpdateProofVerifier<H, OUTPUT_SIZE>;
@@ -483,7 +465,7 @@ impl<
             root: root.clone(),
             // a zero-length proof (for a single-element tree) is only valid if the value hash is equal to the root
             verified: size == 1 && value_hash == root,
-            hasher: H::new(),
+            _marker: PhantomData,
         }
     }
 
@@ -509,7 +491,7 @@ impl<
         H: ResettableHasher<OUTPUT_SIZE>,
         T: AsRef<[u8]> + Clone + Serialize + DeserializeOwned,
         const OUTPUT_SIZE: usize,
-    > VectorAccumulator<T, HashOutput<OUTPUT_SIZE>> for MerkleAccumulator<H, T, OUTPUT_SIZE>
+    > VectorAccumulator<T, OUTPUT_SIZE> for MerkleAccumulator<H, T, OUTPUT_SIZE>
 {
     type InclusionProof = Vec<HashOutput<OUTPUT_SIZE>>;
     type InclusionProofRef<'a> = &'a [HashOutput<OUTPUT_SIZE>];
