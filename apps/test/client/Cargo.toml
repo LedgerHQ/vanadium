@@ -4,7 +4,9 @@ version = "0.1.0"
 edition = "2021"
 
 [features]
+default = []
 speculos-tests = []
+debug = ["dep:env_logger", "sdk/debug"]
 
 [dependencies]
 clap = { version = "4.5.17", features = ["derive"] }
@@ -13,6 +15,7 @@ hidapi = "2.6.3"
 ledger-transport-hid = "0.11.0"
 sdk = { package = "vanadium-client-sdk", path = "../../../client-sdk"}
 tokio = { version = "1.38.1", features = ["io-util", "macros", "net", "rt", "rt-multi-thread", "sync"] }
+env_logger = { version = "0.11.8", optional = true }
 
 [dev-dependencies]
 hex-literal = "0.4.1"

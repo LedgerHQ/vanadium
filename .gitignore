@@ -17,3 +17,6 @@ Cargo.lock
 # so we ignore these folders if present.
 venv
 .venv
+
+# Used when debugging the V-App clients
+**/debug.log
