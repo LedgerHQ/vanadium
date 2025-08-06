@@ -1,3 +1,6 @@
+#[cfg(feature = "debug")]
+use log::debug;
+
 use async_trait::async_trait;
 use std::{
     cmp::min,
@@ -178,6 +181,12 @@ impl<E: std::fmt::Debug + Send + Sync + 'static> VAppEngine<E> {
             page_index,
         } = GetPageMessage::deserialize(command)?;
 
+        #[cfg(feature = "debug")]
+        debug!(
+            "Processing get_page: section = {:?}, page_index = {}",
+            section_kind, page_index
+        );
+
         let segment = match section_kind {
             SectionKind::Code => &self.code_seg,
             SectionKind::Data => &self.data_seg,
@@ -295,6 +304,12 @@ impl<E: std::fmt::Debug + Send + Sync + 'static> VAppEngine<E> {
         command: &[u8],
     ) -> Result<(StatusWord, Vec<u8>), VAppEngineError<E>> {
         let msg = CommitPageMessage::deserialize(command)?;
+
+        #[cfg(feature = "debug")]
+        debug!(
+            "Processing commit_page: section = {:?}, page_index = {}",
+            msg.section_kind, msg.page_index,
+        );
 
         let segment = match msg.section_kind {
             SectionKind::Code => {
