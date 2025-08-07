@@ -17,6 +17,8 @@ use sdk::vanadium_client::client_utils::{create_default_client, ClientType};
 
 use std::borrow::Cow;
 
+use crate::client::BitcoinClientError;
+
 #[derive(Parser, Debug)]
 #[command(name = "vnd-bitcoin-cli")]
 struct Cli {
@@ -245,7 +247,7 @@ fn parse_wallet_policy(
 async fn handle_cli_command(
     bitcoin_client: &mut BitcoinClient,
     cli: &Cli,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<(), BitcoinClientError> {
     match &cli.command {
         CliCommand::GetFingerprint => {
             let fpr = bitcoin_client.get_master_fingerprint().await?;
@@ -371,7 +373,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let _ = rl.load_history("history.txt");
 
-    let mut with_error = false;
+    let mut with_unrecoverable_error = false;
     loop {
         match rl.readline("₿ ") {
             Ok(line) => {
@@ -395,13 +397,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 };
 
                 match Cli::try_parse_from(clap_args) {
-                    Ok(cli) => {
-                        if let Err(e) = handle_cli_command(&mut bitcoin_client, &cli).await {
-                            println!("Error: {}", e);
-                            with_error = true;
+                    Ok(cli) => match handle_cli_command(&mut bitcoin_client, &cli).await {
+                        Ok(_) => {}
+                        Err(BitcoinClientError::AppError(e)) => {
+                            // The V-App returned an error, but it's still running fine
+                            println!("The V-App returned an error: {}", e);
+                        }
+                        Err(e) => {
+                            // Other errors can't be recovered from
+                            println!("Fatal error: {}", e);
+                            with_unrecoverable_error = true;
                             break;
                         }
-                    }
+                    },
                     Err(e) => println!("Invalid command: {}", e),
                 }
             }
@@ -419,7 +427,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     rl.save_history("history.txt")?;
 
-    if !with_error {
+    if !with_unrecoverable_error {
         // close the client gracefully
         let exit_status = bitcoin_client.exit().await?;
         if exit_status != 0 {
