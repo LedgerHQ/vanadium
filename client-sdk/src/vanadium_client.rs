@@ -183,7 +183,7 @@ impl<E: std::fmt::Debug + Send + Sync + 'static> VAppEngine<E> {
 
         #[cfg(feature = "debug")]
         debug!(
-            "Processing get_page: section = {:?}, page_index = {}",
+            "<- GetPageMessage(section_kind = {:?}, page_index = {})",
             section_kind, page_index
         );
 
@@ -224,9 +224,15 @@ impl<E: std::fmt::Debug + Send + Sync + 'static> VAppEngine<E> {
         // We expect this message from the VM
         GetPageProofMessage::deserialize(&result)?;
 
+        #[cfg(feature = "debug")]
+        debug!("<- GetPageProofMessage()");
+
         // Calculate how many proof elements we can send in one message
         let max_proof_elements = (255 - 2) / 32; // 2 bytes for n and t, 32 bytes per proof element
         let t = std::cmp::min(proof.len(), max_proof_elements) as u8;
+
+        #[cfg(feature = "debug")]
+        debug!("Proof length: {}", proof.len());
 
         // Create the proof response
         let response = GetPageProofResponse::new(
@@ -251,6 +257,9 @@ impl<E: std::fmt::Debug + Send + Sync + 'static> VAppEngine<E> {
             }
 
             GetPageProofContinuedMessage::deserialize(&result)?;
+
+            #[cfg(feature = "debug")]
+            debug!("<- GetPageProofContinuedMessage()");
 
             let mut offset = t as usize;
 
@@ -281,19 +290,10 @@ impl<E: std::fmt::Debug + Send + Sync + 'static> VAppEngine<E> {
                     return Err(VAppEngineError::InterruptedExecutionExpected);
                 }
 
-                if let Ok(GetPageProofContinuedMessage { command_code }) =
-                    GetPageProofContinuedMessage::deserialize(&new_result)
-                {
-                    if !matches!(command_code, ClientCommandCode::GetPageProofContinued) {
-                        return Err(VAppEngineError::ResponseError(
-                            "Unexpected command code during proof continuation",
-                        ));
-                    }
-                } else {
-                    return Err(VAppEngineError::ResponseError(
-                        "Failed to deserialize GetPageProofContinuedMessage",
-                    ));
-                }
+                GetPageProofContinuedMessage::deserialize(&new_result)?;
+
+                #[cfg(feature = "debug")]
+                debug!("<- GetPageProofContinuedMessage()");
             }
         }
         Ok((status, result))
@@ -307,7 +307,7 @@ impl<E: std::fmt::Debug + Send + Sync + 'static> VAppEngine<E> {
 
         #[cfg(feature = "debug")]
         debug!(
-            "Processing commit_page: section = {:?}, page_index = {}",
+            "-> CommitPageMessage(section_kind = {:?}, page_index = {})",
             msg.section_kind, msg.page_index,
         );
 
@@ -334,6 +334,9 @@ impl<E: std::fmt::Debug + Send + Sync + 'static> VAppEngine<E> {
             command_code: _,
             data,
         } = CommitPageContentMessage::deserialize(&tmp_result)?;
+
+        #[cfg(feature = "debug")]
+        debug!("-> CommitPageContentMessage(data.len() = {})", data.len());
 
         assert!(data.len() == PAGE_SIZE);
         assert!(msg.is_encrypted == true); // the VM should always commit to encrypted pages
@@ -370,13 +373,11 @@ impl<E: std::fmt::Debug + Send + Sync + 'static> VAppEngine<E> {
             // CommitPageProofContinuedMessage have a different size
             let max_proof_elements = (255 - 2) / 32; // 2 bytes for n and t, 32 bytes per proof element
 
-            let Ok(CommitPageProofContinuedMessage { command_code: _ }) =
-                CommitPageProofContinuedMessage::deserialize(&result)
-            else {
-                return Err(VAppEngineError::ResponseError(
-                    "Failed to deserialize CommitPageProofContinuedMessage",
-                ));
-            };
+            CommitPageProofContinuedMessage::deserialize(&result)?;
+
+            #[cfg(feature = "debug")]
+            debug!("<- CommitPageProofContinuedMessage()");
+
             let mut offset = t as usize;
 
             // Send remaining proof elements, potentially in multiple messages
@@ -406,19 +407,10 @@ impl<E: std::fmt::Debug + Send + Sync + 'static> VAppEngine<E> {
                     return Err(VAppEngineError::InterruptedExecutionExpected);
                 }
 
-                if let Ok(CommitPageProofContinuedMessage { command_code }) =
-                    CommitPageProofContinuedMessage::deserialize(&new_result)
-                {
-                    if !matches!(command_code, ClientCommandCode::CommitPageProofContinued) {
-                        return Err(VAppEngineError::ResponseError(
-                            "Unexpected command code during proof continuation",
-                        ));
-                    }
-                } else {
-                    return Err(VAppEngineError::ResponseError(
-                        "Failed to deserialize CommitPageProofContinuedMessage",
-                    ));
-                }
+                CommitPageProofContinuedMessage::deserialize(&new_result)?;
+
+                #[cfg(feature = "debug")]
+                debug!("<- CommitPageProofContinuedMessage()");
             }
         }
 
@@ -435,6 +427,13 @@ impl<E: std::fmt::Debug + Send + Sync + 'static> VAppEngine<E> {
             total_remaining_size: mut remaining_len,
             data,
         } = SendBufferMessage::deserialize(command)?;
+
+        #[cfg(feature = "debug")]
+        debug!(
+            "-> SendBufferMessage(total_remaining_size = {}, data.len() = {})",
+            remaining_len,
+            data.len()
+        );
 
         let mut buf = data.to_vec();
 
@@ -459,6 +458,13 @@ impl<E: std::fmt::Debug + Send + Sync + 'static> VAppEngine<E> {
             }
 
             let msg = SendBufferMessage::deserialize(&result)?;
+
+            #[cfg(feature = "debug")]
+            debug!(
+                "<- SendBufferMessage(total_remaining_size = {}, data.len() = {})",
+                msg.total_remaining_size,
+                msg.data.len()
+            );
 
             if msg.total_remaining_size != remaining_len {
                 return Err(VAppEngineError::ResponseError(
@@ -486,6 +492,9 @@ impl<E: std::fmt::Debug + Send + Sync + 'static> VAppEngine<E> {
         command: &[u8],
     ) -> Result<(StatusWord, Vec<u8>), VAppEngineError<E>> {
         ReceiveBufferMessage::deserialize(command)?;
+
+        #[cfg(feature = "debug")]
+        debug!("-> ReceiveBufferMessage()");
 
         // Wait for the message from the client
         let ClientMessage::ReceiveBuffer(bytes) = self
@@ -527,6 +536,9 @@ impl<E: std::fmt::Debug + Send + Sync + 'static> VAppEngine<E> {
                     return Err(VAppEngineError::ResponseError("Empty response"));
                 }
                 ReceiveBufferMessage::deserialize(&result)?;
+
+                #[cfg(feature = "debug")]
+                debug!("<- ReceiveBufferMessage()");
             }
         }
     }
@@ -542,6 +554,13 @@ impl<E: std::fmt::Debug + Send + Sync + 'static> VAppEngine<E> {
             total_remaining_size: mut remaining_len,
             data,
         } = SendPanicBufferMessage::deserialize(command)?;
+
+        #[cfg(feature = "debug")]
+        debug!(
+            "-> SendPanicBufferMessage(total_remaining_size = {}, data.len() = {})",
+            remaining_len,
+            data.len()
+        );
 
         let mut buf = data.to_vec();
         if (buf.len() as u32) > remaining_len {
@@ -564,6 +583,13 @@ impl<E: std::fmt::Debug + Send + Sync + 'static> VAppEngine<E> {
                 return Err(VAppEngineError::ResponseError("Empty response"));
             }
             let msg = SendPanicBufferMessage::deserialize(&result)?;
+
+            #[cfg(feature = "debug")]
+            debug!(
+                "<- SendPanicBufferMessage(total_remaining_size = {}, data.len() = {})",
+                msg.total_remaining_size,
+                msg.data.len()
+            );
 
             if msg.total_remaining_size != remaining_len {
                 return Err(VAppEngineError::ResponseError(
