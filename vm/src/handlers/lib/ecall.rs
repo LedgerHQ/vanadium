@@ -21,7 +21,7 @@ use ledger_secure_sdk_sys::{
     CX_SHA256, CX_SHA512,
 };
 
-use crate::{AppSW, Instruction};
+use crate::{io::CommExt, AppSW, Instruction};
 
 use super::{outsourced_mem::OutsourcedMemory, SerializeToComm};
 
@@ -356,9 +356,9 @@ impl<'a> CommEcallHandler<'a> {
 
             let mut comm = self.comm.borrow_mut();
             SendPanicBufferMessage::new(size as u32, &[]).serialize_to_comm(&mut comm);
-            comm.reply(AppSW::InterruptedExecution);
 
-            let Instruction::Continue(p1, p2) = comm.next_command() else {
+            let Instruction::Continue(p1, p2) = comm.io_exchange(AppSW::InterruptedExecution)
+            else {
                 return Err(CommEcallError::WrongINS); // expected "Continue"
             };
 
@@ -385,9 +385,9 @@ impl<'a> CommEcallHandler<'a> {
 
             let mut comm = self.comm.borrow_mut();
             SendPanicBufferMessage::new(size as u32, &buffer).serialize_to_comm(&mut comm);
-            comm.reply(AppSW::InterruptedExecution);
 
-            let Instruction::Continue(p1, p2) = comm.next_command() else {
+            let Instruction::Continue(p1, p2) = comm.io_exchange(AppSW::InterruptedExecution)
+            else {
                 return Err(CommEcallError::WrongINS); // expected "Continue"
             };
 
@@ -416,9 +416,9 @@ impl<'a> CommEcallHandler<'a> {
 
             let mut comm = self.comm.borrow_mut();
             SendBufferMessage::new(size as u32, &[]).serialize_to_comm(&mut comm);
-            comm.reply(AppSW::InterruptedExecution);
 
-            let Instruction::Continue(p1, p2) = comm.next_command() else {
+            let Instruction::Continue(p1, p2) = comm.io_exchange(AppSW::InterruptedExecution)
+            else {
                 return Err(CommEcallError::WrongINS); // expected "Continue"
             };
 
@@ -445,9 +445,9 @@ impl<'a> CommEcallHandler<'a> {
 
             let mut comm = self.comm.borrow_mut();
             SendBufferMessage::new(size as u32, &buffer).serialize_to_comm(&mut comm);
-            comm.reply(AppSW::InterruptedExecution);
 
-            let Instruction::Continue(p1, p2) = comm.next_command() else {
+            let Instruction::Continue(p1, p2) = comm.io_exchange(AppSW::InterruptedExecution)
+            else {
                 return Err(CommEcallError::WrongINS); // expected "Continue"
             };
 
@@ -479,9 +479,9 @@ impl<'a> CommEcallHandler<'a> {
         while remaining_length != Some(0) {
             let mut comm = self.comm.borrow_mut();
             ReceiveBufferMessage::new().serialize_to_comm(&mut comm);
-            comm.reply(AppSW::InterruptedExecution);
 
-            let Instruction::Continue(p1, p2) = comm.next_command() else {
+            let Instruction::Continue(p1, p2) = comm.io_exchange(AppSW::InterruptedExecution)
+            else {
                 return Err(CommEcallError::WrongINS); // expected "Data"
             };
 

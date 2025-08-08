@@ -22,6 +22,7 @@ mod aes;
 mod app_ui;
 mod handlers;
 mod hash;
+mod io;
 
 #[cfg(feature = "run_tests")]
 mod app_tests;
