@@ -1,3 +1,5 @@
+use std::fs::{File, OpenOptions};
+use std::io::Write;
 use std::process::{Child, Command};
 use std::sync::Arc;
 use std::thread::sleep;
@@ -11,7 +13,9 @@ use sdk::{
 
 pub struct TestSetup {
     pub client: TestClient,
+    pub transport_tcp: Arc<TransportTcp>,
     child: Child,
+    log_file: File,
 }
 
 impl TestSetup {
@@ -22,7 +26,9 @@ impl TestSetup {
             "../app/target/riscv32imc-unknown-none-elf/release/vnd-test".to_string()
         });
 
-        let (child, transport) = spawn_speculos_and_transport(&vanadium_binary).await;
+        let (child, transport_tcp) = spawn_speculos_and_transport(&vanadium_binary).await;
+
+        let transport = Arc::new(TransportWrapper::new(transport_tcp.clone()));
 
         let (vanadium_client, _) = VanadiumAppClient::new(&vapp_binary, transport, None)
             .await
@@ -30,7 +36,26 @@ impl TestSetup {
 
         let client = TestClient::new(Box::new(vanadium_client));
 
-        TestSetup { client, child }
+        // Create log file and write test name
+        let mut log_file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open("test.log")
+            .expect("Failed to open test.log");
+
+        writeln!(
+            log_file,
+            "=== Test: {} ===",
+            std::thread::current().name().unwrap_or("unknown_test")
+        )
+        .unwrap();
+
+        TestSetup {
+            client,
+            transport_tcp,
+            child,
+            log_file,
+        }
     }
 }
 
@@ -38,12 +63,7 @@ impl TestSetup {
 /// 1) Spawn speculos
 /// 2) Poll for a running TCP transport (readiness)
 /// 3) If speculos dies prematurely, relaunch once
-async fn spawn_speculos_and_transport(
-    vanadium_binary: &str,
-) -> (
-    Child,
-    Arc<dyn Transport<Error = Box<dyn std::error::Error + Send + Sync>> + Send + Sync>,
-) {
+async fn spawn_speculos_and_transport(vanadium_binary: &str) -> (Child, Arc<TransportTcp>) {
     const MAX_LAUNCH_ATTEMPTS: usize = 10;
     const MAX_POLL_ATTEMPTS: usize = 5;
 
@@ -59,7 +79,7 @@ async fn spawn_speculos_and_transport(
             .expect("Failed to spawn speculos process");
 
         // --- 2) Poll for readiness ---
-        let mut transport: Option<Arc<_>> = None;
+        let mut transport_tcp: Option<Arc<TransportTcp>> = None;
 
         for _ in 0..MAX_POLL_ATTEMPTS {
             // Check if speculos died
@@ -74,8 +94,8 @@ async fn spawn_speculos_and_transport(
             // If it's still alive, try to connect
             match TransportTcp::new().await {
                 Ok(tcp) => {
-                    // If we succeed, wrap it up and return
-                    transport = Some(Arc::new(TransportWrapper::new(Arc::new(tcp))));
+                    // If we succeed, store the TransportTcp instance directly
+                    transport_tcp = Some(Arc::new(tcp));
                     break;
                 }
                 Err(_) => {
@@ -86,7 +106,7 @@ async fn spawn_speculos_and_transport(
         }
 
         // Did we succeed in getting a transport?
-        if let Some(t) = transport {
+        if let Some(t) = transport_tcp {
             // Return on success
             return (child, t);
         }
@@ -111,6 +131,26 @@ async fn spawn_speculos_and_transport(
 
 impl Drop for TestSetup {
     fn drop(&mut self) {
+        // Write the number of exchanges, amount sent and amount received to the log file
+        writeln!(
+            self.log_file,
+            "Total exchanges: {}",
+            self.transport_tcp.total_exchanges()
+        )
+        .unwrap();
+        writeln!(
+            self.log_file,
+            "Total sent: {}",
+            self.transport_tcp.total_sent()
+        )
+        .unwrap();
+        writeln!(
+            self.log_file,
+            "Total received: {}",
+            self.transport_tcp.total_received()
+        )
+        .unwrap();
+
         self.child.kill().expect("Failed to kill speculos process");
         self.child
             .wait()
