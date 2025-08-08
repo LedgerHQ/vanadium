@@ -204,7 +204,7 @@ pub trait VectorAccumulator<
 pub trait VectorAccumulatorVerifier<
     T: AsRef<[u8]> + Clone + Serialize + DeserializeOwned,
     const OUTPUT_SIZE: usize,
-    H: ResettableHasher<OUTPUT_SIZE>,
+    H: Hasher<OUTPUT_SIZE>,
 >
 {
     /// The type representing a reference to an inclusion proof.
@@ -434,7 +434,7 @@ impl<H: ResettableHasher<OUTPUT_SIZE>, const OUTPUT_SIZE: usize> UpdateProofVeri
 
 /// A Merkle tree-based implementation of the `VectorAccumulator` trait.
 pub struct MerkleAccumulator<
-    H: ResettableHasher<OUTPUT_SIZE>,
+    H: Hasher<OUTPUT_SIZE>,
     T: AsRef<[u8]> + Clone + Serialize + DeserializeOwned,
     const OUTPUT_SIZE: usize,
 > {
@@ -488,7 +488,7 @@ impl<
 }
 
 impl<
-        H: ResettableHasher<OUTPUT_SIZE>,
+        H: Hasher<OUTPUT_SIZE>,
         T: AsRef<[u8]> + Clone + Serialize + DeserializeOwned,
         const OUTPUT_SIZE: usize,
     > VectorAccumulator<T, OUTPUT_SIZE> for MerkleAccumulator<H, T, OUTPUT_SIZE>
@@ -599,7 +599,7 @@ impl<
 }
 
 impl<
-        H: ResettableHasher<OUTPUT_SIZE>,
+        H: Hasher<OUTPUT_SIZE>,
         T: AsRef<[u8]> + Clone + Serialize + DeserializeOwned,
         const OUTPUT_SIZE: usize,
     > MerkleAccumulator<H, T, OUTPUT_SIZE>
