@@ -8,6 +8,9 @@ default = ["cargo_toml", "transport"]
 transport = ["hidapi", "ledger-apdu", "ledger-transport-hid"]
 debug = ["dep:log"]
 
+# utilities for integration tests
+test-utils = ["transport"]
+
 [dependencies]
 
 app-sdk = { package = "vanadium-app-sdk", path = "../app-sdk"}

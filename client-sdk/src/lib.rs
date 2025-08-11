@@ -13,6 +13,9 @@ pub mod transport;
 #[cfg(feature = "transport")]
 pub mod vanadium_client;
 
+#[cfg(feature = "test-utils")]
+pub mod test_utils;
+
 pub use common::manifest;
 
 // re-export if using the cargo_toml feature
