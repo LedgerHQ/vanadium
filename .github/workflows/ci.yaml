@@ -318,6 +318,13 @@ jobs:
         run: |
           cargo test --features speculos-tests
 
+      - name: Upload test logs
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: vnd_test_logs_${{ matrix.model }}
+          path: apps/test/client/test.log
+
   # build sadik V-App
   build_vnd_sadik:
     name: vnd-sadik, Build on Risc-V target
@@ -401,6 +408,13 @@ jobs:
           VAPP_BINARY: ../../../vnd_sadik_riscv_binary/vnd-sadik.vapp
         run: |
           cargo test --features speculos-tests
+
+      - name: Upload test logs
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: vnd_sadik_logs_${{ matrix.model }}
+          path: apps/sadik/client/test.log
 
   # build bitcoin V-App
   build_vnd_bitcoin:
