@@ -1,12 +1,26 @@
 #![cfg(feature = "speculos-tests")]
 
-mod common;
-
 use hex_literal::hex;
+
+use sdk::test_utils::{setup_test, TestSetup};
+
+use vnd_test_client::TestClient;
+
+pub async fn setup() -> TestSetup<TestClient> {
+    let vanadium_binary = std::env::var("VANADIUM_BINARY")
+        .unwrap_or_else(|_| "../../../vm/target/flex/release/app-vanadium".to_string());
+    let vapp_binary = std::env::var("VAPP_BINARY").unwrap_or_else(|_| {
+        "../app/target/riscv32imc-unknown-none-elf/release/vnd-test".to_string()
+    });
+    setup_test(&vanadium_binary, &vapp_binary, |transport| {
+        TestClient::new(transport)
+    })
+    .await
+}
 
 #[tokio::test]
 async fn test_reverse() {
-    let mut setup = common::setup().await;
+    let mut setup = setup().await;
 
     #[rustfmt::skip]
     let testcases: Vec<(Vec<u8>, Vec<u8>)> = vec![
@@ -20,7 +34,7 @@ async fn test_reverse() {
 
 #[tokio::test]
 async fn test_add_numbers() {
-    let mut setup = common::setup().await;
+    let mut setup = setup().await;
 
     #[rustfmt::skip]
     let testcases: Vec<(u32, u64)> = vec![
@@ -36,7 +50,7 @@ async fn test_add_numbers() {
 
 #[tokio::test]
 async fn test_b58enc() {
-    let mut setup = common::setup().await;
+    let mut setup = setup().await;
 
     #[rustfmt::skip]
     let testcases: Vec<(&str, &str)> = vec![
@@ -54,7 +68,7 @@ async fn test_b58enc() {
 
 #[tokio::test]
 async fn test_sha256() {
-    let mut setup = common::setup().await;
+    let mut setup = setup().await;
 
     #[rustfmt::skip]
     let testcases: Vec<(&str, Vec<u8>)> = vec![
@@ -72,7 +86,7 @@ async fn test_sha256() {
 
 #[tokio::test]
 async fn test_nprimes() {
-    let mut setup = common::setup().await;
+    let mut setup = setup().await;
 
     #[rustfmt::skip]
     let testcases: Vec<(u32, u32)> = vec![
@@ -89,7 +103,7 @@ async fn test_nprimes() {
 
 #[tokio::test]
 async fn test_deviceprop() {
-    let mut setup = common::setup().await;
+    let mut setup = setup().await;
 
     let device_id = setup.client.device_props(1).await.unwrap();
     assert_eq!(device_id >> 16, 0x2C97); // Ledger vendor_id

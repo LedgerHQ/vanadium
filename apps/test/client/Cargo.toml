@@ -19,6 +19,7 @@ env_logger = { version = "0.11.8", optional = true }
 
 [dev-dependencies]
 hex-literal = "0.4.1"
+sdk = { package = "vanadium-client-sdk", path = "../../../client-sdk", features = ["test-utils"] }
 
 [lib]
 name = "vnd_test_client"

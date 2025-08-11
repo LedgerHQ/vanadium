@@ -20,6 +20,7 @@ tokio = { version = "1.38.1", features = ["io-util", "macros", "net", "rt", "rt-
 [dev-dependencies]
 k256 = { version = "0.13.4", features = ["schnorr"] }
 hex-literal = "0.4.1"
+sdk = { package = "vanadium-client-sdk", path = "../../../client-sdk", features = ["test-utils"] }
 sha2 = "0.10.8"
 
 [lib]

@@ -1,15 +1,28 @@
 #![cfg(feature = "speculos-tests")]
-
-mod test_common;
-
 use common::{BigIntOperator, HashId};
 use hex_literal::hex;
 use sha2::Digest;
 
+use sdk::test_utils::{setup_test, TestSetup};
+
+use vnd_sadik_client::SadikClient;
+
+pub async fn setup() -> TestSetup<SadikClient> {
+    let vanadium_binary = std::env::var("VANADIUM_BINARY")
+        .unwrap_or_else(|_| "../../../vm/target/flex/release/app-vanadium".to_string());
+    let vapp_binary = std::env::var("VAPP_BINARY").unwrap_or_else(|_| {
+        "../app/target/riscv32imc-unknown-none-elf/release/vnd-sadik".to_string()
+    });
+    setup_test(&vanadium_binary, &vapp_binary, |transport| {
+        SadikClient::new(transport)
+    })
+    .await
+}
+
 #[tokio::test]
 #[rustfmt::skip]
 async fn test_big_num() {
-    let mut setup = test_common::setup().await;
+    let mut setup = setup().await;
 
     let zero_large = [0u8; 64].to_vec();
     let minus_one_large = [0xffu8; 64].to_vec();
@@ -61,7 +74,7 @@ async fn test_big_num() {
 #[tokio::test]
 #[rustfmt::skip]
 async fn test_big_num_mod() {
-    let mut setup = test_common::setup().await;
+    let mut setup = setup().await;
 
     // all operations are modulo 0xfffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141
     // (curve order of Secp256k1)
@@ -144,7 +157,7 @@ async fn test_big_num_mod() {
 
 #[tokio::test]
 async fn test_ripemd160() {
-    let mut setup = test_common::setup().await;
+    let mut setup = setup().await;
 
     #[rustfmt::skip]
     let testcases: Vec<(Vec<u8>, Vec<u8>)> = vec![
@@ -162,7 +175,7 @@ async fn test_ripemd160() {
 
 #[tokio::test]
 async fn test_sha256() {
-    let mut setup = test_common::setup().await;
+    let mut setup = setup().await;
 
     #[rustfmt::skip]
     let testcases: Vec<(Vec<u8>, Vec<u8>)> = vec![
@@ -180,7 +193,7 @@ async fn test_sha256() {
 
 #[tokio::test]
 async fn test_sha512() {
-    let mut setup = test_common::setup().await;
+    let mut setup = setup().await;
 
     #[rustfmt::skip]
     let testcases: Vec<(Vec<u8>, Vec<u8>)> = vec![
@@ -198,7 +211,7 @@ async fn test_sha512() {
 
 #[tokio::test]
 async fn test_secp256k1_get_master_fingerprint() {
-    let mut setup = test_common::setup().await;
+    let mut setup = setup().await;
 
     assert_eq!(
         setup
@@ -212,7 +225,7 @@ async fn test_secp256k1_get_master_fingerprint() {
 
 #[tokio::test]
 async fn test_secp256k1_derive_hd_node() {
-    let mut setup = test_common::setup().await;
+    let mut setup = setup().await;
 
     let test_cases: Vec<(Vec<u32>, ([u8; 32], [u8; 32]))> = vec![
         (
@@ -250,7 +263,7 @@ async fn test_secp256k1_derive_hd_node() {
 // Disabled until SLIP-21 support is implemented properly in the Rust SDK
 // #[tokio::test]
 // async fn test_derive_slip21_key() {
-//     let mut setup = test_common::setup().await;
+//     let mut setup = setup().await;
 //     let client = &mut setup.client;
 
 //     let label1 = b"Vanadium".to_vec();
@@ -271,7 +284,7 @@ async fn test_secp256k1_derive_hd_node() {
 
 #[tokio::test]
 async fn test_secp256k1_point_add() {
-    let mut setup = test_common::setup().await;
+    let mut setup = setup().await;
 
     let p = hex!("04c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee51ae168fea63dc339a3c58419466ceaeef7f632653266d0e1236431a950cfe52a");
     let q = hex!("04f9308a019258c31049344f85f89d5229b531c845836f99b08601f113bce036f9388f7b0f632de8140fe337e62a37f3566500a99934c2231b6cb9fd7584b8e672");
@@ -290,7 +303,7 @@ async fn test_secp256k1_point_add() {
 
 #[tokio::test]
 async fn test_secp256k1_point_scalarmul() {
-    let mut setup = test_common::setup().await;
+    let mut setup = setup().await;
 
     let p = hex!("0479be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798483ada7726a3c4655da4fbfc0e1108a8fd17b448a68554199c47d08ffb10d4b8");
     let k = hex!("22445566778899aabbccddeeff0011223344556677889900aabbccddeeff0011");
@@ -309,7 +322,7 @@ async fn test_secp256k1_point_scalarmul() {
 
 #[tokio::test]
 async fn test_secp256k1_ecdsa_sign() {
-    let mut setup = test_common::setup().await;
+    let mut setup = setup().await;
     let msg =
         "If you don't believe me or don't get it, I don't have time to try to convince you, sorry.";
 
@@ -332,7 +345,7 @@ async fn test_secp256k1_ecdsa_sign() {
 
 #[tokio::test]
 async fn test_secp256k1_ecdsa_verify() {
-    let mut setup = test_common::setup().await;
+    let mut setup = setup().await;
     let msg =
         "If you don't believe me or don't get it, I don't have time to try to convince you, sorry.";
 
@@ -367,7 +380,7 @@ async fn test_secp256k1_ecdsa_verify() {
 
 #[tokio::test]
 async fn test_secp256k1_schnorr_sign() {
-    let mut setup = test_common::setup().await;
+    let mut setup = setup().await;
     let msg =
         "If you don't believe me or don't get it, I don't have time to try to convince you, sorry.";
 
@@ -398,7 +411,7 @@ async fn test_secp256k1_schnorr_sign() {
 
 #[tokio::test]
 async fn test_secp256k1_schnorr_verify() {
-    let mut setup = test_common::setup().await;
+    let mut setup = setup().await;
     let msg =
         "If you don't believe me or don't get it, I don't have time to try to convince you, sorry.";
 
@@ -441,7 +454,7 @@ async fn test_secp256k1_schnorr_verify() {
 #[tokio::test]
 async fn test_ticker() {
     // a simple test that verifies that ticker events are indeed received.
-    let mut setup = test_common::setup().await;
+    let mut setup = setup().await;
     let result = setup.client.sleep(10).await.expect("Should not fail");
     assert_eq!(result, Vec::<u8>::new());
 }
