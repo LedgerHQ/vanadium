@@ -123,29 +123,24 @@ async fn spawn_speculos_and_transport(vanadium_binary: &str) -> (Child, Arc<Tran
 impl<C> Drop for TestSetup<C> {
     fn drop(&mut self) {
         // Write the number of exchanges, amount sent and amount received to the log file
-        writeln!(
+        let _ = writeln!(
             self.log_file,
             "Total exchanges: {}",
             self.transport_tcp.total_exchanges()
-        )
-        .unwrap();
-        writeln!(
+        );
+        let _ = writeln!(
             self.log_file,
             "Total sent: {}",
             self.transport_tcp.total_sent()
-        )
-        .unwrap();
-        writeln!(
+        );
+        let _ = writeln!(
             self.log_file,
             "Total received: {}",
             self.transport_tcp.total_received()
-        )
-        .unwrap();
+        );
 
-        self.child.kill().expect("Failed to kill speculos process");
-        self.child
-            .wait()
-            .expect("Failed to wait on speculos process");
+        let _ = self.child.kill();
+        let _ = self.child.wait();
     }
 }
 
