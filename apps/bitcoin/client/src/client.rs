@@ -3,7 +3,7 @@ use std::str::FromStr;
 use bitcoin::bip32::DerivationPath;
 use common::account::ProofOfRegistration;
 use common::message::{self, PartialSignature, Request, Response};
-use sdk::vanadium_client::{VAppClient, VAppExecutionError};
+use sdk::vanadium_client::{VAppExecutionError, VAppTransport};
 
 use sdk::comm::SendMessageError;
 
@@ -65,16 +65,16 @@ impl std::error::Error for BitcoinClientError {
 }
 
 pub struct BitcoinClient {
-    app_client: Box<dyn VAppClient + Send + Sync>,
+    app_transport: Box<dyn VAppTransport + Send + Sync>,
 }
 
 impl<'a> BitcoinClient {
-    pub fn new(app_client: Box<dyn VAppClient + Send + Sync>) -> Self {
-        Self { app_client }
+    pub fn new(app_transport: Box<dyn VAppTransport + Send + Sync>) -> Self {
+        Self { app_transport }
     }
 
     async fn send_message(&mut self, out: &[u8]) -> Result<Vec<u8>, BitcoinClientError> {
-        sdk::comm::send_message(&mut self.app_client, out)
+        sdk::comm::send_message(&mut self.app_transport, out)
             .await
             .map_err(BitcoinClientError::from)
     }

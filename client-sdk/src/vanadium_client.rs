@@ -860,7 +860,7 @@ impl std::error::Error for VAppExecutionError {
 /// This trait defines the behavior for sending messages to an application and
 /// receiving responses.
 #[async_trait]
-pub trait VAppClient {
+pub trait VAppTransport {
     /// Sends a message to the app and returns the response asynchronously.
     ///
     /// # Parameters
@@ -875,7 +875,7 @@ pub trait VAppClient {
     async fn send_message(&mut self, msg: &[u8]) -> Result<Vec<u8>, VAppExecutionError>;
 }
 
-/// Implementation of a VAppClient using the Vanadium VM.
+/// Implementation of a VAppTransport using the Vanadium VM.
 pub struct VanadiumAppClient<E: std::fmt::Debug + Send + Sync + 'static> {
     client: GenericVanadiumClient<E>,
 }
@@ -1022,7 +1022,7 @@ impl<E: std::fmt::Debug + Send + Sync + 'static> VanadiumAppClient<E> {
 }
 
 #[async_trait]
-impl<E: std::fmt::Debug + Send + Sync + 'static> VAppClient for VanadiumAppClient<E> {
+impl<E: std::fmt::Debug + Send + Sync + 'static> VAppTransport for VanadiumAppClient<E> {
     async fn send_message(&mut self, msg: &[u8]) -> Result<Vec<u8>, VAppExecutionError> {
         match self.client.send_message(msg).await {
             Ok(response) => Ok(response),
@@ -1058,7 +1058,7 @@ impl NativeAppClient {
 }
 
 #[async_trait]
-impl VAppClient for NativeAppClient {
+impl VAppTransport for NativeAppClient {
     async fn send_message(&mut self, msg: &[u8]) -> Result<Vec<u8>, VAppExecutionError> {
         // ---------- WRITE ----------
         let len = msg.len() as u32;
@@ -1133,7 +1133,7 @@ pub mod client_utils {
     /// Creates a client for a V-App compiled using the native target. Uses TCP for communication
     pub async fn create_native_client(
         tcp_addr: Option<&str>,
-    ) -> Result<Box<dyn VAppClient + Send + Sync>, ClientUtilsError> {
+    ) -> Result<Box<dyn VAppTransport + Send + Sync>, ClientUtilsError> {
         let addr = tcp_addr.unwrap_or("127.0.0.1:2323");
         let client = NativeAppClient::new(addr)
             .await
@@ -1145,7 +1145,7 @@ pub mod client_utils {
     pub async fn create_tcp_client(
         app_path: &str,
         app_hmac: Option<[u8; 32]>,
-    ) -> Result<(Box<dyn VAppClient + Send + Sync>, [u8; 32]), ClientUtilsError> {
+    ) -> Result<(Box<dyn VAppTransport + Send + Sync>, [u8; 32]), ClientUtilsError> {
         let transport_raw = Arc::new(TransportTcp::new().await.map_err(|e| {
             ClientUtilsError::TcpTransportFailed(format!(
                 "Unable to get TCP transport. Is speculos running? {}",
@@ -1164,7 +1164,7 @@ pub mod client_utils {
     pub async fn create_hid_client(
         app_path: &str,
         app_hmac: Option<[u8; 32]>,
-    ) -> Result<(Box<dyn VAppClient + Send + Sync>, [u8; 32]), ClientUtilsError> {
+    ) -> Result<(Box<dyn VAppTransport + Send + Sync>, [u8; 32]), ClientUtilsError> {
         let hid_api = hidapi::HidApi::new().map_err(|e| {
             ClientUtilsError::HidTransportFailed(format!("Unable to create HID API: {}", e))
         })?;
@@ -1208,7 +1208,7 @@ pub mod client_utils {
     pub async fn create_default_client(
         app_name: &str,
         client_type: ClientType,
-    ) -> Result<Box<dyn VAppClient + Send + Sync>, ClientUtilsError> {
+    ) -> Result<Box<dyn VAppTransport + Send + Sync>, ClientUtilsError> {
         let app_path = format!(
             "../app/target/riscv32imc-unknown-none-elf/release/{}",
             app_name

@@ -2,7 +2,7 @@
 //! according to a specific communication protocol.
 //! See the documentation of the V-App SDK's `comm` module for more details.
 
-use crate::vanadium_client::{VAppClient, VAppExecutionError};
+use crate::vanadium_client::{VAppExecutionError, VAppTransport};
 
 use common::comm::{ACK, CHUNK_LENGTH};
 
@@ -39,7 +39,7 @@ impl core::error::Error for SendMessageError {}
 ///
 /// # Arguments
 ///
-/// * `client` - The V-App client.
+/// * `transport` - The V-App transport.
 /// * `message` - A byte slice containing the message to be sent.
 ///
 /// # Returns
@@ -56,7 +56,7 @@ impl core::error::Error for SendMessageError {}
 /// * An error occurs during the execution of the virtual application client.
 ///
 pub async fn send_message(
-    client: &mut Box<dyn VAppClient + Send + Sync>,
+    transport: &mut Box<dyn VAppTransport + Send + Sync>,
     message: &[u8],
 ) -> Result<Vec<u8>, SendMessageError> {
     // concatenate the length of the message (as a 4-byte big-endian) and the message itself
@@ -69,7 +69,7 @@ pub async fn send_message(
         if resp != ACK {
             return Err(SendMessageError::NotAckReceived);
         }
-        resp = client
+        resp = transport
             .send_message(chunk)
             .await
             .map_err(SendMessageError::VAppExecutionError)?;
@@ -88,7 +88,7 @@ pub async fn send_message(
 
     let mut response_data = resp[4..].to_vec();
     while response_data.len() < response_data_len {
-        let resp = client
+        let resp = transport
             .send_message(&ACK)
             .await
             .map_err(SendMessageError::VAppExecutionError)?;
