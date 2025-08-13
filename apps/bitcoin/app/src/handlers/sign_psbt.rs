@@ -9,7 +9,10 @@ use common::{
     account::{Account, ProofOfRegistration},
     bip388::{DescriptorTemplate, SegwitVersion},
     message::{PartialSignature, Response},
-    psbt::{PsbtAccountCoordinates, PsbtAccountOutput},
+    psbt::{
+        PsbtAccount, PsbtAccountCoordinates, PsbtAccountGlobalRead, PsbtAccountInputRead,
+        PsbtAccountOutputRead,
+    },
     script::ToScript,
     taproot::{GetTapLeafHash, GetTapTreeHash},
 };
@@ -22,7 +25,6 @@ use bitcoin::{
     sighash::SighashCache,
     Address, TapLeafHash, TapNodeHash, TapSighashType, Transaction, TxOut,
 };
-use common::psbt::{PsbtAccount, PsbtAccountGlobal, PsbtAccountInput};
 use sdk::{
     curve::{Curve, EcfpPrivateKey, ToPublicKey},
     ux::TagValue,

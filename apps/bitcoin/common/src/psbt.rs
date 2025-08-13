@@ -44,9 +44,14 @@ pub enum PsbtAccountCoordinates {
     // coordinates for other account types will be added here
 }
 
-pub trait PsbtAccountGlobal {
+pub trait PsbtAccountGlobalRead {
     fn get_accounts(&self) -> Result<Vec<PsbtAccount>, &'static str>;
     fn get_account(&self, id: u32) -> Result<Option<PsbtAccount>, &'static str>;
+    fn get_account_name(&self, id: u32) -> Result<Option<String>, &'static str>;
+    fn get_account_proof_of_registration(&self, id: u32) -> Result<Option<Vec<u8>>, &'static str>;
+}
+
+pub trait PsbtAccountGlobalWrite {
     fn set_account(&mut self, id: u32, account: PsbtAccount) -> Result<(), &'static str>;
     fn set_accounts(&mut self, accounts: Vec<PsbtAccount>) -> Result<(), &'static str> {
         for (i, account) in accounts.into_iter().enumerate() {
@@ -54,9 +59,7 @@ pub trait PsbtAccountGlobal {
         }
         Ok(())
     }
-    fn get_account_name(&self, id: u32) -> Result<Option<String>, &'static str>;
     fn set_account_name(&mut self, id: u32, name: &str) -> Result<(), &'static str>;
-    fn get_account_proof_of_registration(&self, id: u32) -> Result<Option<Vec<u8>>, &'static str>;
     fn set_account_proof_of_registration(
         &mut self,
         id: u32,
@@ -64,10 +67,13 @@ pub trait PsbtAccountGlobal {
     ) -> Result<(), &'static str>;
 }
 
-pub trait PsbtAccountInput {
+pub trait PsbtAccountInputRead {
     fn get_account_coordinates(
         &self,
     ) -> Result<Option<(u32, PsbtAccountCoordinates)>, &'static str>;
+}
+
+pub trait PsbtAccountInputWrite {
     fn set_account_coordinates(
         &mut self,
         id: u32,
@@ -75,10 +81,13 @@ pub trait PsbtAccountInput {
     ) -> Result<(), &'static str>;
 }
 
-pub trait PsbtAccountOutput {
+pub trait PsbtAccountOutputRead {
     fn get_account_coordinates(
         &self,
     ) -> Result<Option<(u32, PsbtAccountCoordinates)>, &'static str>;
+}
+
+pub trait PsbtAccountOutputWrite {
     fn set_account_coordinates(
         &mut self,
         id: u32,
@@ -86,7 +95,7 @@ pub trait PsbtAccountOutput {
     ) -> Result<(), &'static str>;
 }
 
-impl PsbtAccountGlobal for Psbt {
+impl PsbtAccountGlobalRead for Psbt {
     // Get all accounts from the global section of the PSBT.
     // Unknown account types are ignored.
     fn get_accounts(&self) -> Result<Vec<PsbtAccount>, &'static str> {
@@ -135,6 +144,47 @@ impl PsbtAccountGlobal for Psbt {
         }
     }
 
+    fn get_account_name(&self, id: u32) -> Result<Option<String>, &'static str> {
+        let mut id_raw = Vec::with_capacity(1); // unlikely to be more than 1 byte
+        let _ = id.consensus_encode(&mut id_raw).unwrap();
+        let key = ProprietaryKey {
+            prefix: PSBT_ACCOUNT_PROPRIETARY_IDENTIFIER.to_vec(),
+            subtype: PSBT_ACCOUNT_GLOBAL_ACCOUNT_NAME,
+            key: id_raw,
+        };
+
+        if let Some(value) = self.proprietary.get(&key) {
+            if !is_valid_account_name(&value) {
+                return Err("Invalid account name");
+            }
+
+            Ok(Some(String::from_utf8(value.to_vec()).unwrap()))
+        } else {
+            Ok(None)
+        }
+    }
+
+    fn get_account_proof_of_registration(&self, id: u32) -> Result<Option<Vec<u8>>, &'static str> {
+        let mut id_raw = Vec::with_capacity(1); // unlikely to be more than 1 byte
+        let _ = id.consensus_encode(&mut id_raw).unwrap();
+        let key = ProprietaryKey {
+            prefix: PSBT_ACCOUNT_PROPRIETARY_IDENTIFIER.to_vec(),
+            subtype: PSBT_ACCOUNT_GLOBAL_ACCOUNT_POR,
+            key: id_raw,
+        };
+
+        if let Some(value) = self.proprietary.get(&key) {
+            if value.len() < 1 {
+                return Err("Empty account value");
+            }
+            Ok(Some(value.to_vec()))
+        } else {
+            Ok(None)
+        }
+    }
+}
+
+impl PsbtAccountGlobalWrite for Psbt {
     fn set_account(&mut self, id: u32, account: PsbtAccount) -> Result<(), &'static str> {
         let mut id_raw = Vec::with_capacity(1); // unlikely to be more than 1 byte
         let _ = id.consensus_encode(&mut id_raw).unwrap();
@@ -157,26 +207,6 @@ impl PsbtAccountGlobal for Psbt {
         Ok(())
     }
 
-    fn get_account_name(&self, id: u32) -> Result<Option<String>, &'static str> {
-        let mut id_raw = Vec::with_capacity(1); // unlikely to be more than 1 byte
-        let _ = id.consensus_encode(&mut id_raw).unwrap();
-        let key = ProprietaryKey {
-            prefix: PSBT_ACCOUNT_PROPRIETARY_IDENTIFIER.to_vec(),
-            subtype: PSBT_ACCOUNT_GLOBAL_ACCOUNT_NAME,
-            key: id_raw,
-        };
-
-        if let Some(value) = self.proprietary.get(&key) {
-            if !is_valid_account_name(&value) {
-                return Err("Invalid account name");
-            }
-
-            Ok(Some(String::from_utf8(value.to_vec()).unwrap()))
-        } else {
-            Ok(None)
-        }
-    }
-
     fn set_account_name(&mut self, id: u32, name: &str) -> Result<(), &'static str> {
         let mut id_raw = Vec::with_capacity(1); // unlikely to be more than 1 byte
         let _ = id.consensus_encode(&mut id_raw).unwrap();
@@ -192,25 +222,6 @@ impl PsbtAccountGlobal for Psbt {
         self.proprietary.insert(key, name.as_bytes().to_vec());
 
         Ok(())
-    }
-
-    fn get_account_proof_of_registration(&self, id: u32) -> Result<Option<Vec<u8>>, &'static str> {
-        let mut id_raw = Vec::with_capacity(1); // unlikely to be more than 1 byte
-        let _ = id.consensus_encode(&mut id_raw).unwrap();
-        let key = ProprietaryKey {
-            prefix: PSBT_ACCOUNT_PROPRIETARY_IDENTIFIER.to_vec(),
-            subtype: PSBT_ACCOUNT_GLOBAL_ACCOUNT_POR,
-            key: id_raw,
-        };
-
-        if let Some(value) = self.proprietary.get(&key) {
-            if value.len() < 1 {
-                return Err("Empty account value");
-            }
-            Ok(Some(value.to_vec()))
-        } else {
-            Ok(None)
-        }
     }
 
     fn set_account_proof_of_registration(
@@ -236,7 +247,7 @@ impl PsbtAccountGlobal for Psbt {
     }
 }
 
-impl PsbtAccountInput for psbt::Input {
+impl PsbtAccountInputRead for psbt::Input {
     fn get_account_coordinates(
         &self,
     ) -> Result<Option<(u32, PsbtAccountCoordinates)>, &'static str> {
@@ -266,7 +277,9 @@ impl PsbtAccountInput for psbt::Input {
         }
         Ok(None)
     }
+}
 
+impl PsbtAccountInputWrite for psbt::Input {
     fn set_account_coordinates(
         &mut self,
         id: u32,
@@ -296,7 +309,7 @@ impl PsbtAccountInput for psbt::Input {
     }
 }
 
-impl PsbtAccountOutput for psbt::Output {
+impl PsbtAccountOutputRead for psbt::Output {
     fn get_account_coordinates(
         &self,
     ) -> Result<Option<(u32, PsbtAccountCoordinates)>, &'static str> {
@@ -327,7 +340,9 @@ impl PsbtAccountOutput for psbt::Output {
         }
         Ok(None)
     }
+}
 
+impl PsbtAccountOutputWrite for psbt::Output {
     fn set_account_coordinates(
         &mut self,
         id: u32,
