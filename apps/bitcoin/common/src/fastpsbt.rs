@@ -22,21 +22,49 @@ const PSBT_GLOBAL_PROPRIETARY: u8 = 0xFC;
 
 const PSBT_IN_NON_WITNESS_UTXO: u8 = 0x00;
 const PSBT_IN_WITNESS_UTXO: u8 = 0x01;
+const PSBT_IN_PARTIAL_SIG: u8 = 0x02;
 const PSBT_IN_SIGHASH_TYPE: u8 = 0x03;
 const PSBT_IN_REDEEM_SCRIPT: u8 = 0x04;
 const PSBT_IN_WITNESS_SCRIPT: u8 = 0x05;
+const PSBT_IN_BIP32_DERIVATION: u8 = 0x06;
 const PSBT_IN_FINAL_SCRIPTSIG: u8 = 0x07;
 const PSBT_IN_FINAL_SCRIPTWITNESS: u8 = 0x08;
+const PSBT_IN_POR_COMMITMENT: u8 = 0x09;
+const PSBT_IN_RIPEMD160: u8 = 0x0A;
+const PSBT_IN_SHA256: u8 = 0x0B;
+const PSBT_IN_HASH160: u8 = 0x0C;
+const PSBT_IN_HASH256: u8 = 0x0D;
 const PSBT_IN_PREVIOUS_TXID: u8 = 0x0E;
 const PSBT_IN_OUTPUT_INDEX: u8 = 0x0F;
 const PSBT_IN_SEQUENCE: u8 = 0x10;
 const PSBT_IN_REQUIRED_TIME_LOCKTIME: u8 = 0x11;
 const PSBT_IN_REQUIRED_HEIGHT_LOCKTIME: u8 = 0x12;
+const PSBT_IN_TAP_KEY_SIG: u8 = 0x13;
+const PSBT_IN_TAP_SCRIPT_SIG: u8 = 0x14;
+const PSBT_IN_TAP_LEAF_SCRIPT: u8 = 0x15;
+const PSBT_IN_TAP_BIP32_DERIVATION: u8 = 0x16;
+const PSBT_IN_TAP_INTERNAL_KEY: u8 = 0x17;
+const PSBT_IN_TAP_MERKLE_ROOT: u8 = 0x18;
+const PSBT_IN_MUSIG2_PARTICIPANT_PUBKEYS: u8 = 0x1A;
+const PSBT_IN_MUSIG2_PUB_NONCE: u8 = 0x1B;
+const PSBT_IN_MUSIG2_PARTIAL_SIG: u8 = 0x1C;
+const PSBT_IN_SP_ECDH_SHARE: u8 = 0x1D;
+const PSBT_IN_SP_DLEQ: u8 = 0x1E;
+const PSBT_IN_PROPRIETARY: u8 = 0xFC;
 
 const PSBT_OUT_REDEEM_SCRIPT: u8 = 0x00;
 const PSBT_OUT_WITNESS_SCRIPT: u8 = 0x01;
+const PSBT_OUT_BIP32_DERIVATION: u8 = 0x02;
 const PSBT_OUT_AMOUNT: u8 = 0x03;
 const PSBT_OUT_SCRIPT: u8 = 0x04;
+const PSBT_OUT_TAP_INTERNAL_KEY: u8 = 0x05;
+const PSBT_OUT_TAP_TREE: u8 = 0x06;
+const PSBT_OUT_TAP_BIP32_DERIVATION: u8 = 0x07;
+const PSBT_OUT_MUSIG2_PARTICIPANT_PUBKEYS: u8 = 0x08;
+const PSBT_OUT_SP_V0_INFO: u8 = 0x09;
+const PSBT_OUT_SP_V0_LABEL: u8 = 0x0A;
+const PSBT_OUT_DNSSEC_PROOF: u8 = 0x35;
+const PSBT_OUT_PROPRIETARY: u8 = 0xFC;
 
 // A key in a PSBT map, consisting of a type and key data.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -236,21 +264,22 @@ impl<'a> ParsedMap<'a> {
         }
     }
 
-    // Update get() to compare keys correctly
-    fn get(&self, key: &[u8]) -> Option<&'a [u8]> {
-        if key.is_empty() {
-            return None;
-        }
-        let search_key_type = key[0];
-        let search_key_data = &key[1..];
+    fn get(&self, key_type: u8, key_data: &[u8]) -> Option<&'a [u8]> {
         self.pairs
             .binary_search_by(|p| {
                 p.key_type
-                    .cmp(&search_key_type)
-                    .then_with(|| p.key_data.cmp(search_key_data))
+                    .cmp(&key_type)
+                    .then_with(|| p.key_data.cmp(key_data))
             })
             .ok()
             .map(|idx| self.pairs[idx].value)
+    }
+
+    /// Iterate over all pairs with the given key_type, in-order.
+    fn iter_keys(&'a self, key_type: u8) -> core::slice::Iter<'a, MapPair<'a>> {
+        let start = self.pairs.partition_point(|p| p.key_type < key_type);
+        let end = start + self.pairs[start..].partition_point(|p| p.key_type == key_type);
+        self.pairs[start..end].iter()
     }
 }
 
@@ -364,6 +393,17 @@ impl<'a> Psbt<'a> {
             fallback_locktime,
             tx_modifiable,
         })
+    }
+
+    fn get_global(&self, key_type: u8, key_data: &[u8]) -> Option<&'a [u8]> {
+        self.global_map.get(key_type, key_data)
+    }
+
+    /// Iterate global map entries with a given key_type.
+    pub fn iter_keys(&'a self, key_type: u8) -> impl Iterator<Item = (&'a [u8], &'a [u8])> + 'a {
+        self.global_map
+            .iter_keys(key_type)
+            .map(|p| (p.key_data, p.value))
     }
 }
 
@@ -489,7 +529,21 @@ impl<'a> Input<'a> {
             required_height_locktime,
         })
     }
+
+    fn get(&self, key_type: u8, key_data: &[u8]) -> Option<&'a [u8]> {
+        self.map.get(key_type, key_data)
+    }
+
+    /// Iterate this input's map entries with a given key_type.
+    pub fn iter_keys(&'a self, key_type: u8) -> impl Iterator<Item = (&'a [u8], &'a [u8])> + 'a {
+        self.map.iter_keys(key_type).map(|p| (p.key_data, p.value))
+    }
+
+    pub fn bip32_derivations(&'a self) -> impl Iterator<Item = (&'a [u8], &'a [u8])> + 'a {
+        self.iter_keys(PSBT_IN_BIP32_DERIVATION)
+    }
 }
+
 impl<'a> Output<'a> {
     fn from_cursor(cur: &mut Cursor<'a>) -> Result<Self, PsbtError> {
         let mut redeem_script = None;
@@ -538,6 +592,19 @@ impl<'a> Output<'a> {
             amount,
             script,
         })
+    }
+
+    fn get(&self, key_type: u8, key_data: &[u8]) -> Option<&'a [u8]> {
+        self.map.get(key_type, key_data)
+    }
+
+    /// Iterate this output's map entries with a given key_type.
+    pub fn iter_keys(&'a self, key_type: u8) -> impl Iterator<Item = (&'a [u8], &'a [u8])> + 'a {
+        self.map.iter_keys(key_type).map(|p| (p.key_data, p.value))
+    }
+
+    pub fn bip32_derivations(&'a self) -> impl Iterator<Item = (&'a [u8], &'a [u8])> + 'a {
+        self.iter_keys(PSBT_OUT_BIP32_DERIVATION)
     }
 }
 
@@ -591,6 +658,23 @@ mod test {
             Some(&hex!("5421032751f30b14a53c0b2710fcffec1133190a7f7035b11eb1b32327e8ab74027a5221035db2ed35275bc4970bff5047496620ce40392a29dbafbdbe2e29a3905fceb0e7210285f686e648a2dfa42bd06d995d11881b47c1f9f354bd71ee609ae2b9d931dd322102759ae4e33ce9fb33f6d8238764b37230bcc66b614e36e59bf2021e9e8a3bfab354ae736476a914c29f13b114de820ff21f13ed571c2818843ab4de88ac6b76a914d700ef7fd7c3b05086eae264b863d2684d711cb988ac6c936b76a914ac6b0f3fe53355c4aafe09d4e4fc73820723e33088ac6c936b76a91472f43f7010acd56629785de9a806ae568fb9954c88ac6c93538803ffff00b268")[..])
         );
 
-        // TODO: add BIP32 derivations
+        let bip32_derivations = psbt.inputs[0].bip32_derivations().collect::<Vec<_>>();
+        assert_eq!(bip32_derivations.len(), 2);
+        assert_eq!(
+            bip32_derivations[0],
+            (
+                &hex!("0307a2238d9627fdb51ee2e4068b8d6dac90fde18660a32272d909dc86b256462f")[..],
+                &hex!("f5acc2fd3000008001000080000000800200008003000000231c0000")[..]
+            )
+        );
+        assert_eq!(
+            bip32_derivations[1],
+            (
+                &hex!("0319f7b7f0bb48eb342d0f018b56dc5d832ae2b0a2d49d3d08402396898c8917de")[..],
+                &hex!("f5acc2fd3000008001000080000000800200008001000000231c0000")[..]
+            )
+        );
     }
+
+    // TODO: add oither missing fields
 }
