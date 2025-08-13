@@ -4,6 +4,7 @@ extern crate alloc;
 
 pub mod account;
 pub mod bip388;
+pub mod fastpsbt;
 pub mod message;
 pub mod psbt;
 pub mod script;
