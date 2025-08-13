@@ -52,13 +52,13 @@ pub enum PsbtError {
     DuplicateKey,   // exact duplicate key bytes in same map
     UnsortedKeys,   // only PSBTs with lexicographically sorted maps are supported
     BadSmallField,  // wrong length for known small field
-    MissingCounts,  // required in v2 to split sections
+    MissingCounts,  // missing PSBT_GLOBAL_INPUT_COUNT or PSBT_GLOBAL_OUTPUT_COUNT
     CountsTooLarge, // counts don't fit in usize
     NotAllowed,     // not allowed in PSBT v2
 }
 
 #[derive(Debug, Clone, Copy)]
-pub struct MapPair<'a> {
+struct MapPair<'a> {
     pub key_type: u8,
     pub key_data: &'a [u8],
     pub value: &'a [u8],
@@ -138,13 +138,25 @@ impl<'a> Cursor<'a> {
     }
 }
 
+fn u64_from_compact_size(data: &[u8]) -> Result<u64, PsbtError> {
+    let mut cur = Cursor::new(data, 0);
+    let res = cur.read_compact_size();
+    if cur.remaining() > 0 {
+        return Err(PsbtError::InvalidCompactSize);
+    }
+    res
+}
+
 #[derive(Debug)]
 struct ParsedMap<'a> {
     pub pairs: Vec<MapPair<'a>>,
 }
 
 impl<'a> ParsedMap<'a> {
-    fn from_cursor(cur: &mut Cursor<'a>) -> Result<ParsedMap<'a>, PsbtError> {
+    fn from_cursor<F>(cur: &mut Cursor<'a>, mut f: F) -> Result<ParsedMap<'a>, PsbtError>
+    where
+        F: for<'b> FnMut(&'b MapPair<'a>) -> Result<(), PsbtError>,
+    {
         let mut pairs: Vec<MapPair<'a>> = Vec::new();
 
         loop {
@@ -173,11 +185,13 @@ impl<'a> ParsedMap<'a> {
             }
 
             let value = cur.read_len_prefixed()?;
-            pairs.push(MapPair {
+            let pair = MapPair {
                 key_type,
                 key_data,
                 value,
-            });
+            };
+            f(&pair)?;
+            pairs.push(pair);
         }
     }
 
@@ -207,25 +221,24 @@ impl<'a> Psbt<'a> {
         }
         let mut cur = Cursor::new(raw, MAGIC.len());
 
-        let global_map = ParsedMap::from_cursor(&mut cur)?;
+        let mut n_inputs = None;
+        let mut n_outputs = None;
 
-        let n_inputs = global_map
-            .get(&[PSBT_GLOBAL_INPUT_COUNT])
-            .ok_or(PsbtError::MissingCounts)
-            .and_then(|v| {
-                let mut cur = Cursor::new(v, 0);
-                cur.read_compact_size()
-            })
-            .and_then(|n| usize::try_from(n).map_err(|_| PsbtError::CountsTooLarge))?;
+        let global_map = ParsedMap::from_cursor(&mut cur, |pair: &MapPair| {
+            match pair.key_type {
+                PSBT_GLOBAL_INPUT_COUNT => {
+                    n_inputs = Some(u64_from_compact_size(pair.value)?);
+                }
+                PSBT_GLOBAL_OUTPUT_COUNT => {
+                    n_outputs = Some(u64_from_compact_size(pair.value)?);
+                }
+                _ => {}
+            }
+            Ok(())
+        })?;
 
-        let n_outputs = global_map
-            .get(&[PSBT_GLOBAL_OUTPUT_COUNT])
-            .ok_or(PsbtError::MissingCounts)
-            .and_then(|v| {
-                let mut cur = Cursor::new(v, 0);
-                cur.read_compact_size()
-            })
-            .and_then(|n| usize::try_from(n).map_err(|_| PsbtError::CountsTooLarge))?;
+        let n_inputs = n_inputs.ok_or(PsbtError::MissingCounts)?;
+        let n_outputs = n_outputs.ok_or(PsbtError::MissingCounts)?;
 
         let inputs = (0..n_inputs)
             .map(|_| Input::from_cursor(&mut cur))
@@ -250,13 +263,14 @@ impl<'a> Psbt<'a> {
 
 impl<'a> Input<'a> {
     fn from_cursor(cur: &mut Cursor<'a>) -> Result<Self, PsbtError> {
-        let map = ParsedMap::from_cursor(cur)?;
+        let map = ParsedMap::from_cursor(cur, |_pair: &MapPair| Ok(()))?;
         Ok(Self { map })
     }
 }
 impl<'a> Output<'a> {
     fn from_cursor(cur: &mut Cursor<'a>) -> Result<Self, PsbtError> {
-        let map = ParsedMap::from_cursor(cur)?;
+        let map = ParsedMap::from_cursor(cur, |_pair: &MapPair| Ok(()))?;
+
         Ok(Self { map })
     }
 }
