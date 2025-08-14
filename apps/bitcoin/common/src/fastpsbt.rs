@@ -14,7 +14,7 @@ use bitcoin::{
     Transaction, TxIn, TxOut, Txid, Witness,
 };
 
-use core::{borrow::Borrow, cmp::Ordering};
+use core::{borrow::Borrow, cell::OnceCell, cmp::Ordering};
 
 const PSBT_GLOBAL_UNSIGNED_TX: u8 = 0x00;
 const PSBT_GLOBAL_XPUB: u8 = 0x01;
@@ -135,6 +135,8 @@ pub struct Psbt<'a> {
     pub tx_version: i32,
     pub fallback_locktime: Option<u32>,
     pub tx_modifiable: Option<u8>,
+
+    cached_unsigned_tx: OnceCell<Transaction>,
 }
 
 #[derive(Debug)]
@@ -153,6 +155,9 @@ pub struct Input<'a> {
     pub sequence: Option<u32>,
     pub required_time_locktime: Option<u32>,
     pub required_height_locktime: Option<u32>,
+
+    cached_witness_utxo: OnceCell<bitcoin::TxOut>,
+    cached_non_witness_utxo: OnceCell<bitcoin::Transaction>,
 }
 
 #[derive(Debug)]
@@ -404,6 +409,7 @@ impl<'a> Psbt<'a> {
             tx_version,
             fallback_locktime,
             tx_modifiable,
+            cached_unsigned_tx: OnceCell::new(),
         })
     }
 
@@ -418,7 +424,17 @@ impl<'a> Psbt<'a> {
             .map(|p| (p.key_data, p.value))
     }
 
-    pub fn unsigned_tx(&self) -> Result<bitcoin::Transaction, PsbtError> {
+    pub fn unsigned_tx(&self) -> Result<&bitcoin::Transaction, PsbtError> {
+        if let Some(tx) = self.cached_unsigned_tx.get() {
+            return Ok(tx);
+        }
+
+        let tx = self.build_unsigned_tx()?;
+        let _ = self.cached_unsigned_tx.set(tx);
+        Ok(self.cached_unsigned_tx.get().unwrap())
+    }
+
+    fn build_unsigned_tx(&self) -> Result<bitcoin::Transaction, PsbtError> {
         // Determine lock_time
         let mut req_height: Option<u32> = None;
         let mut req_time: Option<u32> = None;
@@ -751,6 +767,8 @@ impl<'a> Input<'a> {
             sequence,
             required_time_locktime,
             required_height_locktime,
+            cached_witness_utxo: OnceCell::new(),
+            cached_non_witness_utxo: OnceCell::new(),
         })
     }
 
@@ -765,6 +783,51 @@ impl<'a> Input<'a> {
 
     pub fn bip32_derivations(&'a self) -> impl Iterator<Item = (&'a [u8], &'a [u8])> + 'a {
         self.iter_keys(PSBT_IN_BIP32_DERIVATION)
+    }
+
+    pub fn get_witness_utxo(&self) -> Result<Option<&bitcoin::TxOut>, PsbtError> {
+        if let Some(txout) = self.cached_witness_utxo.get() {
+            return Ok(Some(txout));
+        }
+
+        let Some(wutxo) = self.witness_utxo else {
+            return Ok(None);
+        };
+
+        if wutxo.len() < 8 + 1 || wutxo[8] > 0xfc || wutxo.len() != 8 + 1 + wutxo[8] as usize {
+            return Err(PsbtError::BadValue);
+        }
+        let script_len = wutxo[8] as usize;
+
+        let script_pubkey = ScriptBuf::from_bytes(wutxo[9..9 + script_len].to_vec());
+        let amount = Amount::from_sat(u64::from_le_bytes([
+            wutxo[0], wutxo[1], wutxo[2], wutxo[3], wutxo[4], wutxo[5], wutxo[6], wutxo[7],
+        ]));
+
+        let txout = TxOut {
+            value: amount,
+            script_pubkey,
+        };
+
+        let _ = self.cached_witness_utxo.set(txout);
+
+        Ok(self.cached_witness_utxo.get())
+    }
+
+    pub fn get_non_witness_utxo(&self) -> Result<Option<&bitcoin::Transaction>, PsbtError> {
+        if let Some(tx) = self.cached_non_witness_utxo.get() {
+            return Ok(Some(tx));
+        }
+
+        let Some(tx) = self.non_witness_utxo else {
+            return Ok(None);
+        };
+
+        let tx: bitcoin::Transaction = deserialize(tx).map_err(|_| PsbtError::BadValue)?;
+
+        let _ = self.cached_non_witness_utxo.set(tx);
+
+        Ok(self.cached_non_witness_utxo.get())
     }
 }
 

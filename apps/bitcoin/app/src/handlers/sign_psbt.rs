@@ -278,10 +278,11 @@ pub fn handle_sign_psbt(_app: &mut sdk::App, psbt: &[u8]) -> Result<Response, &'
         if segwit_version == SegwitVersion::Legacy || segwit_version == SegwitVersion::SegwitV0 {
             // if the non-witness UTXO is present, validate it matches the previous output.
             // If missing, fail for legacy inputs, while we show a warning for SegWit v0 inputs.
-            match input.non_witness_utxo {
+            match input
+                .get_non_witness_utxo()
+                .map_err(|_| "Invalid non-witness UTXO")?
+            {
                 Some(tx) => {
-                    let tx: Transaction =
-                        deserialize(tx).map_err(|_| "Failed to deserialize non-witness UTXO")?;
                     let computed_txid = tx.compute_txid();
                     if input.previous_txid != Some(computed_txid.as_byte_array()) {
                         return Err("Non-witness UTXO does not match the previous output");
@@ -304,22 +305,19 @@ pub fn handle_sign_psbt(_app: &mut sdk::App, psbt: &[u8]) -> Result<Response, &'
             return Err("Witness UTXO is required for SegWit version");
         }
 
-        let (input_scriptpubkey, amount) = if let Some(wutxo) = input.witness_utxo {
-            if wutxo.len() < 8 + 1 {
-                return Err("Witness UTXO is too short");
-            }
-            if wutxo.len() < 8 + 1 || wutxo[8] > 0xfc || wutxo.len() != 8 + 1 + wutxo[8] as usize {
-                return Err("Witness UTXO is invalid");
-            }
-            let script_len = wutxo[8] as usize;
-            let script_pubkey = ScriptBuf::from_bytes(wutxo[9..9 + script_len].to_vec());
+        let tx_out: &TxOut = if let Some(witness_utxo) = input
+            .get_witness_utxo()
+            .map_err(|_| "Invalid witness UTXO")?
+        {
             let script = if let Some(redeem_script) = input.redeem_script {
-                if script_pubkey != ScriptBuf::from_bytes(redeem_script.to_vec()).to_p2sh() {
+                if witness_utxo.script_pubkey
+                    != ScriptBuf::from_bytes(redeem_script.to_vec()).to_p2sh()
+                {
                     return Err("Redeem script does not match the witness UTXO");
                 }
                 ScriptBuf::from_bytes(redeem_script.to_vec())
             } else {
-                script_pubkey.clone()
+                witness_utxo.script_pubkey.clone()
             };
 
             if script.is_p2wsh() {
@@ -332,11 +330,11 @@ pub fn handle_sign_psbt(_app: &mut sdk::App, psbt: &[u8]) -> Result<Response, &'
                     return Err("Witness script is required for P2WSH");
                 }
             }
-            let value = Amount::from_sat(u64::from_le_bytes(wutxo[0..8].try_into().unwrap()));
-            (script_pubkey, value)
-        } else if let Some(non_witness_utxo) = &input.non_witness_utxo {
-            let non_witness_utxo: Transaction = deserialize(non_witness_utxo)
-                .map_err(|_| "Failed to deserialize non-witness UTXO")?;
+            &witness_utxo
+        } else if let Some(non_witness_utxo) = input
+            .get_non_witness_utxo()
+            .map_err(|_| "Invalid non-witness UTXO")?
+        {
             let prevout_txid = input.previous_txid.ok_or("Missing previous txid")?;
             let prevout_txid = Txid::from_byte_array(*prevout_txid);
             let prevout_index = input.output_index.ok_or("Missing previous output index")? as usize;
@@ -349,22 +347,19 @@ pub fn handle_sign_psbt(_app: &mut sdk::App, psbt: &[u8]) -> Result<Response, &'
                     return Err("Redeem script does not match the non-witness UTXO");
                 }
             }
-
-            (
-                non_witness_utxo.output[prevout_index].script_pubkey.clone(),
-                non_witness_utxo.output[prevout_index].value,
-            )
+            &non_witness_utxo.output[prevout_index]
         } else {
             return Err("Each input must have either a witness UTXO or a non-witness UTXO");
         };
 
         // verify that the account, derived at the coordinates in the PSBT, produces the same script
-        if wallet_policy.to_script(coords.is_change, coords.address_index)? != *input_scriptpubkey {
+        if wallet_policy.to_script(coords.is_change, coords.address_index)? != tx_out.script_pubkey
+        {
             return Err("Script does not match the account at the coordinates indicated in the PSBT for this input");
         }
 
-        account_spent_amounts[account_id as usize] += amount.to_sat() as i64;
-        inputs_total_amount += amount.to_sat();
+        account_spent_amounts[account_id as usize] += tx_out.value.to_sat() as i64;
+        inputs_total_amount += tx_out.value.to_sat();
     }
 
     /***** output checks *****/
@@ -508,7 +503,7 @@ pub fn handle_sign_psbt(_app: &mut sdk::App, psbt: &[u8]) -> Result<Response, &'
     let unsigned_tx = psbt
         .unsigned_tx()
         .map_err(|_| "Failed to get unsigned transaction")?;
-    let mut sighash_cache = SighashCache::new(unsigned_tx);
+    let mut sighash_cache = SighashCache::new(unsigned_tx.clone());
 
     let master_fingerprint = sdk::curve::Secp256k1::get_master_fingerprint();
 
