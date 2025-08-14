@@ -334,12 +334,7 @@ pub fn handle_sign_psbt(_app: &mut sdk::App, psbt: &[u8]) -> Result<Response, &'
             .get_non_witness_utxo()
             .map_err(|_| "Invalid non-witness UTXO")?
         {
-            let prevout_txid = input.previous_txid.ok_or("Missing previous txid")?;
-            let prevout_txid = Txid::from_byte_array(*prevout_txid);
             let prevout_index = input.output_index.ok_or("Missing previous output index")? as usize;
-            if non_witness_utxo.compute_txid() != prevout_txid {
-                return Err("Non-witness UTXO does not match the previous output");
-            }
             if let Some(redeem_script) = input.redeem_script {
                 let redeem_script = ScriptBuf::from_bytes(redeem_script.to_vec());
                 if non_witness_utxo.output[prevout_index].script_pubkey != redeem_script.to_p2sh() {
