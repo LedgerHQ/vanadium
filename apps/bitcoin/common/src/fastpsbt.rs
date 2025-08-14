@@ -8,7 +8,13 @@
 // It is assumed that keys in each map of the PSBT are unique and sorted in ascending order.
 
 use alloc::vec::Vec;
-use core::cmp::Ordering;
+use bitcoin::{
+    consensus::deserialize, hashes::Hash, psbt::OutputType, script::ScriptBuf, secp256k1::Message,
+    sighash::SighashCache, transaction::Version, Amount, EcdsaSighashType, OutPoint, Sequence,
+    Transaction, TxIn, TxOut, Txid, Witness,
+};
+
+use core::{borrow::Borrow, cmp::Ordering};
 
 const PSBT_GLOBAL_UNSIGNED_TX: u8 = 0x00;
 const PSBT_GLOBAL_XPUB: u8 = 0x01;
@@ -95,12 +101,18 @@ pub enum PsbtError {
     UnexpectedEof,
     InvalidCompactSize,
     MapTerminatorMissing,
-    DuplicateKey,   // exact duplicate key bytes in same map
-    UnsortedKeys,   // only PSBTs with lexicographically sorted maps are supported
-    BadValue,       // invalid value
-    MissingCounts,  // missing PSBT_GLOBAL_INPUT_COUNT or PSBT_GLOBAL_OUTPUT_COUNT
+    DuplicateKey,  // exact duplicate key bytes in same map
+    UnsortedKeys,  // only PSBTs with lexicographically sorted maps are supported
+    BadValue,      // invalid value
+    MissingCounts, // missing PSBT_GLOBAL_INPUT_COUNT or PSBT_GLOBAL_OUTPUT_COUNT
+    MissingOutputIndex,
+    MissingRedeemScript,
+    MissingWitnessScript,
     CountsTooLarge, // counts don't fit in usize
     NotAllowed,     // not allowed in PSBT v2
+    OutOfRange,
+    UnknownOutputType,
+    Unsupported,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -136,7 +148,7 @@ pub struct Input<'a> {
     pub witness_script: Option<&'a [u8]>,
     pub final_scriptsig: Option<&'a [u8]>,
     pub final_scriptwitness: Option<&'a [u8]>,
-    pub previous_txid: Option<[u8; 32]>,
+    pub previous_txid: Option<&'a [u8; 32]>,
     pub output_index: Option<u32>,
     pub sequence: Option<u32>,
     pub required_time_locktime: Option<u32>,
@@ -149,7 +161,7 @@ pub struct Output<'a> {
 
     pub redeem_script: Option<&'a [u8]>,
     pub witness_script: Option<&'a [u8]>,
-    pub amount: Option<i64>,
+    pub amount: Option<u64>,
     pub script: Option<&'a [u8]>,
 }
 
@@ -405,6 +417,223 @@ impl<'a> Psbt<'a> {
             .iter_keys(key_type)
             .map(|p| (p.key_data, p.value))
     }
+
+    pub fn unsigned_tx(&self) -> Result<bitcoin::Transaction, PsbtError> {
+        // Determine lock_time
+        let mut req_height: Option<u32> = None;
+        let mut req_time: Option<u32> = None;
+
+        for inp in &self.inputs {
+            if let Some(h) = inp.required_height_locktime {
+                req_height = Some(req_height.map_or(h, |m| m.max(h)));
+            }
+            if let Some(t) = inp.required_time_locktime {
+                req_time = Some(req_time.map_or(t, |m| m.max(t)));
+            }
+        }
+
+        // Both height- and time-based requirements cannot be satisfied together.
+        if req_height.is_some() && req_time.is_some() {
+            return Err(PsbtError::BadValue);
+        }
+
+        let mut lock_time: u32 = self.fallback_locktime.unwrap_or(0);
+
+        if let Some(h) = req_height {
+            if h >= 500_000_000 {
+                return Err(PsbtError::BadValue);
+            }
+            lock_time = lock_time.max(h);
+        }
+        if let Some(t) = req_time {
+            if t < 500_000_000 {
+                return Err(PsbtError::BadValue);
+            }
+            lock_time = lock_time.max(t);
+        }
+
+        // Build inputs
+        let mut ins = Vec::with_capacity(self.inputs.len());
+        for inp in &self.inputs {
+            let prev_txid_be = inp.previous_txid.ok_or(PsbtError::BadValue)?;
+            let vout = inp.output_index.ok_or(PsbtError::BadValue)?;
+            let txid = Txid::from_byte_array(*prev_txid_be);
+
+            let seq_val = inp.sequence.unwrap_or(0xFFFF_FFFF);
+            ins.push(TxIn {
+                previous_output: OutPoint { txid, vout },
+                script_sig: ScriptBuf::new(),
+                sequence: Sequence::from_consensus(seq_val),
+                witness: Witness::new(),
+            });
+        }
+
+        // Build outputs
+        let mut outs = Vec::with_capacity(self.outputs.len());
+        for out in &self.outputs {
+            let amt = Amount::from_sat(out.amount.ok_or(PsbtError::BadValue)?);
+            let spk_bytes = out.script.ok_or(PsbtError::BadValue)?;
+            outs.push(TxOut {
+                value: amt,
+                script_pubkey: ScriptBuf::from_bytes(spk_bytes.to_vec()),
+            });
+        }
+
+        Ok(Transaction {
+            version: Version(self.tx_version),
+            lock_time: bitcoin::absolute::LockTime::from_consensus(lock_time),
+            input: ins,
+            output: outs,
+        })
+    }
+
+    fn spend_utxo(&self, input_index: usize) -> Result<TxOut, PsbtError> {
+        if input_index >= self.inputs.len() {
+            return Err(PsbtError::OutOfRange);
+        }
+
+        let input = &self.inputs[input_index];
+        if let Some(witness_utxo) = input.witness_utxo {
+            if witness_utxo.len() < 8 + 1 {
+                return Err(PsbtError::BadValue);
+            }
+            let script_len = witness_utxo[8] as usize;
+            if script_len > 0xfc {
+                return Err(PsbtError::BadValue);
+            }
+            if witness_utxo.len() != 8 + 1 + script_len {
+                return Err(PsbtError::BadValue);
+            }
+            let script_pubkey = ScriptBuf::from_bytes(witness_utxo[9..9 + script_len].to_vec());
+            let amount = Amount::from_sat(u64::from_le_bytes([
+                witness_utxo[0],
+                witness_utxo[1],
+                witness_utxo[2],
+                witness_utxo[3],
+                witness_utxo[4],
+                witness_utxo[5],
+                witness_utxo[6],
+                witness_utxo[7],
+            ]));
+            Ok(TxOut {
+                value: amount,
+                script_pubkey,
+            })
+        } else if let Some(non_witness_utxo) = input.non_witness_utxo {
+            let non_witness_utxo: Transaction =
+                deserialize(non_witness_utxo).map_err(|_| PsbtError::BadValue)?;
+            let vout = input.output_index.ok_or(PsbtError::MissingOutputIndex)? as usize;
+            if vout >= non_witness_utxo.output.len() {
+                return Err(PsbtError::OutOfRange);
+            }
+            Ok(TxOut {
+                value: non_witness_utxo.output[vout].value,
+                script_pubkey: non_witness_utxo.output[vout].script_pubkey.clone(),
+            })
+        } else {
+            Err(PsbtError::BadValue)
+        }
+    }
+
+    // ported from rust-bitcoin
+    pub fn sighash_ecdsa<T: Borrow<Transaction>>(
+        &self,
+        input_index: usize,
+        cache: &mut SighashCache<T>,
+    ) -> Result<(Message, EcdsaSighashType), PsbtError> {
+        if input_index >= self.inputs.len() {
+            return Err(PsbtError::OutOfRange);
+        }
+
+        let input = &self.inputs[input_index];
+        let utxo = self.spend_utxo(input_index)?;
+        let spk = &utxo.script_pubkey;
+
+        let output_type = if !(spk.is_witness_program() || spk.is_p2sh()) {
+            OutputType::Bare
+        } else if spk.is_p2wpkh() {
+            OutputType::Wpkh
+        } else if spk.is_p2wsh() {
+            OutputType::Wsh
+        } else if spk.is_p2sh() {
+            if input
+                .redeem_script
+                .as_ref()
+                .map(|s| {
+                    let s = ScriptBuf::from_bytes(s.to_vec());
+                    s.is_p2wpkh()
+                })
+                .unwrap_or(false)
+            {
+                OutputType::ShWpkh
+            } else if input
+                .redeem_script
+                .as_ref()
+                .map(|s| {
+                    let s = ScriptBuf::from_bytes(s.to_vec());
+                    s.is_p2wsh()
+                })
+                .unwrap_or(false)
+            {
+                OutputType::ShWsh
+            } else {
+                OutputType::Sh
+            }
+        } else {
+            return Err(PsbtError::UnknownOutputType);
+        };
+
+        let hash_ty = EcdsaSighashType::All; // TODO: compute correctly from the PSBT
+
+        match output_type {
+            OutputType::Bare => {
+                let sighash = cache
+                    .legacy_signature_hash(input_index, spk, hash_ty.to_u32())
+                    .expect("input checked above");
+                Ok((Message::from(sighash), hash_ty))
+            }
+            OutputType::Sh => {
+                let script_code = input
+                    .redeem_script
+                    .as_ref()
+                    .ok_or(PsbtError::MissingRedeemScript)?;
+                let script_code = ScriptBuf::from_bytes(script_code.to_vec());
+                let sighash = cache
+                    .legacy_signature_hash(input_index, &script_code, hash_ty.to_u32())
+                    .expect("input checked above");
+                Ok((Message::from(sighash), hash_ty))
+            }
+            OutputType::Wpkh => {
+                let sighash = cache
+                    .p2wpkh_signature_hash(input_index, spk, utxo.value, hash_ty)
+                    .map_err(|_| PsbtError::BadValue)?;
+                Ok((Message::from(sighash), hash_ty))
+            }
+            OutputType::ShWpkh => {
+                let redeem_script = input.redeem_script.as_ref().expect("checked above");
+                let redeem_script = ScriptBuf::from_bytes(redeem_script.to_vec());
+                let sighash = cache
+                    .p2wpkh_signature_hash(input_index, &redeem_script, utxo.value, hash_ty)
+                    .map_err(|_| PsbtError::BadValue)?;
+                Ok((Message::from(sighash), hash_ty))
+            }
+            OutputType::Wsh | OutputType::ShWsh => {
+                let witness_script = input
+                    .witness_script
+                    .as_ref()
+                    .ok_or(PsbtError::MissingWitnessScript)?;
+                let witness_script = ScriptBuf::from_bytes(witness_script.to_vec());
+                let sighash = cache
+                    .p2wsh_signature_hash(input_index, &witness_script, utxo.value, hash_ty)
+                    .map_err(|_| PsbtError::BadValue)?;
+                Ok((Message::from(sighash), hash_ty))
+            }
+            OutputType::Tr => {
+                Err(PsbtError::Unsupported) // different function for taproot sighash
+            }
+            _ => Err(PsbtError::Unsupported),
+        }
+    }
 }
 
 impl<'a> Input<'a> {
@@ -457,12 +686,7 @@ impl<'a> Input<'a> {
                     final_scriptwitness = Some(pair.value);
                 }
                 PSBT_IN_PREVIOUS_TXID => {
-                    if pair.value.len() != 32 {
-                        return Err(PsbtError::BadValue);
-                    }
-                    let mut txid = [0u8; 32];
-                    txid.copy_from_slice(pair.value);
-                    previous_txid = Some(txid);
+                    previous_txid = Some(pair.value.try_into().map_err(|_| PsbtError::BadValue)?);
                 }
                 PSBT_IN_OUTPUT_INDEX => {
                     if pair.value.len() != 4 {
@@ -566,7 +790,7 @@ impl<'a> Output<'a> {
                     if pair.value.len() != 8 {
                         return Err(PsbtError::BadValue);
                     }
-                    amount = Some(i64::from_le_bytes([
+                    amount = Some(u64::from_le_bytes([
                         pair.value[0],
                         pair.value[1],
                         pair.value[2],
@@ -631,7 +855,7 @@ mod test {
         assert_eq!(psbt.inputs[0].witness_script, Some(&hex!("54210319f7b7f0bb48eb342d0f018b56dc5d832ae2b0a2d49d3d08402396898c8917de2102817144cb1307339fe45b48f970085cbe9a709b4895342d057b796f6917a986082103b5e475419cc96ba7e6e0d4401ca0d92d9ba8e4565c3c6e2b628a610f8f2067662103e5ad856996fcefbcc9f8ff582bb50e8968387e85ec9817f9853128809c89295c54ae736476a914a3ffec07a19cff51b12d5dde3388ae5ae7474f6788ac6b76a914feeb5c97deb44ea3ae1d87d7fa67bd34d2e298a888ac6c936b76a9148111af1a29b99339ed288838ed9ad799761d077388ac6c936b76a91467177c0d1d6b70017d8541a290a242577cb3277b88ac6c93538803ffff00b268")[..]));
         assert_eq!(
             psbt.inputs[0].previous_txid,
-            Some(hex!(
+            Some(&hex!(
                 "5af0cd32a083ab4c73dbfb43f23c57858080d723691ffbe5e735c809c3b40b4a"
             ))
         );
