@@ -218,8 +218,7 @@ fn sign_input_schnorr(
 }
 
 pub fn handle_sign_psbt(_app: &mut sdk::App, psbt: &[u8]) -> Result<Response, &'static str> {
-    let raw_psbtv2 = common::psbt::psbt_v0_to_v2(psbt).unwrap(); // TODO: delete once the app migrates to psbtv2
-    let psbt = fastpsbt::Psbt::parse(&raw_psbtv2).unwrap();
+    let psbt = fastpsbt::Psbt::parse(&psbt).unwrap();
 
     let accounts = psbt.get_accounts()?;
     let mut account_spent_amounts: Vec<i64> = vec![0; accounts.len()];
@@ -610,9 +609,14 @@ mod tests {
     use bitcoin::{psbt::Psbt, secp256k1::schnorr::Signature, XOnlyPublicKey};
     use common::{
         bip388::{KeyPlaceholder, WalletPolicy},
-        psbt::fill_psbt_with_bip388_coordinates,
+        psbt::{fill_psbt_with_bip388_coordinates, psbt_v0_to_v2},
     };
     use hex_literal::hex;
+
+    // rust-bitcoin doesn't support Psbtv2, so we use this helper for conversion
+    fn serialize_as_psbtv2(psbt: &Psbt) -> Vec<u8> {
+        psbt_v0_to_v2(&psbt.serialize()).expect("Failed to convert PSBTv0 to PSBTv2")
+    }
 
     fn prepare_psbt(psbt: &mut Psbt, named_accounts: &[(&WalletPolicy, &str, &[u8; 32])]) {
         for (wallet_policy, account_name, por) in named_accounts {
@@ -654,11 +658,9 @@ mod tests {
             ProofOfRegistration::new(&wallet_policy.get_id(account_name)).dangerous_as_bytes();
 
         prepare_psbt(&mut psbt, &[(&wallet_policy, account_name, &por)]);
-        let mut psbt_final = String::new();
-        STANDARD.encode_string(psbt.serialize(), &mut psbt_final);
-        println!("Psbt with wallet policies:\n{}", psbt_final);
 
-        let response = handle_sign_psbt(&mut sdk::App::singleton(), &psbt.serialize()).unwrap();
+        let response =
+            handle_sign_psbt(&mut sdk::App::singleton(), &serialize_as_psbtv2(&psbt)).unwrap();
 
         assert_eq!(response, Response::PsbtSigned(vec![
             PartialSignature {
@@ -686,7 +688,8 @@ mod tests {
             ProofOfRegistration::new(&wallet_policy.get_id(account_name)).dangerous_as_bytes();
         prepare_psbt(&mut psbt, &[(&wallet_policy, &account_name, &por)]);
 
-        let response = handle_sign_psbt(&mut sdk::App::singleton(), &psbt.serialize()).unwrap();
+        let response =
+            handle_sign_psbt(&mut sdk::App::singleton(), &serialize_as_psbtv2(&psbt)).unwrap();
 
         assert_eq!(response, Response::PsbtSigned(vec![
             PartialSignature {
@@ -715,7 +718,8 @@ mod tests {
             ProofOfRegistration::new(&wallet_policy.get_id(account_name)).dangerous_as_bytes();
         prepare_psbt(&mut psbt, &[(&wallet_policy, &account_name, &por)]);
 
-        let response = handle_sign_psbt(&mut sdk::App::singleton(), &psbt.serialize()).unwrap();
+        let response =
+            handle_sign_psbt(&mut sdk::App::singleton(), &serialize_as_psbtv2(&psbt)).unwrap();
 
         let Response::PsbtSigned(partial_signatures) = response else {
             panic!("Expected PsbtSigned response");

@@ -1,4 +1,5 @@
 use base64::Engine as _;
+use bitcoin::psbt::Psbt;
 
 use clap::{CommandFactory, Parser, Subcommand};
 use common::account::ProofOfRegistration;
@@ -322,9 +323,19 @@ async fn handle_cli_command(
             println!("{}", addr);
         }
         CliCommand::SignPsbt { psbt } => {
-            let psbt = base64::engine::general_purpose::STANDARD
+            let mut psbt = base64::engine::general_purpose::STANDARD
                 .decode(&psbt)
                 .map_err(|_| "Failed to decode PSBT")?;
+
+            // At this time, rust-bitcoin only supports PSBT version 0. Therefore, if parsing
+            // succeeds, we assume it's a valid PSBTv0, and we convert it to version 2.
+            // To be rewritten once rust-bitcoin supports PSBTv2.
+            if let Ok(parsed_psbt) = Psbt::deserialize(&psbt) {
+                assert!(parsed_psbt.version == 0);
+                psbt = common::psbt::psbt_v0_to_v2(&psbt)
+                    .map_err(|_| "Failed to convert PSBTv0 to PSBTv2")?;
+            }
+
             let partial_sigs = bitcoin_client.sign_psbt(&psbt).await?;
 
             println!("{} signatures returned", partial_sigs.len());
