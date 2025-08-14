@@ -128,7 +128,7 @@ impl PsbtAccountGlobalRead for Psbt {
         };
 
         if let Some(value) = self.proprietary.get(&key) {
-            if value.len() < 1 {
+            if value.is_empty() {
                 return Err("Empty account value");
             }
             match value[0] {
@@ -174,7 +174,7 @@ impl PsbtAccountGlobalRead for Psbt {
         };
 
         if let Some(value) = self.proprietary.get(&key) {
-            if value.len() < 1 {
+            if value.is_empty() {
                 return Err("Empty account value");
             }
             Ok(Some(value.to_vec()))
@@ -403,7 +403,7 @@ impl<'a> PsbtAccountGlobalRead for crate::fastpsbt::Psbt<'a> {
         // 0xFC == PSBT_GLOBAL_PROPRIETARY
         for (kd, value) in self.iter_keys(0xFC) {
             if kd == key_data.as_slice() {
-                if value.len() < 1 {
+                if value.is_empty() {
                     return Err("Empty account value");
                 }
                 return match value[0] {
@@ -452,7 +452,7 @@ impl<'a> PsbtAccountGlobalRead for crate::fastpsbt::Psbt<'a> {
 
         for (kd, value) in self.iter_keys(0xFC) {
             if kd == key_data.as_slice() {
-                if value.len() < 1 {
+                if value.is_empty() {
                     return Err("Empty account value");
                 }
                 return Ok(Some(value.to_vec()));
