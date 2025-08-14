@@ -6,6 +6,17 @@
 // as slices into the original PSBT data.
 //
 // It is assumed that keys in each map of the PSBT are unique and sorted in ascending order.
+//
+// This is currently only a partial implementation, only targeting what the vnd-bitcoin V-App uses.
+//
+// TODO:
+// - implement missing fields
+// - make all fields of Psbt, Input and Output private and implement accessors (preventing modifications to the
+//   internal state)
+// - Make the compulsory fields from BIP-370 not be typed as an Option<T>; fail in the constructor instead
+// - Add test vectors from BIP-370
+
+#![allow(dead_code)]
 
 use alloc::vec::Vec;
 use bitcoin::{
