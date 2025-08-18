@@ -2,6 +2,7 @@ pub const ECALL_FATAL: u32 = 1;
 pub const ECALL_XSEND: u32 = 2;
 pub const ECALL_XRECV: u32 = 3;
 pub const ECALL_EXIT: u32 = 4;
+pub const ECALL_PRINT: u32 = 5;
 
 // device handling, events, and UX
 

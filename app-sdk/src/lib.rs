@@ -116,6 +116,29 @@ pub fn get_device_property(property_id: u32) -> u32 {
     ecalls::get_device_property(property_id)
 }
 
+pub fn print(message: *const u8, size: usize) {
+    ecalls::print(message, size);
+}
+
+// define print! and println! macros that can be used by V-Apps
+#[macro_export]
+macro_rules! print {
+    ($($arg:tt)*) => {{
+        use core::fmt::Write;
+        let mut buf = alloc::string::String::new();
+        write!(&mut buf, $($arg)*).unwrap();
+        $crate::print(buf.as_ptr(), buf.len());
+    }};
+}
+
+#[macro_export]
+macro_rules! println {
+    () => ($crate::print!("\n"));
+    ($($arg:tt)*) => ({
+        $crate::print!("{}\n", format_args!($($arg)*));
+    });
+}
+
 /// Initialization boilerplate for the application that is called before the main function, for
 /// targets that need it.
 #[macro_export]
@@ -127,5 +150,8 @@ macro_rules! bootstrap {
             $crate::rust_init_heap();
             main()
         }
+
+        #[cfg(target_arch = "riscv32")]
+        use $crate::{print, println};
     };
 }

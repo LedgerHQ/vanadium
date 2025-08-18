@@ -506,6 +506,16 @@ impl<'a> CommEcallHandler<'a> {
         Ok(total_received)
     }
 
+    // Sends exactly size bytes from the buffer in the V-app memory to the host
+    fn handle_print<E: fmt::Debug>(
+        &self,
+        cpu: &mut Cpu<OutsourcedMemory<'_>>,
+        buffer: GuestPointer,
+        size: usize,
+    ) -> Result<(), CommEcallError> {
+        self.handle_send_buffer::<E>(cpu, buffer, size, BufferType::Print)
+    }
+
     fn handle_bn_modm<E: fmt::Debug>(
         &self,
         cpu: &mut Cpu<OutsourcedMemory<'_>>,
@@ -1514,6 +1524,7 @@ fn get_ecall_name(ecall_code: u32) -> String {
         ECALL_FATAL => "fatal".into(),
         ECALL_XSEND => "xsend".into(),
         ECALL_XRECV => "xrecv".into(),
+        ECALL_PRINT => "print".into(),
         ECALL_GET_EVENT => "get_event".into(),
         ECALL_SHOW_PAGE => "show_page".into(),
         ECALL_SHOW_STEP => "show_step".into(),
@@ -1582,6 +1593,11 @@ impl<'a> EcallHandler for CommEcallHandler<'a> {
                     .handle_xrecv::<CommEcallError>(cpu, GPreg!(A0), reg!(A1) as usize)
                     .map_err(|_| CommEcallError::GenericError("xrecv failed"))?;
                 reg!(A0) = ret as u32;
+            }
+            ECALL_PRINT => {
+                self.handle_print::<CommEcallError>(cpu, GPreg!(A0), reg!(A1) as usize)
+                    .map_err(|_| CommEcallError::GenericError("print failed"))?;
+                reg!(A0) = 1;
             }
             ECALL_GET_EVENT => {
                 reg!(A0) = self.handle_get_event::<CommEcallError>(cpu, GPreg!(A0))?;

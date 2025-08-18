@@ -503,6 +503,15 @@ impl<E: std::fmt::Debug + Send + Sync + 'static> VAppEngine<E> {
                     .await
                     .map_err(|e| VAppEngineError::GenericError(Box::new(e)))?;
             }
+            BufferType::Print => {
+                // Send the print message to the VAppEngine
+                let print_message = String::from_utf8(buf)
+                    .map_err(|e| VAppEngineError::GenericError(Box::new(e)))?;
+
+                // TODO: it would be better to have a more appropriate way to specify how the stream of
+                // printed messages should be handled.
+                print!("{}", print_message);
+            }
         }
 
         // Continue processing

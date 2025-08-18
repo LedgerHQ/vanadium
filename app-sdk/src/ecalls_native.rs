@@ -1,9 +1,9 @@
-use core::panic;
 use lazy_static::lazy_static;
 use rand::TryRngCore;
 use std::{
     io::{self, Read, Write},
     net::{TcpListener, TcpStream},
+    str::from_utf8,
     sync::Mutex,
     thread::sleep,
     time::Duration,
@@ -203,6 +203,15 @@ pub fn xrecv(buffer: *mut u8, max_size: usize) -> usize {
     let slice = unsafe { std::slice::from_raw_parts_mut(buffer, expected) };
     stream.read_exact(slice).expect("TCP read failed");
     expected
+}
+
+pub fn print(buffer: *const u8, size: usize) {
+    // SAFETY: caller guarantees [buffer, buffer+size) is valid.
+    let data = unsafe { std::slice::from_raw_parts(buffer, size) };
+
+    // TODO: too simplistic: we should allow the client to decide how the print stream should be handled
+    // For now, we just print it raw to the console
+    print!("{}", from_utf8(data).unwrap());
 }
 
 pub fn get_event(data: *mut EventData) -> u32 {

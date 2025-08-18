@@ -335,6 +335,7 @@ pub unsafe fn fatal(msg: *const u8, size: usize) -> ! {
 
 ecall2v!(xsend, ECALL_XSEND, (buffer: *const u8), (size: usize));
 ecall2!(xrecv, ECALL_XRECV, (buffer: *mut u8), (size: usize), usize);
+ecall2v!(print, ECALL_PRINT, (buffer: *const u8), (size: usize));
 
 ecall1!(get_event, ECALL_GET_EVENT, (data: *mut EventData), u32);
 ecall2!(show_page, ECALL_SHOW_PAGE, (page_desc: *const u8), (page_desc_len: usize), u32);

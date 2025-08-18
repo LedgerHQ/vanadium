@@ -62,6 +62,13 @@ forward_to_ecall! {
     /// The number of bytes received.
     pub fn xrecv(buffer: *mut u8, max_size: usize) -> usize;
 
+    /// Sends a buffer to print to the host.
+    ///
+    /// # Parameters
+    /// - `buffer`: Pointer to the buffer to print, that must be a valid UTF-8 string.
+    /// - `size`: Size of the buffer.
+    pub fn print(buffer: *const u8, size: usize);
+
     /// Waits for the next event.
     ///
     /// # Parameters

@@ -19,6 +19,7 @@ delegate_ecall!(exit, !, (status: i32));
 delegate_ecall!(fatal, !, (msg: *const u8), (size: usize));
 delegate_ecall!(xsend, (buffer: *const u8), (size: usize));
 delegate_ecall!(xrecv, usize, (buffer: *mut u8), (size: usize));
+delegate_ecall!(print, (buffer: *const u8), (size: usize));
 
 delegate_ecall!(get_event, u32, (data: *mut EventData));
 delegate_ecall!(show_page, u32, (page_desc: *const u8), (page_desc_len: usize));

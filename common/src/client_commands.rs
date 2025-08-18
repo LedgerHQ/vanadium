@@ -601,6 +601,7 @@ impl<'a> Message<'a> for CommitPageProofContinuedResponse<'a> {
 pub enum BufferType {
     VAppMessage = 0, // data buffer sent from the VApp to the host
     Panic = 1,       // the VApp panicked
+    Print = 2,       // the VApp printed a message
 }
 
 /// Message sent by the VM to send a buffer (or the first chunk of it) to the host during an ECALL_XSEND.
@@ -646,6 +647,7 @@ impl<'a> Message<'a> for SendBufferMessage<'a> {
         let buffer_type = match data[1] {
             0 => BufferType::VAppMessage,
             1 => BufferType::Panic,
+            2 => BufferType::Print,
             _ => return Err(MessageDeserializationError::InvalidBufferType),
         };
         let total_size = u32::from_be_bytes([data[2], data[3], data[4], data[5]]);
