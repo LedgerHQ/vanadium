@@ -37,9 +37,10 @@ fn handle_request(app: &mut App, request: &Request) -> Result<Response, common::
 
 fn process_message(app: &mut App, request: &[u8]) -> Vec<u8> {
     let Ok(request) = postcard::from_bytes(request) else {
-        return postcard::to_allocvec(&Response::Error("Invalid request".to_string())).unwrap();
+        return postcard::to_allocvec(&Response::Error(common::errors::Error::InvalidRequest))
+            .unwrap();
     };
-    let response = handle_request(app, &request).unwrap_or_else(|e| Response::Error(e.to_string()));
+    let response = handle_request(app, &request).unwrap_or_else(|e| Response::Error(e));
     postcard::to_allocvec(&response).unwrap()
 }
 

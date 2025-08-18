@@ -11,8 +11,8 @@ use sdk::comm::SendMessageError;
 pub enum BitcoinClientError {
     VAppExecutionError(VAppExecutionError),
     SendMessageError(SendMessageError),
-    AppError(String),        // the V-App returned an error response
-    InvalidResponse(String), // the V-App response was an unexpected type
+    AppError(common::errors::Error), // the V-App returned an error response
+    InvalidResponse(String),         // the V-App response was an unexpected type
     GenericError(String),
 }
 

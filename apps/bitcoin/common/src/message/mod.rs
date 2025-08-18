@@ -107,7 +107,7 @@ pub enum Response {
     },
     Address(String),
     PsbtSigned(Vec<PartialSignature>),
-    Error(String),
+    Error(crate::errors::Error),
 }
 
 // Conversions between messages and other internal types
