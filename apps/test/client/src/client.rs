@@ -122,6 +122,15 @@ impl TestClient {
         Ok(u32::from_be_bytes(result_raw.try_into().unwrap()))
     }
 
+    pub async fn print(&mut self, print_msg: &str) -> Result<(), TestClientError> {
+        let mut msg: Vec<u8> = Vec::new();
+        msg.extend_from_slice(&[Command::Print as u8]);
+        msg.extend_from_slice(print_msg.as_bytes());
+
+        self.app_transport.send_message(&msg).await?;
+        Ok(())
+    }
+
     pub async fn panic(&mut self, panic_msg: &str) -> Result<(), TestClientError> {
         let mut msg: Vec<u8> = Vec::new();
         msg.extend_from_slice(&[Command::Panic as u8]);

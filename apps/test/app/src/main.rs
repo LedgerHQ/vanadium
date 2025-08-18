@@ -2,6 +2,8 @@
 
 extern crate alloc;
 
+use alloc::vec;
+
 mod commands;
 mod handlers;
 
@@ -51,6 +53,11 @@ pub fn main() {
                 }
                 let property_id = u32::from_be_bytes([msg[1], msg[2], msg[3], msg[4]]);
                 sdk::get_device_property(property_id).to_be_bytes().to_vec()
+            }
+            Command::Print => {
+                let print_msg = core::str::from_utf8(&msg[1..]).unwrap();
+                sdk::println!("{}", print_msg);
+                vec![]
             }
             Command::Panic => {
                 let panic_msg = core::str::from_utf8(&msg[1..]).unwrap();

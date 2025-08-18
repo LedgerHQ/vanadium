@@ -32,6 +32,7 @@ enum CliCommand {
     NPrimes(u32),
     Ux(u8),
     DeviceProp(u32),
+    Print(String),
     Panic(String),
     Exit,
 }
@@ -109,6 +110,14 @@ fn parse_command(line: &str) -> Result<CliCommand, String> {
                     .unwrap_or("");
                 Ok(CliCommand::Panic(msg.to_string()))
             }
+            "print" => {
+                // find where the word "print" ends and the message starts
+                let msg = line
+                    .find("print")
+                    .map(|i| line[i + 5..].trim())
+                    .unwrap_or("");
+                Ok(CliCommand::Print(msg.to_string()))
+            }
             _ => Err(format!("Unknown command: '{}'", command)),
         }
     } else {
@@ -174,6 +183,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 CliCommand::DeviceProp(property) => {
                     let value = test_client.device_props(property).await?;
                     println!("Value for property {}: 0x{:08x}", property, value);
+                }
+                CliCommand::Print(msg) => {
+                    test_client.print(&msg).await?;
                 }
                 CliCommand::Panic(msg) => {
                     test_client.panic(&msg).await?;
