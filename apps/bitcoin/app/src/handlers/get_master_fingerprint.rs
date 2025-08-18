@@ -1,7 +1,9 @@
 use common::message::Response;
 use sdk::curve::Curve;
 
-pub fn handle_get_master_fingerprint(_app: &mut sdk::App) -> Result<Response, &'static str> {
+pub fn handle_get_master_fingerprint(
+    _app: &mut sdk::App,
+) -> Result<Response, common::errors::Error> {
     Ok(Response::MasterFingerprint(
         sdk::curve::Secp256k1::get_master_fingerprint(),
     ))

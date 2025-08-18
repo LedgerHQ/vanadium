@@ -15,7 +15,7 @@ use sdk::App;
 
 sdk::bootstrap!();
 
-fn handle_request(app: &mut App, request: &Request) -> Result<Response, &'static str> {
+fn handle_request(app: &mut App, request: &Request) -> Result<Response, common::errors::Error> {
     match request {
         Request::GetVersion => todo!(),
         Request::Exit => sdk::exit(0),

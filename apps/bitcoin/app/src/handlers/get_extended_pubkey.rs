@@ -6,6 +6,8 @@ use sdk::{
     hash::{Hasher, Ripemd160, Sha256},
 };
 
+use common::errors::Error;
+
 const BIP32_TESTNET_PUBKEY_VERSION: u32 = 0x043587CFu32;
 
 // TODO: refactor using vlib_bitcoin
@@ -65,12 +67,13 @@ pub fn handle_get_extended_pubkey(
     _app: &mut sdk::App,
     bip32_path: &common::message::Bip32Path,
     display: bool,
-) -> Result<Response, &'static str> {
+) -> Result<Response, Error> {
     if bip32_path.0.len() > 256 {
-        return Err("Derivation path is too long");
+        return Err(Error::DerivationPathTooLong);
     }
 
-    let hd_node = sdk::curve::Secp256k1::derive_hd_node(&bip32_path.0)?;
+    let hd_node = sdk::curve::Secp256k1::derive_hd_node(&bip32_path.0)
+        .map_err(|_| Error::KeyDerivationFailed)?;
     let privkey: EcfpPrivateKey<Secp256k1, 32> = EcfpPrivateKey::new(*hd_node.privkey);
     let pubkey = privkey.to_public_key();
     let pubkey_bytes = pubkey.as_ref().to_bytes();
@@ -81,7 +84,8 @@ pub fn handle_get_extended_pubkey(
         0
     } else {
         let hd_node =
-            sdk::curve::Secp256k1::derive_hd_node(&bip32_path.0[..bip32_path.0.len() - 1])?;
+            sdk::curve::Secp256k1::derive_hd_node(&bip32_path.0[..bip32_path.0.len() - 1])
+                .map_err(|_| Error::KeyDerivationFailed)?;
         let parent_privkey: EcfpPrivateKey<Secp256k1, 32> = EcfpPrivateKey::new(*hd_node.privkey);
         let parent_pubkey = parent_privkey.to_public_key();
         get_pubkey_fingerprint(&parent_pubkey)
@@ -105,7 +109,7 @@ pub fn handle_get_extended_pubkey(
     if display {
         let xpub_base58 = bitcoin::base58::encode_check(&xpub);
         if !display_xpub(&xpub_base58, &bip32_path.0) {
-            return Err("Rejected by the user");
+            return Err(Error::UserRejected);
         }
     }
 

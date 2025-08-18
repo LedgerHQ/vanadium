@@ -4,6 +4,8 @@ use common::{
     message::Response,
 };
 
+use common::errors::Error;
+
 #[cfg(not(test))]
 fn display_wallet_policy(name: &str, wallet_policy: &bip388::WalletPolicy) -> bool {
     use alloc::{format, string::ToString, vec::Vec};
@@ -51,13 +53,14 @@ pub fn handle_register_account(
     _app: &mut sdk::App,
     name: &str,
     account: &common::message::Account,
-) -> Result<Response, &'static str> {
-    let wallet_policy: bip388::WalletPolicy = account.try_into()?;
+) -> Result<Response, Error> {
+    let wallet_policy: bip388::WalletPolicy =
+        account.try_into().map_err(|_| Error::InvalidWalletPolicy)?;
 
     // TODO: necessary sanity checks on the wallet policy
 
     if !display_wallet_policy(name, &wallet_policy) {
-        return Err("Rejected by the user");
+        return Err(Error::UserRejected);
     }
 
     let id = wallet_policy.get_id(name);

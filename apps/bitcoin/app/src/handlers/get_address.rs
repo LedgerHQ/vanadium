@@ -4,6 +4,8 @@ use common::{
     message::Response,
 };
 
+use common::errors::Error;
+
 #[cfg(not(test))]
 fn display_address(account_name: Option<&str>, addr: &str) -> bool {
     use alloc::vec;
@@ -51,33 +53,36 @@ pub fn handle_get_address(
     por: &[u8],
     coordinates: &common::message::AccountCoordinates,
     display: bool,
-) -> Result<Response, &'static str> {
-    let wallet_policy: bip388::WalletPolicy = account.try_into()?;
+) -> Result<Response, Error> {
+    let wallet_policy: bip388::WalletPolicy =
+        account.try_into().map_err(|_| Error::InvalidWalletPolicy)?;
 
     // hmac should be empty or a 32 byte vector; if not, give an error, otherwise convert to Option<[u8; 32]>
     let hmac: Option<&[u8; 32]> = match por.len() {
         0 => None,
         32 => Some(por.try_into().unwrap()),
-        _ => return Err("Invalid Proof of Registration length"),
+        _ => return Err(Error::InvalidProofOfRegistrationLength),
     };
 
-    let hmac = hmac.ok_or("Default wallets are not supported yet")?;
+    let hmac = hmac.ok_or(Error::DefaultAccountsNotSupported)?;
 
     let id = wallet_policy.get_id(name.unwrap_or(""));
     let por = common::account::ProofOfRegistration::from_bytes(*hmac);
     if por != ProofOfRegistration::new(&id) {
-        return Err("Invalid proof of registration");
+        return Err(Error::InvalidProofOfRegistration);
     }
 
     let common::message::AccountCoordinates::WalletPolicy(coordinates) = coordinates;
-    let address = wallet_policy.get_address(&common::account::WalletPolicyCoordinates {
-        is_change: coordinates.is_change,
-        address_index: coordinates.address_index,
-    })?;
+    let address = wallet_policy
+        .get_address(&common::account::WalletPolicyCoordinates {
+            is_change: coordinates.is_change,
+            address_index: coordinates.address_index,
+        })
+        .map_err(|_| Error::InvalidWalletPolicy)?;
 
     if display {
         if !display_address(name, &address) {
-            return Err("Rejected by the user");
+            return Err(Error::UserRejected);
         }
     }
 

@@ -8,6 +8,7 @@ use alloc::{
 use common::{
     account::{Account, ProofOfRegistration},
     bip388::{DescriptorTemplate, SegwitVersion},
+    errors::Error,
     message::{PartialSignature, Response},
     psbt::{
         PsbtAccount, PsbtAccountCoordinates, PsbtAccountGlobalRead, PsbtAccountInputRead,
@@ -19,11 +20,10 @@ use common::{
 
 use bitcoin::{
     bip32::ChildNumber,
-    consensus::deserialize,
     hashes::Hash,
     key::{Keypair, TapTweak},
     sighash::SighashCache,
-    Address, Amount, ScriptBuf, TapLeafHash, TapNodeHash, TapSighashType, Transaction, TxOut, Txid,
+    Address, Amount, ScriptBuf, TapLeafHash, TapNodeHash, TapSighashType, Transaction, TxOut,
 };
 use common::fastpsbt;
 use sdk::{
@@ -110,13 +110,14 @@ fn sign_input_ecdsa(
     input_index: usize,
     sighash_cache: &mut SighashCache<Transaction>,
     path: &[ChildNumber],
-) -> Result<PartialSignature, &'static str> {
+) -> Result<PartialSignature, Error> {
     let (sighash, sighash_type) = psbt
         .sighash_ecdsa(input_index, sighash_cache)
-        .map_err(|_| "Error computing sighash")?;
+        .map_err(|_| Error::ErrorComputingSighash)?;
 
     let path: Vec<u32> = path.iter().map(|&x| x.into()).collect();
-    let hd_node = sdk::curve::Secp256k1::derive_hd_node(&path)?;
+    let hd_node =
+        sdk::curve::Secp256k1::derive_hd_node(&path).map_err(|_| Error::KeyDerivationFailed)?;
     let privkey: EcfpPrivateKey<sdk::curve::Secp256k1, 32> = EcfpPrivateKey::new(*hd_node.privkey);
     let pubkey = privkey.to_public_key();
     let pubkey_uncompressed = pubkey.as_ref().to_bytes();
@@ -124,7 +125,9 @@ fn sign_input_ecdsa(
     pubkey_compressed.push(2 + pubkey_uncompressed[64] % 2);
     pubkey_compressed.extend_from_slice(&pubkey_uncompressed[1..33]);
 
-    let mut signature = privkey.ecdsa_sign_hash(sighash.as_ref())?;
+    let mut signature = privkey
+        .ecdsa_sign_hash(sighash.as_ref())
+        .map_err(|_| Error::SigningFailed)?;
     signature.push(sighash_type.to_u32() as u8);
 
     Ok(PartialSignature {
@@ -142,7 +145,7 @@ fn sign_input_schnorr(
     path: &[ChildNumber],
     taptree_hash: Option<[u8; 32]>,
     leaf_hash: Option<TapLeafHash>,
-) -> Result<PartialSignature, &'static str> {
+) -> Result<PartialSignature, Error> {
     let sighash_type = TapSighashType::Default; // TODO: only DEFAULT is supported for now
 
     let prevouts = psbt
@@ -150,10 +153,10 @@ fn sign_input_schnorr(
         .iter()
         .map(|input| {
             let Some(wutxo) = input.witness_utxo else {
-                return Err("Missing witness UTXO");
+                return Err(Error::MissingInputUtxo);
             };
             if wutxo.len() < 8 + 1 || wutxo[8] > 0xfc || wutxo.len() != 8 + 1 + wutxo[8] as usize {
-                return Err("Witness UTXO is invalid");
+                return Err(Error::InvalidWitnessUtxo);
             }
             let script_len = wutxo[8] as usize;
             let script_pubkey = ScriptBuf::from_bytes(wutxo[8 + 1..8 + 1 + script_len].to_vec());
@@ -163,7 +166,7 @@ fn sign_input_schnorr(
                 script_pubkey,
             })
         })
-        .collect::<Result<Vec<TxOut>, &'static str>>()?;
+        .collect::<Result<Vec<TxOut>, Error>>()?;
 
     let sighash = if let Some(leaf_hash) = leaf_hash {
         sighash_cache
@@ -173,7 +176,7 @@ fn sign_input_schnorr(
                 leaf_hash,
                 sighash_type,
             )
-            .map_err(|_| "Error computing sighash")?
+            .map_err(|_| Error::ErrorComputingSighash)?
     } else {
         sighash_cache
             .taproot_key_spend_signature_hash(
@@ -181,14 +184,15 @@ fn sign_input_schnorr(
                 &bitcoin::sighash::Prevouts::All(&prevouts),
                 sighash_type,
             )
-            .map_err(|_| "Error computing sighash")?
+            .map_err(|_| Error::ErrorComputingSighash)?
     };
 
     let path: Vec<u32> = path.iter().map(|&x| x.into()).collect();
-    let hd_node = sdk::curve::Secp256k1::derive_hd_node(&path)?;
+    let hd_node =
+        sdk::curve::Secp256k1::derive_hd_node(&path).map_err(|_| Error::KeyDerivationFailed)?;
     let secp = bitcoin::secp256k1::Secp256k1::new();
-    let keypair: Keypair =
-        Keypair::from_seckey_slice(&secp, hd_node.privkey.as_ref()).map_err(|_| "Invalid key")?;
+    let keypair: Keypair = Keypair::from_seckey_slice(&secp, hd_node.privkey.as_ref())
+        .map_err(|_| Error::InvalidKey)?;
 
     let signing_privkey = if !leaf_hash.is_none() {
         // script path signing, no further tweak
@@ -203,7 +207,9 @@ fn sign_input_schnorr(
         EcfpPrivateKey::new(tweaked_keypair.to_inner().secret_bytes())
     };
 
-    let mut signature = signing_privkey.schnorr_sign(sighash.as_ref(), None)?;
+    let mut signature = signing_privkey
+        .schnorr_sign(sighash.as_ref(), None)
+        .map_err(|_| Error::SigningFailed)?;
 
     if sighash_type != TapSighashType::Default {
         signature.push(sighash_type as u8)
@@ -217,10 +223,12 @@ fn sign_input_schnorr(
     })
 }
 
-pub fn handle_sign_psbt(_app: &mut sdk::App, psbt: &[u8]) -> Result<Response, &'static str> {
+pub fn handle_sign_psbt(_app: &mut sdk::App, psbt: &[u8]) -> Result<Response, Error> {
     let psbt = fastpsbt::Psbt::parse(&psbt).unwrap();
 
-    let accounts = psbt.get_accounts()?;
+    let accounts = psbt
+        .get_accounts()
+        .map_err(|_| Error::InvalidWalletPolicy)?;
     let mut account_spent_amounts: Vec<i64> = vec![0; accounts.len()];
     let mut external_outputs_indexes = Vec::new();
     let mut inputs_total_amount: u64 = 0;
@@ -231,16 +239,19 @@ pub fn handle_sign_psbt(_app: &mut sdk::App, psbt: &[u8]) -> Result<Response, &'
     /***** verify accounts *****/
     for (account_id, account) in accounts.iter().enumerate() {
         let account_name = psbt
-            .get_account_name(account_id as u32)?
+            .get_account_name(account_id as u32)
+            .map_err(|_| Error::InvalidWalletPolicy)?
             .unwrap_or("".to_string());
 
-        let por = psbt.get_account_proof_of_registration(account_id as u32)?;
+        let por = psbt
+            .get_account_proof_of_registration(account_id as u32)
+            .map_err(|_| Error::InvalidWalletPolicy)?;
         // verify that por is 32 bytes, and convert to ProofOfRegistration
 
-        let por = por.ok_or("Default accounts are not supported yet")?;
+        let por = por.ok_or(Error::DefaultAccountsNotSupported)?;
         let por = ProofOfRegistration::from_bytes(
             por.try_into()
-                .map_err(|_| "Invalid Proof of Registration length")?,
+                .map_err(|_| Error::InvalidProofOfRegistrationLength)?,
         );
 
         match account {
@@ -248,7 +259,7 @@ pub fn handle_sign_psbt(_app: &mut sdk::App, psbt: &[u8]) -> Result<Response, &'
                 // verify proof of registration
                 let id = wallet_policy.get_id(&account_name);
                 if por != ProofOfRegistration::new(&id) {
-                    return Err("Invalid proof of registration");
+                    return Err(Error::InvalidProofOfRegistration);
                 }
             }
         }
@@ -257,21 +268,26 @@ pub fn handle_sign_psbt(_app: &mut sdk::App, psbt: &[u8]) -> Result<Response, &'
     /***** input checks *****/
 
     for input in psbt.inputs.iter() {
-        let Some((account_id, coords)) = input.get_account_coordinates()? else {
-            return Err("External inputs are not supported");
+        let Some((account_id, coords)) = input
+            .get_account_coordinates()
+            .map_err(|_| Error::FailedToGetAccounts)?
+        else {
+            return Err(Error::ExternalInputsNotSupported);
         };
 
         if account_id as usize >= accounts.len() {
-            return Err("Invalid account ID");
+            return Err(Error::InvalidAccountId);
         }
 
         let PsbtAccount::WalletPolicy(wallet_policy) = &accounts[account_id as usize];
         let PsbtAccountCoordinates::WalletPolicy(coords) = coords;
 
-        let segwit_version = wallet_policy.get_segwit_version()?;
+        let segwit_version = wallet_policy
+            .get_segwit_version()
+            .map_err(|_| Error::InvalidWalletPolicy)?;
 
         if segwit_version == SegwitVersion::Legacy && input.witness_utxo.is_some() {
-            return Err("Witness UTXO is not allowed for Legacy transaction");
+            return Err(Error::WitnessUtxoNotAllowedForLegacy);
         }
 
         if segwit_version == SegwitVersion::Legacy || segwit_version == SegwitVersion::SegwitV0 {
@@ -279,18 +295,18 @@ pub fn handle_sign_psbt(_app: &mut sdk::App, psbt: &[u8]) -> Result<Response, &'
             // If missing, fail for legacy inputs, while we show a warning for SegWit v0 inputs.
             match input
                 .get_non_witness_utxo()
-                .map_err(|_| "Invalid non-witness UTXO")?
+                .map_err(|_| Error::InvalidNonWitnessUtxo)?
             {
                 Some(tx) => {
                     let computed_txid = tx.compute_txid();
                     if input.previous_txid != Some(computed_txid.as_byte_array()) {
-                        return Err("Non-witness UTXO does not match the previous output");
+                        return Err(Error::NonWitnessUtxoMismatch);
                     }
                 }
                 None => {
                     if segwit_version == SegwitVersion::Legacy {
                         // for legacy transactions, non-witness UTXO is not required
-                        return Err("Non-witness UTXO is required for SegWit version");
+                        return Err(Error::NonWitnessUtxoRequired);
                     } else if segwit_version == SegwitVersion::SegwitV0 {
                         // for Segwitv0 transactions, non-witness UTXO is not mandatory,
                         // but we show a warning if missing
@@ -301,18 +317,18 @@ pub fn handle_sign_psbt(_app: &mut sdk::App, psbt: &[u8]) -> Result<Response, &'
         }
 
         if segwit_version.is_segwit() && input.witness_utxo.is_none() {
-            return Err("Witness UTXO is required for SegWit version");
+            return Err(Error::WitnessUtxoRequiredForSegwit);
         }
 
         let tx_out: &TxOut = if let Some(witness_utxo) = input
             .get_witness_utxo()
-            .map_err(|_| "Invalid witness UTXO")?
+            .map_err(|_| Error::InvalidWitnessUtxo)?
         {
             let script = if let Some(redeem_script) = input.redeem_script {
                 if witness_utxo.script_pubkey
                     != ScriptBuf::from_bytes(redeem_script.to_vec()).to_p2sh()
                 {
-                    return Err("Redeem script does not match the witness UTXO");
+                    return Err(Error::RedeemScriptMismatchWitness);
                 }
                 ScriptBuf::from_bytes(redeem_script.to_vec())
             } else {
@@ -323,33 +339,38 @@ pub fn handle_sign_psbt(_app: &mut sdk::App, psbt: &[u8]) -> Result<Response, &'
                 if let Some(witness_script) = &input.witness_script {
                     let witness_script = ScriptBuf::from_bytes(witness_script.to_vec());
                     if script != witness_script.to_p2wsh() {
-                        return Err("Witness script does not match the witness UTXO");
+                        return Err(Error::WitnessScriptMismatchWitness);
                     }
                 } else {
-                    return Err("Witness script is required for P2WSH");
+                    return Err(Error::WitnessScriptRequiredForP2WSH);
                 }
             }
             &witness_utxo
         } else if let Some(non_witness_utxo) = input
             .get_non_witness_utxo()
-            .map_err(|_| "Invalid non-witness UTXO")?
+            .map_err(|_| Error::InvalidNonWitnessUtxo)?
         {
-            let prevout_index = input.output_index.ok_or("Missing previous output index")? as usize;
+            let prevout_index = input
+                .output_index
+                .ok_or(Error::MissingPreviousOutputIndex)? as usize;
             if let Some(redeem_script) = input.redeem_script {
                 let redeem_script = ScriptBuf::from_bytes(redeem_script.to_vec());
                 if non_witness_utxo.output[prevout_index].script_pubkey != redeem_script.to_p2sh() {
-                    return Err("Redeem script does not match the non-witness UTXO");
+                    return Err(Error::RedeemScriptMismatch);
                 }
             }
             &non_witness_utxo.output[prevout_index]
         } else {
-            return Err("Each input must have either a witness UTXO or a non-witness UTXO");
+            return Err(Error::MissingInputUtxo);
         };
 
         // verify that the account, derived at the coordinates in the PSBT, produces the same script
-        if wallet_policy.to_script(coords.is_change, coords.address_index)? != tx_out.script_pubkey
+        if wallet_policy
+            .to_script(coords.is_change, coords.address_index)
+            .map_err(|_| Error::InvalidWalletPolicy)?
+            != tx_out.script_pubkey
         {
-            return Err("Script does not match the account at the coordinates indicated in the PSBT for this input");
+            return Err(Error::InputScriptMismatch);
         }
 
         account_spent_amounts[account_id as usize] += tx_out.value.to_sat() as i64;
@@ -358,22 +379,28 @@ pub fn handle_sign_psbt(_app: &mut sdk::App, psbt: &[u8]) -> Result<Response, &'
 
     /***** output checks *****/
     for (output_index, output) in psbt.outputs.iter().enumerate() {
-        let amount = output.amount.ok_or("Output amount is missing")?;
-        if let Some((account_id, coords)) = output.get_account_coordinates()? {
+        let amount = output.amount.ok_or(Error::OutputAmountMissing)?;
+        if let Some((account_id, coords)) = output
+            .get_account_coordinates()
+            .map_err(|_| Error::FailedToGetAccounts)?
+        {
             // output internal to an account (change, or receiving to an account). Check if it's true
             if account_id as usize >= accounts.len() {
-                return Err("Invalid account ID");
+                return Err(Error::InvalidAccountId);
             }
 
             let PsbtAccount::WalletPolicy(wallet_policy) = &accounts[account_id as usize];
             let PsbtAccountCoordinates::WalletPolicy(coords) = coords;
 
             // verify that the account, derived at the coordinates in the PSBT, produces the same script
-            let out_script_pubkey = output.script.ok_or("Output script is missing")?;
+            let out_script_pubkey = output.script.ok_or(Error::OutputScriptMissing)?;
             let out_script_pubkey = ScriptBuf::from_bytes(out_script_pubkey.to_vec());
-            if wallet_policy.to_script(coords.is_change, coords.address_index)? != out_script_pubkey
+            if wallet_policy
+                .to_script(coords.is_change, coords.address_index)
+                .map_err(|_| Error::InvalidWalletPolicy)?
+                != out_script_pubkey
             {
-                return Err("Script does not match the account at the coordinates indicated in the PSBT for this output");
+                return Err(Error::OutputScriptMismatch);
             }
 
             account_spent_amounts[account_id as usize] -= amount as i64;
@@ -387,7 +414,7 @@ pub fn handle_sign_psbt(_app: &mut sdk::App, psbt: &[u8]) -> Result<Response, &'
 
     if outputs_total_amount > inputs_total_amount {
         // for now we don't support sighash flags - so output amounts can't be smaller than input amounts
-        return Err("Transaction outputs total amount is greater than inputs total amount");
+        return Err(Error::InputsLessThanOutputs);
     }
     let fee = inputs_total_amount - outputs_total_amount;
 
@@ -397,14 +424,14 @@ pub fn handle_sign_psbt(_app: &mut sdk::App, psbt: &[u8]) -> Result<Response, &'
 
     if warn_unverified_inputs {
         if !display_warning_unverified_inputs() {
-            return Err("User rejected unverified inputs");
+            return Err(Error::UserRejected);
         }
     }
     if inputs_total_amount >= crate::constants::THRESHOLD_WARN_HIGH_FEES_AMOUNT {
         let fee_frac = fee as f64 / inputs_total_amount as f64;
         if fee_frac >= crate::constants::THRESHOLD_WARN_HIGH_FEES_FRACTION {
             if !display_warning_high_fee(fee_frac) {
-                return Err("User rejected high fee transaction");
+                return Err(Error::UserRejected);
             }
         }
     }
@@ -423,7 +450,10 @@ pub fn handle_sign_psbt(_app: &mut sdk::App, psbt: &[u8]) -> Result<Response, &'
     // TODO: format amounts correctly, with commas and decimals
     // pairs for accounts we're spending from (or refreshing)
     for (account_id, spent_amount) in account_spent_amounts.iter().enumerate() {
-        let account_description = match psbt.get_account_name(account_id as u32)? {
+        let account_description = match psbt
+            .get_account_name(account_id as u32)
+            .map_err(|_| Error::InvalidWalletPolicy)?
+        {
             Some(name) => format!("account: {}", name),
             None => "default account".to_string(),
         };
@@ -447,7 +477,10 @@ pub fn handle_sign_psbt(_app: &mut sdk::App, psbt: &[u8]) -> Result<Response, &'
     }
     // pairs for accounts we're receiving from (negative spent amount)
     for (account_id, spent_amount) in account_spent_amounts.iter().enumerate() {
-        let account_description = match psbt.get_account_name(account_id as u32)? {
+        let account_description = match psbt
+            .get_account_name(account_id as u32)
+            .map_err(|_| Error::InvalidWalletPolicy)?
+        {
             Some(name) => format!("account: {}", name),
             None => "default account".to_string(),
         };
@@ -467,11 +500,11 @@ pub fn handle_sign_psbt(_app: &mut sdk::App, psbt: &[u8]) -> Result<Response, &'
     // pairs for external outputs. For these, we show the address as usual.
     for output_index in external_outputs_indexes.iter() {
         let output = &psbt.outputs[*output_index];
-        let out_script_pubkey = output.script.ok_or("Output script is missing")?;
+        let out_script_pubkey = output.script.ok_or(Error::OutputScriptMissing)?;
         let out_script_pubkey = ScriptBuf::from_bytes(out_script_pubkey.to_vec());
-        let amount = output.amount.ok_or("Output amount is missing")?;
+        let amount = output.amount.ok_or(Error::OutputAmountMissing)?;
         let address = Address::from_script(&out_script_pubkey, bitcoin::Network::Testnet)
-            .map_err(|_| "Failed to convert script to address")?;
+            .map_err(|_| Error::AddressFromScriptFailed)?;
 
         pairs.push(TagValue {
             tag: format!("Output {}", output_index),
@@ -490,13 +523,13 @@ pub fn handle_sign_psbt(_app: &mut sdk::App, psbt: &[u8]) -> Result<Response, &'
     });
 
     if !display_transaction(&pairs) {
-        return Err("User rejected transaction");
+        return Err(Error::UserRejected);
     }
 
     /***** Sign transaction *****/
     let unsigned_tx = psbt
         .unsigned_tx()
-        .map_err(|_| "Failed to get unsigned transaction")?;
+        .map_err(|_| Error::FailedUnsignedTransaction)?;
     let mut sighash_cache = SighashCache::new(unsigned_tx.clone());
 
     let master_fingerprint = sdk::curve::Secp256k1::get_master_fingerprint();
@@ -504,11 +537,14 @@ pub fn handle_sign_psbt(_app: &mut sdk::App, psbt: &[u8]) -> Result<Response, &'
     let mut partial_signatures = Vec::with_capacity(psbt.inputs.len());
 
     for (input_index, input) in psbt.inputs.iter().enumerate() {
-        let Some((account_id, coords)) = input.get_account_coordinates()? else {
-            return Err("External inputs are not supported");
+        let Some((account_id, coords)) = input
+            .get_account_coordinates()
+            .map_err(|_| Error::FailedToGetAccounts)?
+        else {
+            return Err(Error::ExternalInputsNotSupported);
         };
         if account_id as usize >= accounts.len() {
-            return Err("Invalid account ID");
+            return Err(Error::InvalidAccountId);
         }
 
         let PsbtAccountCoordinates::WalletPolicy(coords) = coords;
@@ -556,8 +592,9 @@ pub fn handle_sign_psbt(_app: &mut sdk::App, psbt: &[u8]) -> Result<Response, &'
                                         coords.address_index,
                                     )
                                 })
-                                .transpose(),
-                            _ => return Err("Unexpected state: should be a Taproot wallet policy"),
+                                .transpose()
+                                .map_err(|_| Error::InvalidWalletPolicy),
+                            _ => return Err(Error::UnexpectedTaprootPolicy),
                         }?;
 
                         let leaf_hash = tapleaf_desc
@@ -568,7 +605,8 @@ pub fn handle_sign_psbt(_app: &mut sdk::App, psbt: &[u8]) -> Result<Response, &'
                                     coords.address_index,
                                 )
                             })
-                            .transpose()?;
+                            .transpose()
+                            .map_err(|_| Error::InvalidWalletPolicy)?;
 
                         let partial_signature = sign_input_schnorr(
                             &psbt,
@@ -580,7 +618,7 @@ pub fn handle_sign_psbt(_app: &mut sdk::App, psbt: &[u8]) -> Result<Response, &'
                         )?;
                         partial_signatures.push(partial_signature);
                     }
-                    _ => return Err("Unexpected state: should be SegwitV0 or Taproot"),
+                    _ => return Err(Error::UnexpectedSegwitVersion),
                 }
             } else {
                 // sign as legacy p2pkh or p2sh
@@ -604,13 +642,13 @@ mod tests {
     use bitcoin::{psbt::Psbt, secp256k1::schnorr::Signature, XOnlyPublicKey};
     use common::{
         bip388::{KeyPlaceholder, WalletPolicy},
-        psbt::{fill_psbt_with_bip388_coordinates, psbt_v0_to_v2},
+        psbt::fill_psbt_with_bip388_coordinates,
     };
     use hex_literal::hex;
 
     // rust-bitcoin doesn't support Psbtv2, so we use this helper for conversion
     fn serialize_as_psbtv2(psbt: &Psbt) -> Vec<u8> {
-        psbt_v0_to_v2(&psbt.serialize()).expect("Failed to convert PSBTv0 to PSBTv2")
+        common::psbt::psbt_v0_to_v2(&psbt.serialize()).expect("Failed to convert PSBTv0 to PSBTv2")
     }
 
     fn prepare_psbt(psbt: &mut Psbt, named_accounts: &[(&WalletPolicy, &str, &[u8; 32])]) {
