@@ -25,13 +25,16 @@ use common::client_commands::{
 use common::constants::{DEFAULT_STACK_START, PAGE_SIZE};
 use common::manifest::Manifest;
 
-use crate::apdu::{
-    apdu_continue, apdu_continue_with_p1, apdu_register_vapp, apdu_run_vapp, APDUCommand,
-    StatusWord,
-};
 use crate::elf::{self, ElfFile};
 use crate::memory::{MemorySegment, MemorySegmentError};
 use crate::transport::Transport;
+use crate::{
+    apdu::{
+        apdu_continue, apdu_continue_with_p1, apdu_register_vapp, apdu_run_vapp, APDUCommand,
+        StatusWord,
+    },
+    linewriter::PrintWriter,
+};
 
 enum VAppMessage {
     SendBuffer(Vec<u8>),
@@ -128,6 +131,7 @@ struct VAppEngine<E: std::fmt::Debug + Send + Sync + 'static> {
     transport: Arc<dyn Transport<Error = E>>,
     engine_to_client_sender: mpsc::Sender<VAppMessage>,
     client_to_engine_receiver: mpsc::Receiver<ClientMessage>,
+    print_writer: Box<dyn std::io::Write + Send>,
 }
 
 impl<E: std::fmt::Debug + Send + Sync + 'static> VAppEngine<E> {
@@ -504,13 +508,9 @@ impl<E: std::fmt::Debug + Send + Sync + 'static> VAppEngine<E> {
                     .map_err(|e| VAppEngineError::GenericError(Box::new(e)))?;
             }
             BufferType::Print => {
-                // Send the print message to the VAppEngine
-                let print_message = String::from_utf8(buf)
+                self.print_writer
+                    .write(&buf)
                     .map_err(|e| VAppEngineError::GenericError(Box::new(e)))?;
-
-                // TODO: it would be better to have a more appropriate way to specify how the stream of
-                // printed messages should be handled.
-                print!("{}", print_message);
             }
         }
 
@@ -737,6 +737,7 @@ impl<E: std::fmt::Debug + Send + Sync + 'static> GenericVanadiumClient<E> {
             transport,
             engine_to_client_sender,
             client_to_engine_receiver,
+            print_writer: Box::new(PrintWriter::new(true)),
         };
 
         // Start the VAppEngine in a task
@@ -996,14 +997,21 @@ impl<E: std::fmt::Debug + Send + Sync + 'static> VAppTransport for VanadiumAppCl
 /// Client that talks to the V-App over a length-prefixed TCP stream.
 pub struct NativeAppClient {
     stream: TcpStream,
+    print_writer: Box<dyn std::io::Write + Send>,
 }
 
 impl NativeAppClient {
     /// `addr` is something like `"127.0.0.1:5555"`.
-    pub async fn new(addr: &str) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+    pub async fn new(
+        addr: &str,
+        print_writer: Box<dyn std::io::Write + Send>,
+    ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         let stream = TcpStream::connect(addr).await?;
         stream.set_nodelay(true)?;
-        Ok(Self { stream })
+        Ok(Self {
+            stream,
+            print_writer,
+        })
     }
 
     /// Convenience for turning any I/O error into the right enum.
@@ -1028,21 +1036,43 @@ impl VAppTransport for NativeAppClient {
         self.stream.write_all(msg).await.map_err(Self::map_err)?;
         self.stream.flush().await.map_err(Self::map_err)?;
 
-        // ---------- READ ----------
-        let mut len_buf = [0u8; 4];
-        self.stream
-            .read_exact(&mut len_buf)
-            .await
-            .map_err(Self::map_err)?;
-        let resp_len = u32::from_be_bytes(len_buf) as usize;
+        loop {
+            // ---------- READ ----------
+            let mut len_buf = [0u8; 5];
+            self.stream
+                .read_exact(&mut len_buf)
+                .await
+                .map_err(Self::map_err)?;
 
-        let mut resp = vec![0u8; resp_len];
-        self.stream
-            .read_exact(&mut resp)
-            .await
-            .map_err(Self::map_err)?;
+            let buffer_type: BufferType = len_buf[0]
+                .try_into()
+                .map_err(|_| VAppExecutionError::Other("Invalid buffer type".into()))?;
+            let resp_len =
+                u32::from_be_bytes([len_buf[1], len_buf[2], len_buf[3], len_buf[4]]) as usize;
 
-        Ok(resp)
+            let mut resp = vec![0u8; resp_len];
+            self.stream
+                .read_exact(&mut resp)
+                .await
+                .map_err(Self::map_err)?;
+
+            match buffer_type {
+                BufferType::Print => {
+                    // Print the message to the print writer
+                    self.print_writer
+                        .write_all(&resp)
+                        .map_err(|e| VAppExecutionError::Other(Box::new(e)))?;
+                    self.print_writer
+                        .flush()
+                        .map_err(|e| VAppExecutionError::Other(Box::new(e)))?;
+                    continue; // Wait for the next message
+                }
+                BufferType::VAppMessage => return Ok(resp),
+                BufferType::Panic => {
+                    panic!("V-App panicked: {}", String::from_utf8_lossy(&resp));
+                }
+            }
+        }
     }
 }
 
@@ -1092,9 +1122,10 @@ pub mod client_utils {
     /// Creates a client for a V-App compiled using the native target. Uses TCP for communication
     pub async fn create_native_client(
         tcp_addr: Option<&str>,
-    ) -> Result<Box<dyn VAppTransport + Send + Sync>, ClientUtilsError> {
+    ) -> Result<Box<dyn VAppTransport + Send>, ClientUtilsError> {
         let addr = tcp_addr.unwrap_or("127.0.0.1:2323");
-        let client = NativeAppClient::new(addr)
+        let print_writer = Box::new(PrintWriter::new(true));
+        let client = NativeAppClient::new(addr, print_writer)
             .await
             .map_err(|e| ClientUtilsError::NativeConnectionFailed(e.to_string()))?;
         Ok(Box::new(client))
@@ -1104,7 +1135,7 @@ pub mod client_utils {
     pub async fn create_tcp_client(
         app_path: &str,
         app_hmac: Option<[u8; 32]>,
-    ) -> Result<(Box<dyn VAppTransport + Send + Sync>, [u8; 32]), ClientUtilsError> {
+    ) -> Result<(Box<dyn VAppTransport + Send>, [u8; 32]), ClientUtilsError> {
         let transport_raw = Arc::new(TransportTcp::new().await.map_err(|e| {
             ClientUtilsError::TcpTransportFailed(format!(
                 "Unable to get TCP transport. Is speculos running? {}",
@@ -1123,7 +1154,7 @@ pub mod client_utils {
     pub async fn create_hid_client(
         app_path: &str,
         app_hmac: Option<[u8; 32]>,
-    ) -> Result<(Box<dyn VAppTransport + Send + Sync>, [u8; 32]), ClientUtilsError> {
+    ) -> Result<(Box<dyn VAppTransport + Send>, [u8; 32]), ClientUtilsError> {
         let hid_api = hidapi::HidApi::new().map_err(|e| {
             ClientUtilsError::HidTransportFailed(format!("Unable to create HID API: {}", e))
         })?;
@@ -1167,7 +1198,7 @@ pub mod client_utils {
     pub async fn create_default_client(
         app_name: &str,
         client_type: ClientType,
-    ) -> Result<Box<dyn VAppTransport + Send + Sync>, ClientUtilsError> {
+    ) -> Result<Box<dyn VAppTransport + Send>, ClientUtilsError> {
         let app_path = format!(
             "../app/target/riscv32imc-unknown-none-elf/release/{}",
             app_name

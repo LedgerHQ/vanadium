@@ -3,7 +3,6 @@ use rand::TryRngCore;
 use std::{
     io::{self, Read, Write},
     net::{TcpListener, TcpStream},
-    str::from_utf8,
     sync::Mutex,
     thread::sleep,
     time::Duration,
@@ -12,8 +11,11 @@ use std::{
 use hmac::{Hmac, Mac};
 use sha2::Sha512;
 
-use common::ecall_constants::{CurveKind, MAX_BIGNUMBER_SIZE};
 use common::ux::{Deserializable, EventCode, EventData};
+use common::{
+    client_commands::BufferType,
+    ecall_constants::{CurveKind, MAX_BIGNUMBER_SIZE},
+};
 
 use bip32::{ChildNumber, XPrv};
 use hex_literal::hex;
@@ -165,20 +167,32 @@ pub fn exit(status: i32) -> ! {
 }
 
 pub fn fatal(msg: *const u8, size: usize) -> ! {
-    // print the message as a panic
-    let slice = unsafe { std::slice::from_raw_parts(msg, size) };
-    let msg = std::str::from_utf8(slice).unwrap();
-    panic!("{}", msg);
+    // SAFETY: caller guarantees [buffer, buffer+size) is valid.
+    let data = unsafe { std::slice::from_raw_parts(msg, size) };
+
+    // We need to communicate the panic to the client before exiting.
+    // 1 byte message type, 4-byte big-endian length, then raw payload.
+    let mut stream = TCP_CONN.lock().expect("TCP mutex poisoned");
+    stream
+        .write_all(&[BufferType::Panic as u8])
+        .and_then(|_| stream.write_all(&(size as u32).to_be_bytes()))
+        .and_then(|_| stream.write_all(data))
+        .and_then(|_| stream.flush())
+        .expect("TCP write failed");
+
+    // No reason not to panic also here, since we have to exit anyway
+    panic!("{}", std::str::from_utf8(data).unwrap());
 }
 
 pub fn xsend(buffer: *const u8, size: usize) {
     // SAFETY: caller guarantees [buffer, buffer+size) is valid.
     let data = unsafe { std::slice::from_raw_parts(buffer, size) };
 
-    // Length-prefix: 4-byte big-endian, then raw payload.
+    // 1 byte message type, 4-byte big-endian length, then raw payload.
     let mut stream = TCP_CONN.lock().expect("TCP mutex poisoned");
     stream
-        .write_all(&(size as u32).to_be_bytes())
+        .write_all(&[BufferType::VAppMessage as u8])
+        .and_then(|_| stream.write_all(&(size as u32).to_be_bytes()))
         .and_then(|_| stream.write_all(data))
         .and_then(|_| stream.flush())
         .expect("TCP write failed");
@@ -209,9 +223,14 @@ pub fn print(buffer: *const u8, size: usize) {
     // SAFETY: caller guarantees [buffer, buffer+size) is valid.
     let data = unsafe { std::slice::from_raw_parts(buffer, size) };
 
-    // TODO: too simplistic: we should allow the client to decide how the print stream should be handled
-    // For now, we just print it raw to the console
-    print!("{}", from_utf8(data).unwrap());
+    // 1 byte message type, 4-byte big-endian length, then raw payload.
+    let mut stream = TCP_CONN.lock().expect("TCP mutex poisoned");
+    stream
+        .write_all(&[BufferType::Print as u8])
+        .and_then(|_| stream.write_all(&(size as u32).to_be_bytes()))
+        .and_then(|_| stream.write_all(data))
+        .and_then(|_| stream.flush())
+        .expect("TCP write failed");
 }
 
 pub fn get_event(data: *mut EventData) -> u32 {

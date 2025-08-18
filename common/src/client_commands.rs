@@ -604,6 +604,19 @@ pub enum BufferType {
     Print = 2,       // the VApp printed a message
 }
 
+impl TryFrom<u8> for BufferType {
+    type Error = &'static str;
+
+    fn try_from(value: u8) -> Result<Self, Self::Error> {
+        match value {
+            0 => Ok(BufferType::VAppMessage),
+            1 => Ok(BufferType::Panic),
+            2 => Ok(BufferType::Print),
+            _ => Err("Invalid buffer type"),
+        }
+    }
+}
+
 /// Message sent by the VM to send a buffer (or the first chunk of it) to the host during an ECALL_XSEND.
 #[derive(Debug, Clone)]
 pub struct SendBufferMessage<'a> {

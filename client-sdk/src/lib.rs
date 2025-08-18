@@ -9,6 +9,8 @@ pub mod memory;
 #[cfg(feature = "transport")]
 pub mod comm;
 #[cfg(feature = "transport")]
+pub mod linewriter;
+#[cfg(feature = "transport")]
 pub mod transport;
 #[cfg(feature = "transport")]
 pub mod vanadium_client;
