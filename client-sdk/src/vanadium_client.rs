@@ -15,12 +15,12 @@ use tokio::{
 };
 
 use common::client_commands::{
-    ClientCommandCode, CommitPageContentMessage, CommitPageMessage,
+    BufferType, ClientCommandCode, CommitPageContentMessage, CommitPageMessage,
     CommitPageProofContinuedMessage, CommitPageProofContinuedResponse, CommitPageProofResponse,
     GetPageMessage, GetPageProofContinuedMessage, GetPageProofContinuedResponse,
     GetPageProofMessage, GetPageProofResponse, Message, MessageDeserializationError,
-    ReceiveBufferMessage, ReceiveBufferResponse, SectionKind, SendBufferMessage,
-    SendPanicBufferMessage,
+    ReceiveBufferMessage, ReceiveBufferResponse, SectionKind, SendBufferContinuedMessage,
+    SendBufferMessage,
 };
 use common::constants::{DEFAULT_STACK_START, PAGE_SIZE};
 use common::manifest::Manifest;
@@ -417,27 +417,28 @@ impl<E: std::fmt::Debug + Send + Sync + 'static> VAppEngine<E> {
         Ok((status, result))
     }
 
-    // receive a buffer sent by the V-App via xsend; send it to the VappEngine
-    async fn process_send_buffer(
+    async fn process_send_buffer_generic(
         &mut self,
         command: &[u8],
-    ) -> Result<(StatusWord, Vec<u8>), VAppEngineError<E>> {
+    ) -> Result<(BufferType, Vec<u8>), VAppEngineError<E>> {
         let SendBufferMessage {
             command_code: _,
-            total_remaining_size: mut remaining_len,
+            buffer_type,
+            total_size: mut remaining_len,
             data,
         } = SendBufferMessage::deserialize(command)?;
 
         #[cfg(feature = "debug")]
         debug!(
-            "<- SendBufferMessage(total_remaining_size = {}, data.len() = {})",
+            "<- SendBufferMessage(buffer_type = {:?}, total_size = {}, data.len() = {})",
+            buffer_type,
             remaining_len,
             data.len()
         );
 
         let mut buf = data.to_vec();
 
-        if (buf.len() as u32) > remaining_len {
+        if buf.len() > remaining_len as usize {
             return Err(VAppEngineError::ResponseError(
                 "Received data length exceeds expected remaining length",
             ));
@@ -457,31 +458,54 @@ impl<E: std::fmt::Debug + Send + Sync + 'static> VAppEngine<E> {
                 return Err(VAppEngineError::ResponseError("Empty response"));
             }
 
-            let msg = SendBufferMessage::deserialize(&result)?;
+            let msg = SendBufferContinuedMessage::deserialize(&result)?;
 
             #[cfg(feature = "debug")]
             debug!(
-                "<- SendBufferMessage(total_remaining_size = {}, data.len() = {})",
-                msg.total_remaining_size,
+                "<- SendBufferContinuedMessage(data.len() = {})",
                 msg.data.len()
             );
 
-            if msg.total_remaining_size != remaining_len {
+            if msg.data.len() > remaining_len as usize {
                 return Err(VAppEngineError::ResponseError(
-                    "Received total_remaining_size does not match expected",
+                    "Received total_size does not match expected",
                 ));
             }
 
             buf.extend_from_slice(&msg.data);
             remaining_len -= msg.data.len() as u32;
         }
+        Ok((buffer_type, buf))
+    }
 
-        // Send the buffer back to the client via engine_to_client_sender
-        self.engine_to_client_sender
-            .send(VAppMessage::SendBuffer(buf))
-            .await
-            .map_err(|e| VAppEngineError::GenericError(Box::new(e)))?;
+    // receive a buffer sent by the V-App via xsend; send it to the VappEngine
+    async fn process_send_buffer(
+        &mut self,
+        command: &[u8],
+    ) -> Result<(StatusWord, Vec<u8>), VAppEngineError<E>> {
+        let (buffer_type, buf) = self.process_send_buffer_generic(command).await?;
 
+        match buffer_type {
+            BufferType::VAppMessage => {
+                // Send the buffer back to the client via engine_to_client_sender
+                self.engine_to_client_sender
+                    .send(VAppMessage::SendBuffer(buf))
+                    .await
+                    .map_err(|e| VAppEngineError::GenericError(Box::new(e)))?;
+            }
+            BufferType::Panic => {
+                let panic_message = String::from_utf8(buf)
+                    .map_err(|e| VAppEngineError::GenericError(Box::new(e)))?;
+
+                // Send the panic message back to the client via engine_to_client_sender
+                self.engine_to_client_sender
+                    .send(VAppMessage::SendPanicBuffer(panic_message))
+                    .await
+                    .map_err(|e| VAppEngineError::GenericError(Box::new(e)))?;
+            }
+        }
+
+        // Continue processing
         self.exchange_and_process_page_requests(&apdu_continue(vec![]))
             .await
     }
@@ -543,78 +567,6 @@ impl<E: std::fmt::Debug + Send + Sync + 'static> VAppEngine<E> {
         }
     }
 
-    // receive a buffer sent by the V-App during a panic; send it to the VAppEngine
-    // TODO: almost identical to process_send_buffer; it might be nice to refactor
-    async fn process_send_panic_buffer(
-        &mut self,
-        command: &[u8],
-    ) -> Result<(StatusWord, Vec<u8>), VAppEngineError<E>> {
-        let SendPanicBufferMessage {
-            command_code: _,
-            total_remaining_size: mut remaining_len,
-            data,
-        } = SendPanicBufferMessage::deserialize(command)?;
-
-        #[cfg(feature = "debug")]
-        debug!(
-            "<- SendPanicBufferMessage(total_remaining_size = {}, data.len() = {})",
-            remaining_len,
-            data.len()
-        );
-
-        let mut buf = data.to_vec();
-        if (buf.len() as u32) > remaining_len {
-            return Err(VAppEngineError::ResponseError(
-                "Received data length exceeds expected remaining length",
-            ));
-        }
-
-        remaining_len -= buf.len() as u32;
-
-        while remaining_len > 0 {
-            let (status, result) = self
-                .exchange_and_process_page_requests(&apdu_continue(vec![]))
-                .await?;
-
-            if status != StatusWord::InterruptedExecution {
-                return Err(VAppEngineError::InterruptedExecutionExpected);
-            }
-            if result.len() == 0 {
-                return Err(VAppEngineError::ResponseError("Empty response"));
-            }
-            let msg = SendPanicBufferMessage::deserialize(&result)?;
-
-            #[cfg(feature = "debug")]
-            debug!(
-                "<- SendPanicBufferMessage(total_remaining_size = {}, data.len() = {})",
-                msg.total_remaining_size,
-                msg.data.len()
-            );
-
-            if msg.total_remaining_size != remaining_len {
-                return Err(VAppEngineError::ResponseError(
-                    "Received total_remaining_size does not match expected",
-                ));
-            }
-
-            buf.extend_from_slice(&msg.data);
-            remaining_len -= msg.data.len() as u32;
-        }
-
-        let panic_message =
-            String::from_utf8(buf).map_err(|e| VAppEngineError::GenericError(Box::new(e)))?;
-
-        // Send the panic message back to the client via engine_to_client_sender
-        self.engine_to_client_sender
-            .send(VAppMessage::SendPanicBuffer(panic_message))
-            .await
-            .map_err(|e| VAppEngineError::GenericError(Box::new(e)))?;
-
-        // Continue processing
-        self.exchange_and_process_page_requests(&apdu_continue(vec![]))
-            .await
-    }
-
     async fn busy_loop(
         &mut self,
         first_sw: StatusWord,
@@ -663,10 +615,8 @@ impl<E: std::fmt::Debug + Send + Sync + 'static> VAppEngine<E> {
                 ClientCommandCode::CommitPage => self.process_commit_page(&result).await?,
                 ClientCommandCode::SendBuffer => self.process_send_buffer(&result).await?,
                 ClientCommandCode::ReceiveBuffer => self.process_receive_buffer(&result).await?,
-                ClientCommandCode::SendPanicBuffer => {
-                    self.process_send_panic_buffer(&result).await?
-                }
-                ClientCommandCode::CommitPageContent
+                ClientCommandCode::SendBufferContinued
+                | ClientCommandCode::CommitPageContent
                 | ClientCommandCode::GetPageProof
                 | ClientCommandCode::GetPageProofContinued
                 | ClientCommandCode::CommitPageProofContinued => {

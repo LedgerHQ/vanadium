@@ -7,8 +7,8 @@ use core::{
 use alloc::{format, rc::Rc, string::String, vec, vec::Vec};
 use common::{
     client_commands::{
-        Message, MessageDeserializationError, ReceiveBufferMessage, ReceiveBufferResponse,
-        SendBufferMessage, SendPanicBufferMessage,
+        BufferType, Message, MessageDeserializationError, ReceiveBufferMessage,
+        ReceiveBufferResponse, SendBufferContinuedMessage, SendBufferMessage,
     },
     ecall_constants::{self, *},
     manifest::Manifest,
@@ -343,19 +343,19 @@ impl<'a> CommEcallHandler<'a> {
         }
     }
 
-    // TODO: can we refactor this and handle_xsend? They are almost identical
-    fn handle_panic<E: fmt::Debug>(
+    fn handle_send_buffer<E: fmt::Debug>(
         &self,
         cpu: &mut Cpu<OutsourcedMemory<'_>>,
         buffer: GuestPointer,
         mut size: usize,
+        buffer_type: BufferType,
     ) -> Result<(), CommEcallError> {
         if size == 0 {
             // We must not read the pointer for an empty buffer; Rust always uses address 0x01 for
             // an empty buffer
 
             let mut comm = self.comm.borrow_mut();
-            SendPanicBufferMessage::new(size as u32, &[]).serialize_to_comm(&mut comm);
+            SendBufferMessage::new(size as u32, buffer_type, &[]).serialize_to_comm(&mut comm);
             comm.reply(AppSW::InterruptedExecution);
 
             let Instruction::Continue(p1, p2) = comm.next_command() else {
@@ -376,15 +376,36 @@ impl<'a> CommEcallHandler<'a> {
 
         let segment = cpu.get_segment::<E>(g_ptr)?;
 
+        let mut buffer = [0u8; 256];
+        let mut first_chunk = true;
         // loop while size > 0
         while size > 0 {
-            let copy_size = min(size, 255 - 4); // send maximum 251 bytes per message
+            if first_chunk {
+                let copy_size = min(size, 255 - 6); // send maximum 249 bytes in the first chunk
+                segment.read_buffer(g_ptr, &mut buffer[0..copy_size])?;
 
-            let mut buffer = vec![0; copy_size];
-            segment.read_buffer(g_ptr, &mut buffer)?;
+                crate::println!(
+                    "Sending {} bytes in the first chunk. Total: {}",
+                    copy_size,
+                    size
+                );
+                let mut comm = self.comm.borrow_mut();
+                SendBufferMessage::new(size as u32, buffer_type, &buffer[0..copy_size])
+                    .serialize_to_comm(&mut comm);
+                size -= copy_size;
+                g_ptr += copy_size as u32;
+                first_chunk = false;
+            } else {
+                let copy_size = min(size, 255 - 1); // send maximum 255 bytes in each subsequent chunk
+                segment.read_buffer(g_ptr, &mut buffer[0..copy_size])?;
+                crate::println!("Sending {} bytes in the subsequent chunk.", copy_size);
+                let mut comm = self.comm.borrow_mut();
+                SendBufferContinuedMessage::new(&buffer[0..copy_size]).serialize_to_comm(&mut comm);
+                size -= copy_size;
+                g_ptr += copy_size as u32;
+            }
 
             let mut comm = self.comm.borrow_mut();
-            SendPanicBufferMessage::new(size as u32, &buffer).serialize_to_comm(&mut comm);
             comm.reply(AppSW::InterruptedExecution);
 
             let Instruction::Continue(p1, p2) = comm.next_command() else {
@@ -394,72 +415,29 @@ impl<'a> CommEcallHandler<'a> {
             if (p1, p2) != (0, 0) {
                 return Err(CommEcallError::WrongP1P2);
             }
-
-            size -= copy_size;
-            g_ptr += copy_size as u32;
         }
 
         Ok(())
     }
 
+    // Sends a panic message
+    fn handle_panic<E: fmt::Debug>(
+        &self,
+        cpu: &mut Cpu<OutsourcedMemory<'_>>,
+        buffer: GuestPointer,
+        size: usize,
+    ) -> Result<(), CommEcallError> {
+        self.handle_send_buffer::<E>(cpu, buffer, size, BufferType::Panic)
+    }
+
     // Sends exactly size bytes from the buffer in the V-app memory to the host
-    // TODO: we might want to revise the protocol, not as optimized as it could be
     fn handle_xsend<E: fmt::Debug>(
         &self,
         cpu: &mut Cpu<OutsourcedMemory<'_>>,
         buffer: GuestPointer,
-        mut size: usize,
+        size: usize,
     ) -> Result<(), CommEcallError> {
-        if size == 0 {
-            // We must not read the pointer for an empty buffer; Rust always uses address 0x01 for
-            // an empty buffer
-
-            let mut comm = self.comm.borrow_mut();
-            SendBufferMessage::new(size as u32, &[]).serialize_to_comm(&mut comm);
-            comm.reply(AppSW::InterruptedExecution);
-
-            let Instruction::Continue(p1, p2) = comm.next_command() else {
-                return Err(CommEcallError::WrongINS); // expected "Continue"
-            };
-
-            if (p1, p2) != (0, 0) {
-                return Err(CommEcallError::WrongP1P2);
-            }
-            return Ok(());
-        }
-
-        if buffer.0.checked_add(size as u32).is_none() {
-            return Err(CommEcallError::Overflow);
-        }
-
-        let mut g_ptr = buffer.0;
-
-        let segment = cpu.get_segment::<E>(g_ptr)?;
-
-        // loop while size > 0
-        while size > 0 {
-            let copy_size = min(size, 255 - 4); // send maximum 251 bytes per message
-
-            let mut buffer = vec![0; copy_size];
-            segment.read_buffer(g_ptr, &mut buffer)?;
-
-            let mut comm = self.comm.borrow_mut();
-            SendBufferMessage::new(size as u32, &buffer).serialize_to_comm(&mut comm);
-            comm.reply(AppSW::InterruptedExecution);
-
-            let Instruction::Continue(p1, p2) = comm.next_command() else {
-                return Err(CommEcallError::WrongINS); // expected "Continue"
-            };
-
-            if (p1, p2) != (0, 0) {
-                return Err(CommEcallError::WrongP1P2);
-            }
-
-            size -= copy_size;
-            g_ptr += copy_size as u32;
-        }
-
-        Ok(())
+        self.handle_send_buffer::<E>(cpu, buffer, size, BufferType::VAppMessage)
     }
 
     // Receives up to max_size bytes from the host into the buffer in the V-app memory

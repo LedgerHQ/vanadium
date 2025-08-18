@@ -11,6 +11,7 @@ pub enum MessageDeserializationError {
     InvalidSectionKind,
     InvalidDataLength,
     UnexpectedCommandCode,
+    InvalidBufferType,
 }
 
 impl fmt::Display for MessageDeserializationError {
@@ -26,6 +27,9 @@ impl fmt::Display for MessageDeserializationError {
             MessageDeserializationError::InvalidDataLength => write!(f, "Invalid data length"),
             MessageDeserializationError::UnexpectedCommandCode => {
                 write!(f, "Unexpected command code")
+            }
+            MessageDeserializationError::InvalidBufferType => {
+                write!(f, "Invalid buffer type")
             }
         }
     }
@@ -56,8 +60,8 @@ pub enum ClientCommandCode {
     CommitPageContent = 4,
     CommitPageProofContinued = 5,
     SendBuffer = 6,
-    ReceiveBuffer = 7,
-    SendPanicBuffer = 8,
+    SendBufferContinued = 7,
+    ReceiveBuffer = 8,
 }
 
 impl TryFrom<u8> for ClientCommandCode {
@@ -72,8 +76,8 @@ impl TryFrom<u8> for ClientCommandCode {
             4 => Ok(ClientCommandCode::CommitPageContent),
             5 => Ok(ClientCommandCode::CommitPageProofContinued),
             6 => Ok(ClientCommandCode::SendBuffer),
-            7 => Ok(ClientCommandCode::ReceiveBuffer),
-            8 => Ok(ClientCommandCode::SendPanicBuffer),
+            7 => Ok(ClientCommandCode::SendBufferContinued),
+            8 => Ok(ClientCommandCode::ReceiveBuffer),
             _ => Err("Invalid value for ClientCommandCode"),
         }
     }
@@ -592,24 +596,33 @@ impl<'a> Message<'a> for CommitPageProofContinuedResponse<'a> {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum BufferType {
+    VAppMessage = 0, // data buffer sent from the VApp to the host
+    Panic = 1,       // the VApp panicked
+}
+
 /// Message sent by the VM to send a buffer (or the first chunk of it) to the host during an ECALL_XSEND.
 #[derive(Debug, Clone)]
 pub struct SendBufferMessage<'a> {
     pub command_code: ClientCommandCode,
-    pub total_remaining_size: u32,
+    pub buffer_type: BufferType,
+    pub total_size: u32,
     pub data: &'a [u8],
 }
 
 impl<'a> SendBufferMessage<'a> {
     #[inline]
-    pub fn new(total_remaining_size: u32, data: &'a [u8]) -> Self {
-        if data.len() > total_remaining_size as usize {
-            panic!("Data size exceeds total remaining size");
+    pub fn new(total_size: u32, buffer_type: BufferType, data: &'a [u8]) -> Self {
+        if data.len() > total_size as usize {
+            panic!("Data size exceeds total size");
         }
 
         SendBufferMessage {
             command_code: ClientCommandCode::SendBuffer,
-            total_remaining_size,
+            buffer_type,
+            total_size,
             data,
         }
     }
@@ -619,27 +632,73 @@ impl<'a> Message<'a> for SendBufferMessage<'a> {
     #[inline]
     fn serialize_with<F: FnMut(&[u8])>(&self, mut f: F) {
         f(&[self.command_code as u8]);
-        f(&self.total_remaining_size.to_be_bytes());
+        f(&[self.buffer_type as u8]);
+        f(&self.total_size.to_be_bytes());
         f(self.data);
     }
 
     fn deserialize(data: &'a [u8]) -> Result<Self, MessageDeserializationError> {
         let command_code = ClientCommandCode::try_from(data[0])
             .map_err(|_| MessageDeserializationError::InvalidClientCommandCode)?;
-        if (!matches!(command_code, ClientCommandCode::SendBuffer)) || (data.len() < 5) {
+        if (!matches!(command_code, ClientCommandCode::SendBuffer)) || (data.len() < 6) {
             return Err(MessageDeserializationError::MismatchingClientCommandCode);
         }
-        let total_remaining_size = u32::from_be_bytes([data[1], data[2], data[3], data[4]]);
-        let data = &data[5..];
+        let buffer_type = match data[1] {
+            0 => BufferType::VAppMessage,
+            1 => BufferType::Panic,
+            _ => return Err(MessageDeserializationError::InvalidBufferType),
+        };
+        let total_size = u32::from_be_bytes([data[2], data[3], data[4], data[5]]);
+        let data = &data[6..];
 
-        if data.len() > total_remaining_size as usize {
+        if data.len() > total_size as usize {
             return Err(MessageDeserializationError::InvalidDataLength);
         }
 
         Ok(SendBufferMessage {
             command_code,
-            total_remaining_size,
+            buffer_type,
+            total_size,
             data,
+        })
+    }
+}
+
+pub struct SendBufferContinuedMessage<'a> {
+    pub command_code: ClientCommandCode,
+    pub data: &'a [u8],
+}
+
+impl<'a> SendBufferContinuedMessage<'a> {
+    #[inline]
+    pub fn new(data: &'a [u8]) -> Self {
+        SendBufferContinuedMessage {
+            command_code: ClientCommandCode::SendBufferContinued,
+            data,
+        }
+    }
+}
+
+impl<'a> Message<'a> for SendBufferContinuedMessage<'a> {
+    #[inline]
+    fn serialize_with<F: FnMut(&[u8])>(&self, mut f: F) {
+        f(&[self.command_code as u8]);
+        f(self.data);
+    }
+
+    fn deserialize(data: &'a [u8]) -> Result<Self, MessageDeserializationError> {
+        if data.len() < 1 {
+            return Err(MessageDeserializationError::InvalidDataLength);
+        }
+        let command_code = ClientCommandCode::try_from(data[0])
+            .map_err(|_| MessageDeserializationError::InvalidClientCommandCode)?;
+        if !matches!(command_code, ClientCommandCode::SendBufferContinued) {
+            return Err(MessageDeserializationError::MismatchingClientCommandCode);
+        }
+
+        Ok(SendBufferContinuedMessage {
+            command_code,
+            data: &data[1..],
         })
     }
 }
@@ -714,62 +773,6 @@ impl<'a> Message<'a> for ReceiveBufferResponse<'a> {
         Ok(ReceiveBufferResponse {
             remaining_length,
             content: &data[4..],
-        })
-    }
-}
-
-/// Identical to SendBufferMessage, except for the different command code; used for panics.
-#[derive(Debug, Clone)]
-pub struct SendPanicBufferMessage<'a> {
-    pub command_code: ClientCommandCode,
-    pub total_remaining_size: u32,
-    pub data: &'a [u8],
-}
-
-impl<'a> SendPanicBufferMessage<'a> {
-    #[inline]
-    pub fn new(total_remaining_size: u32, data: &'a [u8]) -> Self {
-        if data.len() > total_remaining_size as usize {
-            panic!("Data size exceeds total remaining size");
-        }
-
-        SendPanicBufferMessage {
-            command_code: ClientCommandCode::SendPanicBuffer,
-            total_remaining_size,
-            data,
-        }
-    }
-}
-
-impl<'a> Message<'a> for SendPanicBufferMessage<'a> {
-    #[inline]
-    fn serialize_with<F: FnMut(&[u8])>(&self, mut f: F) {
-        f(&[self.command_code as u8]);
-        f(&self.total_remaining_size.to_be_bytes());
-        f(self.data);
-    }
-
-    fn deserialize(data: &'a [u8]) -> Result<Self, MessageDeserializationError> {
-        let command_code = ClientCommandCode::try_from(data[0])
-            .map_err(|_| MessageDeserializationError::InvalidClientCommandCode)?;
-        if !matches!(command_code, ClientCommandCode::SendPanicBuffer) {
-            return Err(MessageDeserializationError::MismatchingClientCommandCode);
-        }
-
-        if data.len() < 5 {
-            return Err(MessageDeserializationError::InvalidDataLength);
-        }
-        let total_remaining_size = u32::from_be_bytes([data[1], data[2], data[3], data[4]]);
-        let data = &data[5..];
-
-        if data.len() > total_remaining_size as usize {
-            return Err(MessageDeserializationError::InvalidDataLength);
-        }
-
-        Ok(SendPanicBufferMessage {
-            command_code,
-            total_remaining_size,
-            data,
         })
     }
 }
