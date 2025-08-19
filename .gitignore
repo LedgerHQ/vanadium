@@ -20,6 +20,7 @@ venv
 
 # Used when debugging the V-App clients
 **/debug.log
+**/print.log
 
 # Produced in integration tests with speculos
 **/test.log
