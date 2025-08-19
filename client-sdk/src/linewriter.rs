@@ -20,6 +20,7 @@ use std::{
     fmt,
     fs::{File, OpenOptions},
     io::{self, BufWriter, Write},
+    path::PathBuf,
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -153,32 +154,45 @@ pub struct FileLineWriter {
 #[derive(Debug)]
 struct FileHandler {
     with_timestamp: bool,
-    writer: BufWriter<File>,
+    path: PathBuf,
+    overwrite: bool,
+    writer: Option<BufWriter<File>>,
 }
 
 impl LineHandler for FileHandler {
     fn on_line(&mut self, line: &str) -> io::Result<()> {
-        writeln!(self.writer, "{}", format_line(self.with_timestamp, line))?;
-        self.writer.flush()
+        if self.writer.is_none() {
+            let file: File = if self.overwrite {
+                // Truncate/create on first actual write
+                File::create(&self.path)?
+            } else {
+                OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(&self.path)?
+            };
+            self.writer = Some(BufWriter::new(file));
+        }
+
+        let w = self.writer.as_mut().expect("writer must be initialized");
+        writeln!(w, "{}", format_line(self.with_timestamp, line))?;
+        w.flush()
     }
 }
 
 impl FileLineWriter {
     /// `overwrite = false` will append if file exists
-    pub fn new(path: &str, with_timestamp: bool, overwrite: bool) -> io::Result<Self> {
-        let file: File = if overwrite {
-            File::create(path)?
-        } else {
-            OpenOptions::new().create(true).append(true).open(path)?
-        };
+    pub fn new(path: &str, with_timestamp: bool, overwrite: bool) -> Self {
         let handler = FileHandler {
             with_timestamp,
-            writer: BufWriter::new(file),
+            path: PathBuf::from(path),
+            overwrite,
+            writer: None,
         };
 
-        Ok(Self {
+        Self {
             inner: LineDispatcher::new(handler),
-        })
+        }
     }
 }
 
@@ -243,7 +257,7 @@ mod tests {
     fn file_line_writer_with_timestamp_format() {
         let path = tmp_path("stream_ts");
         {
-            let mut w = FileLineWriter::new(path.to_string_lossy().as_ref(), true, true).unwrap();
+            let mut w = FileLineWriter::new(path.to_string_lossy().as_ref(), true, true);
             w.write_all(b"foo").unwrap();
             w.flush().unwrap();
         }

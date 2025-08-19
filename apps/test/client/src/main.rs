@@ -150,7 +150,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     } else {
         ClientType::Tcp
     };
-    let print_writer = Box::new(FileLineWriter::new("print.log", true, true)?);
+    let print_writer = Box::new(FileLineWriter::new("print.log", true, true));
     let mut test_client =
         TestClient::new(create_default_client("vnd-test", client_type, Some(print_writer)).await?);
 

@@ -5,6 +5,7 @@ use std::sync::Arc;
 use std::thread::sleep;
 use std::time::Duration;
 
+use crate::linewriter::FileLineWriter;
 use crate::transport::{TransportTcp, TransportWrapper};
 use crate::vanadium_client::{VAppTransport, VanadiumAppClient};
 
@@ -153,9 +154,11 @@ where
     F: FnOnce(Box<dyn VAppTransport + Send + Sync>) -> C,
 {
     TestSetup::new(vanadium_binary, |transport| async move {
-        let (vanadium_client, _) = VanadiumAppClient::new(vapp_binary, transport, None)
-            .await
-            .expect("Failed to create client");
+        let print_writer = Box::new(FileLineWriter::new("print.log", true, true));
+        let (vanadium_client, _) =
+            VanadiumAppClient::new(vapp_binary, transport, None, print_writer)
+                .await
+                .expect("Failed to create client");
 
         create_client(Box::new(vanadium_client))
     })
