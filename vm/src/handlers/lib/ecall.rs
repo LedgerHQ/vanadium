@@ -384,11 +384,6 @@ impl<'a> CommEcallHandler<'a> {
                 let copy_size = min(size, 255 - 6); // send maximum 249 bytes in the first chunk
                 segment.read_buffer(g_ptr, &mut buffer[0..copy_size])?;
 
-                crate::println!(
-                    "Sending {} bytes in the first chunk. Total: {}",
-                    copy_size,
-                    size
-                );
                 let mut comm = self.comm.borrow_mut();
                 SendBufferMessage::new(size as u32, buffer_type, &buffer[0..copy_size])
                     .serialize_to_comm(&mut comm);
@@ -398,7 +393,6 @@ impl<'a> CommEcallHandler<'a> {
             } else {
                 let copy_size = min(size, 255 - 1); // send maximum 255 bytes in each subsequent chunk
                 segment.read_buffer(g_ptr, &mut buffer[0..copy_size])?;
-                crate::println!("Sending {} bytes in the subsequent chunk.", copy_size);
                 let mut comm = self.comm.borrow_mut();
                 SendBufferContinuedMessage::new(&buffer[0..copy_size]).serialize_to_comm(&mut comm);
                 size -= copy_size;

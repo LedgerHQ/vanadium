@@ -80,7 +80,7 @@ fn format_line(with_timestamp: bool, line: &str) -> String {
             .as_millis();
 
         let s = ms / 1000;
-        let ms_frac = (ms % 1000) as u128;
+        let ms_frac = ms % 1000;
         format!("[{s}.{ms_frac:03}] {line}")
     } else {
         line.to_owned()

@@ -657,12 +657,8 @@ impl<'a> Message<'a> for SendBufferMessage<'a> {
         if (!matches!(command_code, ClientCommandCode::SendBuffer)) || (data.len() < 6) {
             return Err(MessageDeserializationError::MismatchingClientCommandCode);
         }
-        let buffer_type = match data[1] {
-            0 => BufferType::VAppMessage,
-            1 => BufferType::Panic,
-            2 => BufferType::Print,
-            _ => return Err(MessageDeserializationError::InvalidBufferType),
-        };
+        let buffer_type = BufferType::try_from(data[1])
+            .map_err(|_| MessageDeserializationError::InvalidBufferType)?;
         let total_size = u32::from_be_bytes([data[2], data[3], data[4], data[5]]);
         let data = &data[6..];
 
