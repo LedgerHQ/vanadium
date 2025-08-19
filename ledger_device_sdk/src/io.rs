@@ -1,3 +1,7 @@
+extern crate alloc;
+
+use alloc::{vec, vec::Vec};
+
 #[cfg(not(any(target_os = "stax", target_os = "flex")))]
 use ledger_secure_sdk_sys::buttons::{get_button_event, ButtonEvent, ButtonsState};
 use ledger_secure_sdk_sys::seph as sys_seph;
@@ -107,7 +111,8 @@ pub enum Event<T> {
 /// Manages the communication of the device: receives events such as button presses, incoming
 /// APDU requests, and provides methods to build and transmit APDU responses.
 pub struct Comm {
-    pub apdu_buffer: [u8; 272],
+    pub apdu_buffer: Vec<u8>,
+    pub data_size: usize,
     pub rx: usize,
     pub tx: usize,
     pub event_pending: bool,
@@ -120,7 +125,7 @@ pub struct Comm {
     pub expected_cla: Option<u8>,
 
     pub apdu_type: u8,
-    pub io_buffer: [u8; 273],
+    pub io_buffer: Vec<u8>,
     pub rx_length: usize,
     pub tx_length: usize,
 }
@@ -146,9 +151,19 @@ pub struct ApduHeader {
 
 impl Comm {
     /// Creates a new [`Comm`] instance, which accepts any CLA APDU by default.
-    pub const fn new() -> Self {
+    pub fn new() -> Self {
+        Self::new_with_data_size(272)
+    }
+
+    /// Creates a new [`Comm`] instance, which accepts any CLA APDU by default.
+    pub fn new_with_data_size(data_size: usize) -> Self {
+        if data_size < 5 {
+            panic!("Invalid data size");
+        }
+
         Self {
-            apdu_buffer: [0u8; 272],
+            apdu_buffer: vec![0u8; data_size],
+            data_size,
             rx: 0,
             tx: 0,
             event_pending: false,
@@ -156,7 +171,7 @@ impl Comm {
             buttons: ButtonsState::new(),
             expected_cla: None,
             apdu_type: seph::PacketTypes::PacketTypeNone as u8,
-            io_buffer: [0u8; 273],
+            io_buffer: vec![0u8; data_size + 1],
             rx_length: 0,
             tx_length: 0,
         }
@@ -187,7 +202,7 @@ impl Comm {
     fn apdu_send(&mut self) {
         #[cfg(any(target_os = "stax", target_os = "flex", feature = "nano_nbgl"))]
         {
-            let mut buffer: [u8; 273] = [0; 273];
+            let mut buffer = vec![0u8; self.data_size + 1];
             let status = sys_seph::io_rx(&mut buffer, false);
             if status > 0 {
                 let packet_type = seph::PacketTypes::from(buffer[0]);
@@ -282,8 +297,8 @@ impl Comm {
         Reply: From<<T as TryFrom<ApduHeader>>::Error>,
     {
         if self.event_pending {
-            //let mut apdu_buffer = [0u8; 272];
-            //apdu_buffer[0..272].copy_from_slice(&self.io_buffer[1..273]);
+            //let mut apdu_buffer = vec![0u8; self.data_size];
+            //apdu_buffer[0..self.data_size].copy_from_slice(&self.io_buffer[1..self.data_size+1]);
             self.event_pending = false;
 
             // Reject incomplete APDUs
@@ -328,7 +343,7 @@ impl Comm {
         None
     }
 
-    pub fn process_event<T>(&mut self, mut seph_buffer: [u8; 272], length: i32) -> Option<Event<T>>
+    pub fn process_event<T>(&mut self, seph_buffer: &[u8], length: i32) -> Option<Event<T>>
     where
         T: TryFrom<ApduHeader>,
         Reply: From<<T as TryFrom<ApduHeader>>::Error>,
@@ -347,7 +362,7 @@ impl Comm {
             seph::Events::ButtonPushEvent => {
                 #[cfg(feature = "nano_nbgl")]
                 unsafe {
-                    ux_process_button_event(seph_buffer.as_mut_ptr());
+                    ux_process_button_event(seph_buffer.as_ptr() as *mut u8); // the cast to mutable can be removed on more recent SDKs
                 }
                 let button_info = seph_buffer[3] >> 1;
                 if let Some(btn_evt) = get_button_event(&mut self.buttons, button_info) {
@@ -358,7 +373,7 @@ impl Comm {
             // SCREEN TOUCH EVENT
             #[cfg(any(target_os = "stax", target_os = "flex"))]
             seph::Events::ScreenTouchEvent => unsafe {
-                ux_process_finger_event(seph_buffer.as_mut_ptr());
+                ux_process_finger_event(seph_buffer.as_ptr() as *mut u8); // the cast to mutable can be removed on more recent SDKs
                 return Some(Event::TouchEvent);
             },
 
@@ -435,9 +450,10 @@ impl Comm {
         match seph::PacketTypes::from(packet_type) {
             seph::PacketTypes::PacketTypeSeph | seph::PacketTypes::PacketTypeSeEvent => {
                 // SE or SEPH event
-                let mut seph_buffer = [0u8; 272];
-                seph_buffer[0..272].copy_from_slice(&self.io_buffer[1..273]);
-                if let Some(event) = self.process_event(seph_buffer, length - 1) {
+                let mut seph_buffer = vec![0u8; self.data_size];
+                seph_buffer[0..self.data_size]
+                    .copy_from_slice(&self.io_buffer[1..self.data_size + 1]);
+                if let Some(event) = self.process_event(&seph_buffer, length - 1) {
                     return Some(event);
                 }
             }
@@ -454,7 +470,8 @@ impl Comm {
                         return None;
                     }
                 }
-                self.apdu_buffer[0..272].copy_from_slice(&self.io_buffer[1..273]);
+                self.apdu_buffer[0..self.data_size]
+                    .copy_from_slice(&self.io_buffer[1..self.data_size + 1]);
                 self.apdu_type = packet_type;
                 self.rx_length = length as usize;
                 self.rx = self.rx_length - 1;
@@ -613,7 +630,7 @@ fn handle_bolos_apdu(com: &mut Comm, ins: u8) {
                 let len = os_registry_get_current_app_tag(
                     BOLOS_TAG_APPNAME,
                     &mut com.io_buffer[com.tx_length + 1] as *mut u8,
-                    (273 - com.tx_length - 2) as u32,
+                    (com.io_buffer.len() - com.tx_length - 2) as u32,
                 );
                 com.io_buffer[com.tx_length] = len as u8;
                 com.tx_length += 1 + (len as usize);
@@ -621,7 +638,7 @@ fn handle_bolos_apdu(com: &mut Comm, ins: u8) {
                 let len = os_registry_get_current_app_tag(
                     BOLOS_TAG_APPVERSION,
                     &mut com.io_buffer[com.tx_length + 1] as *mut u8,
-                    (273 - com.tx_length - 2) as u32,
+                    (com.io_buffer.len() - com.tx_length - 2) as u32,
                 );
                 com.io_buffer[com.tx_length] = len as u8;
                 com.tx_length += 1 + (len as usize);
