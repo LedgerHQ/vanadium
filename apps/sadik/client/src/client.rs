@@ -41,11 +41,11 @@ impl std::error::Error for SadikClientError {
 }
 
 pub struct SadikClient {
-    app_transport: Box<dyn VAppTransport + Send + Sync>,
+    app_transport: Box<dyn VAppTransport + Send>,
 }
 
 impl SadikClient {
-    pub fn new(app_transport: Box<dyn VAppTransport + Send + Sync>) -> Self {
+    pub fn new(app_transport: Box<dyn VAppTransport + Send>) -> Self {
         Self { app_transport }
     }
 

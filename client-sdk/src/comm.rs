@@ -56,7 +56,7 @@ impl core::error::Error for SendMessageError {}
 /// * An error occurs during the execution of the virtual application client.
 ///
 pub async fn send_message(
-    transport: &mut Box<dyn VAppTransport + Send + Sync>,
+    transport: &mut Box<dyn VAppTransport + Send>,
     message: &[u8],
 ) -> Result<Vec<u8>, SendMessageError> {
     // concatenate the length of the message (as a 4-byte big-endian) and the message itself

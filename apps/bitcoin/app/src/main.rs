@@ -8,7 +8,7 @@ mod merkle;
 
 use handlers::*;
 
-use alloc::{string::ToString, vec::Vec};
+use alloc::vec::Vec;
 
 use common::message::{Request, Response};
 use sdk::App;

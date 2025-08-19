@@ -38,11 +38,11 @@ impl std::error::Error for TestClientError {
 }
 
 pub struct TestClient {
-    app_transport: Box<dyn VAppTransport + Send + Sync>,
+    app_transport: Box<dyn VAppTransport + Send>,
 }
 
 impl TestClient {
-    pub fn new(app_transport: Box<dyn VAppTransport + Send + Sync>) -> Self {
+    pub fn new(app_transport: Box<dyn VAppTransport + Send>) -> Self {
         Self { app_transport }
     }
 

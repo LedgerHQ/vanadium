@@ -65,11 +65,11 @@ impl std::error::Error for BitcoinClientError {
 }
 
 pub struct BitcoinClient {
-    app_transport: Box<dyn VAppTransport + Send + Sync>,
+    app_transport: Box<dyn VAppTransport + Send>,
 }
 
 impl<'a> BitcoinClient {
-    pub fn new(app_transport: Box<dyn VAppTransport + Send + Sync>) -> Self {
+    pub fn new(app_transport: Box<dyn VAppTransport + Send>) -> Self {
         Self { app_transport }
     }
 
