@@ -1494,7 +1494,7 @@ fn wait_for_ticker(comm: &mut RefMut<'_, &mut ledger_device_sdk::io::Comm>) {
         if status > 0 {
             // TODO: yikes. But this needs to be fixed in the rust-sdk, rather
             let spi_buffer: [u8; 272] = buffer[1..273].try_into().unwrap();
-            comm.process_event::<Instruction>(spi_buffer, status - 1);
+            comm.process_event::<Instruction>(&spi_buffer, status - 1);
 
             // TODO: we're ignoring the return value, so we might potentially miss an APDU if it comes at
             // the wrong time.
