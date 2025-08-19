@@ -25,15 +25,15 @@ use common::client_commands::{
 use common::constants::{DEFAULT_STACK_START, PAGE_SIZE};
 use common::manifest::Manifest;
 
-use crate::elf::{self, ElfFile};
+use crate::apdu::{
+    apdu_continue, apdu_continue_with_p1, apdu_register_vapp, apdu_run_vapp, APDUCommand,
+    StatusWord,
+};
 use crate::memory::{MemorySegment, MemorySegmentError};
 use crate::transport::Transport;
 use crate::{
-    apdu::{
-        apdu_continue, apdu_continue_with_p1, apdu_register_vapp, apdu_run_vapp, APDUCommand,
-        StatusWord,
-    },
-    linewriter::PrintWriter,
+    elf::{self, ElfFile},
+    linewriter::Sink,
 };
 
 enum VAppMessage {
@@ -713,6 +713,7 @@ impl<E: std::fmt::Debug + Send + Sync + 'static> GenericVanadiumClient<E> {
         manifest: &Manifest,
         app_hmac: &[u8; 32],
         elf: &ElfFile,
+        print_writer: Box<dyn std::io::Write + Send>,
     ) -> Result<(), VAppEngineError<E>> {
         let mut data = postcard::to_allocvec(manifest)?;
         data.extend_from_slice(app_hmac);
@@ -737,7 +738,7 @@ impl<E: std::fmt::Debug + Send + Sync + 'static> GenericVanadiumClient<E> {
             transport,
             engine_to_client_sender,
             client_to_engine_receiver,
-            print_writer: Box::new(PrintWriter::new(true)),
+            print_writer,
         };
 
         // Start the VAppEngine in a task
@@ -891,6 +892,7 @@ impl<E: std::fmt::Debug + Send + Sync + 'static> VanadiumAppClient<E> {
         elf_path: &str,
         transport: Arc<dyn Transport<Error = E>>,
         app_hmac: Option<[u8; 32]>,
+        print_writer: Box<dyn std::io::Write + Send>,
     ) -> Result<(Self, [u8; 32]), Box<dyn std::error::Error + Send + Sync>> {
         // Create ELF file and manifest
         let elf_file = ElfFile::new(Path::new(&elf_path))?;
@@ -975,7 +977,7 @@ impl<E: std::fmt::Debug + Send + Sync + 'static> VanadiumAppClient<E> {
             app_hmac.unwrap_or(client.register_vapp(transport.clone(), &manifest).await?);
 
         // run the V-App
-        client.run_vapp(transport, &manifest, &app_hmac, &elf_file)?;
+        client.run_vapp(transport, &manifest, &app_hmac, &elf_file, print_writer)?;
 
         Ok((Self { client }, app_hmac))
     }
@@ -1122,9 +1124,12 @@ pub mod client_utils {
     /// Creates a client for a V-App compiled using the native target. Uses TCP for communication
     pub async fn create_native_client(
         tcp_addr: Option<&str>,
+        print_writer: Option<Box<dyn std::io::Write + Send>>,
     ) -> Result<Box<dyn VAppTransport + Send>, ClientUtilsError> {
         let addr = tcp_addr.unwrap_or("127.0.0.1:2323");
-        let print_writer = Box::new(PrintWriter::new(true));
+
+        // if no print_writer is provided, default to Sink
+        let print_writer = print_writer.unwrap_or_else(|| Box::new(Sink::default()));
         let client = NativeAppClient::new(addr, print_writer)
             .await
             .map_err(|e| ClientUtilsError::NativeConnectionFailed(e.to_string()))?;
@@ -1135,6 +1140,7 @@ pub mod client_utils {
     pub async fn create_tcp_client(
         app_path: &str,
         app_hmac: Option<[u8; 32]>,
+        print_writer: Option<Box<dyn std::io::Write + Send>>,
     ) -> Result<(Box<dyn VAppTransport + Send>, [u8; 32]), ClientUtilsError> {
         let transport_raw = Arc::new(TransportTcp::new().await.map_err(|e| {
             ClientUtilsError::TcpTransportFailed(format!(
@@ -1144,9 +1150,12 @@ pub mod client_utils {
         })?);
         let transport = TransportWrapper::new(transport_raw);
 
-        let (client, hmac) = VanadiumAppClient::new(app_path, Arc::new(transport), app_hmac)
-            .await
-            .map_err(|e| ClientUtilsError::VanadiumClientFailed(e.to_string()))?;
+        // if no print_writer is provided, default to Sink
+        let print_writer = print_writer.unwrap_or_else(|| Box::new(Sink::default()));
+        let (client, hmac) =
+            VanadiumAppClient::new(app_path, Arc::new(transport), app_hmac, print_writer)
+                .await
+                .map_err(|e| ClientUtilsError::VanadiumClientFailed(e.to_string()))?;
         Ok((Box::new(client), hmac))
     }
 
@@ -1154,6 +1163,7 @@ pub mod client_utils {
     pub async fn create_hid_client(
         app_path: &str,
         app_hmac: Option<[u8; 32]>,
+        print_writer: Option<Box<dyn std::io::Write + Send>>,
     ) -> Result<(Box<dyn VAppTransport + Send>, [u8; 32]), ClientUtilsError> {
         let hid_api = hidapi::HidApi::new().map_err(|e| {
             ClientUtilsError::HidTransportFailed(format!("Unable to create HID API: {}", e))
@@ -1168,9 +1178,12 @@ pub mod client_utils {
         ));
         let transport = TransportWrapper::new(transport_raw);
 
-        let (client, hmac) = VanadiumAppClient::new(app_path, Arc::new(transport), app_hmac)
-            .await
-            .map_err(|e| ClientUtilsError::VanadiumClientFailed(e.to_string()))?;
+        // if no print_writer is provided, default to Sink
+        let print_writer = print_writer.unwrap_or_else(|| Box::new(Sink::default()));
+        let (client, hmac) =
+            VanadiumAppClient::new(app_path, Arc::new(transport), app_hmac, print_writer)
+                .await
+                .map_err(|e| ClientUtilsError::VanadiumClientFailed(e.to_string()))?;
         Ok((Box::new(client), hmac))
     }
 
@@ -1198,6 +1211,7 @@ pub mod client_utils {
     pub async fn create_default_client(
         app_name: &str,
         client_type: ClientType,
+        print_writer: Option<Box<dyn std::io::Write + Send>>,
     ) -> Result<Box<dyn VAppTransport + Send>, ClientUtilsError> {
         let app_path = format!(
             "../app/target/riscv32imc-unknown-none-elf/release/{}",
@@ -1207,9 +1221,13 @@ pub mod client_utils {
         let tcp_addr = std::env::var("VAPP_ADDRESS").unwrap_or_else(|_| "127.0.0.1:2323".into());
 
         match client_type {
-            ClientType::Native => create_native_client(Some(&tcp_addr)).await,
-            ClientType::Tcp => create_tcp_client(&app_path, None).await.map(|(c, _hmac)| c),
-            ClientType::Hid => create_hid_client(&app_path, None).await.map(|(c, _hmac)| c),
+            ClientType::Native => create_native_client(Some(&tcp_addr), print_writer).await,
+            ClientType::Tcp => create_tcp_client(&app_path, None, print_writer)
+                .await
+                .map(|(c, _hmac)| c),
+            ClientType::Hid => create_hid_client(&app_path, None, print_writer)
+                .await
+                .map(|(c, _hmac)| c),
         }
     }
 }

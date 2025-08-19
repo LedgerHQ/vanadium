@@ -1,6 +1,7 @@
 use clap::Parser;
 use client::TestClient;
 
+use sdk::linewriter::FileLineWriter;
 use sdk::vanadium_client::client_utils::{create_default_client, ClientType};
 
 mod commands;
@@ -149,7 +150,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     } else {
         ClientType::Tcp
     };
-    let mut test_client = TestClient::new(create_default_client("vnd-test", client_type).await?);
+    let print_writer = Box::new(FileLineWriter::new("print.log", true, true)?);
+    let mut test_client =
+        TestClient::new(create_default_client("vnd-test", client_type, Some(print_writer)).await?);
 
     loop {
         println!("Enter a command:");

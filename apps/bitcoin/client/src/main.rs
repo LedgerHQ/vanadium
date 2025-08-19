@@ -14,6 +14,7 @@ use client::BitcoinClient;
 
 mod client;
 
+use sdk::linewriter::FileLineWriter;
 use sdk::vanadium_client::client_utils::{create_default_client, ClientType};
 
 use std::borrow::Cow;
@@ -376,8 +377,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     } else {
         ClientType::Tcp
     };
-    let mut bitcoin_client =
-        BitcoinClient::new(create_default_client("vnd-bitcoin", client_type).await?);
+    let print_writer = Box::new(FileLineWriter::new("print.log", true, true)?);
+    let mut bitcoin_client = BitcoinClient::new(
+        create_default_client("vnd-bitcoin", client_type, Some(print_writer)).await?,
+    );
 
     let mut rl = Editor::<CommandCompleter, rustyline::history::DefaultHistory>::new()?;
     rl.set_helper(Some(CommandCompleter));
