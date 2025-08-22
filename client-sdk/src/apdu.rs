@@ -68,9 +68,17 @@ pub struct APDUCommand {
 
 impl APDUCommand {
     pub fn encode(&self) -> Vec<u8> {
-        let mut vec = vec![self.cla, self.ins, self.p1, self.p2, self.data.len() as u8];
-        vec.extend(self.data.iter());
-        vec
+        if self.data.len() <= 255 {
+            let mut vec = vec![self.cla, self.ins, self.p1, self.p2, self.data.len() as u8];
+            vec.extend(self.data.iter());
+            vec
+        } else {
+            let len_lo = (self.data.len() as u16 & 0xFF) as u8;
+            let len_hi = ((self.data.len() as u16 >> 8) & 0xFF) as u8;
+            let mut vec = vec![self.cla, self.ins, self.p1, self.p2, 0, len_lo, len_hi];
+            vec.extend(self.data.iter());
+            vec
+        }
     }
 }
 
