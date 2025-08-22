@@ -13,7 +13,8 @@ hex = { version = "0.4.3", default-features = false, features = ["serde", "alloc
 numtoa = "0.2.4"
 postcard = { version = "1.1.1", default-features = false, features = ["alloc"] }
 ledger_device_sdk = { path = "../ledger_device_sdk", features = ["debug", "nano_nbgl"] }
-ledger_secure_sdk_sys = { version = "=1.9.0", features = ["nano_nbgl"] }
+ledger_secure_sdk_sys = { git = "https://github.com/LedgerHQ/ledger-device-rust-sdk.git", branch = "vanadium" }
+
 zeroize = "1.8.1"
 hex-literal = "0.4.1"
 subtle = { version = "2.6.0", default-features = false }
