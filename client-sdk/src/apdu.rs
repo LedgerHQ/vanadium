@@ -92,16 +92,6 @@ pub fn apdu_continue(data: Vec<u8>) -> APDUCommand {
     }
 }
 
-pub fn apdu_continue_with_p1(data: Vec<u8>, p1: u8) -> APDUCommand {
-    APDUCommand {
-        cla: 0xE0,
-        ins: 0xff,
-        p1,
-        p2: 0,
-        data,
-    }
-}
-
 pub fn apdu_register_vapp(serialized_manifest: Vec<u8>) -> APDUCommand {
     APDUCommand {
         cla: 0xE0,

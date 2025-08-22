@@ -15,20 +15,16 @@ use tokio::{
 };
 
 use common::client_commands::{
-    BufferType, ClientCommandCode, CommitPageContentMessage, CommitPageMessage,
-    CommitPageProofContinuedMessage, CommitPageProofContinuedResponse, CommitPageProofResponse,
-    GetPageMessage, GetPageProofContinuedMessage, GetPageProofContinuedResponse,
-    GetPageProofMessage, GetPageProofResponse, Message, MessageDeserializationError,
-    ReceiveBufferMessage, ReceiveBufferResponse, SectionKind, SendBufferContinuedMessage,
-    SendBufferMessage,
+    BufferType, ClientCommandCode, CommitPageMessage, CommitPageProofContinuedMessage,
+    CommitPageProofContinuedResponse, CommitPageProofResponse, GetPageMessage,
+    GetPageProofContinuedMessage, GetPageProofContinuedResponse, GetPageResponse, Message,
+    MessageDeserializationError, ReceiveBufferMessage, ReceiveBufferResponse, SectionKind,
+    SendBufferContinuedMessage, SendBufferMessage,
 };
 use common::constants::{DEFAULT_STACK_START, PAGE_SIZE};
 use common::manifest::Manifest;
 
-use crate::apdu::{
-    apdu_continue, apdu_continue_with_p1, apdu_register_vapp, apdu_run_vapp, APDUCommand,
-    StatusWord,
-};
+use crate::apdu::{apdu_continue, apdu_register_vapp, apdu_run_vapp, APDUCommand, StatusWord};
 use crate::memory::{MemorySegment, MemorySegmentError};
 use crate::transport::Transport;
 use crate::{
@@ -211,35 +207,12 @@ impl<E: std::fmt::Debug + Send + Sync + 'static> VAppEngine<E> {
         // Convert HashOutput<32> to [u8; 32]
         let proof: Vec<[u8; 32]> = proof.into_iter().map(|h| h.0).collect();
 
-        let p1 = data[PAGE_SIZE - 1];
-
-        // Return the content of the page (the last byte is in p1)
-        let (status, result) = self
-            .transport
-            .exchange(&apdu_continue_with_p1(data[0..PAGE_SIZE - 1].to_vec(), p1))
-            .await
-            .map_err(VAppEngineError::TransportError)?;
-
-        // If the VM requests a proof, handle it
-        if status != StatusWord::InterruptedExecution || result.is_empty() {
-            return Err(VAppEngineError::InterruptedExecutionExpected);
-        }
-
-        // We expect this message from the VM
-        GetPageProofMessage::deserialize(&result)?;
-
-        #[cfg(feature = "debug")]
-        debug!("<- GetPageProofMessage()");
-
         // Calculate how many proof elements we can send in one message
-        let max_proof_elements = (255 - 2) / 32; // 2 bytes for n and t, 32 bytes per proof element
-        let t = std::cmp::min(proof.len(), max_proof_elements) as u8;
+        let t = min(proof.len(), GetPageResponse::max_proof_size()) as u8;
 
-        #[cfg(feature = "debug")]
-        debug!("Proof length: {}", proof.len());
-
-        // Create the proof response
-        let response = GetPageProofResponse::new(
+        // Create the page response
+        let response = GetPageResponse::new(
+            (*data).try_into().unwrap(),
             is_encrypted,
             nonce,
             proof.len() as u8,
@@ -253,6 +226,9 @@ impl<E: std::fmt::Debug + Send + Sync + 'static> VAppEngine<E> {
             .exchange(&apdu_continue(response))
             .await
             .map_err(VAppEngineError::TransportError)?;
+
+        #[cfg(feature = "debug")]
+        debug!("Proof length: {}", proof.len());
 
         // If there are more proof elements to send and VM requests them
         if t < proof.len() as u8 {
@@ -270,7 +246,7 @@ impl<E: std::fmt::Debug + Send + Sync + 'static> VAppEngine<E> {
             // Send remaining proof elements, potentially in multiple messages
             while offset < proof.len() {
                 let remaining = proof.len() - offset;
-                let t = std::cmp::min(remaining, max_proof_elements) as u8;
+                let t = min(remaining, GetPageProofContinuedResponse::max_proof_size()) as u8;
 
                 let response =
                     GetPageProofContinuedResponse::new(t, &proof[offset..offset + t as usize])
@@ -323,32 +299,15 @@ impl<E: std::fmt::Debug + Send + Sync + 'static> VAppEngine<E> {
             SectionKind::Stack => &mut self.stack_seg,
         };
 
-        // get the next message, which contains the content of the page
-        let (tmp_status, tmp_result) = self
-            .transport
-            .exchange(&apdu_continue(vec![]))
-            .await
-            .map_err(VAppEngineError::TransportError)?;
-
-        if tmp_status != StatusWord::InterruptedExecution {
-            return Err(VAppEngineError::InterruptedExecutionExpected);
-        }
-
-        let CommitPageContentMessage {
-            command_code: _,
-            data,
-        } = CommitPageContentMessage::deserialize(&tmp_result)?;
-
         #[cfg(feature = "debug")]
         debug!("<- CommitPageContentMessage(data.len() = {})", data.len());
 
-        assert!(data.len() == PAGE_SIZE);
         assert!(msg.is_encrypted == true); // the VM should always commit to encrypted pages
 
         let mut serialized_page = Vec::<u8>::with_capacity(1 + 12 + PAGE_SIZE);
         serialized_page.push(msg.is_encrypted as u8);
         serialized_page.extend_from_slice(&msg.nonce);
-        serialized_page.extend_from_slice(&data);
+        serialized_page.extend_from_slice(msg.data);
 
         // Store page and get proof
         let (proof, new_root) = segment.store_page(msg.page_index, &serialized_page)?;
@@ -358,7 +317,7 @@ impl<E: std::fmt::Debug + Send + Sync + 'static> VAppEngine<E> {
 
         // Calculate how many proof elements we can send in one message
         let max_proof_elements = (255 - 2 - 32) / 32; // 2 bytes for n and t, 32 bytes for new_root, then 32 bytes for each proof element
-        let t = std::cmp::min(proof.len(), max_proof_elements) as u8;
+        let t = min(proof.len(), max_proof_elements) as u8;
 
         // Create the proof response
         let response =
@@ -387,7 +346,7 @@ impl<E: std::fmt::Debug + Send + Sync + 'static> VAppEngine<E> {
             // Send remaining proof elements, potentially in multiple messages
             while offset < proof.len() {
                 let remaining = proof.len() - offset;
-                let t = std::cmp::min(remaining, max_proof_elements) as u8;
+                let t = min(remaining, max_proof_elements) as u8;
 
                 let response =
                     CommitPageProofContinuedResponse::new(t, &proof[offset..offset + t as usize])
@@ -625,8 +584,6 @@ impl<E: std::fmt::Debug + Send + Sync + 'static> VAppEngine<E> {
                 ClientCommandCode::SendBuffer => self.process_send_buffer(&result).await?,
                 ClientCommandCode::ReceiveBuffer => self.process_receive_buffer(&result).await?,
                 ClientCommandCode::SendBufferContinued
-                | ClientCommandCode::CommitPageContent
-                | ClientCommandCode::GetPageProof
                 | ClientCommandCode::GetPageProofContinued
                 | ClientCommandCode::CommitPageProofContinued => {
                     // not a top-level command, part of the handling of some other command
