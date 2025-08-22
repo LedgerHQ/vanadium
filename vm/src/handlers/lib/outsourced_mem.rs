@@ -9,10 +9,9 @@ use common::vm::{Page, PagedMemory};
 use ledger_device_sdk::io;
 
 use common::client_commands::{
-    CommitPageContentMessage, CommitPageMessage, CommitPageProofContinuedMessage,
-    CommitPageProofContinuedResponse, CommitPageProofResponse, GetPageMessage,
-    GetPageProofContinuedMessage, GetPageProofContinuedResponse, GetPageProofMessage,
-    GetPageProofResponse, Message, SectionKind,
+    CommitPageMessage, CommitPageProofContinuedMessage, CommitPageProofContinuedResponse,
+    CommitPageProofResponse, GetPageMessage, GetPageProofContinuedMessage,
+    GetPageProofContinuedResponse, GetPageResponse, Message, SectionKind,
 };
 use common::constants::PAGE_SIZE;
 
@@ -154,21 +153,20 @@ impl<'c> OutsourcedMemory<'c> {
 
         assert!(payload.len() == PAGE_SIZE);
 
+        let payload_array: &[u8; PAGE_SIZE] = payload
+            .as_slice()
+            .try_into()
+            .expect("The payload is the correct size");
+
         let mut comm = self.comm.borrow_mut();
-        CommitPageMessage::new(self.section_kind, cached_page.idx, true, nonce)
-            .serialize_to_comm(&mut comm);
-
-        let Instruction::Continue(p1, p2) = comm.io_exchange(AppSW::InterruptedExecution) else {
-            return Err(common::vm::MemoryError::GenericError("INS not supported"));
-            // expected "Continue"
-        };
-
-        if (p1, p2) != (0, 0) {
-            return Err(common::vm::MemoryError::GenericError("Wrong P1/P2"));
-        }
-
-        // Second message: communicate the updated page content
-        CommitPageContentMessage::new(&payload).serialize_to_comm(&mut comm);
+        CommitPageMessage::new(
+            self.section_kind,
+            cached_page.idx,
+            true,
+            nonce,
+            payload_array,
+        )
+        .serialize_to_comm(&mut comm);
 
         let Instruction::Continue(p1, p2) = comm.io_exchange(AppSW::InterruptedExecution) else {
             return Err(common::vm::MemoryError::GenericError("INS not supported"));
@@ -293,52 +291,29 @@ impl<'c> OutsourcedMemory<'c> {
             return Err(common::vm::MemoryError::GenericError("INS not supported"));
         };
 
-        if p2 != 0 {
-            return Err(common::vm::MemoryError::GenericError("Wrong P2"));
+        if p1 != 0 || p2 != 0 {
+            return Err(common::vm::MemoryError::GenericError("Wrong P1/P2"));
         }
 
         let fetched_data = comm
             .get_data()
             .map_err(|_| common::vm::MemoryError::GenericError("Wrong APDU length"))?;
-        if fetched_data.len() != PAGE_SIZE - 1 {
-            return Err(common::vm::MemoryError::GenericError("Wrong APDU length"));
-        }
 
-        let mut data = [0u8; PAGE_SIZE];
-        data[0..PAGE_SIZE - 1].copy_from_slice(&fetched_data);
-        data[PAGE_SIZE - 1] = p1;
+        let page_response = GetPageResponse::deserialize(&fetched_data)
+            .map_err(|_| common::vm::MemoryError::GenericError("Invalid page data"))?;
 
-        // Request the Merkle proof for the page
-        GetPageProofMessage::new().serialize_to_comm(&mut comm);
-
-        let Instruction::Continue(p1, p2) = comm.io_exchange(AppSW::InterruptedExecution) else {
-            return Err(common::vm::MemoryError::GenericError(
-                "INS not supported during proof request",
-            ));
-        };
-
-        if (p1, p2) != (0, 0) {
-            return Err(common::vm::MemoryError::GenericError(
-                "Wrong P1/P2 in proof response",
-            ));
-        }
-
-        // Decode the proof
-        let proof_data = comm.get_data().map_err(|_| {
-            common::vm::MemoryError::GenericError("Wrong APDU length in proof response")
-        })?;
-
-        let proof_response = GetPageProofResponse::deserialize(&proof_data)
-            .map_err(|_| common::vm::MemoryError::GenericError("Invalid proof data"))?;
-
-        let page_hash = if proof_response.is_encrypted {
-            get_page_hash(&mut self.hasher, &data, Some(&proof_response.nonce))
+        let page_hash = if page_response.is_encrypted {
+            get_page_hash(
+                &mut self.hasher,
+                page_response.page_data,
+                Some(&page_response.nonce),
+            )
         } else {
-            get_page_hash(&mut self.hasher, &data, None)
+            get_page_hash(&mut self.hasher, page_response.page_data, None)
         };
 
-        let n = proof_response.n; // Total number of elements in the proof
-        if proof_response.t as usize != proof_response.proof.len() {
+        let n = page_response.n; // Total number of elements in the proof
+        if page_response.t as usize != page_response.proof.len() {
             return Err(common::vm::MemoryError::GenericError(
                 "Proof fragment size does not match the expected number of elements",
             ));
@@ -352,15 +327,15 @@ impl<'c> OutsourcedMemory<'c> {
             self.n_pages as usize,
         );
 
-        for el in proof_response.proof.iter() {
+        for el in page_response.proof.iter() {
             verifier.feed(&mut self.hasher, HashOutput::<32>::as_hash_output(el));
         }
 
-        let nonce = proof_response.nonce.clone();
-        let is_page_encrypted = proof_response.is_encrypted;
+        let nonce = page_response.nonce.clone();
+        let is_page_encrypted = page_response.is_encrypted;
 
-        let mut n_processed_elements = proof_response.t as usize;
-
+        let mut n_processed_elements = page_response.t as usize;
+        let data = *page_response.page_data;
         // If we need more elements, request them
         while n_processed_elements < n as usize {
             GetPageProofContinuedMessage::new().serialize_to_comm(&mut comm);

@@ -4,6 +4,8 @@ use crate::constants::PAGE_SIZE;
 use alloc::vec::Vec;
 use core::fmt;
 
+const MAX_APDU_DATA_SIZE: usize = 590;
+
 #[derive(Debug)]
 pub enum MessageDeserializationError {
     InvalidClientCommandCode,
@@ -54,14 +56,12 @@ pub trait Message<'a>: Sized {
 #[repr(u8)]
 pub enum ClientCommandCode {
     GetPage = 0,
-    GetPageProof = 1,
-    GetPageProofContinued = 2,
-    CommitPage = 3,
-    CommitPageContent = 4,
-    CommitPageProofContinued = 5,
-    SendBuffer = 6,
-    SendBufferContinued = 7,
-    ReceiveBuffer = 8,
+    GetPageProofContinued = 1,
+    CommitPage = 2,
+    CommitPageProofContinued = 3,
+    SendBuffer = 4,
+    SendBufferContinued = 5,
+    ReceiveBuffer = 6,
 }
 
 impl TryFrom<u8> for ClientCommandCode {
@@ -70,14 +70,12 @@ impl TryFrom<u8> for ClientCommandCode {
     fn try_from(value: u8) -> Result<Self, Self::Error> {
         match value {
             0 => Ok(ClientCommandCode::GetPage),
-            1 => Ok(ClientCommandCode::GetPageProof),
-            2 => Ok(ClientCommandCode::GetPageProofContinued),
-            3 => Ok(ClientCommandCode::CommitPage),
-            4 => Ok(ClientCommandCode::CommitPageContent),
-            5 => Ok(ClientCommandCode::CommitPageProofContinued),
-            6 => Ok(ClientCommandCode::SendBuffer),
-            7 => Ok(ClientCommandCode::SendBufferContinued),
-            8 => Ok(ClientCommandCode::ReceiveBuffer),
+            1 => Ok(ClientCommandCode::GetPageProofContinued),
+            2 => Ok(ClientCommandCode::CommitPage),
+            3 => Ok(ClientCommandCode::CommitPageProofContinued),
+            4 => Ok(ClientCommandCode::SendBuffer),
+            5 => Ok(ClientCommandCode::SendBufferContinued),
+            6 => Ok(ClientCommandCode::ReceiveBuffer),
             _ => Err("Invalid value for ClientCommandCode"),
         }
     }
@@ -154,45 +152,11 @@ impl<'a> Message<'a> for GetPageMessage {
     }
 }
 
-/// Message sent by the VM to request a proof after getting a page
-#[derive(Debug, Clone)]
-pub struct GetPageProofMessage {
-    pub command_code: ClientCommandCode,
-}
-
-impl GetPageProofMessage {
-    #[inline]
-    pub fn new() -> Self {
-        GetPageProofMessage {
-            command_code: ClientCommandCode::GetPageProof,
-        }
-    }
-}
-
-impl<'a> Message<'a> for GetPageProofMessage {
-    #[inline]
-    fn serialize_with<F: FnMut(&[u8])>(&self, mut f: F) {
-        f(&[self.command_code as u8]);
-    }
-
-    fn deserialize(data: &[u8]) -> Result<Self, MessageDeserializationError> {
-        if data.len() != 1 {
-            return Err(MessageDeserializationError::InvalidDataLength);
-        }
-        let command_code = ClientCommandCode::try_from(data[0])
-            .map_err(|_| MessageDeserializationError::InvalidClientCommandCode)?;
-        if !matches!(command_code, ClientCommandCode::GetPageProof) {
-            return Err(MessageDeserializationError::MismatchingClientCommandCode);
-        }
-
-        Ok(GetPageProofMessage { command_code })
-    }
-}
-
 /// Message sent by client in response to the VM's GetPageProofMessage
 /// It contains the page's metadata, and the merkle proof of the page (or part of it)
 #[derive(Debug, Clone)]
-pub struct GetPageProofResponse<'a> {
+pub struct GetPageResponse<'a> {
+    pub page_data: &'a [u8; PAGE_SIZE],
     pub is_encrypted: bool,    // whether the page is encrypted
     pub nonce: [u8; 12],       // nonce of the page encryption (all zeros if not encrypted)
     pub n: u8,                 // number of element in the proof
@@ -200,10 +164,18 @@ pub struct GetPageProofResponse<'a> {
     pub proof: &'a [[u8; 32]], // hashes of the proof
 }
 
-impl<'a> GetPageProofResponse<'a> {
+impl<'a> GetPageResponse<'a> {
     #[inline]
-    pub fn new(is_encrypted: bool, nonce: [u8; 12], n: u8, t: u8, proof: &'a [[u8; 32]]) -> Self {
-        GetPageProofResponse {
+    pub fn new(
+        page_data: &'a [u8; PAGE_SIZE],
+        is_encrypted: bool,
+        nonce: [u8; 12],
+        n: u8,
+        t: u8,
+        proof: &'a [[u8; 32]],
+    ) -> Self {
+        GetPageResponse {
+            page_data,
             is_encrypted,
             nonce,
             n,
@@ -211,11 +183,16 @@ impl<'a> GetPageProofResponse<'a> {
             proof,
         }
     }
+
+    pub const fn max_proof_size() -> usize {
+        (MAX_APDU_DATA_SIZE - PAGE_SIZE - 1 - 12 - 1 - 1) / 32
+    }
 }
 
-impl<'a> Message<'a> for GetPageProofResponse<'a> {
+impl<'a> Message<'a> for GetPageResponse<'a> {
     #[inline]
     fn serialize_with<F: FnMut(&[u8])>(&self, mut f: F) {
+        f(self.page_data);
         f(&[self.n]);
         f(&[self.t]);
         f(&[self.is_encrypted as u8]);
@@ -226,30 +203,32 @@ impl<'a> Message<'a> for GetPageProofResponse<'a> {
     }
 
     fn deserialize(data: &'a [u8]) -> Result<Self, MessageDeserializationError> {
-        if data.len() < 1 + 1 + 1 + 12 {
+        if data.len() < PAGE_SIZE + 1 + 1 + 1 + 12 {
             return Err(MessageDeserializationError::InvalidDataLength);
         }
-        let n = data[0];
-        let t = data[1];
-        let is_encrypted = data[2] == 1;
+        let page_data = data[0..PAGE_SIZE].try_into().unwrap();
+        let n = data[PAGE_SIZE];
+        let t = data[PAGE_SIZE + 1];
+        let is_encrypted = data[PAGE_SIZE + 2] == 1;
         let nonce = if is_encrypted {
             let mut arr = [0; 12];
-            arr.copy_from_slice(&data[3..15]);
+            arr.copy_from_slice(&data[PAGE_SIZE + 3..PAGE_SIZE + 15]);
             arr
         } else {
             [0; 12]
         };
-        let proof_len = data.len() - (1 + 1 + 1 + 12);
+        let proof_len = data.len() - (PAGE_SIZE + 1 + 1 + 1 + 12);
         if proof_len % 32 != 0 {
             return Err(MessageDeserializationError::InvalidDataLength);
         }
         let slice_len = proof_len / 32;
         let proof = unsafe {
-            let ptr = data.as_ptr().add(1 + 1 + 1 + 12) as *const [u8; 32];
+            let ptr = data.as_ptr().add(PAGE_SIZE + 1 + 1 + 1 + 12) as *const [u8; 32];
             core::slice::from_raw_parts(ptr, slice_len)
         };
 
-        Ok(GetPageProofResponse {
+        Ok(GetPageResponse {
+            page_data,
             is_encrypted,
             nonce,
             n,
@@ -260,7 +239,7 @@ impl<'a> Message<'a> for GetPageProofResponse<'a> {
 }
 
 /// Message sent by the VM to request the rest of the proof, if it didn't fit
-/// in a single GetPageProofResponse
+/// in GetPageResponse
 #[derive(Debug, Clone)]
 pub struct GetPageProofContinuedMessage {
     pub command_code: ClientCommandCode,
@@ -306,6 +285,10 @@ impl<'a> GetPageProofContinuedResponse<'a> {
     pub fn new(t: u8, proof: &'a [[u8; 32]]) -> Self {
         GetPageProofContinuedResponse { t, proof }
     }
+
+    pub const fn max_proof_size() -> usize {
+        (MAX_APDU_DATA_SIZE - 1) / 32
+    }
 }
 
 impl<'a> Message<'a> for GetPageProofContinuedResponse<'a> {
@@ -338,21 +321,23 @@ impl<'a> Message<'a> for GetPageProofContinuedResponse<'a> {
 
 /// Message sent by the VM to commit a page to the host
 #[derive(Debug, Clone)]
-pub struct CommitPageMessage {
+pub struct CommitPageMessage<'a> {
     pub command_code: ClientCommandCode,
     pub section_kind: SectionKind,
     pub page_index: u32,
-    pub is_encrypted: bool, // whether the page is encrypted
-    pub nonce: [u8; 12],    // nonce of the page encryption (all zeros if not encrypted)
+    pub is_encrypted: bool,        // whether the page is encrypted
+    pub nonce: [u8; 12],           // nonce of the page encryption (all zeros if not encrypted)
+    pub data: &'a [u8; PAGE_SIZE], // content of the page
 }
 
-impl CommitPageMessage {
+impl<'a> CommitPageMessage<'a> {
     #[inline]
     pub fn new(
         section_kind: SectionKind,
         page_index: u32,
         is_encrypted: bool,
         nonce: [u8; 12],
+        data: &'a [u8; PAGE_SIZE],
     ) -> Self {
         CommitPageMessage {
             command_code: ClientCommandCode::CommitPage,
@@ -360,11 +345,12 @@ impl CommitPageMessage {
             page_index,
             is_encrypted,
             nonce,
+            data,
         }
     }
 }
 
-impl<'a> Message<'a> for CommitPageMessage {
+impl<'a> Message<'a> for CommitPageMessage<'a> {
     #[inline]
     fn serialize_with<F: FnMut(&[u8])>(&self, mut f: F) {
         f(&[self.command_code as u8]);
@@ -376,10 +362,11 @@ impl<'a> Message<'a> for CommitPageMessage {
         } else {
             f(&[0; 13]); // 0 byte, followed by 12 zero bytes for the (unused) nonce
         }
+        f(self.data);
     }
 
-    fn deserialize(data: &[u8]) -> Result<Self, MessageDeserializationError> {
-        if data.len() != 1 + 1 + 4 + 1 + 12 {
+    fn deserialize(data: &'a [u8]) -> Result<Self, MessageDeserializationError> {
+        if data.len() != 1 + 1 + 4 + 1 + 12 + PAGE_SIZE {
             return Err(MessageDeserializationError::InvalidDataLength);
         }
         let command_code = ClientCommandCode::try_from(data[0])
@@ -401,56 +388,18 @@ impl<'a> Message<'a> for CommitPageMessage {
             [0; 12]
         };
 
+        // Safe extraction of the page data (starts after 1+1+4+1+12 = 19 bytes)
+        let data: &'a [u8; PAGE_SIZE] = data[1 + 1 + 4 + 1 + 12..1 + 1 + 4 + 1 + 12 + PAGE_SIZE]
+            .try_into()
+            .map_err(|_| MessageDeserializationError::InvalidDataLength)?;
+
         Ok(CommitPageMessage {
             command_code,
             section_kind,
             page_index,
             is_encrypted,
             nonce,
-        })
-    }
-}
-
-/// Part of the flow started with a CommitPageMessage; it contains the content of the page
-#[derive(Debug, Clone)]
-pub struct CommitPageContentMessage<'a> {
-    pub command_code: ClientCommandCode,
-    pub data: &'a [u8],
-}
-
-impl<'a> CommitPageContentMessage<'a> {
-    #[inline]
-    pub fn new(data: &'a [u8]) -> Self {
-        if data.len() != PAGE_SIZE {
-            panic!("Invalid data length for CommitPageContentMessage");
-        }
-        CommitPageContentMessage {
-            command_code: ClientCommandCode::CommitPageContent,
             data,
-        }
-    }
-}
-
-impl<'a> Message<'a> for CommitPageContentMessage<'a> {
-    #[inline]
-    fn serialize_with<F: FnMut(&[u8])>(&self, mut f: F) {
-        f(&[self.command_code as u8]);
-        f(self.data);
-    }
-
-    fn deserialize(data: &'a [u8]) -> Result<Self, MessageDeserializationError> {
-        if data.len() != PAGE_SIZE + 1 {
-            return Err(MessageDeserializationError::InvalidDataLength);
-        }
-
-        let command_code = ClientCommandCode::try_from(data[0])
-            .map_err(|_| MessageDeserializationError::InvalidClientCommandCode)?;
-        if !matches!(command_code, ClientCommandCode::CommitPageContent) {
-            return Err(MessageDeserializationError::MismatchingClientCommandCode);
-        }
-        Ok(CommitPageContentMessage {
-            command_code,
-            data: &data[1..],
         })
     }
 }
