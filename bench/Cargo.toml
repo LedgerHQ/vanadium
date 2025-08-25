@@ -5,6 +5,5 @@ edition = "2024"
 
 [dependencies]
 hidapi = "2.6.3"
-ledger-transport-hid = "0.11.0"
 sdk = { package = "vanadium-client-sdk", path = "../client-sdk"}
 tokio = { version = "1.38.1", features = ["io-util", "macros", "net", "rt", "rt-multi-thread", "sync"] }
