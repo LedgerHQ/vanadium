@@ -9,8 +9,8 @@ use std::sync::{
 
 use async_trait::async_trait;
 
+use crate::transport_native_hid::TransportNativeHID;
 use ledger_apdu::APDUAnswer;
-use ledger_transport_hid::TransportNativeHID;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpStream,
@@ -40,7 +40,7 @@ impl Transport for TransportHID {
     type Error = Box<dyn Error + Send + Sync>;
     async fn exchange(&self, cmd: &APDUCommand) -> Result<(StatusWord, Vec<u8>), Self::Error> {
         self.0
-            .exchange(&ledger_apdu::APDUCommand {
+            .exchange(&APDUCommand {
                 ins: cmd.ins,
                 cla: cmd.cla,
                 p1: cmd.p1,

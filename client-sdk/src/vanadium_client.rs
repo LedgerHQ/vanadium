@@ -1086,7 +1086,7 @@ impl VAppTransport for NativeAppClient {
 pub mod client_utils {
     use super::*;
     use crate::transport::{TransportHID, TransportTcp, TransportWrapper};
-    use ledger_transport_hid::TransportNativeHID;
+    use crate::transport_native_hid::TransportNativeHID;
 
     #[derive(Debug, Clone)]
     pub enum ClientUtilsError {
