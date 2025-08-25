@@ -6,6 +6,9 @@ target = "nanosplus"
 
 [env]
 HEAP_SIZE = "14306"
+# The value of CUSTOM_IO_APDU_BUFFER_SIZE needs to be compatible with the MAX_APDU_DATA_SIZE
+# constant, taking into account the overhead for APDU headers
+LEDGER_SDK_EXTRA_DEFINES="CUSTOM_IO_APDU_BUFFER_SIZE=600"
 
 [unstable]
 build-std = ["core", "alloc"]

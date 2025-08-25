@@ -1,6 +1,9 @@
 {
   "folders": [
     {
+      "path": "ledger_device_sdk"
+    },
+    {
       "path": "vm"
     },
     {

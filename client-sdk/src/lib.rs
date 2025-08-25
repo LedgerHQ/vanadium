@@ -13,6 +13,8 @@ pub mod linewriter;
 #[cfg(feature = "transport")]
 pub mod transport;
 #[cfg(feature = "transport")]
+pub mod transport_native_hid;
+#[cfg(feature = "transport")]
 pub mod vanadium_client;
 
 #[cfg(feature = "test-utils")]

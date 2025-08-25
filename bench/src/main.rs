@@ -1,7 +1,7 @@
 use client::BenchClient;
 use hidapi::HidApi;
-use ledger_transport_hid::TransportNativeHID;
 use sdk::transport::{TransportHID, TransportWrapper};
+use sdk::transport_native_hid::TransportNativeHID;
 use sdk::vanadium_client::VanadiumAppClient;
 use std::env;
 use std::sync::Arc;

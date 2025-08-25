@@ -114,7 +114,7 @@ fn handle_panic(info: &core::panic::PanicInfo) -> ! {
     };
     println!("{}", message);
 
-    let mut comm = ledger_device_sdk::io::Comm::new();
+    let mut comm = ledger_device_sdk::io::Comm::new_with_data_size(600);
     comm.reply(ledger_device_sdk::io::StatusWords::Panic);
 
     ledger_device_sdk::exit_app(0x01)
@@ -192,7 +192,7 @@ extern "C" fn sample_main() {
     // Create the communication manager, and configure it to accept only APDU from the 0xe0 class.
     // If any APDU with a wrong class value is received, comm will respond automatically with
     // BadCla status word.
-    let mut comm = Comm::new().set_expected_cla(0xe0);
+    let mut comm = Comm::new_with_data_size(752).set_expected_cla(0xe0);
     init_comm(&mut comm);
 
     let mut home = ui_menu_main(&mut comm);

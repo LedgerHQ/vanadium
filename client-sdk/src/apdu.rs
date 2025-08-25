@@ -57,7 +57,7 @@ impl TryFrom<u16> for StatusWord {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct APDUCommand {
     pub cla: u8,
     pub ins: u8,
@@ -68,9 +68,17 @@ pub struct APDUCommand {
 
 impl APDUCommand {
     pub fn encode(&self) -> Vec<u8> {
-        let mut vec = vec![self.cla, self.ins, self.p1, self.p2, self.data.len() as u8];
-        vec.extend(self.data.iter());
-        vec
+        if self.data.len() <= 255 {
+            let mut vec = vec![self.cla, self.ins, self.p1, self.p2, self.data.len() as u8];
+            vec.extend(self.data.iter());
+            vec
+        } else {
+            let len_lo = (self.data.len() as u16 & 0xFF) as u8;
+            let len_hi = ((self.data.len() as u16 >> 8) & 0xFF) as u8;
+            let mut vec = vec![self.cla, self.ins, self.p1, self.p2, 0, len_hi, len_lo];
+            vec.extend(self.data.iter());
+            vec
+        }
     }
 }
 
@@ -79,16 +87,6 @@ pub fn apdu_continue(data: Vec<u8>) -> APDUCommand {
         cla: 0xE0,
         ins: 0xff,
         p1: 0,
-        p2: 0,
-        data,
-    }
-}
-
-pub fn apdu_continue_with_p1(data: Vec<u8>, p1: u8) -> APDUCommand {
-    APDUCommand {
-        cla: 0xE0,
-        ins: 0xff,
-        p1,
         p2: 0,
         data,
     }

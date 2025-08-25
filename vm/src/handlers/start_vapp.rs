@@ -44,7 +44,7 @@ pub fn handler_start_vapp(comm: &mut io::Comm) -> Result<Vec<u8>, AppSW> {
         AesKey::new_random().map_err(|_| AppSW::VMRuntimeError)?,
     )));
 
-    let (n_code_cache_pages, n_data_cache_pages, n_stack_cache_pages) = (24, 8, 8);
+    let (n_code_cache_pages, n_data_cache_pages, n_stack_cache_pages) = (22, 6, 6); // TODO: find the best constants
 
     let mut code_mem = OutsourcedMemory::new(
         comm.clone(),
