@@ -15,13 +15,13 @@ use common::{
     ux::Deserializable,
     vm::{Cpu, CpuError, EcallHandler, MemoryError},
 };
-use ledger_device_sdk::hash::HashInit;
+use ledger_device_sdk::{hash::HashInit, io::DecodedEventType};
 use ledger_secure_sdk_sys::{
-    self as sys, cx_ripemd160_t, cx_sha256_t, cx_sha512_t, seph as sys_seph, CX_OK, CX_RIPEMD160,
-    CX_SHA256, CX_SHA512,
+    self as sys, cx_ripemd160_t, cx_sha256_t, cx_sha512_t, CX_OK, CX_RIPEMD160, CX_SHA256,
+    CX_SHA512,
 };
 
-use crate::{io::CommExt, AppSW, Instruction};
+use crate::io::interrupt;
 
 use super::{outsourced_mem::OutsourcedMemory, SerializeToComm};
 
@@ -325,15 +325,15 @@ impl core::error::Error for CommEcallError {
     }
 }
 
-pub struct CommEcallHandler<'a> {
-    comm: Rc<RefCell<&'a mut ledger_device_sdk::io::Comm>>,
+pub struct CommEcallHandler<'a, const N: usize> {
+    comm: Rc<RefCell<&'a mut ledger_device_sdk::io::Comm<N>>>,
     manifest: &'a Manifest,
     ux_handler: &'static mut UxHandler,
 }
 
-impl<'a> CommEcallHandler<'a> {
+impl<'a, const N: usize> CommEcallHandler<'a, N> {
     pub fn new(
-        comm: Rc<RefCell<&'a mut ledger_device_sdk::io::Comm>>,
+        comm: Rc<RefCell<&'a mut ledger_device_sdk::io::Comm<N>>>,
         manifest: &'a Manifest,
     ) -> Self {
         Self {
@@ -345,7 +345,7 @@ impl<'a> CommEcallHandler<'a> {
 
     fn handle_send_buffer<E: fmt::Debug>(
         &self,
-        cpu: &mut Cpu<OutsourcedMemory<'_>>,
+        cpu: &mut Cpu<OutsourcedMemory<'_, N>>,
         buffer: GuestPointer,
         mut size: usize,
         buffer_type: BufferType,
@@ -355,16 +355,9 @@ impl<'a> CommEcallHandler<'a> {
             // an empty buffer
 
             let mut comm = self.comm.borrow_mut();
-            SendBufferMessage::new(size as u32, buffer_type, &[]).serialize_to_comm(&mut comm);
-
-            let Instruction::Continue(p1, p2) = comm.io_exchange(AppSW::InterruptedExecution)
-            else {
-                return Err(CommEcallError::WrongINS); // expected "Continue"
-            };
-
-            if (p1, p2) != (0, 0) {
-                return Err(CommEcallError::WrongP1P2);
-            }
+            let mut resp = comm.begin_response();
+            SendBufferMessage::new(size as u32, buffer_type, &[]).serialize_to_comm(&mut resp);
+            interrupt(resp)?;
             return Ok(());
         }
 
@@ -385,8 +378,10 @@ impl<'a> CommEcallHandler<'a> {
                 segment.read_buffer(g_ptr, &mut buffer[0..copy_size])?;
 
                 let mut comm = self.comm.borrow_mut();
+                let mut resp = comm.begin_response();
                 SendBufferMessage::new(size as u32, buffer_type, &buffer[0..copy_size])
-                    .serialize_to_comm(&mut comm);
+                    .serialize_to_comm(&mut resp);
+                interrupt(resp)?;
                 size -= copy_size;
                 g_ptr += copy_size as u32;
                 first_chunk = false;
@@ -394,19 +389,11 @@ impl<'a> CommEcallHandler<'a> {
                 let copy_size = min(size, 255 - 1); // send maximum 255 bytes in each subsequent chunk
                 segment.read_buffer(g_ptr, &mut buffer[0..copy_size])?;
                 let mut comm = self.comm.borrow_mut();
-                SendBufferContinuedMessage::new(&buffer[0..copy_size]).serialize_to_comm(&mut comm);
+                let mut resp = comm.begin_response();
+                SendBufferContinuedMessage::new(&buffer[0..copy_size]).serialize_to_comm(&mut resp);
+                interrupt(resp)?;
                 size -= copy_size;
                 g_ptr += copy_size as u32;
-            }
-
-            let mut comm = self.comm.borrow_mut();
-            let Instruction::Continue(p1, p2) = comm.io_exchange(AppSW::InterruptedExecution)
-            else {
-                return Err(CommEcallError::WrongINS); // expected "Continue"
-            };
-
-            if (p1, p2) != (0, 0) {
-                return Err(CommEcallError::WrongP1P2);
             }
         }
 
@@ -416,7 +403,7 @@ impl<'a> CommEcallHandler<'a> {
     // Sends a panic message
     fn handle_panic<E: fmt::Debug>(
         &self,
-        cpu: &mut Cpu<OutsourcedMemory<'_>>,
+        cpu: &mut Cpu<OutsourcedMemory<'_, N>>,
         buffer: GuestPointer,
         size: usize,
     ) -> Result<(), CommEcallError> {
@@ -426,7 +413,7 @@ impl<'a> CommEcallHandler<'a> {
     // Sends exactly size bytes from the buffer in the V-app memory to the host
     fn handle_xsend<E: fmt::Debug>(
         &self,
-        cpu: &mut Cpu<OutsourcedMemory<'_>>,
+        cpu: &mut Cpu<OutsourcedMemory<'_, N>>,
         buffer: GuestPointer,
         size: usize,
     ) -> Result<(), CommEcallError> {
@@ -437,7 +424,7 @@ impl<'a> CommEcallHandler<'a> {
     // Returns the catual of bytes received.
     fn handle_xrecv<E: fmt::Debug>(
         &self,
-        cpu: &mut Cpu<OutsourcedMemory<'_>>,
+        cpu: &mut Cpu<OutsourcedMemory<'_, N>>,
         buffer: GuestPointer,
         max_size: usize,
     ) -> Result<usize, CommEcallError> {
@@ -449,20 +436,12 @@ impl<'a> CommEcallHandler<'a> {
         let mut total_received: usize = 0;
         while remaining_length != Some(0) {
             let mut comm = self.comm.borrow_mut();
-            ReceiveBufferMessage::new().serialize_to_comm(&mut comm);
+            let mut resp = comm.begin_response();
+            ReceiveBufferMessage::new().serialize_to_comm(&mut resp);
 
-            let Instruction::Continue(p1, p2) = comm.io_exchange(AppSW::InterruptedExecution)
-            else {
-                return Err(CommEcallError::WrongINS); // expected "Data"
-            };
+            let command = interrupt(resp)?;
 
-            if (p1, p2) != (0, 0) {
-                return Err(CommEcallError::WrongP1P2);
-            }
-
-            let raw_data = comm
-                .get_data()
-                .map_err(|_| CommEcallError::InvalidResponse(""))?;
+            let raw_data = command.get_data();
             let response = ReceiveBufferResponse::deserialize(raw_data)?;
 
             match remaining_length {
@@ -502,7 +481,7 @@ impl<'a> CommEcallHandler<'a> {
     // Sends exactly size bytes from the buffer in the V-app memory to the host
     fn handle_print<E: fmt::Debug>(
         &self,
-        cpu: &mut Cpu<OutsourcedMemory<'_>>,
+        cpu: &mut Cpu<OutsourcedMemory<'_, N>>,
         buffer: GuestPointer,
         size: usize,
     ) -> Result<(), CommEcallError> {
@@ -511,7 +490,7 @@ impl<'a> CommEcallHandler<'a> {
 
     fn handle_bn_modm<E: fmt::Debug>(
         &self,
-        cpu: &mut Cpu<OutsourcedMemory<'_>>,
+        cpu: &mut Cpu<OutsourcedMemory<'_, N>>,
         r: GuestPointer,
         n: GuestPointer,
         len: usize,
@@ -549,7 +528,7 @@ impl<'a> CommEcallHandler<'a> {
 
     fn handle_bn_addm<E: fmt::Debug>(
         &self,
-        cpu: &mut Cpu<OutsourcedMemory<'_>>,
+        cpu: &mut Cpu<OutsourcedMemory<'_, N>>,
         r: GuestPointer,
         a: GuestPointer,
         b: GuestPointer,
@@ -593,7 +572,7 @@ impl<'a> CommEcallHandler<'a> {
 
     fn handle_bn_subm<E: fmt::Debug>(
         &self,
-        cpu: &mut Cpu<OutsourcedMemory<'_>>,
+        cpu: &mut Cpu<OutsourcedMemory<'_, N>>,
         r: GuestPointer,
         a: GuestPointer,
         b: GuestPointer,
@@ -637,7 +616,7 @@ impl<'a> CommEcallHandler<'a> {
 
     fn handle_bn_multm<E: fmt::Debug>(
         &self,
-        cpu: &mut Cpu<OutsourcedMemory<'_>>,
+        cpu: &mut Cpu<OutsourcedMemory<'_, N>>,
         r: GuestPointer,
         a: GuestPointer,
         b: GuestPointer,
@@ -681,7 +660,7 @@ impl<'a> CommEcallHandler<'a> {
 
     fn handle_bn_powm<E: fmt::Debug>(
         &self,
-        cpu: &mut Cpu<OutsourcedMemory<'_>>,
+        cpu: &mut Cpu<OutsourcedMemory<'_, N>>,
         r: GuestPointer,
         a: GuestPointer,
         e: GuestPointer,
@@ -730,7 +709,7 @@ impl<'a> CommEcallHandler<'a> {
 
     fn handle_hash_init<E: fmt::Debug>(
         &self,
-        cpu: &mut Cpu<OutsourcedMemory<'_>>,
+        cpu: &mut Cpu<OutsourcedMemory<'_, N>>,
         hash_id: u32,
         ctx: GuestPointer,
     ) -> Result<(), CommEcallError> {
@@ -760,7 +739,7 @@ impl<'a> CommEcallHandler<'a> {
 
     fn handle_hash_update<E: fmt::Debug>(
         &self,
-        cpu: &mut Cpu<OutsourcedMemory<'_>>,
+        cpu: &mut Cpu<OutsourcedMemory<'_, N>>,
         hash_id: u32,
         ctx: GuestPointer,
         data: GuestPointer,
@@ -810,7 +789,7 @@ impl<'a> CommEcallHandler<'a> {
 
     fn handle_hash_digest<E: fmt::Debug>(
         &self,
-        cpu: &mut Cpu<OutsourcedMemory<'_>>,
+        cpu: &mut Cpu<OutsourcedMemory<'_, N>>,
         hash_id: u32,
         ctx: GuestPointer,
         digest: GuestPointer,
@@ -846,7 +825,7 @@ impl<'a> CommEcallHandler<'a> {
 
     fn handle_derive_hd_node<E: fmt::Debug>(
         &self,
-        cpu: &mut Cpu<OutsourcedMemory<'_>>,
+        cpu: &mut Cpu<OutsourcedMemory<'_, N>>,
         curve: u32,
         path: GuestPointer,
         path_len: usize,
@@ -897,7 +876,7 @@ impl<'a> CommEcallHandler<'a> {
 
     fn handle_get_master_fingerprint<E: fmt::Debug>(
         &self,
-        _cpu: &mut Cpu<OutsourcedMemory<'_>>,
+        _cpu: &mut Cpu<OutsourcedMemory<'_, N>>,
         curve: u32,
     ) -> Result<u32, CommEcallError> {
         if curve != CurveKind::Secp256k1 as u32 {
@@ -957,7 +936,7 @@ impl<'a> CommEcallHandler<'a> {
 
     fn handle_derive_slip21_node<E: fmt::Debug>(
         &self,
-        cpu: &mut Cpu<OutsourcedMemory<'_>>,
+        cpu: &mut Cpu<OutsourcedMemory<'_, N>>,
         labels: GuestPointer,
         labels_len: usize,
         out: GuestPointer,
@@ -997,7 +976,7 @@ impl<'a> CommEcallHandler<'a> {
 
     fn handle_ecfp_add_point<E: fmt::Debug>(
         &self,
-        cpu: &mut Cpu<OutsourcedMemory<'_>>,
+        cpu: &mut Cpu<OutsourcedMemory<'_, N>>,
         curve: u32,
         r: GuestPointer,
         p: GuestPointer,
@@ -1042,7 +1021,7 @@ impl<'a> CommEcallHandler<'a> {
 
     fn handle_ecfp_scalar_mult<E: fmt::Debug>(
         &self,
-        cpu: &mut Cpu<OutsourcedMemory<'_>>,
+        cpu: &mut Cpu<OutsourcedMemory<'_, N>>,
         curve: u32,
         r: GuestPointer,
         p: GuestPointer,
@@ -1091,7 +1070,7 @@ impl<'a> CommEcallHandler<'a> {
 
     fn handle_get_random_bytes<E: fmt::Debug>(
         &self,
-        cpu: &mut Cpu<OutsourcedMemory<'_>>,
+        cpu: &mut Cpu<OutsourcedMemory<'_, N>>,
         buffer: GuestPointer,
         size: usize,
     ) -> Result<u32, CommEcallError> {
@@ -1124,7 +1103,7 @@ impl<'a> CommEcallHandler<'a> {
 
     fn handle_ecdsa_sign<E: fmt::Debug>(
         &self,
-        cpu: &mut Cpu<OutsourcedMemory<'_>>,
+        cpu: &mut Cpu<OutsourcedMemory<'_, N>>,
         curve: u32,
         mode: u32,
         hash_id: u32,
@@ -1192,7 +1171,7 @@ impl<'a> CommEcallHandler<'a> {
 
     fn handle_ecdsa_verify<E: fmt::Debug>(
         &self,
-        cpu: &mut Cpu<OutsourcedMemory<'_>>,
+        cpu: &mut Cpu<OutsourcedMemory<'_, N>>,
         curve: u32,
         pubkey: GuestPointer,
         msg_hash: GuestPointer,
@@ -1240,7 +1219,7 @@ impl<'a> CommEcallHandler<'a> {
 
     fn handle_schnorr_sign<E: fmt::Debug>(
         &self,
-        cpu: &mut Cpu<OutsourcedMemory<'_>>,
+        cpu: &mut Cpu<OutsourcedMemory<'_, N>>,
         curve: u32,
         mode: u32,
         hash_id: u32,
@@ -1333,7 +1312,7 @@ impl<'a> CommEcallHandler<'a> {
 
     fn handle_schnorr_verify<E: fmt::Debug>(
         &self,
-        cpu: &mut Cpu<OutsourcedMemory<'_>>,
+        cpu: &mut Cpu<OutsourcedMemory<'_, N>>,
         curve: u32,
         mode: u32,
         hash_id: u32,
@@ -1402,7 +1381,7 @@ impl<'a> CommEcallHandler<'a> {
 
     fn handle_get_event<E: fmt::Debug>(
         &self,
-        cpu: &mut Cpu<OutsourcedMemory<'_>>,
+        cpu: &mut Cpu<OutsourcedMemory<'_, N>>,
         event_data_ptr: GuestPointer,
     ) -> Result<u32, CommEcallError> {
         if let Some((event_code, event_data)) = get_last_event() {
@@ -1422,6 +1401,7 @@ impl<'a> CommEcallHandler<'a> {
         } else {
             // if there's no stored event, wait for the next ticker and return it
             let mut comm = self.comm.borrow_mut();
+
             wait_for_ticker(&mut comm);
 
             Ok(common::ux::EventCode::Ticker as u32)
@@ -1430,7 +1410,7 @@ impl<'a> CommEcallHandler<'a> {
 
     fn handle_show_page<E: fmt::Debug>(
         &mut self,
-        cpu: &mut Cpu<OutsourcedMemory<'_>>,
+        cpu: &mut Cpu<OutsourcedMemory<'_, N>>,
         page_ptr: GuestPointer,
         page_len: usize,
     ) -> Result<u32, CommEcallError> {
@@ -1452,7 +1432,7 @@ impl<'a> CommEcallHandler<'a> {
 
     fn handle_show_step<E: fmt::Debug>(
         &mut self,
-        cpu: &mut Cpu<OutsourcedMemory<'_>>,
+        cpu: &mut Cpu<OutsourcedMemory<'_, N>>,
         step_ptr: GuestPointer,
         step_len: usize,
     ) -> Result<u32, CommEcallError> {
@@ -1474,7 +1454,7 @@ impl<'a> CommEcallHandler<'a> {
 
     fn handle_get_device_property<E: fmt::Debug>(
         &mut self,
-        _cpu: &mut Cpu<OutsourcedMemory<'_>>,
+        _cpu: &mut Cpu<OutsourcedMemory<'_, N>>,
         property: u32,
     ) -> Result<u32, CommEcallError> {
         match property {
@@ -1487,25 +1467,11 @@ impl<'a> CommEcallHandler<'a> {
 }
 
 // Processes all events until a ticker is received, then returns
-fn wait_for_ticker(comm: &mut RefMut<'_, &mut ledger_device_sdk::io::Comm>) {
+fn wait_for_ticker<const N: usize>(comm: &mut RefMut<'_, &mut ledger_device_sdk::io::Comm<N>>) {
     loop {
-        let mut buffer: [u8; 273] = [0; 273];
-        let status = sys_seph::io_rx(&mut buffer, true);
-        if status > 0 {
-            // TODO: yikes. But this needs to be fixed in the rust-sdk, rather
-            let spi_buffer: [u8; 272] = buffer[1..273].try_into().unwrap();
-            comm.process_event::<Instruction>(spi_buffer, status - 1);
-
-            // TODO: we're ignoring the return value, so we might potentially miss an APDU if it comes at
-            // the wrong time.
-            // We should either find a solution to avoid receiving APDUs here, or have a way to handle them.
-
-            if buffer[0] == ledger_secure_sdk_sys::OS_IO_PACKET_TYPE_SEPH
-                && buffer[1] == ledger_secure_sdk_sys::SEPROXYHAL_TAG_TICKER_EVENT as u8
-            {
-                // we received a ticker event, so we can return
-                break;
-            }
+        let ety = comm.try_next_event().into_type();
+        if matches!(ety, DecodedEventType::Ticker) {
+            return;
         }
     }
 }
@@ -1544,11 +1510,14 @@ fn get_ecall_name(ecall_code: u32) -> String {
     }
 }
 
-impl<'a> EcallHandler for CommEcallHandler<'a> {
-    type Memory = OutsourcedMemory<'a>;
+impl<'a, const N: usize> EcallHandler for CommEcallHandler<'a, N> {
+    type Memory = OutsourcedMemory<'a, N>;
     type Error = CommEcallError;
 
-    fn handle_ecall(&mut self, cpu: &mut Cpu<OutsourcedMemory<'a>>) -> Result<(), CommEcallError> {
+    fn handle_ecall(
+        &mut self,
+        cpu: &mut Cpu<OutsourcedMemory<'a, N>>,
+    ) -> Result<(), CommEcallError> {
         macro_rules! reg {
             ($reg:ident) => {
                 cpu.regs[Register::$reg.as_index() as usize]
@@ -1798,7 +1767,7 @@ impl<'a> EcallHandler for CommEcallHandler<'a> {
     }
 }
 
-impl<'a> Drop for CommEcallHandler<'a> {
+impl<'a, const N: usize> Drop for CommEcallHandler<'a, N> {
     fn drop(&mut self) {
         drop_ux_handler();
     }

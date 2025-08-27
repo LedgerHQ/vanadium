@@ -3,7 +3,7 @@ use ledger_device_sdk::{io::Comm, nbgl::NbglHomeAndSettings};
 
 use ledger_device_sdk::nbgl::NbglGlyph;
 
-pub fn ui_menu_main(_: &mut Comm) -> NbglHomeAndSettings {
+pub fn ui_menu_main(_: &mut Comm<{ crate::COMM_BUFFER_SIZE }>) -> NbglHomeAndSettings {
     // Load glyph from 64x64 4bpp gif file with include_gif macro. Creates an NBGL compatible glyph.
     #[cfg(any(target_os = "stax", target_os = "flex"))]
     const VANADIUM_ICON: NbglGlyph =

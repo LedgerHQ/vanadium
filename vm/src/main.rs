@@ -33,11 +33,11 @@ use handlers::{
     get_version::handler_get_version, register_vapp::handler_register_vapp,
     start_vapp::handler_start_vapp,
 };
-use ledger_device_sdk::io::{ApduHeader, Comm, Reply, StatusWords};
+use ledger_device_sdk::io::{ApduHeader, Comm, Command, Reply, StatusWords};
 
 extern crate alloc;
 
-use ledger_device_sdk::nbgl::init_comm;
+pub const COMM_BUFFER_SIZE: usize = 600;
 
 // define print! and println! macros using debug_printf (only for running on Speculos)
 #[macro_export]
@@ -114,8 +114,8 @@ fn handle_panic(info: &core::panic::PanicInfo) -> ! {
     };
     println!("{}", message);
 
-    let mut comm = ledger_device_sdk::io::Comm::new_with_data_size(600);
-    comm.reply(ledger_device_sdk::io::StatusWords::Panic);
+    let mut comm = Comm::<COMM_BUFFER_SIZE>::new();
+    let _ = comm.send(&[], ledger_device_sdk::io::StatusWords::Panic);
 
     ledger_device_sdk::exit_app(0x01)
 }
@@ -140,12 +140,42 @@ pub enum AppSW {
     VMRuntimeError = 0xB020,
     VAppPanic = 0xB021,
 
+    Unknown = 0xCCCC,
+
     Ok = 0x9000,
 }
 
 impl From<AppSW> for Reply {
     fn from(sw: AppSW) -> Reply {
         Reply(sw as u16)
+    }
+}
+
+impl From<AppSW> for u16 {
+    fn from(sw: AppSW) -> u16 {
+        sw as u16
+    }
+}
+
+// TODO: get rid of this
+impl From<Reply> for AppSW {
+    fn from(r: Reply) -> Self {
+        match r.0 {
+            x if x == AppSW::Deny as u16 => AppSW::Deny,
+            x if x == AppSW::IncorrectData as u16 => AppSW::IncorrectData,
+            x if x == AppSW::WrongP1P2 as u16 => AppSW::WrongP1P2,
+            x if x == AppSW::InsNotSupported as u16 => AppSW::InsNotSupported,
+            x if x == AppSW::ClaNotSupported as u16 => AppSW::ClaNotSupported,
+            x if x == AppSW::SignatureFail as u16 => AppSW::SignatureFail,
+            x if x == AppSW::KeyDeriveFail as u16 => AppSW::KeyDeriveFail,
+            x if x == AppSW::VersionParsingFail as u16 => AppSW::VersionParsingFail,
+            x if x == AppSW::InterruptedExecution as u16 => AppSW::InterruptedExecution,
+            x if x == AppSW::WrongApduLength as u16 => AppSW::WrongApduLength,
+            x if x == AppSW::VMRuntimeError as u16 => AppSW::VMRuntimeError,
+            x if x == AppSW::VAppPanic as u16 => AppSW::VAppPanic,
+            x if x == AppSW::Ok as u16 => AppSW::Ok,
+            _ => AppSW::Unknown,
+        }
     }
 }
 
@@ -192,24 +222,19 @@ extern "C" fn sample_main() {
     // Create the communication manager, and configure it to accept only APDU from the 0xe0 class.
     // If any APDU with a wrong class value is received, comm will respond automatically with
     // BadCla status word.
-    let mut comm = Comm::new_with_data_size(752).set_expected_cla(0xe0);
-    init_comm(&mut comm);
+    let mut comm = Comm::<COMM_BUFFER_SIZE>::new();
 
     let mut home = ui_menu_main(&mut comm);
     home.show_and_return();
 
     loop {
-        let ins: Instruction = comm.next_command();
-
-        let _status = match handle_apdu(&mut comm, ins) {
+        let command = comm.next_command();
+        let _status = match handle_apdu(command) {
             Ok(data) => {
-                comm.append(&data);
-                comm.reply_ok();
-                AppSW::Ok
+                let _ = comm.send(&data, AppSW::Ok);
             }
             Err(sw) => {
-                comm.reply(sw.clone());
-                sw
+                let _ = comm.send(&[], sw);
             }
         };
         home.show_and_return();
@@ -223,15 +248,15 @@ extern "C" fn sample_main() {
     ledger_device_sdk::exit_app(0x00);
 }
 
-fn handle_apdu(comm: &mut Comm, ins: Instruction) -> Result<Vec<u8>, AppSW> {
+fn handle_apdu(command: Command<COMM_BUFFER_SIZE>) -> Result<Vec<u8>, AppSW> {
+    let ins: Instruction = command
+        .decode::<Instruction>()
+        .map_err(|sw| AppSW::from(sw))?;
     match ins {
-        Instruction::GetAppName => {
-            comm.append(env!("CARGO_PKG_NAME").as_bytes());
-            Ok(vec![])
-        }
-        Instruction::GetVersion => handler_get_version(comm),
-        Instruction::RegisterVApp => handler_register_vapp(comm),
-        Instruction::StartVApp => handler_start_vapp(comm),
+        Instruction::GetAppName => Ok(env!("CARGO_PKG_NAME").as_bytes().to_vec()),
+        Instruction::GetVersion => handler_get_version(command),
+        Instruction::RegisterVApp => handler_register_vapp(command),
+        Instruction::StartVApp => handler_start_vapp(command),
         Instruction::Continue(_, _) => Err(AppSW::InsNotSupported), // 'Continue' command is only allowed when requested by the VM
     }
 }

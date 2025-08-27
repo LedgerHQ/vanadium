@@ -5,12 +5,14 @@ pub mod evict;
 pub mod outsourced_mem;
 pub mod vapp;
 
-trait SerializeToComm {
-    fn serialize_to_comm(&self, comm: &mut ledger_device_sdk::io::Comm);
+trait SerializeToComm<const N: usize> {
+    fn serialize_to_comm(&self, response: &mut ledger_device_sdk::io::CommandResponse<'_, N>);
 }
 
-impl<'a, T: Message<'a>> SerializeToComm for T {
-    fn serialize_to_comm(&self, comm: &mut ledger_device_sdk::io::Comm) {
-        self.serialize_with(|data| comm.append(data));
+impl<'a, T: Message<'a>, const N: usize> SerializeToComm<N> for T {
+    fn serialize_to_comm(&self, response: &mut ledger_device_sdk::io::CommandResponse<'_, N>) {
+        self.serialize_with(|data| {
+            response.append(data).unwrap();
+        });
     }
 }

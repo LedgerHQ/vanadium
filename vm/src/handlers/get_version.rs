@@ -14,15 +14,15 @@
  *  See the License for the specific language governing permissions and
  *  limitations under the License.
  *****************************************************************************/
-use crate::AppSW;
-use alloc::{vec, vec::Vec};
+use crate::{AppSW, COMM_BUFFER_SIZE};
+use alloc::vec::Vec;
 use core::str::FromStr;
-use ledger_device_sdk::io;
 
-pub fn handler_get_version(comm: &mut io::Comm) -> Result<Vec<u8>, AppSW> {
+pub fn handler_get_version(
+    _command: ledger_device_sdk::io::Command<COMM_BUFFER_SIZE>,
+) -> Result<Vec<u8>, AppSW> {
     if let Some((major, minor, patch)) = parse_version_string(env!("CARGO_PKG_VERSION")) {
-        comm.append(&[major, minor, patch]);
-        Ok(vec![])
+        Ok([major, minor, patch].to_vec())
     } else {
         Err(AppSW::VersionParsingFail)
     }

@@ -16,10 +16,12 @@ use super::lib::{
     vapp::get_vapp_hmac,
 };
 use crate::aes::{AesCtr, AesKey};
-use crate::{println, AppSW};
+use crate::{println, AppSW, COMM_BUFFER_SIZE};
 
-pub fn handler_start_vapp(comm: &mut io::Comm) -> Result<Vec<u8>, AppSW> {
-    let data_raw = comm.get_data().map_err(|_| AppSW::WrongApduLength)?;
+pub fn handler_start_vapp(
+    command: ledger_device_sdk::io::Command<COMM_BUFFER_SIZE>,
+) -> Result<Vec<u8>, AppSW> {
+    let data_raw = command.get_data();
 
     let (manifest, provided_hmac) =
         postcard::take_from_bytes::<Manifest>(data_raw).map_err(|_| AppSW::IncorrectData)?;
@@ -38,6 +40,7 @@ pub fn handler_start_vapp(comm: &mut io::Comm) -> Result<Vec<u8>, AppSW> {
     println!("Running app with Manifest: {:?}", manifest);
     println!("hmac: {:?}", provided_hmac);
 
+    let comm = command.into_comm();
     let comm = Rc::new(RefCell::new(comm));
 
     let aes_ctr = Rc::new(RefCell::new(AesCtr::new(
@@ -60,7 +63,7 @@ pub fn handler_start_vapp(comm: &mut io::Comm) -> Result<Vec<u8>, AppSW> {
             n_code_cache_pages / 2,
         )),
     );
-    let code_seg = MemorySegment::<OutsourcedMemory>::new(
+    let code_seg = MemorySegment::<OutsourcedMemory<'_, COMM_BUFFER_SIZE>>::new(
         manifest.code_start,
         manifest.code_end - manifest.code_start,
         &mut code_mem,
@@ -77,7 +80,7 @@ pub fn handler_start_vapp(comm: &mut io::Comm) -> Result<Vec<u8>, AppSW> {
         aes_ctr.clone(),
         Box::new(LruEvictionStrategy::new(n_data_cache_pages)),
     );
-    let data_seg = MemorySegment::<OutsourcedMemory>::new(
+    let data_seg = MemorySegment::<OutsourcedMemory<'_, COMM_BUFFER_SIZE>>::new(
         manifest.data_start,
         manifest.data_end - manifest.data_start,
         &mut data_mem,
@@ -94,7 +97,7 @@ pub fn handler_start_vapp(comm: &mut io::Comm) -> Result<Vec<u8>, AppSW> {
         aes_ctr.clone(),
         Box::new(LruEvictionStrategy::new(n_stack_cache_pages)),
     );
-    let stack_seg = MemorySegment::<OutsourcedMemory>::new(
+    let stack_seg = MemorySegment::<OutsourcedMemory<'_, COMM_BUFFER_SIZE>>::new(
         manifest.stack_start,
         manifest.stack_end - manifest.stack_start,
         &mut stack_mem,

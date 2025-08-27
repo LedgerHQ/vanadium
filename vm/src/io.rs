@@ -1,41 +1,25 @@
 use ledger_device_sdk::io;
 
-// This trait encapsulates some customized functions that the Ledger Vanadium app
-// implements on top of the io::Comm
-pub trait CommExt {
-    fn reply_fast<T: Into<io::Reply>>(&mut self, reply: T);
+use crate::{AppSW, Instruction};
 
-    fn io_exchange<R, T>(&mut self, reply: R) -> T
-    where
-        R: Into<io::Reply>,
-        T: TryFrom<io::ApduHeader>,
-        io::Reply: From<<T as TryFrom<io::ApduHeader>>::Error>;
-}
+// Helper function to send the InterruptedExecution response, and make sure the next command is 'Continue'
+pub fn interrupt<'a, const N: usize>(
+    response: io::CommandResponse<'a, N>,
+) -> Result<io::Command<'a, N>, common::vm::MemoryError> {
+    let comm = response.send(AppSW::InterruptedExecution).unwrap();
+    let command = comm.next_command();
 
-impl CommExt for io::Comm {
-    fn reply_fast<T: Into<io::Reply>>(&mut self, reply: T) {
-        let sw = reply.into().0;
-        self.io_buffer[self.tx_length] = (sw >> 8) as u8;
-        self.io_buffer[self.tx_length + 1] = sw as u8;
-        self.tx_length += 2;
+    let ins = command
+        .decode::<Instruction>()
+        .map_err(|_: io::Reply| common::vm::MemoryError::GenericError("Invalid response"))?;
 
-        if self.tx != 0 {
-            ledger_secure_sdk_sys::seph::io_tx(self.apdu_type, &self.apdu_buffer, self.tx);
-            self.tx = 0;
-        } else {
-            ledger_secure_sdk_sys::seph::io_tx(self.apdu_type, &self.io_buffer, self.tx_length);
-        }
-        self.tx_length = 0;
-        self.rx_length = 0;
+    let Instruction::Continue(p1, p2) = ins else {
+        // expected "Continue"
+        return Err(common::vm::MemoryError::GenericError("INS not supported"));
+    };
+    if (p1, p2) != (0, 0) {
+        return Err(common::vm::MemoryError::GenericError("Wrong P1/P2"));
     }
 
-    fn io_exchange<R, T>(&mut self, reply: R) -> T
-    where
-        R: Into<io::Reply>,
-        T: TryFrom<io::ApduHeader>,
-        io::Reply: From<<T as TryFrom<io::ApduHeader>>::Error>,
-    {
-        self.reply_fast(reply);
-        self.next_command()
-    }
+    Ok(command)
 }

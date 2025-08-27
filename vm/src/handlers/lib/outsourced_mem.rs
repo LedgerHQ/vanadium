@@ -17,11 +17,10 @@ use common::constants::PAGE_SIZE;
 
 use crate::aes::AesCtr;
 use crate::hash::Sha256Hasher;
-use crate::{AppSW, Instruction};
 
 use super::SerializeToComm;
 use crate::handlers::lib::evict::PageEvictionStrategy;
-use crate::io::CommExt;
+use crate::io::interrupt;
 
 #[derive(Clone, Debug)]
 struct CachedPage {
@@ -46,8 +45,8 @@ impl Default for CachedPage {
     }
 }
 
-pub struct OutsourcedMemory<'c> {
-    comm: Rc<RefCell<&'c mut io::Comm>>,
+pub struct OutsourcedMemory<'c, const N: usize> {
+    comm: Rc<RefCell<&'c mut io::Comm<N>>>,
     cached_pages: Vec<CachedPage>,
     n_pages: u32,
     merkle_root: HashOutput<32>,
@@ -63,7 +62,7 @@ pub struct OutsourcedMemory<'c> {
     pub n_page_commits: usize,
 }
 
-impl<'c> core::fmt::Debug for OutsourcedMemory<'c> {
+impl<'c, const N: usize> core::fmt::Debug for OutsourcedMemory<'c, N> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("OutsourcedMemory")
             .field("comm", &"...")
@@ -95,9 +94,9 @@ fn get_page_hash(
     hasher.finalize_inplace().into()
 }
 
-impl<'c> OutsourcedMemory<'c> {
+impl<'c, const N: usize> OutsourcedMemory<'c, N> {
     pub fn new(
-        comm: Rc<RefCell<&'c mut io::Comm>>,
+        comm: Rc<RefCell<&'c mut io::Comm<N>>>,
         max_pages_in_cache: usize,
         is_readonly: bool,
         section_kind: SectionKind,
@@ -159,6 +158,7 @@ impl<'c> OutsourcedMemory<'c> {
             .expect("The payload is the correct size");
 
         let mut comm = self.comm.borrow_mut();
+        let mut resp = comm.begin_response();
         CommitPageMessage::new(
             self.section_kind,
             cached_page.idx,
@@ -166,21 +166,12 @@ impl<'c> OutsourcedMemory<'c> {
             nonce,
             payload_array,
         )
-        .serialize_to_comm(&mut comm);
+        .serialize_to_comm(&mut resp);
 
-        let Instruction::Continue(p1, p2) = comm.io_exchange(AppSW::InterruptedExecution) else {
-            return Err(common::vm::MemoryError::GenericError("INS not supported"));
-            // expected "Continue"
-        };
-
-        if (p1, p2) != (0, 0) {
-            return Err(common::vm::MemoryError::GenericError("Wrong P1/P2"));
-        }
+        let command = interrupt(resp)?;
 
         // Decode the proof
-        let proof_data = comm.get_data().map_err(|_| {
-            common::vm::MemoryError::GenericError("Wrong APDU length in proof response")
-        })?;
+        let proof_data = command.get_data();
 
         let proof_response = CommitPageProofResponse::deserialize(&proof_data)
             .map_err(|_| common::vm::MemoryError::GenericError("Invalid proof data"))?;
@@ -216,29 +207,13 @@ impl<'c> OutsourcedMemory<'c> {
 
         // If we need more elements, request them
         while n_processed_elements < n as usize {
-            CommitPageProofContinuedMessage::new().serialize_to_comm(&mut comm);
+            let mut resp = comm.begin_response();
+            CommitPageProofContinuedMessage::new().serialize_to_comm(&mut resp);
 
-            let Instruction::Continue(p1, p2) = comm.io_exchange(AppSW::InterruptedExecution)
-            else {
-                return Err(common::vm::MemoryError::GenericError(
-                    "INS not supported during continued proof request",
-                ));
-            };
-
-            if (p1, p2) != (0, 0) {
-                return Err(common::vm::MemoryError::GenericError(
-                    "Wrong P1/P2 in continued proof response",
-                ));
-            }
-
-            let continued_proof_data = comm.get_data().map_err(|_| {
-                common::vm::MemoryError::GenericError(
-                    "Wrong APDU length in continued proof response",
-                )
-            })?;
+            let command = interrupt(resp)?;
 
             let continued_response = CommitPageProofContinuedResponse::deserialize(
-                &continued_proof_data,
+                &command.get_data(),
             )
             .map_err(|_| common::vm::MemoryError::GenericError("Invalid continued proof data"))?;
 
@@ -284,22 +259,12 @@ impl<'c> OutsourcedMemory<'c> {
         );
 
         let mut comm = self.comm.borrow_mut();
-        GetPageMessage::new(self.section_kind, page_index).serialize_to_comm(&mut comm);
+        let mut resp = comm.begin_response();
+        GetPageMessage::new(self.section_kind, page_index).serialize_to_comm(&mut resp);
 
-        let Instruction::Continue(p1, p2) = comm.io_exchange(AppSW::InterruptedExecution) else {
-            // expected "Continue"
-            return Err(common::vm::MemoryError::GenericError("INS not supported"));
-        };
+        let command = interrupt(resp)?;
 
-        if p1 != 0 || p2 != 0 {
-            return Err(common::vm::MemoryError::GenericError("Wrong P1/P2"));
-        }
-
-        let fetched_data = comm
-            .get_data()
-            .map_err(|_| common::vm::MemoryError::GenericError("Wrong APDU length"))?;
-
-        let page_response = GetPageResponse::deserialize(&fetched_data)
+        let page_response = GetPageResponse::deserialize(command.get_data())
             .map_err(|_| common::vm::MemoryError::GenericError("Invalid page data"))?;
 
         let page_hash = if page_response.is_encrypted {
@@ -336,33 +301,18 @@ impl<'c> OutsourcedMemory<'c> {
 
         let mut n_processed_elements = page_response.t as usize;
         let data = *page_response.page_data;
+
         // If we need more elements, request them
         while n_processed_elements < n as usize {
-            GetPageProofContinuedMessage::new().serialize_to_comm(&mut comm);
+            let mut resp = comm.begin_response();
+            GetPageProofContinuedMessage::new().serialize_to_comm(&mut resp);
 
-            let Instruction::Continue(p1, p2) = comm.io_exchange(AppSW::InterruptedExecution)
-            else {
-                return Err(common::vm::MemoryError::GenericError(
-                    "INS not supported during continued proof request",
-                ));
-            };
+            let command = interrupt(resp)?;
 
-            if (p1, p2) != (0, 0) {
-                return Err(common::vm::MemoryError::GenericError(
-                    "Wrong P1/P2 in continued proof response",
-                ));
-            }
-
-            let continued_proof_data = comm.get_data().map_err(|_| {
-                common::vm::MemoryError::GenericError(
-                    "Wrong APDU length in continued proof response",
-                )
-            })?;
-
-            let continued_response = GetPageProofContinuedResponse::deserialize(
-                &continued_proof_data,
-            )
-            .map_err(|_| common::vm::MemoryError::GenericError("Invalid continued proof data"))?;
+            let continued_response =
+                GetPageProofContinuedResponse::deserialize(&command.get_data()).map_err(|_| {
+                    common::vm::MemoryError::GenericError("Invalid continued proof data")
+                })?;
 
             if continued_response.t as usize != continued_response.proof.len() {
                 return Err(common::vm::MemoryError::GenericError(
@@ -422,7 +372,7 @@ impl<'a> core::ops::DerefMut for CachedPageRef<'a> {
     }
 }
 
-impl<'c> OutsourcedMemory<'c> {
+impl<'c, const N: usize> OutsourcedMemory<'c, N> {
     #[inline]
     /// Returns a mutable reference to the page in the cache, updating the last accessed page.
     fn get_cached_page_ref(&mut self, page_index: u32, slot: usize) -> CachedPageRef<'_> {
@@ -433,7 +383,7 @@ impl<'c> OutsourcedMemory<'c> {
     }
 }
 
-impl<'c> PagedMemory for OutsourcedMemory<'c> {
+impl<'c, const N: usize> PagedMemory for OutsourcedMemory<'c, N> {
     type PageRef<'a>
         = CachedPageRef<'a>
     where

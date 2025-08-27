@@ -1,15 +1,14 @@
 use crate::handlers::lib::vapp::get_vapp_hmac;
-use crate::{hash::Sha256Hasher, AppSW};
-use alloc::{vec, vec::Vec};
+use crate::{hash::Sha256Hasher, AppSW, COMM_BUFFER_SIZE};
+use alloc::vec::Vec;
 use common::manifest::Manifest;
 use include_gif::include_gif;
-use ledger_device_sdk::{
-    io,
-    nbgl::{Field, NbglGlyph, NbglReview},
-};
+use ledger_device_sdk::nbgl::{Field, NbglGlyph, NbglReview};
 
-pub fn handler_register_vapp(comm: &mut io::Comm) -> Result<Vec<u8>, AppSW> {
-    let data_raw = comm.get_data().map_err(|_| AppSW::WrongApduLength)?;
+pub fn handler_register_vapp(
+    command: ledger_device_sdk::io::Command<COMM_BUFFER_SIZE>,
+) -> Result<Vec<u8>, AppSW> {
+    let data_raw = command.get_data();
 
     let (manifest, rest) =
         postcard::take_from_bytes::<Manifest>(data_raw).map_err(|_| AppSW::IncorrectData)?;
@@ -65,7 +64,6 @@ pub fn handler_register_vapp(comm: &mut io::Comm) -> Result<Vec<u8>, AppSW> {
     }
 
     let vapp_hmac = get_vapp_hmac(&manifest);
-    comm.append(&vapp_hmac);
 
-    Ok(vec![])
+    Ok(vapp_hmac.to_vec())
 }
