@@ -3,7 +3,7 @@ pub trait ToIconDetails {
     fn to_icon_details(&self) -> *const nbgl_icon_details_t;
 }
 
-#[cfg(any(target_os = "stax", target_os = "flex"))]
+#[cfg(any(target_os = "stax", target_os = "flex", target_os = "apex_p"))]
 mod large_screen {
     use super::*;
     use ledger_secure_sdk_sys::{nbgl_icon_details_t, NBGL_BPP_4};
@@ -120,7 +120,7 @@ mod large_screen {
     }
 }
 
-#[cfg(not(any(target_os = "stax", target_os = "flex")))]
+#[cfg(any(target_os = "nanosplus", target_os = "nanox"))]
 mod small_screen {
     use super::*;
     use ledger_secure_sdk_sys::{nbgl_icon_details_t, NBGL_BPP_1};

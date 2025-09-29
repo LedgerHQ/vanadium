@@ -1,4 +1,4 @@
-#[cfg(not(any(target_os = "stax", target_os = "flex")))]
+#[cfg(any(target_os = "nanosplus", target_os = "nanox"))]
 use core::ffi::c_void;
 
 use alloc::{ffi::CString, string::String, vec::Vec};
@@ -11,15 +11,15 @@ use super::bitmaps::ToIconDetails;
 
 use super::CommEcallError;
 
-#[cfg(any(target_os = "stax", target_os = "flex"))]
+#[cfg(any(target_os = "stax", target_os = "flex", target_os = "apex_p"))]
 const TOKEN_CONFIRM_REJECT: u8 = 0;
-#[cfg(any(target_os = "stax", target_os = "flex"))]
+#[cfg(any(target_os = "stax", target_os = "flex", target_os = "apex_p"))]
 const TOKEN_QUIT: u8 = 1;
-#[cfg(any(target_os = "stax", target_os = "flex"))]
+#[cfg(any(target_os = "stax", target_os = "flex", target_os = "apex_p"))]
 const TOKEN_SKIP: u8 = 2;
-#[cfg(any(target_os = "stax", target_os = "flex"))]
+#[cfg(any(target_os = "stax", target_os = "flex", target_os = "apex_p"))]
 const TOKEN_NAVIGATION: u8 = 3;
-#[cfg(any(target_os = "stax", target_os = "flex"))]
+#[cfg(any(target_os = "stax", target_os = "flex", target_os = "apex_p"))]
 const TOKEN_TITLE: u8 = 4;
 
 static mut LAST_EVENT: Option<(common::ux::EventCode, common::ux::EventData)> = None;
@@ -44,7 +44,7 @@ fn store_new_event(event_code: common::ux::EventCode, event_data: common::ux::Ev
 }
 
 // nbgl_layoutTouchCallback_t
-#[cfg(any(target_os = "stax", target_os = "flex"))]
+#[cfg(any(target_os = "stax", target_os = "flex", target_os = "apex_p"))]
 unsafe extern "C" fn layout_touch_callback(token: core::ffi::c_int, index: u8) {
     let action = match (token as u8, index) {
         (TOKEN_CONFIRM_REJECT, 0) => common::ux::Action::Confirm,
@@ -78,7 +78,7 @@ unsafe extern "C" fn layout_touch_callback(token: core::ffi::c_int, index: u8) {
 }
 
 // nbgl_stepButtonCallback_t
-#[cfg(not(any(target_os = "stax", target_os = "flex")))]
+#[cfg(any(target_os = "nanosplus", target_os = "nanox"))]
 unsafe extern "C" fn step_button_callback(
     _layout: *mut c_void,
     button_event: ledger_secure_sdk_sys::nbgl_buttonEvent_t,
@@ -104,11 +104,11 @@ unsafe extern "C" fn step_button_callback(
 
 pub struct UxHandler {
     cstrings: Vec<CString>,
-    #[cfg(not(any(target_os = "stax", target_os = "flex")))]
+    #[cfg(any(target_os = "nanosplus", target_os = "nanox"))]
     step_handle: *mut c_void, // handle returned by nbgl when drawing a step; should be freed before drawing a new step
-    #[cfg(any(target_os = "stax", target_os = "flex"))]
+    #[cfg(any(target_os = "stax", target_os = "flex", target_os = "apex_p"))]
     cur_page: u8,
-    #[cfg(any(target_os = "stax", target_os = "flex"))]
+    #[cfg(any(target_os = "stax", target_os = "flex", target_os = "apex_p"))]
     page_handle: *mut sys::nbgl_page_t, // handle returned by nbgl when drawing a page; should be freed before drawing a new page
 }
 
@@ -131,7 +131,7 @@ pub fn init_ux_handler() -> &'static mut UxHandler {
     }
 }
 
-#[cfg(any(target_os = "stax", target_os = "flex"))]
+#[cfg(any(target_os = "stax", target_os = "flex", target_os = "apex_p"))]
 pub fn get_ux_handler() -> &'static mut UxHandler {
     unsafe {
         if !UX_HANDLER_INITIALIZED {
@@ -161,12 +161,12 @@ pub fn drop_ux_handler() {
 impl UxHandler {
     // We keep the constructor private in order to manage the singleton instance
     fn new() -> Self {
-        #[cfg(not(any(target_os = "stax", target_os = "flex")))]
+        #[cfg(any(target_os = "nanosplus", target_os = "nanox"))]
         return Self {
             cstrings: Vec::new(),
             step_handle: core::ptr::null_mut(),
         };
-        #[cfg(any(target_os = "stax", target_os = "flex"))]
+        #[cfg(any(target_os = "stax", target_os = "flex", target_os = "apex_p"))]
         return Self {
             cstrings: Vec::new(),
             cur_page: 0,
@@ -193,7 +193,7 @@ impl UxHandler {
     // This should always be called before drawing a new step or page, in order to
     // make sure that the resources of the previous step/page are released
     fn release_handle(&mut self) {
-        #[cfg(any(target_os = "stax", target_os = "flex"))]
+        #[cfg(any(target_os = "stax", target_os = "flex", target_os = "apex_p"))]
         unsafe {
             if !self.page_handle.is_null() {
                 sys::nbgl_pageRelease(self.page_handle);
@@ -201,7 +201,7 @@ impl UxHandler {
             }
         }
 
-        #[cfg(not(any(target_os = "stax", target_os = "flex")))]
+        #[cfg(any(target_os = "nanosplus", target_os = "nanox"))]
         unsafe {
             if !self.step_handle.is_null() {
                 sys::nbgl_stepRelease(self.step_handle);
@@ -210,12 +210,12 @@ impl UxHandler {
         }
     }
 
-    #[cfg(not(any(target_os = "stax", target_os = "flex")))]
+    #[cfg(any(target_os = "nanosplus", target_os = "nanox"))]
     pub fn show_page(&mut self, _page: &Page) -> Result<(), CommEcallError> {
         Err(CommEcallError::UnhandledEcall)
     }
 
-    #[cfg(any(target_os = "stax", target_os = "flex"))]
+    #[cfg(any(target_os = "stax", target_os = "flex", target_os = "apex_p"))]
     pub fn show_page(&mut self, page: &Page) -> Result<(), CommEcallError> {
         match page {
             common::ux::Page::Spinner { text } => unsafe {
@@ -482,12 +482,12 @@ impl UxHandler {
         Ok(())
     }
 
-    #[cfg(any(target_os = "stax", target_os = "flex"))]
+    #[cfg(any(target_os = "stax", target_os = "flex", target_os = "apex_p"))]
     pub fn show_step(&mut self, _step: &Step) -> Result<(), CommEcallError> {
         Err(CommEcallError::UnhandledEcall)
     }
 
-    #[cfg(not(any(target_os = "stax", target_os = "flex")))]
+    #[cfg(any(target_os = "nanosplus", target_os = "nanox"))]
     pub fn show_step(&mut self, step: &Step) -> Result<(), CommEcallError> {
         match step {
             Step::TextSubtext {

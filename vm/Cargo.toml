@@ -63,6 +63,6 @@ icon = "vanadium_32x32.gif"
 icon = "vanadium_40x40.gif"
 
 [lints.rust]
-unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_os, values("stax", "flex", "nanos", "nanox", "nanosplus"))'] }
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_os, values("stax", "flex", "apex_p", "nanos", "nanox", "nanosplus"))'] }
 
 [workspace]

@@ -20,6 +20,9 @@ pub fn handler_register_vapp(
     #[cfg(any(target_os = "stax", target_os = "flex"))]
     const VANADIUM_ICON: NbglGlyph =
         NbglGlyph::from_include(include_gif!("vanadium_64x64.gif", NBGL));
+    #[cfg(any(target_os = "apex_p"))]
+    const VANADIUM_ICON: NbglGlyph =
+        NbglGlyph::from_include(include_gif!("vanadium_48x48.gif", NBGL));
     #[cfg(any(target_os = "nanosplus", target_os = "nanox"))]
     const VANADIUM_ICON: NbglGlyph =
         NbglGlyph::from_include(include_gif!("vanadium_16x16.gif", NBGL));

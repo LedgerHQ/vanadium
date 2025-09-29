@@ -5,4 +5,4 @@
 [app]
 build_directory = "./"
 sdk = "Rust"
-devices = ["nanox", "nanos+", "stax", "flex"]
+devices = ["nanox", "nanos+", "stax", "flex", "apex_p"]

@@ -5,7 +5,7 @@ use ledger_device_sdk::nbgl::NbglGlyph;
 
 pub fn ui_menu_main(_: &mut Comm<{ crate::COMM_BUFFER_SIZE }>) -> NbglHomeAndSettings {
     // Load glyph from 64x64 4bpp gif file with include_gif macro. Creates an NBGL compatible glyph.
-    #[cfg(any(target_os = "stax", target_os = "flex"))]
+    #[cfg(any(target_os = "stax", target_os = "flex", target_os = "apex_p"))]
     const VANADIUM_ICON: NbglGlyph =
         NbglGlyph::from_include(include_gif!("vanadium_64x64.gif", NBGL));
     #[cfg(any(target_os = "nanosplus", target_os = "nanox"))]

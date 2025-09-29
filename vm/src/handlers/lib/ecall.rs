@@ -65,11 +65,19 @@ mod device_props {
     pub const SCREEN_HEIGHT: u16 = 600;
 }
 
+#[cfg(target_os = "apex_p")]
+mod device_props {
+    pub const PRODUCT_ID: u16 = 0x80;
+    pub const SCREEN_WIDTH: u16 = 300;
+    pub const SCREEN_HEIGHT: u16 = 400;
+}
+
 #[cfg(not(any(
     target_os = "nanox",
     target_os = "nanosplus",
     target_os = "stax",
-    target_os = "flex"
+    target_os = "flex",
+    target_os = "apex_p"
 )))]
 compile_error!("Unsupported target OS. Only nanox, nanosplus, stax, and flex are supported.");
 
