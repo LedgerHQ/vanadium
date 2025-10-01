@@ -10,7 +10,7 @@ pub fn ui_menu_main(_: &mut Comm<{ crate::COMM_BUFFER_SIZE }>) -> NbglHomeAndSet
         NbglGlyph::from_include(include_gif!("vanadium_64x64.gif", NBGL));
     #[cfg(any(target_os = "nanosplus", target_os = "nanox"))]
     const VANADIUM_ICON: NbglGlyph =
-        NbglGlyph::from_include(include_gif!("vanadium_16x16.gif", NBGL));
+        NbglGlyph::from_include(include_gif!("vanadium_14x14.gif", NBGL));
 
     // Display the home screen.
     NbglHomeAndSettings::new()
