@@ -26,7 +26,10 @@ mod ecalls_riscv;
 #[cfg(not(target_arch = "riscv32"))]
 mod ecalls_native;
 
-mod ux_generated;
+#[allow(unused_assignments)]
+mod ux_generated {
+    include!(concat!(env!("OUT_DIR"), "/ux_generated.rs"));
+}
 
 #[cfg(target_arch = "riscv32")]
 use embedded_alloc::Heap;
