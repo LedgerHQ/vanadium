@@ -32,9 +32,10 @@ mod ux_generated;
 use embedded_alloc::Heap;
 
 #[cfg(target_arch = "riscv32")]
-const HEAP_SIZE: usize = 65536;
+include!(concat!(env!("OUT_DIR"), "/heap_config.rs"));
+
 #[cfg(target_arch = "riscv32")]
-static mut HEAP_MEM: [u8; HEAP_SIZE] = [0; HEAP_SIZE];
+static mut HEAP_MEM: [u8; VAPP_HEAP_SIZE] = [0; VAPP_HEAP_SIZE];
 
 #[cfg(target_arch = "riscv32")]
 #[global_allocator]
@@ -44,7 +45,7 @@ static HEAP: Heap = Heap::empty();
 fn init_heap() {
     unsafe {
         #[allow(static_mut_refs)]
-        HEAP.init(HEAP_MEM.as_mut_ptr() as usize, HEAP_SIZE);
+        HEAP.init(HEAP_MEM.as_mut_ptr() as usize, VAPP_HEAP_SIZE);
     }
 }
 

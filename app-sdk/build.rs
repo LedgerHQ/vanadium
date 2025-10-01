@@ -1,4 +1,4 @@
-use std::{fs::File, io::Write, path::Path};
+use std::{env, fs::File, io::Write, path::Path};
 
 use common::ux::*;
 
@@ -249,7 +249,7 @@ fn make_const_steps(file: &mut File) {
     writeln!(file).expect("Could not write");
 }
 
-fn main() {
+fn build_ux() {
     let dest_path = Path::new("src/ux_generated.rs");
     let mut file = File::create(&dest_path).expect("Could not create file");
 
@@ -298,4 +298,24 @@ fn show_step_raw(page: &[u8]) {{
             fn_name,
         );
     }
+}
+
+fn build_heap() {
+    let size_str = env::var("VAPP_HEAP_SIZE").unwrap_or_else(|_| "65536".to_string());
+    let size: usize = size_str
+        .parse()
+        .expect("VAPP_HEAP_SIZE must be a valid usize (e.g., 65536)");
+
+    let out_dir = env::var("OUT_DIR").unwrap();
+    let dest_path = Path::new(&out_dir).join("heap_config.rs");
+    let mut f = File::create(&dest_path).unwrap();
+
+    writeln!(f, "pub const VAPP_HEAP_SIZE: usize = {};", size).unwrap();
+
+    println!("cargo:rerun-if-env-changed=VAPP_HEAP_SIZE");
+}
+
+fn main() {
+    build_ux();
+    build_heap();
 }
