@@ -40,6 +40,8 @@ use ledger_device_sdk::{
 
 extern crate alloc;
 
+include!(concat!(env!("OUT_DIR"), "/heap_size.rs"));
+
 pub const COMM_BUFFER_SIZE: usize = 600;
 
 // define print! and println! macros using debug_printf (only for running on Speculos)

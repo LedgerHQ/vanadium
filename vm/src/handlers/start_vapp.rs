@@ -46,7 +46,32 @@ pub fn handler_start_vapp(
         AesKey::new_random().map_err(|_| AppSW::VMRuntimeError)?,
     )));
 
-    let (n_code_cache_pages, n_data_cache_pages, n_stack_cache_pages) = (24, 8, 8);
+    // Base number of pages for code, data and stack, computed based on the BASE_HEAP_SIZE of Nano X
+    const BASE_CODE_PAGES: usize = 24;
+    const BASE_DATA_PAGES: usize = 8;
+    const BASE_STACK_PAGES: usize = 8;
+
+    // Based on the total available heap size, we allocate more pages to the caches
+    let base_heap_size = crate::BASE_HEAP_SIZE; // smallest heap size, tailored for Nano X
+
+    assert!(crate::HEAP_SIZE >= base_heap_size);
+    let additional_heap = crate::HEAP_SIZE - base_heap_size;
+
+    // compute how many additional pages we can allocate with the extra available heap
+    const CACHED_PAGE_SIZE: usize = OutsourcedMemory::<COMM_BUFFER_SIZE>::size_per_page()
+        + TwoQEvictionStrategy::size_per_page();
+    let n_additional_pages = additional_heap / CACHED_PAGE_SIZE;
+
+    // Divide the additional pages among code, data and stack; we privilege the code cache.
+    // We assign floor(n / 6) to data, floor(n / 6) to stack, and the rest to code
+    let n_additional_data_pages = n_additional_pages / 6;
+    let n_additional_stack_pages = n_additional_pages / 6;
+    let n_additional_code_pages =
+        n_additional_pages - n_additional_data_pages - n_additional_stack_pages;
+
+    let n_code_cache_pages = BASE_CODE_PAGES + n_additional_code_pages;
+    let n_data_cache_pages = BASE_DATA_PAGES + n_additional_data_pages;
+    let n_stack_cache_pages = BASE_STACK_PAGES + n_additional_stack_pages;
 
     let mut code_mem = OutsourcedMemory::new(
         comm.clone(),
