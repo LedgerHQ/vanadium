@@ -97,6 +97,11 @@ impl TwoQEvictionStrategy {
             a1out_max_size,
         }
     }
+
+    // estimates how much space this struct uses for each additional page slot
+    pub const fn size_per_page() -> usize {
+        core::mem::size_of::<PageState>() + core::mem::size_of::<u32>()
+    }
 }
 
 impl PageEvictionStrategy for TwoQEvictionStrategy {

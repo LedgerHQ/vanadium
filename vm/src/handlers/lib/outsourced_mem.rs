@@ -123,6 +123,11 @@ impl<'c, const N: usize> OutsourcedMemory<'c, N> {
         }
     }
 
+    // Return the number of bytes used by a each additional cached page
+    pub const fn size_per_page() -> usize {
+        core::mem::size_of::<CachedPage>()
+    }
+
     fn commit_page_at(&mut self, index: usize) -> Result<(), common::vm::MemoryError> {
         #[cfg(feature = "trace_pages")]
         crate::trace!(
