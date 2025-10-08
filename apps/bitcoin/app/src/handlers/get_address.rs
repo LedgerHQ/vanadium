@@ -54,6 +54,8 @@ pub fn handle_get_address(
     coordinates: &common::message::AccountCoordinates,
     display: bool,
 ) -> Result<Response, Error> {
+    sdk::ux::show_spinner("Processing...");
+
     let wallet_policy: bip388::WalletPolicy =
         account.try_into().map_err(|_| Error::InvalidWalletPolicy)?;
 

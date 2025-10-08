@@ -224,6 +224,8 @@ fn sign_input_schnorr(
 }
 
 pub fn handle_sign_psbt(_app: &mut sdk::App, psbt: &[u8]) -> Result<Response, Error> {
+    sdk::ux::show_spinner("Processing...");
+
     let psbt = fastpsbt::Psbt::parse(&psbt).unwrap();
 
     let accounts = psbt
@@ -525,6 +527,8 @@ pub fn handle_sign_psbt(_app: &mut sdk::App, psbt: &[u8]) -> Result<Response, Er
     if !display_transaction(&pairs) {
         return Err(Error::UserRejected);
     }
+
+    sdk::ux::show_spinner("Signing transaction...");
 
     /***** Sign transaction *****/
     let unsigned_tx = psbt
