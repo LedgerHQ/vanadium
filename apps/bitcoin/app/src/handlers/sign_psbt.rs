@@ -34,20 +34,17 @@ use sdk::{
 use crate::constants::COIN_TICKER;
 
 #[cfg(not(test))]
-fn display_warning_high_fee(fee_frac: f64) -> bool {
+fn display_warning_high_fee(fee_percent: u64) -> bool {
     sdk::ux::show_confirm_reject(
         "High fees",
-        &format!(
-            "Transaction fee fraction is higher than {:.2}%",
-            fee_frac * 100.0
-        ),
+        &format!("Transaction fee fraction is higher than {}%", fee_percent),
         "Continue",
         "Reject",
     )
 }
 
 #[cfg(test)]
-fn display_warning_high_fee(_fee_frac: f64) -> bool {
+fn display_warning_high_fee(_fee_percent: u64) -> bool {
     true
 }
 
@@ -430,9 +427,9 @@ pub fn handle_sign_psbt(_app: &mut sdk::App, psbt: &[u8]) -> Result<Response, Er
         }
     }
     if inputs_total_amount >= crate::constants::THRESHOLD_WARN_HIGH_FEES_AMOUNT {
-        let fee_frac = fee as f64 / inputs_total_amount as f64;
-        if fee_frac >= crate::constants::THRESHOLD_WARN_HIGH_FEES_FRACTION {
-            if !display_warning_high_fee(fee_frac) {
+        let fee_percent = fee.saturating_mul(100) / inputs_total_amount;
+        if fee_percent >= crate::constants::THRESHOLD_WARN_HIGH_FEES_PERCENT {
+            if !display_warning_high_fee(fee_percent) {
                 return Err(Error::UserRejected);
             }
         }
