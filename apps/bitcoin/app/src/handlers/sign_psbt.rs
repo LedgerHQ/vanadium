@@ -641,38 +641,12 @@ mod tests {
     use super::*;
     use base64::{engine::general_purpose::STANDARD, Engine as _};
     use bitcoin::{psbt::Psbt, secp256k1::schnorr::Signature, XOnlyPublicKey};
-    use common::{
-        bip388::{KeyPlaceholder, WalletPolicy},
-        psbt::fill_psbt_with_bip388_coordinates,
-    };
+    use common::{bip388::WalletPolicy, psbt::prepare_psbt};
     use hex_literal::hex;
 
     // rust-bitcoin doesn't support Psbtv2, so we use this helper for conversion
     fn serialize_as_psbtv2(psbt: &Psbt) -> Vec<u8> {
         common::psbt::psbt_v0_to_v2(&psbt.serialize()).expect("Failed to convert PSBTv0 to PSBTv2")
-    }
-
-    fn prepare_psbt(psbt: &mut Psbt, named_accounts: &[(&WalletPolicy, &str, &[u8; 32])]) {
-        for (wallet_policy, account_name, por) in named_accounts {
-            let placeholders: Vec<KeyPlaceholder> = wallet_policy
-                .descriptor_template
-                .placeholders()
-                .map(|(k, _)| k.clone())
-                .collect();
-
-            assert!(placeholders.len() == 1);
-            let key_placeholder = placeholders[0];
-
-            fill_psbt_with_bip388_coordinates(
-                psbt,
-                wallet_policy,
-                Some(&account_name),
-                Some(*por),
-                &key_placeholder,
-                0,
-            )
-            .unwrap();
-        }
     }
 
     #[test]

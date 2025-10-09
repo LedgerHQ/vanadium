@@ -680,6 +680,29 @@ pub fn fill_psbt_with_bip388_coordinates(
     Ok(())
 }
 
+pub fn prepare_psbt(psbt: &mut Psbt, named_accounts: &[(&WalletPolicy, &str, &[u8; 32])]) {
+    for (wallet_policy, account_name, por) in named_accounts {
+        let placeholders: Vec<KeyPlaceholder> = wallet_policy
+            .descriptor_template
+            .placeholders()
+            .map(|(k, _)| k.clone())
+            .collect();
+
+        assert!(placeholders.len() == 1);
+        let key_placeholder = placeholders[0];
+
+        fill_psbt_with_bip388_coordinates(
+            psbt,
+            wallet_policy,
+            Some(&account_name),
+            Some(*por),
+            &key_placeholder,
+            0,
+        )
+        .unwrap();
+    }
+}
+
 mod convert_v0_to_v2 {
     // This module provides a minimal conversion code from psbtv0 to psbtv2, directly in binary format.
     // It performs very little validation, so it should only be used to convert a serialized PSBTv0 to PSBTv2
