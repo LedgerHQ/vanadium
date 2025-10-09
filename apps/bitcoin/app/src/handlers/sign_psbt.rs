@@ -33,7 +33,7 @@ use sdk::{
 
 use crate::constants::COIN_TICKER;
 
-#[cfg(not(test))]
+#[cfg(not(any(test, feature = "autoapprove")))]
 fn display_warning_high_fee(fee_percent: u64) -> bool {
     sdk::ux::show_confirm_reject(
         "High fees",
@@ -43,12 +43,12 @@ fn display_warning_high_fee(fee_percent: u64) -> bool {
     )
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "autoapprove"))]
 fn display_warning_high_fee(_fee_percent: u64) -> bool {
     true
 }
 
-#[cfg(not(test))]
+#[cfg(not(any(test, feature = "autoapprove")))]
 fn display_warning_unverified_inputs() -> bool {
     sdk::ux::show_confirm_reject(
         "Unverified inputs",
@@ -58,12 +58,12 @@ fn display_warning_unverified_inputs() -> bool {
     )
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "autoapprove"))]
 fn display_warning_unverified_inputs() -> bool {
     true
 }
 
-#[cfg(not(test))]
+#[cfg(not(any(test, feature = "autoapprove")))]
 fn display_transaction(pairs: &[TagValue]) -> bool {
     // message on speculos or real device
 
@@ -88,7 +88,7 @@ fn display_transaction(pairs: &[TagValue]) -> bool {
     )
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "autoapprove"))]
 fn display_transaction(_pairs: &[TagValue]) -> bool {
     true
 }

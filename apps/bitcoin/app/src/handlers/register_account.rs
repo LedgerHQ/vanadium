@@ -6,7 +6,7 @@ use common::{
 
 use common::errors::Error;
 
-#[cfg(not(test))]
+#[cfg(not(any(test, feature = "autoapprove")))]
 fn display_wallet_policy(name: &str, wallet_policy: &bip388::WalletPolicy) -> bool {
     use alloc::{format, string::ToString, vec::Vec};
     use sdk::ux::TagValue;
@@ -44,7 +44,7 @@ fn display_wallet_policy(name: &str, wallet_policy: &bip388::WalletPolicy) -> bo
     )
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "autoapprove"))]
 fn display_wallet_policy(_name: &str, _wallet_policy: &bip388::WalletPolicy) -> bool {
     true
 }

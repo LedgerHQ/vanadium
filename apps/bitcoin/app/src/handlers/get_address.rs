@@ -6,7 +6,7 @@ use common::{
 
 use common::errors::Error;
 
-#[cfg(not(test))]
+#[cfg(not(any(test, feature = "autoapprove")))]
 fn display_address(account_name: Option<&str>, addr: &str) -> bool {
     use alloc::vec;
     use sdk::ux::TagValue;
@@ -41,7 +41,7 @@ fn display_address(account_name: Option<&str>, addr: &str) -> bool {
     )
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "autoapprove"))]
 fn display_address(_account_name: Option<&str>, _addr: &str) -> bool {
     true
 }

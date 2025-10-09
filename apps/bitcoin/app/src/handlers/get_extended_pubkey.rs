@@ -24,7 +24,7 @@ fn get_pubkey_fingerprint(pubkey: &EcfpPublicKey<Secp256k1, 32>) -> u32 {
     u32::from_be_bytes([hash[0], hash[1], hash[2], hash[3]])
 }
 
-#[cfg(not(test))]
+#[cfg(not(any(test, feature = "autoapprove")))]
 fn display_xpub(xpub: &str, path: &[u32]) -> bool {
     use alloc::string::ToString;
     use alloc::vec;
@@ -58,7 +58,7 @@ fn display_xpub(xpub: &str, path: &[u32]) -> bool {
     )
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "autoapprove"))]
 fn display_xpub(_xpub: &str, _path: &[u32]) -> bool {
     true
 }

@@ -7,6 +7,9 @@ edition = "2021"
 name = "Bitcoin"
 stack_size = 65536
 
+[features]
+autoapprove = []  # used for integration tests
+
 [dependencies]
 bitcoin = { version = "0.32.0", features = ["serde"], default-features = false }
 common = { package = "vnd-bitcoin-common", path = "../common"}
