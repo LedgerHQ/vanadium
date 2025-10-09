@@ -432,16 +432,114 @@ jobs:
           target: riscv32imc-unknown-none-elf
           components: rustfmt, clippy
           profile: minimal
+      - name: Install riscv64-unknown-elf-objcopy
+        run: |
+          sudo apt-get update && \
+          sudo apt-get install -y binutils-riscv64-unknown-elf  # needed for cargo-vnd
       - name: Clone
         uses: actions/checkout@v4
-      - name: Build app
+      - name: Install cargo-vnd tool
+        run: |
+          cargo install --path ./cargo-vnd
+      - name: Build and package app
         working-directory: apps/bitcoin/app
         run: |
+          set -e  # fail on any error
           cargo +nightly build --release --target riscv32imc-unknown-none-elf
+          cargo vnd package
       - name: Upload binaries
         uses: actions/upload-artifact@v4
         with:
           name: vnd_bitcoin_riscv_binary
-          path: apps/bitcoin/app/target/riscv32imc-unknown-none-elf/release/vnd-bitcoin
+          path: apps/bitcoin/app/target/riscv32imc-unknown-none-elf/release/vnd-bitcoin.vapp
 
+  # build bitcoin V-App with autoapprove feature
+  build_vnd_bitcoin_autoapprove:
+    name: vnd-bitcoin (--features autoapprove), Build on Risc-V target
+    runs-on: ubuntu-latest
+    steps:
+      - name: Set up Rust toolchain
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: nightly
+          target: riscv32imc-unknown-none-elf
+          components: rustfmt, clippy
+          profile: minimal
+      - name: Install riscv64-unknown-elf-objcopy
+        run: |
+          sudo apt-get update && \
+          sudo apt-get install -y binutils-riscv64-unknown-elf  # needed for cargo-vnd
+      - name: Clone
+        uses: actions/checkout@v4
+      - name: Install cargo-vnd tool
+        run: |
+          cargo install --path ./cargo-vnd
+      - name: Build and package app
+        working-directory: apps/bitcoin/app
+        run: |
+          set -e  # fail on any error
+          cargo +nightly build --release --target riscv32imc-unknown-none-elf --features autoapprove
+          cargo vnd package
+      - name: Upload binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: vnd_bitcoin_riscv_autoapprove_binary
+          path: apps/bitcoin/app/target/riscv32imc-unknown-none-elf/release/vnd-bitcoin.vapp
 
+  vnd_bitcoin_integration_tests:
+    name: vnd-bitcoin, Integration tests on Speculos (autoapprove)
+
+    strategy:
+      matrix:
+        include:
+          - model: nanox
+          - model: nanosplus
+          - model: flex
+          - model: stax
+
+    runs-on: ubuntu-latest
+    needs: [build_vanadium_app, build_vnd_bitcoin_autoapprove]
+    steps:
+      - name: Set up Rust toolchain
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: nightly
+          target: x86_64-unknown-linux-gnu
+          components: rustfmt, clippy
+          profile: minimal
+      - name: Install Speculos
+        run: |
+          pip install speculos
+      - name: Install dependencies
+        run: |
+          sudo apt-get update && \
+          sudo apt-get install -y libudev-dev pkg-config && \
+          sudo apt-get install -y qemu-user-static libvncserver-dev
+      - name: Clone
+        uses: actions/checkout@v4
+      - name: Download Vanadium binaries
+        uses: actions/download-artifact@v4
+        with:
+          name: vanadium_binaries
+          path: ./vanadium_binaries
+
+      - name: Download vnd_bitcoin_riscv_autoapprove_binary
+        uses: actions/download-artifact@v4
+        with:
+          name: vnd_bitcoin_riscv_autoapprove_binary
+          path: ./vnd_bitcoin_riscv_autoapprove_binary
+
+      - name: Run integration tests
+        working-directory: apps/bitcoin/client
+        env:
+          VANADIUM_BINARY: ../../../vanadium_binaries/${{ matrix.model }}/release/app-vanadium
+          VAPP_BINARY: ../../../vnd_bitcoin_riscv_autoapprove_binary/vnd-bitcoin.vapp
+        run: |
+          cargo test --features speculos-tests
+
+      - name: Upload test logs
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: vnd_bitcoin_logs_${{ matrix.model }}
+          path: apps/bitcoin/client/test.log
