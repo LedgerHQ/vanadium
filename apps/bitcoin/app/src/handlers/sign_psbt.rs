@@ -223,7 +223,7 @@ fn sign_input_schnorr(
 pub fn handle_sign_psbt(_app: &mut sdk::App, psbt: &[u8]) -> Result<Response, Error> {
     sdk::ux::show_spinner("Processing...");
 
-    let psbt = fastpsbt::Psbt::parse(&psbt).unwrap();
+    let psbt = fastpsbt::Psbt::parse(&psbt).map_err(|_| Error::FailedToDeserializePsbt)?;
 
     let accounts = psbt
         .get_accounts()

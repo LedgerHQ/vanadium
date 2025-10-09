@@ -22,6 +22,7 @@ pub enum Error {
     SigningFailed,
 
     // PSBT / UTXO checks
+    FailedToDeserializePsbt,
     FailedToGetAccounts,
     ExternalInputsNotSupported,
     WitnessUtxoNotAllowedForLegacy,
@@ -72,6 +73,7 @@ impl fmt::Display for Error {
             ErrorComputingSighash => write!(f, "Error computing sighash"),
             SigningFailed => write!(f, "Failed to produce signature"),
 
+            FailedToDeserializePsbt => write!(f, "Failed to deserialize PSBT"),
             FailedToGetAccounts => write!(f, "Failed to get accounts from PSBT"),
             ExternalInputsNotSupported => write!(f, "External inputs are not supported"),
             WitnessUtxoNotAllowedForLegacy => {
