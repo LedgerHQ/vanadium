@@ -1099,7 +1099,7 @@ pub mod client_utils {
         app_hmac: Option<[u8; 32]>,
         print_writer: Option<Box<dyn std::io::Write + Send>>,
     ) -> Result<(Box<dyn VAppTransport + Send>, [u8; 32]), ClientUtilsError> {
-        let transport_raw = Arc::new(TransportTcp::new().await.map_err(|e| {
+        let transport_raw = Arc::new(TransportTcp::new_default().await.map_err(|e| {
             ClientUtilsError::TcpTransportFailed(format!(
                 "Unable to get TCP transport. Is speculos running? {}",
                 e

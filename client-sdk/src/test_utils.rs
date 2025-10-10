@@ -83,7 +83,7 @@ async fn spawn_speculos_and_transport(vanadium_binary: &str) -> (Child, Arc<Tran
             }
 
             // If it's still alive, try to connect
-            match TransportTcp::new().await {
+            match TransportTcp::new_default().await {
                 Ok(tcp) => {
                     // If we succeed, store the TransportTcp instance directly
                     transport_tcp = Some(Arc::new(tcp));
