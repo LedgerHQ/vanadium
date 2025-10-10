@@ -680,7 +680,12 @@ pub fn fill_psbt_with_bip388_coordinates(
     Ok(())
 }
 
-pub fn prepare_psbt(psbt: &mut Psbt, named_accounts: &[(&WalletPolicy, &str, &[u8; 32])]) {
+// Fills the PSBT with accounts and coordinates.
+// TODO: generalize this to more complex policies with multiple placeholders
+pub fn prepare_psbt(
+    psbt: &mut Psbt,
+    named_accounts: &[(&WalletPolicy, &str, &[u8; 32])],
+) -> Result<(), &'static str> {
     for (wallet_policy, account_name, por) in named_accounts {
         let placeholders: Vec<KeyPlaceholder> = wallet_policy
             .descriptor_template
@@ -688,7 +693,11 @@ pub fn prepare_psbt(psbt: &mut Psbt, named_accounts: &[(&WalletPolicy, &str, &[u
             .map(|(k, _)| k.clone())
             .collect();
 
-        assert!(placeholders.len() == 1);
+        assert!(
+            placeholders.len() == 1,
+            "Only single-placeholder policies are supported"
+        );
+
         let key_placeholder = placeholders[0];
 
         fill_psbt_with_bip388_coordinates(
@@ -698,9 +707,9 @@ pub fn prepare_psbt(psbt: &mut Psbt, named_accounts: &[(&WalletPolicy, &str, &[u
             Some(*por),
             &key_placeholder,
             0,
-        )
-        .unwrap();
+        )?;
     }
+    Ok(())
 }
 
 mod convert_v0_to_v2 {

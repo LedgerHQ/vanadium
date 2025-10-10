@@ -665,7 +665,7 @@ mod tests {
         let por =
             ProofOfRegistration::new(&wallet_policy.get_id(account_name)).dangerous_as_bytes();
 
-        prepare_psbt(&mut psbt, &[(&wallet_policy, account_name, &por)]);
+        prepare_psbt(&mut psbt, &[(&wallet_policy, account_name, &por)]).unwrap();
 
         let response =
             handle_sign_psbt(&mut sdk::App::singleton(), &serialize_as_psbtv2(&psbt)).unwrap();
@@ -694,7 +694,7 @@ mod tests {
         let account_name = "My segwit account #0";
         let por =
             ProofOfRegistration::new(&wallet_policy.get_id(account_name)).dangerous_as_bytes();
-        prepare_psbt(&mut psbt, &[(&wallet_policy, &account_name, &por)]);
+        prepare_psbt(&mut psbt, &[(&wallet_policy, &account_name, &por)]).unwrap();
 
         let response =
             handle_sign_psbt(&mut sdk::App::singleton(), &serialize_as_psbtv2(&psbt)).unwrap();
@@ -724,7 +724,7 @@ mod tests {
         let account_name = "My taproot account #0";
         let por =
             ProofOfRegistration::new(&wallet_policy.get_id(account_name)).dangerous_as_bytes();
-        prepare_psbt(&mut psbt, &[(&wallet_policy, &account_name, &por)]);
+        prepare_psbt(&mut psbt, &[(&wallet_policy, &account_name, &por)]).unwrap();
 
         let response =
             handle_sign_psbt(&mut sdk::App::singleton(), &serialize_as_psbtv2(&psbt)).unwrap();

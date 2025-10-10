@@ -114,7 +114,8 @@ async fn test_e2e_sign_transaction() {
     prepare_psbt(
         &mut psbt,
         &[(&wallet_policy, &account_name, &por.dangerous_as_bytes())],
-    );
+    )
+    .unwrap();
 
     let result = client.sign_psbt(&serialize_as_psbtv2(&psbt)).await.unwrap();
 
