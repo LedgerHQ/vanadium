@@ -158,7 +158,10 @@ where
         let (vanadium_client, _) =
             VanadiumAppClient::new(vapp_binary, transport, None, print_writer)
                 .await
-                .expect("Failed to create client");
+                .expect(&format!(
+                    "Failed to create client for vapp binary: {}",
+                    vapp_binary
+                ));
 
         create_client(Box::new(vanadium_client))
     })
