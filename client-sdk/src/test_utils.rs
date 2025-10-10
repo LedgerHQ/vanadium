@@ -2,8 +2,7 @@ use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::process::{Child, Command};
 use std::sync::Arc;
-use std::thread::sleep;
-use std::time::Duration;
+use tokio::time::{sleep, Duration};
 
 use crate::linewriter::FileLineWriter;
 use crate::transport::{TransportTcp, TransportWrapper};
@@ -92,7 +91,7 @@ async fn spawn_speculos_and_transport(vanadium_binary: &str) -> (Child, Arc<Tran
                 }
                 Err(_) => {
                     // Wait a little before retrying
-                    sleep(Duration::from_millis(500));
+                    sleep(Duration::from_millis(500)).await;
                 }
             }
         }
