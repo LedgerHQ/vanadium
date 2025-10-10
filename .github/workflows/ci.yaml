@@ -60,7 +60,7 @@ jobs:
       - name: Set up Rust toolchain
         uses: actions-rs/toolchain@v1
         with:
-          toolchain: nightly
+          toolchain: stable
           target: riscv32imc-unknown-none-elf
           components: rustfmt, clippy
           profile: minimal
@@ -70,7 +70,7 @@ jobs:
         working-directory: bench
         run: |
           for case_dir in ./cases/*; do
-            (cd "$case_dir" && cargo +nightly build --release --target=riscv32imc-unknown-none-elf) || exit 1
+            (cd "$case_dir" && cargo +stable build --release --target=riscv32imc-unknown-none-elf) || exit 1
           done
 
   # VM app tests in speculos

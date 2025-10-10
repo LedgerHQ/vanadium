@@ -25,9 +25,9 @@ on:
         default: ""
         type: string
       rust_toolchain:
-        description: "Rust toolchain (default nightly)."
+        description: "Rust toolchain (default stable)."
         required: false
-        default: nightly
+        default: stable
         type: string
       riscv_target:
         description: "RISC-V target triple"
