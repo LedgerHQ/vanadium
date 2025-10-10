@@ -1,5 +1,6 @@
 use std::fs::{File, OpenOptions};
 use std::io::Write;
+use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener};
 use std::process::{Child, Command};
 use std::sync::Arc;
 use tokio::time::{sleep, Duration};
@@ -50,8 +51,14 @@ impl<C> TestSetup<C> {
     }
 }
 
+// gets a random free port assigned by the OS, then drop the listener and return the port number
+fn get_random_free_port() -> std::io::Result<u16> {
+    let listener = TcpListener::bind("127.0.0.1:0")?;
+    Ok(listener.local_addr()?.port())
+}
+
 /// Helper function to:
-/// 1) Spawn speculos
+/// 1) Spawn speculos, binding to a random free port
 /// 2) Poll for a running TCP transport (readiness)
 /// 3) If speculos dies prematurely, relaunch once
 async fn spawn_speculos_and_transport(vanadium_binary: &str) -> (Child, Arc<TransportTcp>) {
@@ -61,16 +68,23 @@ async fn spawn_speculos_and_transport(vanadium_binary: &str) -> (Child, Arc<Tran
     let mut launch_attempts = 0;
 
     loop {
-        // --- 1) Spawn speculos ---
+        // Pick a random free port by binding to port 0 then dropping the listener ---
+        let port = get_random_free_port()
+            .expect("Failed to bind to an ephemeral port to select APDU port");
+
+        // --- 1) Spawn speculos on that port ---
         let mut child = Command::new("speculos")
             .arg(vanadium_binary)
             .arg("--display")
             .arg("headless")
+            .arg("--apdu-port")
+            .arg(port.to_string())
             .spawn()
             .expect("Failed to spawn speculos process");
 
         // --- 2) Poll for readiness ---
         let mut transport_tcp: Option<Arc<TransportTcp>> = None;
+        let socket_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), port);
 
         for _ in 0..MAX_POLL_ATTEMPTS {
             // Check if speculos died
@@ -83,9 +97,8 @@ async fn spawn_speculos_and_transport(vanadium_binary: &str) -> (Child, Arc<Tran
             }
 
             // If it's still alive, try to connect
-            match TransportTcp::new_default().await {
+            match TransportTcp::new(socket_addr).await {
                 Ok(tcp) => {
-                    // If we succeed, store the TransportTcp instance directly
                     transport_tcp = Some(Arc::new(tcp));
                     break;
                 }
@@ -98,7 +111,6 @@ async fn spawn_speculos_and_transport(vanadium_binary: &str) -> (Child, Arc<Tran
 
         // Did we succeed in getting a transport?
         if let Some(t) = transport_tcp {
-            // Return on success
             return (child, t);
         }
 
