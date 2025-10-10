@@ -14,147 +14,24 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  # Native tests
-
   test_app_sdk:
-    name: Run V-App SDK tests
-    runs-on: ubuntu-latest
-    steps:
-      - name: Set up Rust toolchain
-        uses: actions-rs/toolchain@v1
-        with:
-          toolchain: nightly
-          target: x86_64-unknown-linux-gnu
-          components: rustfmt, clippy
-          profile: minimal
-      - name: Clone
-        uses: actions/checkout@v4
-      - name: Unit tests
-        working-directory: app-sdk
-        run: |
-          cargo +nightly test --target x86_64-unknown-linux-gnu
+    uses: ./.github/workflows/reusable_native_tests.yaml
+    with:
+      app_name: "app-sdk"
+      test_dirs_json: '["app-sdk"]'
 
   test_client_sdk:
-    name: Run V-App Client SDK tests
-    runs-on: ubuntu-latest
-    steps:
-      - name: Set up Rust toolchain
-        uses: actions-rs/toolchain@v1
-        with:
-          toolchain: nightly
-          target: x86_64-unknown-linux-gnu
-          components: rustfmt, clippy
-          profile: minimal
-      - name: Install libudev-dev and pkg-config
-        run: |
-          sudo apt-get update && sudo apt-get install -y libudev-dev pkg-config
-      - name: Clone
-        uses: actions/checkout@v4
-      - name: Unit tests
-        working-directory: client-sdk
-        run: |
-          cargo +nightly test --target x86_64-unknown-linux-gnu
+    uses: ./.github/workflows/reusable_native_tests.yaml
+    with:
+      app_name: "client-sdk"
+      test_dirs_json: '["client-sdk"]'
 
   test_common:
-    name: Run common crate tests
-    runs-on: ubuntu-latest
-    steps:
-      - name: Set up Rust toolchain
-        uses: actions-rs/toolchain@v1
-        with:
-          toolchain: nightly
-          target: x86_64-unknown-linux-gnu
-          components: rustfmt, clippy
-          profile: minimal
-      - name: Clone
-        uses: actions/checkout@v4
-      - name: Unit tests
-        working-directory: common
-        run: |
-          cargo +nightly test --target x86_64-unknown-linux-gnu
-
-  test_vnd_test_app:
-    name: Run vnd-test app tests
-    runs-on: ubuntu-latest
-    steps:
-      - name: Set up Rust toolchain
-        uses: actions-rs/toolchain@v1
-        with:
-          toolchain: nightly
-          target: x86_64-unknown-linux-gnu
-          components: rustfmt, clippy
-          profile: minimal
-      - name: Clone
-        uses: actions/checkout@v4
-      - name: Unit tests
-        working-directory: apps/test/app
-        run: |
-          cargo +nightly test --target x86_64-unknown-linux-gnu
-
-  test_vnd_test_app_client:
-    name: Run vnd-test app client tests
-    runs-on: ubuntu-latest
-    steps:
-      - name: Set up Rust toolchain
-        uses: actions-rs/toolchain@v1
-        with:
-          toolchain: nightly
-          target: x86_64-unknown-linux-gnu
-          components: rustfmt, clippy
-          profile: minimal
-      - name: Install libudev-dev and pkg-config
-        run: |
-          sudo apt-get update && sudo apt-get install -y libudev-dev pkg-config
-      - name: Clone
-        uses: actions/checkout@v4
-      - name: Unit tests
-        working-directory: apps/test/client
-        run: |
-          cargo +nightly test --target x86_64-unknown-linux-gnu
-
-  test_vnd_bitcoin_app:
-    name: Run vnd-bitcoin app tests
-    runs-on: ubuntu-latest
-    steps:
-      - name: Set up Rust toolchain
-        uses: actions-rs/toolchain@v1
-        with:
-          toolchain: nightly
-          target: x86_64-unknown-linux-gnu
-          components: rustfmt, clippy
-          profile: minimal
-      - name: Clone
-        uses: actions/checkout@v4
-      - name: Install pb-rs
-        run: cargo install pb-rs
-      - name: Unit tests of the common crate
-        working-directory: apps/bitcoin/common
-        run: |
-          cargo +nightly test --target x86_64-unknown-linux-gnu
-      - name: Unit tests of the app crate
-        working-directory: apps/bitcoin/app
-        run: |
-          cargo +nightly test --target x86_64-unknown-linux-gnu
-
-  # Native tests for libraries in the libs folder
-  test_vlib_bitcoin:
-    name: Run vlib-bitcoin tests
-    runs-on: ubuntu-latest
-    steps:
-      - name: Set up Rust toolchain
-        uses: actions-rs/toolchain@v1
-        with:
-          toolchain: nightly
-          target: x86_64-unknown-linux-gnu
-          components: rustfmt, clippy
-          profile: minimal
-      - name: Clone
-        uses: actions/checkout@v4
-      - name: Unit tests
-        working-directory: libs/bitcoin
-        run: |
-          cargo +nightly test --target x86_64-unknown-linux-gnu --features serde
-        
+    uses: ./.github/workflows/reusable_native_tests.yaml
+    with:
+      app_name: "common"
+      test_dirs_json: '["common"]'
+       
   # build Vanadium VM app
 
   build_vanadium_app:
@@ -236,310 +113,110 @@ jobs:
         run: |
           speculos --display headless vanadium_binaries_for_tests/${{ matrix.model }}/release/app-vanadium
 
-  ### Risc-V tests
+  ### vlib tests
+
+  test_vlib_bitcoin:
+    uses: ./.github/workflows/reusable_native_tests.yaml
+    with:
+      app_name: "vlib-bitcoin"
+      test_dirs_json: '["libs/bitcoin"]'
+      cargo_test_args: '--features serde'
+
+  ### V-Apps
+
+  ## vnd-test
 
   # build test V-App
   build_vnd_test:
-    name: vnd-test, Build on Risc-V target
-    runs-on: ubuntu-latest
-    steps:
-      - name: Set up Rust toolchain
-        uses: actions-rs/toolchain@v1
-        with:
-          toolchain: nightly
-          target: riscv32imc-unknown-none-elf
-          components: rustfmt, clippy
-          profile: minimal
-      - name: Install riscv64-unknown-elf-objcopy
-        run: |
-          sudo apt-get update && \
-          sudo apt-get install -y binutils-riscv64-unknown-elf  # needed for cargo-vnd
-      - name: Clone
-        uses: actions/checkout@v4
-      - name: Install cargo-vnd tool
-        run: |
-          cargo install --path ./cargo-vnd
-      - name: Build and package app
-        working-directory: apps/test/app
-        run: |
-          set -e  # fail on any error
-          cargo +nightly build --release --target riscv32imc-unknown-none-elf
-          cargo vnd package
-      - name: Upload binaries
-        uses: actions/upload-artifact@v4
-        with:
-          name: vnd_test_riscv_binary
-          path: apps/test/app/target/riscv32imc-unknown-none-elf/release/vnd-test.vapp
+    uses: ./.github/workflows/reusable_vapp_build.yaml
+    with:
+      app_name: "vnd-test"
+      app_dir: "apps/test/app"
+      artifact_name: "vnd_test_riscv_binary"
+      binary_name: "vnd-test"
+
+  test_vnd_test_app:
+    uses: ./.github/workflows/reusable_native_tests.yaml
+    with:
+      app_name: "vnd-test-app"
+      test_dirs_json: '["apps/test/app"]'
+
+  test_vnd_test_app_client:
+    uses: ./.github/workflows/reusable_native_tests.yaml
+    with:
+      app_name: "vnd-test-client"
+      test_dirs_json: '["apps/test/client"]'
 
   vnd_test_speculos_integration_tests:
-    name: vnd-test, Integration tests on Speculos
-
-    strategy:
-      matrix:
-        include:
-          - model: nanox
-          - model: nanosplus
-          - model: flex
-          - model: stax
-
-    runs-on: ubuntu-latest
     needs: [build_vanadium_app, build_vnd_test]
-    steps:
-      - name: Set up Rust toolchain
-        uses: actions-rs/toolchain@v1
-        with:
-          toolchain: nightly
-          target: x86_64-unknown-linux-gnu
-          components: rustfmt, clippy
-          profile: minimal
-      - name: Install Speculos
-        run: |
-          pip install speculos
-      - name: Install dependencies
-        run: |
-          sudo apt-get update && \
-          sudo apt-get install -y libudev-dev pkg-config && \
-          sudo apt-get install -y qemu-user-static libvncserver-dev
-      - name: Clone
-        uses: actions/checkout@v4
-      - name: Download Vanadium binaries
-        uses: actions/download-artifact@v4
-        with:
-          name: vanadium_binaries
-          path: ./vanadium_binaries
+    uses: ./.github/workflows/reusable_vapp_integration_tests.yaml
+    with:
+      app_name: 'vnd-test'
+      client_dir: 'apps/test/client'
+      vanadium_artifact_name: 'vanadium_binaries'
+      vapp_artifact_name: 'vnd_test_riscv_binary'
+      vapp_binary_name: 'vnd-test.vapp'
+      models_json: '["nanox","nanosplus","flex","stax"]'
+      cargo_test_features: 'speculos-tests'
 
-      - name: Download vnd_test_riscv_binary
-        uses: actions/download-artifact@v4
-        with:
-          name: vnd_test_riscv_binary
-          path: ./vnd_test_riscv_binary
-
-      - name: Run integration tests
-        working-directory: apps/test/client
-        env:
-          VANADIUM_BINARY: ../../../vanadium_binaries/${{ matrix.model }}/release/app-vanadium
-          VAPP_BINARY: ../../../vnd_test_riscv_binary/vnd-test.vapp
-        run: |
-          cargo test --features speculos-tests
-
-      - name: Upload test logs
-        uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: vnd_test_logs_${{ matrix.model }}
-          path: apps/test/client/test.log
+  ## vnd-sadik
 
   # build sadik V-App
   build_vnd_sadik:
-    name: vnd-sadik, Build on Risc-V target
-    runs-on: ubuntu-latest
-    steps:
-      - name: Set up Rust toolchain
-        uses: actions-rs/toolchain@v1
-        with:
-          toolchain: nightly
-          target: riscv32imc-unknown-none-elf
-          components: rustfmt, clippy
-          profile: minimal
-      - name: Install riscv64-unknown-elf-objcopy
-        run: |
-          sudo apt-get update && \
-          sudo apt-get install -y binutils-riscv64-unknown-elf  # needed for cargo-vnd
-      - name: Clone
-        uses: actions/checkout@v4
-      - name: Install cargo-vnd tool
-        run: |
-          cargo install --path ./cargo-vnd
-      - name: Build and package app
-        working-directory: apps/sadik/app
-        run: |
-          set -e  # fail on any error
-          cargo +nightly build --release --target riscv32imc-unknown-none-elf
-          cargo vnd package
-      - name: Upload binaries
-        uses: actions/upload-artifact@v4
-        with:
-          name: vnd_sadik_riscv_binary
-          path: apps/sadik/app/target/riscv32imc-unknown-none-elf/release/vnd-sadik.vapp
+    uses: ./.github/workflows/reusable_vapp_build.yaml
+    with:
+      app_name: "vnd-sadik"
+      app_dir: "apps/sadik/app"
+      artifact_name: "vnd_sadik_riscv_binary"
+      binary_name: "vnd-sadik"
 
   vnd_sadik_integration_tests:
-    name: vnd-sadik, Integration tests on Speculos
-
-    strategy:
-      matrix:
-        include:
-          - model: nanox
-          - model: nanosplus
-          - model: flex
-          - model: stax
-
-    runs-on: ubuntu-latest
     needs: [build_vanadium_app, build_vnd_sadik]
-    steps:
-      - name: Set up Rust toolchain
-        uses: actions-rs/toolchain@v1
-        with:
-          toolchain: nightly
-          target: x86_64-unknown-linux-gnu
-          components: rustfmt, clippy
-          profile: minimal
-      - name: Install Speculos
-        run: |
-          pip install speculos
-      - name: Install dependencies
-        run: |
-          sudo apt-get update && \
-          sudo apt-get install -y libudev-dev pkg-config && \
-          sudo apt-get install -y qemu-user-static libvncserver-dev
-      - name: Clone
-        uses: actions/checkout@v4
-      - name: Download Vanadium binaries
-        uses: actions/download-artifact@v4
-        with:
-          name: vanadium_binaries
-          path: ./vanadium_binaries
+    uses: ./.github/workflows/reusable_vapp_integration_tests.yaml
+    with:
+      app_name: 'vnd-sadik'
+      client_dir: 'apps/sadik/client'
+      vanadium_artifact_name: 'vanadium_binaries'
+      vapp_artifact_name: 'vnd_sadik_riscv_binary'
+      vapp_binary_name: 'vnd-sadik.vapp'
+      models_json: '["nanox","nanosplus","flex","stax"]'
+      cargo_test_features: 'speculos-tests'
 
-      - name: Download vnd_sadik_riscv_binary
-        uses: actions/download-artifact@v4
-        with:
-          name: vnd_sadik_riscv_binary
-          path: ./vnd_sadik_riscv_binary
-
-      - name: Run integration tests
-        working-directory: apps/sadik/client
-        env:
-          VANADIUM_BINARY: ../../../vanadium_binaries/${{ matrix.model }}/release/app-vanadium
-          VAPP_BINARY: ../../../vnd_sadik_riscv_binary/vnd-sadik.vapp
-        run: |
-          cargo test --features speculos-tests
-
-      - name: Upload test logs
-        uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: vnd_sadik_logs_${{ matrix.model }}
-          path: apps/sadik/client/test.log
+  ## vnd-bitcoin
 
   # build bitcoin V-App
   build_vnd_bitcoin:
-    name: vnd-bitcoin, Build on Risc-V target
-    runs-on: ubuntu-latest
-    steps:
-      - name: Set up Rust toolchain
-        uses: actions-rs/toolchain@v1
-        with:
-          toolchain: nightly
-          target: riscv32imc-unknown-none-elf
-          components: rustfmt, clippy
-          profile: minimal
-      - name: Install riscv64-unknown-elf-objcopy
-        run: |
-          sudo apt-get update && \
-          sudo apt-get install -y binutils-riscv64-unknown-elf  # needed for cargo-vnd
-      - name: Clone
-        uses: actions/checkout@v4
-      - name: Install cargo-vnd tool
-        run: |
-          cargo install --path ./cargo-vnd
-      - name: Build and package app
-        working-directory: apps/bitcoin/app
-        run: |
-          set -e  # fail on any error
-          cargo +nightly build --release --target riscv32imc-unknown-none-elf
-          cargo vnd package
-      - name: Upload binaries
-        uses: actions/upload-artifact@v4
-        with:
-          name: vnd_bitcoin_riscv_binary
-          path: apps/bitcoin/app/target/riscv32imc-unknown-none-elf/release/vnd-bitcoin.vapp
+    uses: ./.github/workflows/reusable_vapp_build.yaml
+    with:
+      app_name: "vnd-bitcoin"
+      app_dir: "apps/bitcoin/app"
+      artifact_name: "vnd_bitcoin_riscv_binary"
+      binary_name: "vnd-bitcoin"
 
   # build bitcoin V-App with autoapprove feature
   build_vnd_bitcoin_autoapprove:
-    name: vnd-bitcoin (--features autoapprove), Build on Risc-V target
-    runs-on: ubuntu-latest
-    steps:
-      - name: Set up Rust toolchain
-        uses: actions-rs/toolchain@v1
-        with:
-          toolchain: nightly
-          target: riscv32imc-unknown-none-elf
-          components: rustfmt, clippy
-          profile: minimal
-      - name: Install riscv64-unknown-elf-objcopy
-        run: |
-          sudo apt-get update && \
-          sudo apt-get install -y binutils-riscv64-unknown-elf  # needed for cargo-vnd
-      - name: Clone
-        uses: actions/checkout@v4
-      - name: Install cargo-vnd tool
-        run: |
-          cargo install --path ./cargo-vnd
-      - name: Build and package app
-        working-directory: apps/bitcoin/app
-        run: |
-          set -e  # fail on any error
-          cargo +nightly build --release --target riscv32imc-unknown-none-elf --features autoapprove
-          cargo vnd package
-      - name: Upload binaries
-        uses: actions/upload-artifact@v4
-        with:
-          name: vnd_bitcoin_riscv_autoapprove_binary
-          path: apps/bitcoin/app/target/riscv32imc-unknown-none-elf/release/vnd-bitcoin.vapp
+    uses: ./.github/workflows/reusable_vapp_build.yaml
+    with:
+      app_name: "vnd-bitcoin-autoapprove"
+      app_dir: "apps/bitcoin/app"
+      artifact_name: "vnd_bitcoin_riscv_autoapprove_binary"
+      binary_name: "vnd-bitcoin"
+      extra_build_args: '--features autoapprove'
+
+  test_vnd_bitcoin_app:
+    uses: ./.github/workflows/reusable_native_tests.yaml
+    with:
+      app_name: "vnd-bitcoin"
+      test_dirs_json: '["apps/bitcoin/common","apps/bitcoin/app"]'
 
   vnd_bitcoin_integration_tests:
-    name: vnd-bitcoin, Integration tests on Speculos (autoapprove)
-
-    strategy:
-      matrix:
-        include:
-          - model: nanox
-          - model: nanosplus
-          - model: flex
-          - model: stax
-
-    runs-on: ubuntu-latest
     needs: [build_vanadium_app, build_vnd_bitcoin_autoapprove]
-    steps:
-      - name: Set up Rust toolchain
-        uses: actions-rs/toolchain@v1
-        with:
-          toolchain: nightly
-          target: x86_64-unknown-linux-gnu
-          components: rustfmt, clippy
-          profile: minimal
-      - name: Install Speculos
-        run: |
-          pip install speculos
-      - name: Install dependencies
-        run: |
-          sudo apt-get update && \
-          sudo apt-get install -y libudev-dev pkg-config && \
-          sudo apt-get install -y qemu-user-static libvncserver-dev
-      - name: Clone
-        uses: actions/checkout@v4
-      - name: Download Vanadium binaries
-        uses: actions/download-artifact@v4
-        with:
-          name: vanadium_binaries
-          path: ./vanadium_binaries
-
-      - name: Download vnd_bitcoin_riscv_autoapprove_binary
-        uses: actions/download-artifact@v4
-        with:
-          name: vnd_bitcoin_riscv_autoapprove_binary
-          path: ./vnd_bitcoin_riscv_autoapprove_binary
-
-      - name: Run integration tests
-        working-directory: apps/bitcoin/client
-        env:
-          VANADIUM_BINARY: ../../../vanadium_binaries/${{ matrix.model }}/release/app-vanadium
-          VAPP_BINARY: ../../../vnd_bitcoin_riscv_autoapprove_binary/vnd-bitcoin.vapp
-        run: |
-          cargo test --features speculos-tests
-
-      - name: Upload test logs
-        uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: vnd_bitcoin_logs_${{ matrix.model }}
-          path: apps/bitcoin/client/test.log
+    uses: ./.github/workflows/reusable_vapp_integration_tests.yaml
+    with:
+      app_name: 'vnd-bitcoin'
+      client_dir: 'apps/bitcoin/client'
+      vanadium_artifact_name: 'vanadium_binaries'
+      vapp_artifact_name: 'vnd_bitcoin_riscv_autoapprove_binary'
+      vapp_binary_name: 'vnd-bitcoin.vapp'
+      models_json: '["nanox","nanosplus","flex","stax"]'
+      cargo_test_features: 'speculos-tests'

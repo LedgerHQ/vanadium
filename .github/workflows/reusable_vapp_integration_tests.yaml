@@ -1,0 +1,94 @@
+name: Reusable V-App Integration Tests
+
+on:
+  workflow_call:
+    inputs:
+      app_name:
+        description: "Human readable app name (e.g. vnd-test)"
+        required: true
+        type: string
+      client_dir:
+        description: "Relative path to the client crate directory running integration tests"
+        required: true
+        type: string
+      vanadium_artifact_name:
+        description: "Artifact name containing built Vanadium binaries"
+        required: true
+        type: string
+      vapp_artifact_name:
+        description: "Artifact name for the V-App RISC-V binary (.vapp or raw)"
+        required: true
+        type: string
+      vapp_binary_name:
+        description: "File name of the V-App artifact inside the artifact (e.g. vnd-test.vapp, vnd-sadik.vapp, vnd-bitcoin)"
+        required: true
+        type: string
+      models_json:
+        description: "JSON array of device models to test (e.g. ['nanox','nanosplus','flex','stax'])"
+        required: true
+        type: string
+      cargo_test_features:
+        description: "Cargo features to enable for integration tests"
+        required: false
+        default: speculos-tests
+        type: string
+      rust_toolchain:
+        description: "Rust toolchain"
+        required: false
+        default: nightly
+        type: string
+
+jobs:
+  integration-tests:
+    name: Integration tests (${{ inputs.app_name }}) on Speculos
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        model: ${{ fromJson(inputs.models_json) }}
+    steps:
+      - name: Set up Rust toolchain
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: ${{ inputs.rust_toolchain }}
+          target: x86_64-unknown-linux-gnu
+          components: rustfmt, clippy
+          profile: minimal
+
+      - name: Install Speculos
+        run: pip install speculos
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update && \
+          sudo apt-get install -y libudev-dev pkg-config qemu-user-static libvncserver-dev
+
+      - name: Checkout sources
+        uses: actions/checkout@v4
+
+      - name: Download Vanadium binaries
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ inputs.vanadium_artifact_name }}
+          path: ./vanadium_binaries
+
+      - name: Download V-App binary
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ inputs.vapp_artifact_name }}
+          path: ./vapp_binary
+
+      - name: Run integration tests
+        working-directory: ${{ inputs.client_dir }}
+        env:
+          VANADIUM_BINARY: ../../../vanadium_binaries/${{ matrix.model }}/release/app-vanadium
+          VAPP_BINARY: ../../../vapp_binary/${{ inputs.vapp_binary_name }}
+        run: |
+          cargo test --features ${{ inputs.cargo_test_features }}
+
+      - name: Upload test logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ inputs.app_name }}_logs_${{ matrix.model }}
+          path: ${{ inputs.client_dir }}/test.log

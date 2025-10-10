@@ -1,0 +1,73 @@
+name: Reusable V-App Build
+
+on:
+  workflow_call:
+    inputs:
+      app_name:
+        description: "Human readable name for the V-App (e.g. vnd-test)"
+        required: true
+        type: string
+      app_dir:
+        description: "Relative path to the app crate directory (e.g. apps/test/app)"
+        required: true
+        type: string
+      artifact_name:
+        description: "Name of the artifact to upload (e.g. vnd_test_riscv_binary)"
+        required: true
+        type: string
+      binary_name:
+        description: "Expected produced V-App binary filename without extension (e.g. vnd-test, vnd-sadik, vnd-bitcoin)"
+        required: true
+        type: string
+      extra_build_args:
+        description: "Additional args appended to cargo build command."
+        required: false
+        default: ""
+        type: string
+      rust_toolchain:
+        description: "Rust toolchain (default nightly)."
+        required: false
+        default: nightly
+        type: string
+      riscv_target:
+        description: "RISC-V target triple"
+        required: false
+        default: riscv32imc-unknown-none-elf
+        type: string
+
+jobs:
+  build:
+    name: Build ${{ inputs.app_name }} (RISC-V)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Set up Rust toolchain
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: ${{ inputs.rust_toolchain }}
+          target: ${{ inputs.riscv_target }}
+          components: rustfmt, clippy
+          profile: minimal
+
+      - name: Checkout sources
+        uses: actions/checkout@v4
+
+      - name: Install riscv64-unknown-elf-objcopy (cargo-vnd prerequisite)
+        run: |
+          sudo apt-get update && \
+          sudo apt-get install -y binutils-riscv64-unknown-elf
+      - name: Install cargo-vnd
+        run: |
+          cargo install --path ./cargo-vnd
+
+      - name: Build
+        working-directory: ${{ inputs.app_dir }}
+        run: |
+          set -e
+          cargo +${{ inputs.rust_toolchain }} build --release --target ${{ inputs.riscv_target }} ${{ inputs.extra_build_args }}
+          cargo vnd package
+
+      - name: Upload V-App artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ inputs.artifact_name }}
+          path: ${{ inputs.app_dir }}/target/${{ inputs.riscv_target }}/release/${{ inputs.binary_name }}*

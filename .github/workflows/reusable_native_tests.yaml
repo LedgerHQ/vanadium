@@ -1,0 +1,56 @@
+name: Reusable V-App Unit Tests
+
+on:
+  workflow_call:
+    inputs:
+      app_name:
+        description: "Human readable app name (e.g. vnd-bitcoin)"
+        required: true
+        type: string
+      test_dirs_json:
+        description: "JSON array of relative directories to run cargo test in (e.g. ['apps/bitcoin/common','apps/bitcoin/app'])"
+        required: true
+        type: string
+      rust_toolchain:
+        description: "Rust toolchain"
+        required: false
+        default: nightly
+        type: string
+      rust_target:
+        description: "Native target triple"
+        required: false
+        default: x86_64-unknown-linux-gnu
+        type: string
+      cargo_test_args:
+        description: "Extra cargo test args"
+        required: false
+        default: ""
+        type: string
+
+jobs:
+  unit-tests:
+    name: Unit tests (${{ inputs.app_name }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        test_dir: ${{ fromJson(inputs.test_dirs_json) }}
+    steps:
+      - name: Set up Rust toolchain
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: ${{ inputs.rust_toolchain }}
+          target: ${{ inputs.rust_target }}
+          components: rustfmt, clippy
+          profile: minimal
+
+      - name: Install system deps (udev and pkg-config)
+        run: sudo apt-get update && sudo apt-get install -y libudev-dev pkg-config
+
+      - name: Checkout sources
+        uses: actions/checkout@v4
+
+      - name: Cargo test (${{ matrix.test_dir }})
+        working-directory: ${{ matrix.test_dir }}
+        run: |
+          cargo +${{ inputs.rust_toolchain }} test --target ${{ inputs.rust_target }} ${{ inputs.cargo_test_args }}
