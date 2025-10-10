@@ -1,7 +1,5 @@
 #![cfg(feature = "speculos-tests")]
 
-use std::println;
-
 use base64::{self, Engine};
 use bitcoin::Psbt;
 use common::{message::Account, psbt::prepare_psbt};
