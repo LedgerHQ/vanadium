@@ -64,6 +64,15 @@ jobs:
           target: riscv32imc-unknown-none-elf
           components: rustfmt, clippy
           profile: minimal
+      - name: Cache cargo dirs
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-cargo-bench-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-bench-
       - name: Clone
         uses: actions/checkout@v4
       - name: Build app
@@ -93,6 +102,15 @@ jobs:
           target: x86_64-unknown-linux-gnu
           components: rustfmt, clippy
           profile: minimal
+      - name: Cache cargo dirs
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-cargo-speculos-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-speculos-
       - name: Install Speculos
         run: |
           pip install speculos

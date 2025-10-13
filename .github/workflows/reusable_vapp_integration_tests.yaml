@@ -55,6 +55,17 @@ jobs:
           components: rustfmt, clippy
           profile: minimal
 
+      - name: Cache cargo dirs
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ inputs.rust_toolchain }}-integration-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-${{ inputs.rust_toolchain }}-integration-
+
       - name: Install Speculos
         run: pip install speculos
 
