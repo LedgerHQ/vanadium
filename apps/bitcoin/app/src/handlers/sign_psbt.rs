@@ -224,9 +224,13 @@ fn sign_input_schnorr(
 }
 
 pub fn handle_sign_psbt(app: &mut sdk::App, psbt: &[u8]) -> Result<Response, Error> {
+    sdk::println!("STARTED");
+
     app.show_spinner("Processing...");
 
     let psbt = fastpsbt::Psbt::parse(&psbt).map_err(|_| Error::FailedToDeserializePsbt)?;
+
+    sdk::println!("PARSED PSBT");
 
     let accounts = psbt
         .get_accounts()
@@ -266,6 +270,8 @@ pub fn handle_sign_psbt(app: &mut sdk::App, psbt: &[u8]) -> Result<Response, Err
             }
         }
     }
+
+    sdk::println!("Verified accounts");
 
     /***** input checks *****/
 
@@ -379,6 +385,8 @@ pub fn handle_sign_psbt(app: &mut sdk::App, psbt: &[u8]) -> Result<Response, Err
         inputs_total_amount += tx_out.value.to_sat();
     }
 
+    sdk::println!("Checked inputs");
+
     /***** output checks *****/
     for (output_index, output) in psbt.outputs.iter().enumerate() {
         let amount = output.amount.ok_or(Error::OutputAmountMissing)?;
@@ -419,6 +427,8 @@ pub fn handle_sign_psbt(app: &mut sdk::App, psbt: &[u8]) -> Result<Response, Err
         return Err(Error::InputsLessThanOutputs);
     }
     let fee = inputs_total_amount - outputs_total_amount;
+
+    sdk::println!("Checked outputs");
 
     /***** user validation UI *****/
 
@@ -524,6 +534,8 @@ pub fn handle_sign_psbt(app: &mut sdk::App, psbt: &[u8]) -> Result<Response, Err
         value: format!("{} {}", fee, COIN_TICKER),
     });
 
+    sdk::println!("Showing ux");
+
     if !display_transaction(app, &pairs) {
         #[cfg(not(any(test, feature = "autoapprove")))]
         app.show_info(Icon::Failure, "Transaction rejected");
@@ -532,6 +544,8 @@ pub fn handle_sign_psbt(app: &mut sdk::App, psbt: &[u8]) -> Result<Response, Err
     }
 
     app.show_spinner("Signing transaction...");
+
+    sdk::println!("Signing");
 
     /***** Sign transaction *****/
     let unsigned_tx = psbt
@@ -641,6 +655,8 @@ pub fn handle_sign_psbt(app: &mut sdk::App, psbt: &[u8]) -> Result<Response, Err
 
     #[cfg(not(any(test, feature = "autoapprove")))]
     app.show_info(Icon::Success, "Transaction signed");
+
+    sdk::println!("Signed");
 
     Ok(Response::PsbtSigned(partial_signatures))
 }
