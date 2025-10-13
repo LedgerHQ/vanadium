@@ -9,6 +9,32 @@ use bitcoin::{PubkeyHash, ScriptBuf, ScriptHash, TapNodeHash, WPubkeyHash, WScri
 
 use crate::taproot::GetTapTreeHash;
 
+// Simple generic bubble sort implementation for Vec<[u8; N]>.
+trait BubbleSort {
+    fn bubble_sort(&mut self);
+}
+
+impl<const N: usize> BubbleSort for Vec<[u8; N]> {
+    fn bubble_sort(&mut self) {
+        let len = self.len();
+        if len < 2 {
+            return;
+        }
+        for i in 0..len {
+            let mut swapped = false;
+            for j in 0..(len - 1 - i) {
+                if self[j] > self[j + 1] {
+                    self.swap(j, j + 1);
+                    swapped = true;
+                }
+            }
+            if !swapped {
+                break;
+            }
+        }
+    }
+}
+
 use crate::account::{DescriptorTemplate, KeyInformation, KeyPlaceholder, WalletPolicy};
 
 const MAX_PUBKEYS_PER_MULTISIG: usize = 20;
@@ -186,7 +212,8 @@ impl ToScriptWithKeyInfoInner for DescriptorTemplate {
                     .collect::<Result<Vec<[u8; 33]>, &'static str>>()?;
 
                 if matches!(self, DescriptorTemplate::Sortedmulti(_, _)) {
-                    keys.sort();
+                    // O(n^2) sorting, better for small arrays
+                    keys.bubble_sort();
                 }
 
                 for key in keys {
@@ -224,7 +251,8 @@ impl ToScriptWithKeyInfoInner for DescriptorTemplate {
                     .collect::<Result<Vec<[u8; 32]>, &'static str>>()?;
 
                 if matches!(self, DescriptorTemplate::Sortedmulti_a(_, _)) {
-                    keys.sort();
+                    // O(n^2) sorting, better for small arrays
+                    keys.bubble_sort();
                 }
 
                 for (idx, key) in keys.iter().enumerate() {
