@@ -134,25 +134,37 @@ async fn spawn_speculos_and_transport(vanadium_binary: &str) -> (Child, Arc<Tran
 
 impl<C> Drop for TestSetup<C> {
     fn drop(&mut self) {
-        // Write the number of exchanges, amount sent and amount received to the log file
-        let _ = writeln!(
+        // Attempt to write metrics
+        if let Err(e) = writeln!(
             self.log_file,
-            "Total exchanges: {}",
-            self.transport_tcp.total_exchanges()
-        );
-        let _ = writeln!(
-            self.log_file,
-            "Total sent: {}",
-            self.transport_tcp.total_sent()
-        );
-        let _ = writeln!(
-            self.log_file,
-            "Total received: {}",
+            "Total exchanges: {} | Total sent: {} | Total received: {}",
+            self.transport_tcp.total_exchanges(),
+            self.transport_tcp.total_sent(),
             self.transport_tcp.total_received()
-        );
+        ) {
+            eprintln!("Failed writing metrics: {e}");
+        }
 
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        // Check if process already exited
+        match self.child.try_wait() {
+            Ok(Some(status)) => {
+                let _ = writeln!(
+                    self.log_file,
+                    "Speculos already exited (code={:?}).",
+                    status.code()
+                );
+            }
+            Ok(None) => {
+                if let Err(e) = self.child.kill() {
+                    eprintln!("Failed to kill speculos: {e}");
+                }
+                let _ = self.child.wait();
+                let _ = writeln!(self.log_file, "Speculos killed.");
+            }
+            Err(e) => {
+                eprintln!("Error querying speculos status: {e}");
+            }
+        }
     }
 }
 
