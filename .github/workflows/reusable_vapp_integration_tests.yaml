@@ -40,7 +40,7 @@ on:
 
 jobs:
   integration-tests:
-    name: Integration tests (${{ inputs.app_name }}) on Speculos
+    name: Integration tests (${{ inputs.app_name }}) on Speculos (${{ matrix.model }})
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
