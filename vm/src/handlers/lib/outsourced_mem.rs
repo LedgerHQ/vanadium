@@ -11,7 +11,8 @@ use ledger_device_sdk::io;
 use common::client_commands::{
     CommitPageMessage, CommitPageProofContinuedMessage, CommitPageProofContinuedResponse,
     CommitPageProofResponse, GetPageMessage, GetPageProofContinuedMessage,
-    GetPageProofContinuedResponse, GetPageResponse, Message, SectionKind,
+    GetPageProofContinuedResponse, GetPageResponse, Message, PageProofKind, SectionKind,
+    StorePageProofMessage,
 };
 use common::constants::PAGE_SIZE;
 
@@ -29,6 +30,7 @@ struct CachedPage {
     page_hash: HashOutput<32>, // Hash of the page data when loaded (before any changes)
     valid: bool,               // Indicates if the slot contains a valid page
     modified: bool,            // Indicates if the page has been modified since it was loaded
+    proof_kind: PageProofKind, // How the page was authenticated (Merkle or Hmac)
 }
 
 impl Default for CachedPage {
@@ -41,6 +43,7 @@ impl Default for CachedPage {
             page_hash: [0; 32].into(),
             valid: false,
             modified: false,
+            proof_kind: PageProofKind::Merkle,
         }
     }
 }
@@ -248,7 +251,7 @@ impl<'c, const N: usize> OutsourcedMemory<'c, N> {
     fn load_page(
         &mut self,
         page_index: u32,
-    ) -> Result<(Page, HashOutput<32>), common::vm::MemoryError> {
+    ) -> Result<(Page, HashOutput<32>, PageProofKind), common::vm::MemoryError> {
         #[cfg(feature = "metrics")]
         {
             self.n_page_loads += 1;
@@ -281,60 +284,87 @@ impl<'c, const N: usize> OutsourcedMemory<'c, N> {
         } else {
             get_page_hash(&mut self.hasher, page_response.page_data, None)
         };
-
-        let n = page_response.n; // Total number of elements in the proof
-        if page_response.t as usize != page_response.proof.len() {
-            return Err(common::vm::MemoryError::GenericError(
-                "Proof fragment size does not match the expected number of elements",
-            ));
-        }
-
-        // Verify the Merkle inclusion proof using streaming verification
-        let mut verifier = MerkleAccumulator::<Sha256Hasher, Vec<u8>, 32>::begin_inclusion_proof(
-            &self.merkle_root,
-            &page_hash,
-            page_index as usize,
-            self.n_pages as usize,
-        );
-
-        for el in page_response.proof.iter() {
-            verifier.feed(&mut self.hasher, HashOutput::<32>::as_hash_output(el));
-        }
-
         let nonce = page_response.nonce.clone();
         let is_page_encrypted = page_response.is_encrypted;
-
-        let mut n_processed_elements = page_response.t as usize;
         let data = *page_response.page_data;
 
-        // If we need more elements, request them
-        while n_processed_elements < n as usize {
-            let mut resp = comm.begin_response();
-            GetPageProofContinuedMessage::new().serialize_to_comm(&mut resp);
+        let proof_kind = page_response.proof_kind;
 
-            let command = interrupt(resp)?;
-
-            let continued_response =
-                GetPageProofContinuedResponse::deserialize(&command.get_data()).map_err(|_| {
-                    common::vm::MemoryError::GenericError("Invalid continued proof data")
-                })?;
-
-            if continued_response.t as usize != continued_response.proof.len() {
-                return Err(common::vm::MemoryError::GenericError(
-                    "Continued proof size does not match the expected number of elements",
-                ));
+        match proof_kind {
+            PageProofKind::Merkle => {
+                let n = page_response.n;
+                if page_response.t as usize != page_response.proof.len() {
+                    return Err(common::vm::MemoryError::GenericError(
+                        "Proof fragment size does not match the expected number of elements",
+                    ));
+                }
+                let mut verifier =
+                    MerkleAccumulator::<Sha256Hasher, Vec<u8>, 32>::begin_inclusion_proof(
+                        &self.merkle_root,
+                        &page_hash,
+                        page_index as usize,
+                        self.n_pages as usize,
+                    );
+                for el in page_response.proof.iter() {
+                    verifier.feed(&mut self.hasher, HashOutput::<32>::as_hash_output(el));
+                }
+                let mut n_processed_elements = page_response.t as usize;
+                while n_processed_elements < n as usize {
+                    let mut resp2 = comm.begin_response();
+                    GetPageProofContinuedMessage::new().serialize_to_comm(&mut resp2);
+                    let command2 = interrupt(resp2)?;
+                    let continued_response = GetPageProofContinuedResponse::deserialize(
+                        &command2.get_data(),
+                    )
+                    .map_err(|_| {
+                        common::vm::MemoryError::GenericError("Invalid continued proof data")
+                    })?;
+                    if continued_response.t as usize != continued_response.proof.len() {
+                        return Err(common::vm::MemoryError::GenericError(
+                            "Continued proof size does not match the expected number of elements",
+                        ));
+                    }
+                    for el in continued_response.proof.iter() {
+                        verifier.feed(&mut self.hasher, HashOutput::<32>::as_hash_output(el));
+                    }
+                    n_processed_elements += continued_response.t as usize;
+                }
+                if !verifier.verified() {
+                    return Err(common::vm::MemoryError::GenericError(
+                        "Merkle inclusion verification failed",
+                    ));
+                }
+                // If this is a code page, we will later possibly store HMAC on eviction, mark kind
+                if self.section_kind == SectionKind::Code {
+                    if let Some(slot_idx) = self.last_accessed_page.map(|(_, s)| s) {
+                        self.cached_pages[slot_idx].proof_kind = PageProofKind::Merkle;
+                    }
+                }
             }
+            PageProofKind::Hmac => {
+                // Expect exactly one 32-byte element
+                if page_response.proof.len() != 1 {
+                    return Err(common::vm::MemoryError::GenericError(
+                        "HMAC proof must contain exactly one element",
+                    ));
+                }
+                let hmac = page_response.proof[0];
+                // Verify matches stored HMAC (for code pages). For other sections, reject.
+                if self.section_kind != SectionKind::Code {
+                    return Err(common::vm::MemoryError::GenericError(
+                        "HMAC proof not allowed for non-code section",
+                    ));
+                }
 
-            for el in continued_response.proof.iter() {
-                verifier.feed(&mut self.hasher, HashOutput::<32>::as_hash_output(el));
+                // placeholder: compute the actual hmac
+                let expected_hmac = [42u8; 32];
+                if hmac != expected_hmac {
+                    // TODO: use constant time comparison
+                    return Err(common::vm::MemoryError::GenericError(
+                        "HMAC verification failed",
+                    ));
+                }
             }
-            n_processed_elements += continued_response.t as usize;
-        }
-
-        if !verifier.verified() {
-            return Err(common::vm::MemoryError::GenericError(
-                "Merkle inclusion verification failed",
-            ));
         }
 
         if is_page_encrypted {
@@ -351,9 +381,10 @@ impl<'c, const N: usize> OutsourcedMemory<'c, N> {
                     data: decrypted_data.try_into().unwrap(),
                 },
                 page_hash,
+                proof_kind,
             ))
         } else {
-            Ok((Page { data }, page_hash))
+            Ok((Page { data }, page_hash, proof_kind))
         }
     }
 }
@@ -432,6 +463,28 @@ impl<'c, const N: usize> PagedMemory for OutsourcedMemory<'c, N> {
                 self.commit_page_at(evict_index)?;
             }
 
+            if self.section_kind == SectionKind::Code && self.cached_pages[evict_index].valid {
+                // Before invalidating: if code page and proof kind was Merkle, compute HMAC and send StorePageProof
+                if self.cached_pages[evict_index].proof_kind == PageProofKind::Merkle {
+                    // Compute HMAC of page
+                    // TODO: placeholder; compute the actual HMAC
+                    let hmac = [42u8; 32];
+                    // Send message to host
+                    let mut comm = self.comm.borrow_mut();
+                    let mut resp = comm.begin_response();
+                    StorePageProofMessage::new(
+                        self.section_kind,
+                        self.cached_pages[evict_index].idx,
+                        hmac,
+                    )
+                    .serialize_to_comm(&mut resp);
+                    if interrupt(resp)?.get_data().len() != 0 {
+                        return Err(common::vm::MemoryError::GenericError(
+                            "Invalid StorePageProof response: expected empty",
+                        ));
+                    }
+                }
+            }
             // Invalidate the evicted page
             let evicted_page_index = self.cached_pages[evict_index].idx;
             self.cached_pages[evict_index].valid = false;
@@ -453,13 +506,14 @@ impl<'c, const N: usize> PagedMemory for OutsourcedMemory<'c, N> {
         let slot = slot.unwrap();
 
         // Load the page into the slot
-        let (page_data, page_hash) = self.load_page(page_index)?;
+        let (page_data, page_hash, proof_kind) = self.load_page(page_index)?;
         self.cached_pages[slot] = CachedPage {
             idx: page_index,
             page: page_data,
             page_hash,
             valid: true,
             modified: false,
+            proof_kind,
         };
         self.eviction_strategy.on_load(slot, page_index);
 
