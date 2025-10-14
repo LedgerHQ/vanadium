@@ -97,6 +97,13 @@ jobs:
         run: |
           cargo test --features ${{ inputs.cargo_test_features }}
 
+      - name: Show test log
+        if: always()
+        working-directory: ${{ inputs.client_dir }}
+        run: |
+          # Print only the first 1000 lines to avoid excessively large logs
+          head -n 1000 test.log
+
       - name: Upload test logs
         if: always()
         uses: actions/upload-artifact@v4
