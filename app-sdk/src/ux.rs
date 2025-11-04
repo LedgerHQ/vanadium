@@ -24,6 +24,7 @@ pub fn has_page_api() -> bool {
         0 => true,           // native target
         0x2c970060 => true,  // Ledger Stax
         0x2c970070 => true,  // Ledger Flex
+        0x2c970080 => true,  // Ledger Apex_p
         0x2c970040 => false, // Ledger Nano X
         0x2c970050 => false, // Ledger Nano S+
         _ => panic!("Unsupported device"),
