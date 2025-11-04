@@ -13,6 +13,10 @@ run-flex:
 run-stax:
   speculos target/stax/release/app-vanadium
 
+run-apex_p:
+  speculos target/apex_p/release/app-vanadium
+
+
 # note: the load-* commands only work after compiling with the VSCode extension
 
 load-nanosplus:
@@ -26,4 +30,7 @@ load-flex:
 
 load-stax:
   python3 -m ledgerblue.runScript  --scp --fileName build/stax/bin/app.apdu --elfFile build/stax/bin/app.elf
+
+load-apex_p:
+  python3 -m ledgerblue.runScript  --scp --fileName build/apex_p/bin/app.apdu --elfFile build/apex_p/bin/app.elf
 
