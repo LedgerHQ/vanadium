@@ -410,6 +410,7 @@ impl UxHandler {
                                                 smallCaseForValue: false,
                                                 wrapping: true,
                                                 actionCallback: None, // not implemented, no events from the tagvalues
+                                                ..Default::default()
                                             },
                                     },
                             },
