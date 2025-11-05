@@ -62,6 +62,9 @@ icon = "vanadium_32x32.gif"
 [package.metadata.ledger.flex]
 icon = "vanadium_40x40.gif"
 
+[package.metadata.ledger.apex_p]
+icon = "vanadium_32x32.gif"
+
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_os, values("stax", "flex", "apex_p", "nanos", "nanox", "nanosplus"))'] }
 
