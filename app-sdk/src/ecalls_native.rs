@@ -219,6 +219,7 @@ pub fn xrecv(buffer: *mut u8, max_size: usize) -> usize {
     expected
 }
 
+#[cfg(not(feature = "test-mode"))]
 pub fn print(buffer: *const u8, size: usize) {
     // SAFETY: caller guarantees [buffer, buffer+size) is valid.
     let data = unsafe { std::slice::from_raw_parts(buffer, size) };
@@ -231,6 +232,16 @@ pub fn print(buffer: *const u8, size: usize) {
         .and_then(|_| stream.write_all(data))
         .and_then(|_| stream.flush())
         .expect("TCP write failed");
+}
+
+// When running unit tests, we should not perform network I/O on prints,
+// since tests will run without a client.
+#[cfg(feature = "test-mode")]
+pub fn print(buffer: *const u8, size: usize) {
+    // SAFETY: caller guarantees [buffer, buffer+size) is valid.
+    let data = unsafe { std::slice::from_raw_parts(buffer, size) };
+    // In tests, avoid network I/O; just emit the message to stderr for visibility.
+    println!("{}", String::from_utf8_lossy(data));
 }
 
 pub fn get_event(data: *mut EventData) -> u32 {

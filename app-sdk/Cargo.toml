@@ -10,6 +10,10 @@ subtle = { version="2.6.1", default-features = false }
 hex-literal = "0.4.1"
 zeroize = "1.8.1"
 
+[features]
+# Enable this in V-App's dev-dependencies
+test-mode = [] 
+
 [build-dependencies]
 common = { path = "../common", features = ["wrapped_serializable"] }
 

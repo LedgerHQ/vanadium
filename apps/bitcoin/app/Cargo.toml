@@ -21,6 +21,7 @@ sdk = { package = "vanadium-app-sdk", path = "../../../app-sdk"}
 
 [dev-dependencies]
 base64 = { version = "0.22.1", default-features = false, features = ["alloc"] }
+sdk = { package = "vanadium-app-sdk", path = "../../../app-sdk", features = ["test-mode"]}
 
 [profile.release]
 opt-level = "s"
