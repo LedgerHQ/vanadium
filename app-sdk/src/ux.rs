@@ -366,3 +366,12 @@ pub fn ux_idle() {
         show_step_raw(&ux_generated::RAW_STEP_APP_DASHBOARD);
     }
 }
+
+pub fn ux_home(description: &str) {
+    if has_page_api() {
+        ux_generated::show_page_home(description);
+    } else {
+        // not implemented yet for step API
+        todo!();
+    }
+}

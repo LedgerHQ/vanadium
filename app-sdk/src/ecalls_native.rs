@@ -390,6 +390,10 @@ pub fn show_page(page_desc: *const u8, page_desc_len: usize) -> u32 {
                 epilogue_noaction();
             }
         }
+        common::ux::Page::Home { description } => {
+            println!("{}", description);
+            epilogue_noaction();
+        }
     }
 
     1

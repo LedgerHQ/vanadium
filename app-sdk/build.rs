@@ -120,6 +120,12 @@ const PAGE_MAKERS: &[(&'static str, WrappedPage)] = &[
             },
         },
     ),
+    (
+        "home",
+        WrappedPage::Home {
+            description: rt_str("description", "&str"),
+        },
+    ),
 ];
 
 const STEP_MAKERS: &[(&'static str, WrappedStep)] = &[

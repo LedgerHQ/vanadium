@@ -13,6 +13,7 @@ pub enum Action {
     PreviousPage = 4, // TODO: page index is part of the event data
     NextPage = 5,
     TitleBack = 6,
+    TopRight = 7,
 }
 
 #[repr(u32)]
@@ -150,6 +151,9 @@ pub enum Page {
         navigation_info: Option<NavigationInfo>,
         page_content_info: PageContentInfo,
     },
+    /// The entry page of a V-App, containing the app description and a 'Quit' button
+    #[maker(make_page_home)]
+    Home { description: String },
 }
 
 // styles for centered info steps
@@ -247,6 +251,14 @@ mod tests {
         let page = Page::GenericPage {
             navigation_info: Some(nav_info),
             page_content_info,
+        };
+        round_trip(&page);
+    }
+
+    #[test]
+    fn test_home_page() {
+        let page = Page::Home {
+            description: "test".to_string(),
         };
         round_trip(&page);
     }

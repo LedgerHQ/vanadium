@@ -12,15 +12,17 @@ use super::bitmaps::ToIconDetails;
 use super::CommEcallError;
 
 #[cfg(any(target_os = "stax", target_os = "flex", target_os = "apex_p"))]
-const TOKEN_CONFIRM_REJECT: u8 = 0;
+const TOKEN_CONFIRM_REJECT: u8 = 1;
 #[cfg(any(target_os = "stax", target_os = "flex", target_os = "apex_p"))]
-const TOKEN_QUIT: u8 = 1;
+const TOKEN_QUIT: u8 = 2;
 #[cfg(any(target_os = "stax", target_os = "flex", target_os = "apex_p"))]
-const TOKEN_SKIP: u8 = 2;
+const TOKEN_SKIP: u8 = 3;
 #[cfg(any(target_os = "stax", target_os = "flex", target_os = "apex_p"))]
-const TOKEN_NAVIGATION: u8 = 3;
+const TOKEN_NAVIGATION: u8 = 4;
 #[cfg(any(target_os = "stax", target_os = "flex", target_os = "apex_p"))]
-const TOKEN_TITLE: u8 = 4;
+const TOKEN_TITLE: u8 = 5;
+#[cfg(any(target_os = "stax", target_os = "flex", target_os = "apex_p"))]
+const TOKEN_TOPRIGHT: u8 = 6;
 
 static mut LAST_EVENT: Option<(common::ux::EventCode, common::ux::EventData)> = None;
 
@@ -65,6 +67,7 @@ unsafe extern "C" fn layout_touch_callback(token: core::ffi::c_int, index: u8) {
             }
         }
         (TOKEN_TITLE, _) => common::ux::Action::TitleBack,
+        (TOKEN_TOPRIGHT, _) => common::ux::Action::TopRight,
         _ => {
             crate::println!("Event unhandled");
             return;
@@ -474,6 +477,47 @@ impl UxHandler {
                         );
                     }
                 };
+            },
+            common::ux::Page::Home { description } => unsafe {
+                self.clear_cstrings();
+                self.release_handle();
+
+                let ticker_config = sys::nbgl_screenTickerConfiguration_t {
+                    tickerCallback: None, // we could put a callback here if we had a timer
+                    tickerValue: 0,       // no timer
+                    tickerIntervale: 0,   // not periodic
+                };
+
+                let page_info = sys::nbgl_pageInfoDescription_t {
+                    centeredInfo: sys::nbgl_contentCenteredInfo_t {
+                        text1: self.alloc_cstring(Some(description))?,
+                        text2: core::ptr::null(),
+                        text3: core::ptr::null(),
+                        icon: core::ptr::null(),
+                        onTop: false,
+                        style: sys::LARGE_CASE_INFO,
+                        offsetY: 0,
+                    },
+                    topRightStyle: sys::INFO_ICON,
+                    bottomButtonStyle: sys::QUIT_APP_TEXT,
+                    topRightToken: TOKEN_TOPRIGHT,
+                    bottomButtonsToken: TOKEN_QUIT,
+                    footerText: core::ptr::null(),
+                    footerToken: 0,
+                    tapActionText: core::ptr::null(),
+                    isSwipeable: true,
+                    tapActionToken: 0,
+                    actionButtonText: core::ptr::null(),
+                    actionButtonIcon: core::ptr::null(),
+                    actionButtonStyle: sys::BLACK_BACKGROUND,
+                    tuneId: sys::TUNE_TAP_CASUAL,
+                };
+
+                self.page_handle = sys::nbgl_pageDrawInfo(
+                    Some(layout_touch_callback),
+                    &ticker_config, // or core::ptr::null()
+                    &page_info,
+                );
             },
         }
 
