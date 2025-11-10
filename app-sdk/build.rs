@@ -37,7 +37,7 @@ const PAGE_MAKERS: &[(&'static str, WrappedPage)] = &[
                 n_pages: rt("n_pages", "u32"),
                 skip_text: None,
                 nav_info: WrappedNavInfo::NavWithButtons {
-                    has_back_button: ct(true),
+                    has_back_button: ct(false),
                     has_page_indicator: ct(true),
                     quit_text: Some(ct_str("Reject")),
                 },
@@ -124,6 +124,31 @@ const PAGE_MAKERS: &[(&'static str, WrappedPage)] = &[
         "home",
         WrappedPage::Home {
             description: rt_str("description", "&str"),
+        },
+    ),
+    (
+        // TODO: the C SDK uses nbgl_contentInfoList_t with a 'back' button on the
+        // top-left of the page. We don't yet support it, so we use a custom button
+        // at the bottom of the page, instead.
+        "home_info",
+        WrappedPage::GenericPage {
+            navigation_info: Some(WrappedNavigationInfo {
+                active_page: ct(0u32),
+                n_pages: ct(1u32),
+                skip_text: None,
+                nav_info: WrappedNavInfo::NavWithButtons {
+                    has_back_button: ct(true),
+                    has_page_indicator: ct(false),
+                    quit_text: Some(ct_str("<- Back")),
+                },
+            }),
+            page_content_info: WrappedPageContentInfo {
+                title: None,
+                top_right_icon: ct(Icon::None), // TODO: support icons
+                page_content: WrappedPageContent::TagValueList {
+                    list: rt("pairs", "&[TagValue]"),
+                },
+            },
         },
     ),
 ];
