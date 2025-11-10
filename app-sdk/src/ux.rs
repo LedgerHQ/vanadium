@@ -295,7 +295,7 @@ pub fn show_info(icon: Icon, text: &str) {
 }
 
 // computes the correct constant among SINGLE_STEP, FIRST_STEP, LAST_STEP, NEITHER_FIRST_NOR_LAST_STEP
-const fn step_pos(n_steps: u32, cur_step: u32) -> u8 {
+pub(crate) const fn step_pos(n_steps: u32, cur_step: u32) -> u8 {
     let has_left_arrow = (cur_step > 0) as u8;
     let has_right_arrow = (cur_step + 1 < n_steps) as u8;
 
@@ -364,14 +364,5 @@ pub fn ux_idle() {
         show_page_raw(&ux_generated::RAW_PAGE_APP_DASHBOARD);
     } else {
         show_step_raw(&ux_generated::RAW_STEP_APP_DASHBOARD);
-    }
-}
-
-pub fn ux_home(description: &str) {
-    if has_page_api() {
-        ux_generated::show_page_home(description);
-    } else {
-        // not implemented yet for step API
-        todo!();
     }
 }

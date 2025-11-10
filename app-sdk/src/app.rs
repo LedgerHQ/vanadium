@@ -4,6 +4,11 @@ use alloc::{
 };
 use common::ux::TagValue;
 
+use crate::{
+    ux::{has_page_api, step_pos},
+    ux_generated,
+};
+
 /// A Handler is a function that is called when a message is received from the host, and
 /// returns the app's response.
 pub type Handler = fn(&mut App, &[u8]) -> Vec<u8>;
@@ -11,10 +16,15 @@ pub type Handler = fn(&mut App, &[u8]) -> Vec<u8>;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum View {
     None,
-    Home,
-    HomeInfo,
+    // views for the Page API
+    HomePage,
+    AppInfoPage,
+    // views for the Step API
+    HomeIntroStep,
+    HomeAppInfoStep,
+    HomeQuitStep,
+    AppInfoStep(u8), // generic step to show the app info
 }
-
 /// The App struct represents the context of the application.
 pub struct App {
     handler: Handler,
@@ -61,20 +71,76 @@ impl App {
         self
     }
 
-    fn show_home(&mut self) {
+    // Pages
+    fn show_page_home(&mut self) {
         let description = self
             .description
             .as_deref()
             .unwrap_or("Application is ready");
 
-        crate::ux::ux_home(description);
-        self.current_view = View::Home;
+        ux_generated::show_page_home(description);
+
+        self.current_view = View::HomePage;
     }
 
-    fn show_home_info(&mut self) {
+    fn show_page_app_info(&mut self) {
         let page_raw = self.home_info_page();
         crate::ux::show_page_raw(page_raw);
-        self.current_view = View::HomeInfo;
+        self.current_view = View::AppInfoPage;
+    }
+
+    // Steps
+    fn show_step_home_intro(&mut self) {
+        let description = self
+            .description
+            .as_deref()
+            .unwrap_or("Application is ready");
+
+        ux_generated::show_step_text_subtext(step_pos(3, 0), description, "");
+
+        self.current_view = View::HomeIntroStep;
+    }
+
+    fn show_step_home_app_info(&mut self) {
+        ux_generated::show_step_text_subtext(step_pos(3, 1), "App Info", "");
+
+        self.current_view = View::HomeAppInfoStep;
+    }
+
+    fn show_step_home_quit(&mut self) {
+        ux_generated::show_step_text_subtext(step_pos(3, 2), "Quit", "");
+
+        self.current_view = View::HomeQuitStep;
+    }
+
+    fn show_step_app_info(&mut self, index: u8) {
+        let n_steps = self.n_appinfo_steps() as u32;
+        match index {
+            0 => ux_generated::show_step_text_subtext(
+                step_pos(n_steps, 0),
+                "V-App Name",
+                self.app_name,
+            ),
+            1 => {
+                ux_generated::show_step_text_subtext(step_pos(n_steps, 1), "Version", self.version)
+            }
+            2 if self.developer.is_some() => ux_generated::show_step_text_subtext(
+                step_pos(n_steps, 2),
+                "Developer",
+                self.developer.as_deref().unwrap(),
+            ),
+            i if i == (n_steps - 1) as u8 => {
+                ux_generated::show_step_text_subtext(step_pos(n_steps, n_steps - 1), "Back", "")
+            }
+            _ => panic!("Invalid app info step index"),
+        }
+
+        self.current_view = View::AppInfoStep(index);
+    }
+
+    fn n_appinfo_steps(&self) -> u8 {
+        // app name, app version, optionally developer name, back button
+        3 + self.developer.is_some() as u8
     }
 
     /// This function shows the dashboard, then enters the core loop of the app.
@@ -83,13 +149,42 @@ impl App {
     pub fn run(&mut self) -> ! {
         use common::ux::Action::*;
         use common::ux::Event::Action;
-        self.show_home();
+
+        if has_page_api() {
+            self.show_page_home();
+        } else {
+            self.show_step_home_intro();
+        }
+
         loop {
             let ev = crate::ux::get_event();
             match (self.current_view, ev) {
-                (View::Home, Action(Quit)) => crate::ecalls::exit(0),
-                (View::Home, Action(TopRight)) => self.show_home_info(),
-                (View::HomeInfo, Action(Quit)) => self.show_home(),
+                // Page API navigation
+                (View::HomePage, Action(Quit)) => crate::ecalls::exit(0),
+                (View::HomePage, Action(TopRight)) => self.show_page_app_info(),
+                (View::AppInfoPage, Action(Quit)) => self.show_page_home(),
+                // Step API navigation
+                (View::HomeIntroStep, Action(NextPage)) => self.show_step_home_app_info(),
+                (View::HomeAppInfoStep, Action(PreviousPage)) => self.show_step_home_intro(),
+                (View::HomeAppInfoStep, Action(Confirm)) => self.show_step_app_info(0),
+                (View::HomeAppInfoStep, Action(NextPage)) => self.show_step_home_quit(),
+                (View::HomeQuitStep, Action(PreviousPage)) => self.show_step_home_app_info(),
+                (View::HomeQuitStep, Action(Confirm)) => crate::ecalls::exit(0),
+                (View::AppInfoStep(n), Action(NextPage)) => {
+                    if n + 1 < self.n_appinfo_steps() {
+                        self.show_step_app_info(n + 1);
+                    }
+                }
+                (View::AppInfoStep(n), Action(Confirm)) => {
+                    if n == self.n_appinfo_steps() - 1 {
+                        self.show_step_home_app_info();
+                    }
+                }
+                (View::AppInfoStep(n), Action(PreviousPage)) => {
+                    if n > 0 {
+                        self.show_step_app_info(n - 1);
+                    }
+                }
                 (view, ev) => {
                     crate::println!("Unhandled event {:?} in view {:?}", ev, view);
                 }
@@ -108,7 +203,11 @@ impl App {
             // - we shouldn't do it immediately if a confirmation window or notice is being shown after a command
             //   (as we would only go to the dashboard after a timeout).
             // This is temporary until a more proper (stateful) framework is implemented.
-            self.show_home();
+            if has_page_api() {
+                self.show_page_home();
+            } else {
+                self.show_step_home_intro();
+            }
         }
     }
 
