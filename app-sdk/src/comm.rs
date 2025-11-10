@@ -27,6 +27,8 @@ use common::comm::{ACK, CHUNK_LENGTH};
 /// Error types that can occur during message transmission.
 #[derive(Debug)]
 pub enum MessageError {
+    /// When no message is received. Not an actual error.
+    NoMessage,
     /// Error when the received message length does not match expectations.
     InvalidLength,
     /// Error when more bytes are received than expected.
@@ -40,6 +42,7 @@ pub enum MessageError {
 impl core::fmt::Display for MessageError {
     fn fmt(&self, f: &mut core::fmt::Formatter) -> core::fmt::Result {
         match self {
+            MessageError::NoMessage => write!(f, "No message received"),
             MessageError::InvalidLength => write!(f, "Invalid message length"),
             MessageError::TooManyBytesReceived => write!(f, "Too many bytes received"),
             MessageError::FailedToReadMessage => write!(f, "Failed to read message"),
@@ -62,6 +65,7 @@ static mut CHUNK_BUFFER: [u8; CHUNK_LENGTH] = [0u8; CHUNK_LENGTH];
 ///
 /// # Errors
 ///
+/// - Returns `MessageError::NoMessage` if the initial chunk has length 0.
 /// - Returns `MessageError::FailedToReadLength` if the initial chunk is too small to contain the
 ///   message length.
 /// - Returns `MessageError::TooManyBytesReceived` if unexpected extra bytes are received.
@@ -78,6 +82,10 @@ pub fn receive_message() -> Result<Vec<u8>, MessageError> {
     let chunk = &raw mut CHUNK_BUFFER;
 
     let first_chunk_len = xrecv_to(unsafe { &mut *chunk });
+
+    if first_chunk_len == 0 {
+        return Err(MessageError::NoMessage);
+    }
 
     // Ensure we have at least 4 bytes for the length.
     if first_chunk_len < 4 {

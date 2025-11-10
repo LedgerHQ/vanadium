@@ -10,7 +10,10 @@ use std::{
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpStream,
-    sync::{mpsc, Mutex},
+    sync::{
+        mpsc::{self, error::TryRecvError},
+        Mutex,
+    },
     task::JoinHandle,
 };
 
@@ -485,14 +488,22 @@ impl<E: std::fmt::Debug + Send + Sync + 'static> VAppEngine<E> {
         #[cfg(feature = "debug")]
         debug!("<- ReceiveBufferMessage()");
 
-        // Wait for the message from the client
-        let ClientMessage::ReceiveBuffer(bytes) = self
-            .client_to_engine_receiver
-            .recv()
-            .await
-            .ok_or(VAppEngineError::ResponseError(
-                "Failed to receive buffer from client",
-            ))?;
+        let msg = self.client_to_engine_receiver.try_recv();
+        let bytes: Vec<u8> = match msg {
+            Ok(ClientMessage::ReceiveBuffer(b)) => b,
+            Err(TryRecvError::Empty) => {
+                // if there is no data to send to the V-App, respond with an empty buffer
+                let data = ReceiveBufferResponse::new(0, &[]).serialize();
+                return self
+                    .exchange_and_process_page_requests(&apdu_continue(data))
+                    .await;
+            }
+            Err(_) => {
+                return Err(VAppEngineError::ResponseError(
+                    "Failed to receive buffer from client",
+                ))
+            }
+        };
 
         let mut remaining_len = bytes.len() as u32;
         let mut offset: usize = 0;

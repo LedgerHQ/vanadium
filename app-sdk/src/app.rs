@@ -39,9 +39,11 @@ impl App {
 
         crate::ux::ux_home(&description);
         loop {
-            // TODO: can we handle the error any better?
-            //       Aborting in Vanadium might be necessary anyway, if communication breaks.
-            let req_msg = crate::comm::receive_message().expect("Communication error");
+            let req_msg = match crate::comm::receive_message() {
+                Ok(msg) => msg,
+                Err(crate::comm::MessageError::NoMessage) => continue, // TODO: should we wait before retrying, to avoid spamming the channel?
+                Err(e) => panic!("Communication error: {}", e),
+            };
             let resp_msg = (self.handler)(self, &req_msg);
             crate::comm::send_message(&resp_msg);
 

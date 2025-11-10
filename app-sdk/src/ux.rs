@@ -32,12 +32,12 @@ pub fn has_page_api() -> bool {
 }
 
 #[inline(always)]
-fn show_page_raw(page: &[u8]) {
+pub(crate) fn show_page_raw(page: &[u8]) {
     ecalls::show_page(page.as_ptr(), page.len());
 }
 
 #[inline(always)]
-fn show_step_raw(step: &[u8]) {
+pub(crate) fn show_step_raw(step: &[u8]) {
     ecalls::show_step(step.as_ptr(), step.len());
 }
 
