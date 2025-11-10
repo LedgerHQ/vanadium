@@ -10,8 +10,9 @@ pub enum Command {
     CountPrimes,
     ShowUxScreen = 0x80,
     DeviceProp = 0x81,
-    Print = 0xfe,
-    Panic = 0xff,
+    Print = 0xfd,
+    Panic = 0xfe,
+    Exit = 0xff,
 }
 
 impl TryFrom<u8> for Command {
@@ -26,8 +27,9 @@ impl TryFrom<u8> for Command {
             0x04 => Ok(Command::CountPrimes),
             0x80 => Ok(Command::ShowUxScreen),
             0x81 => Ok(Command::DeviceProp),
-            0xfe => Ok(Command::Print),
-            0xff => Ok(Command::Panic),
+            0xfd => Ok(Command::Print),
+            0xfe => Ok(Command::Panic),
+            0xff => Ok(Command::Exit),
             _ => Err(()),
         }
     }

@@ -142,7 +142,11 @@ impl TestClient {
     }
 
     pub async fn exit(&mut self) -> Result<i32, &'static str> {
-        match self.app_transport.send_message(&[]).await {
+        match self
+            .app_transport
+            .send_message(&[Command::Exit as u8])
+            .await
+        {
             Ok(_) => Err("Exit message shouldn't return!"),
             Err(e) => match e {
                 VAppExecutionError::AppExited(status) => Ok(status),

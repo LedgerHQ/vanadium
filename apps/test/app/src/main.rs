@@ -18,7 +18,7 @@ pub fn main() {
     loop {
         let msg = sdk::xrecv(256);
         if msg.is_empty() {
-            sdk::exit(0);
+            continue;
         }
 
         let Ok(command) = Command::try_from(msg[0]) else {
@@ -62,6 +62,9 @@ pub fn main() {
             Command::Panic => {
                 let panic_msg = core::str::from_utf8(&msg[1..]).unwrap();
                 panic!("{}", panic_msg);
+            }
+            Command::Exit => {
+                sdk::exit(0);
             }
         };
 
