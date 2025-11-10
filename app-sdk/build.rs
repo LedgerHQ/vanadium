@@ -164,6 +164,16 @@ const STEP_MAKERS: &[(&'static str, WrappedStep)] = &[
         },
     ),
     (
+        // the first text is in bold
+        "btext_subtext",
+        WrappedStep::TextSubtext {
+            pos: rt("pos", "u8"),
+            text: rt_str("text", "&str"),
+            subtext: rt_str("subtext", "&str"),
+            style: ct(BOLD_TEXT1_INFO),
+        },
+    ),
+    (
         "info_single",
         WrappedStep::CenteredInfo {
             pos: ct(0), // SINGLE_STEP

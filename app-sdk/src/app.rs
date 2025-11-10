@@ -116,15 +116,15 @@ impl App {
     fn show_step_app_info(&mut self, index: u8) {
         let n_steps = self.n_appinfo_steps() as u32;
         match index {
-            0 => ux_generated::show_step_text_subtext(
+            0 => ux_generated::show_step_btext_subtext(
                 step_pos(n_steps, 0),
                 "V-App Name",
                 self.app_name,
             ),
             1 => {
-                ux_generated::show_step_text_subtext(step_pos(n_steps, 1), "Version", self.version)
+                ux_generated::show_step_btext_subtext(step_pos(n_steps, 1), "Version", self.version)
             }
-            2 if self.developer.is_some() => ux_generated::show_step_text_subtext(
+            2 if self.developer.is_some() => ux_generated::show_step_btext_subtext(
                 step_pos(n_steps, 2),
                 "Developer",
                 self.developer.as_deref().unwrap(),
