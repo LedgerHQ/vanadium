@@ -12,17 +12,19 @@ use super::bitmaps::ToIconDetails;
 use super::CommEcallError;
 
 #[cfg(any(target_os = "stax", target_os = "flex", target_os = "apex_p"))]
-const TOKEN_CONFIRM_REJECT: u8 = 1;
+const TOKEN_CONFIRM: u8 = 1;
 #[cfg(any(target_os = "stax", target_os = "flex", target_os = "apex_p"))]
-const TOKEN_QUIT: u8 = 2;
+const TOKEN_CONFIRM_REJECT: u8 = 2;
 #[cfg(any(target_os = "stax", target_os = "flex", target_os = "apex_p"))]
-const TOKEN_SKIP: u8 = 3;
+const TOKEN_QUIT: u8 = 3;
 #[cfg(any(target_os = "stax", target_os = "flex", target_os = "apex_p"))]
-const TOKEN_NAVIGATION: u8 = 4;
+const TOKEN_SKIP: u8 = 4;
 #[cfg(any(target_os = "stax", target_os = "flex", target_os = "apex_p"))]
-const TOKEN_TITLE: u8 = 5;
+const TOKEN_NAVIGATION: u8 = 5;
 #[cfg(any(target_os = "stax", target_os = "flex", target_os = "apex_p"))]
-const TOKEN_TOPRIGHT: u8 = 6;
+const TOKEN_TITLE: u8 = 6;
+#[cfg(any(target_os = "stax", target_os = "flex", target_os = "apex_p"))]
+const TOKEN_TOPRIGHT: u8 = 7;
 
 static mut LAST_EVENT: Option<(common::ux::EventCode, common::ux::EventData)> = None;
 
@@ -49,6 +51,7 @@ fn store_new_event(event_code: common::ux::EventCode, event_data: common::ux::Ev
 #[cfg(any(target_os = "stax", target_os = "flex", target_os = "apex_p"))]
 unsafe extern "C" fn layout_touch_callback(token: core::ffi::c_int, index: u8) {
     let action = match (token as u8, index) {
+        (TOKEN_CONFIRM, _) => common::ux::Action::Confirm,
         (TOKEN_CONFIRM_REJECT, 0) => common::ux::Action::Confirm,
         (TOKEN_CONFIRM_REJECT, 1) => common::ux::Action::Reject,
         (TOKEN_QUIT, _) => common::ux::Action::Quit,
@@ -439,7 +442,7 @@ impl UxHandler {
                                                 icon: core::ptr::null(),
                                                 buttonText: self
                                                     .alloc_cstring(Some(button_text))?,
-                                                buttonToken: 0, // TODO,
+                                                buttonToken: TOKEN_CONFIRM,
                                                 tuneId: 0,
                                             },
                                     },
@@ -469,7 +472,7 @@ impl UxHandler {
                                                 icon: core::ptr::null(),
                                                 longPressText: self
                                                     .alloc_cstring(Some(long_press_text))?,
-                                                longPressToken: 0, // TODO,
+                                                longPressToken: TOKEN_CONFIRM,
                                                 tuneId: 0,
                                             },
                                     },
