@@ -44,5 +44,8 @@ fn process_message(app: &mut App, request: &[u8]) -> Vec<u8> {
 }
 
 pub fn main() {
-    App::new(process_message).run();
+    App::new("Bitcoin", env!("CARGO_PKG_VERSION"), process_message)
+        .description("Bitcoin is ready")
+        .developer("Salvatore Ingala")
+        .run();
 }

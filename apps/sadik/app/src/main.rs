@@ -268,5 +268,5 @@ fn process_message(_app: &mut App, msg: &[u8]) -> Vec<u8> {
 }
 
 pub fn main() {
-    App::new(process_message).run();
+    App::new("Sadik", env!("CARGO_PKG_VERSION"), process_message).run();
 }
