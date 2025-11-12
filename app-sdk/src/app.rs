@@ -37,6 +37,9 @@ pub struct App {
     current_view: View,
     // Cached raw bytes for the home info page (TopRight action). Computed lazily.
     home_info_page: Option<Vec<u8>>,
+    // Set to true whenever the app's ux is changed, and therefore the home page
+    // must be shown again at the end of the message handler.
+    ux_dirty: bool,
 }
 
 impl App {
@@ -56,6 +59,7 @@ impl App {
             developer: None,
             home_info_page: None,
             current_view: View::None,
+            ux_dirty: true, // force showing home at startup
         }
     }
 
@@ -150,13 +154,19 @@ impl App {
         use common::ux::Action::*;
         use common::ux::Event::Action;
 
-        if has_page_api() {
-            self.show_page_home();
-        } else {
-            self.show_step_home_intro();
-        }
-
         loop {
+            if self.ux_dirty {
+                // TODO: when the previous view is finished but ended with an on-screen notification
+                // shown for a few seconds, we shouldn't immediately show the home at this point. This
+                // will require a smarter state machine.
+                if has_page_api() {
+                    self.show_page_home();
+                } else {
+                    self.show_step_home_intro();
+                }
+                self.ux_dirty = false;
+            }
+
             let ev = crate::ux::get_event();
             match (self.current_view, ev) {
                 // Page API navigation
@@ -196,18 +206,8 @@ impl App {
                 Err(e) => panic!("Communication error: {}", e),
             };
             let resp_msg = (self.handler)(self, &req_msg);
+            self.ux_dirty = true; // TODO: remove once handlers can set the 'dirty' state themselves
             crate::comm::send_message(&resp_msg);
-
-            // TODO: this is not ideal, as:
-            // - we should only do this if something was indeed shown during the execution of the command
-            // - we shouldn't do it immediately if a confirmation window or notice is being shown after a command
-            //   (as we would only go to the dashboard after a timeout).
-            // This is temporary until a more proper (stateful) framework is implemented.
-            if has_page_api() {
-                self.show_page_home();
-            } else {
-                self.show_step_home_intro();
-            }
         }
     }
 
