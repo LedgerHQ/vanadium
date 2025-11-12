@@ -25,7 +25,7 @@ fn get_pubkey_fingerprint(pubkey: &EcfpPublicKey<Secp256k1, 32>) -> u32 {
 }
 
 #[cfg(not(any(test, feature = "autoapprove")))]
-fn display_xpub(xpub: &str, path: &[u32]) -> bool {
+fn display_xpub(app: &mut sdk::App, xpub: &str, path: &[u32]) -> bool {
     use alloc::string::ToString;
     use alloc::vec;
     use sdk::ux::TagValue;
@@ -39,7 +39,7 @@ fn display_xpub(xpub: &str, path: &[u32]) -> bool {
         ("Verify Bitcoin", "extended public key")
     };
 
-    sdk::ux::review_pairs(
+    app.review_pairs(
         intro_text,
         intro_subtext,
         &vec![
@@ -59,12 +59,12 @@ fn display_xpub(xpub: &str, path: &[u32]) -> bool {
 }
 
 #[cfg(any(test, feature = "autoapprove"))]
-fn display_xpub(_xpub: &str, _path: &[u32]) -> bool {
+fn display_xpub(_app: &mut sdk::App, _xpub: &str, _path: &[u32]) -> bool {
     true
 }
 
 pub fn handle_get_extended_pubkey(
-    _app: &mut sdk::App,
+    app: &mut sdk::App,
     bip32_path: &common::message::Bip32Path,
     display: bool,
 ) -> Result<Response, Error> {
@@ -108,7 +108,7 @@ pub fn handle_get_extended_pubkey(
 
     if display {
         let xpub_base58 = bitcoin::base58::encode_check(&xpub);
-        if !display_xpub(&xpub_base58, &bip32_path.0) {
+        if !display_xpub(app, &xpub_base58, &bip32_path.0) {
             return Err(Error::UserRejected);
         }
     }

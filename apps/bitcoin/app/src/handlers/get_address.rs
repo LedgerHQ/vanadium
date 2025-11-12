@@ -7,7 +7,7 @@ use common::{
 use common::errors::Error;
 
 #[cfg(not(any(test, feature = "autoapprove")))]
-fn display_address(account_name: Option<&str>, addr: &str) -> bool {
+fn display_address(app: &mut sdk::App, account_name: Option<&str>, addr: &str) -> bool {
     use alloc::vec;
     use sdk::ux::TagValue;
 
@@ -31,7 +31,7 @@ fn display_address(account_name: Option<&str>, addr: &str) -> bool {
     } else {
         ("Verify Bitcoin", "address")
     };
-    sdk::ux::review_pairs(
+    app.review_pairs(
         intro_text,
         intro_subtext,
         &pairs,
@@ -42,19 +42,19 @@ fn display_address(account_name: Option<&str>, addr: &str) -> bool {
 }
 
 #[cfg(any(test, feature = "autoapprove"))]
-fn display_address(_account_name: Option<&str>, _addr: &str) -> bool {
+fn display_address(_app: &mut sdk::App, _account_name: Option<&str>, _addr: &str) -> bool {
     true
 }
 
 pub fn handle_get_address(
-    _app: &mut sdk::App,
+    app: &mut sdk::App,
     name: Option<&str>,
     account: &common::message::Account,
     por: &[u8],
     coordinates: &common::message::AccountCoordinates,
     display: bool,
 ) -> Result<Response, Error> {
-    sdk::ux::show_spinner("Processing...");
+    app.show_spinner("Processing...");
 
     let wallet_policy: bip388::WalletPolicy =
         account.try_into().map_err(|_| Error::InvalidWalletPolicy)?;
@@ -83,7 +83,7 @@ pub fn handle_get_address(
         .map_err(|_| Error::InvalidWalletPolicy)?;
 
     if display {
-        if !display_address(name, &address) {
+        if !display_address(app, name, &address) {
             return Err(Error::UserRejected);
         }
     }

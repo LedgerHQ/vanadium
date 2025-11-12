@@ -34,8 +34,8 @@ use sdk::{
 use crate::constants::COIN_TICKER;
 
 #[cfg(not(any(test, feature = "autoapprove")))]
-fn display_warning_high_fee(fee_percent: u64) -> bool {
-    sdk::ux::show_confirm_reject(
+fn display_warning_high_fee(app: &mut sdk::App, fee_percent: u64) -> bool {
+    app.show_confirm_reject(
         "High fees",
         &format!("Transaction fee fraction is higher than {}%", fee_percent),
         "Continue",
@@ -44,13 +44,13 @@ fn display_warning_high_fee(fee_percent: u64) -> bool {
 }
 
 #[cfg(any(test, feature = "autoapprove"))]
-fn display_warning_high_fee(_fee_percent: u64) -> bool {
+fn display_warning_high_fee(_app: &mut sdk::App, _fee_percent: u64) -> bool {
     true
 }
 
 #[cfg(not(any(test, feature = "autoapprove")))]
-fn display_warning_unverified_inputs() -> bool {
-    sdk::ux::show_confirm_reject(
+fn display_warning_unverified_inputs(app: &mut sdk::App) -> bool {
+    app.show_confirm_reject(
         "Unverified inputs",
         "Some inputs could not be verified.\nReject if you're not sure.",
         "Continue",
@@ -59,12 +59,12 @@ fn display_warning_unverified_inputs() -> bool {
 }
 
 #[cfg(any(test, feature = "autoapprove"))]
-fn display_warning_unverified_inputs() -> bool {
+fn display_warning_unverified_inputs(_app: &mut sdk::App) -> bool {
     true
 }
 
 #[cfg(not(any(test, feature = "autoapprove")))]
-fn display_transaction(pairs: &[TagValue]) -> bool {
+fn display_transaction(app: &mut sdk::App, pairs: &[TagValue]) -> bool {
     // message on speculos or real device
 
     let button_text = if sdk::ux::has_page_api() {
@@ -78,7 +78,7 @@ fn display_transaction(pairs: &[TagValue]) -> bool {
     } else {
         ("Review transaction", "to send Bitcoin")
     };
-    sdk::ux::review_pairs(
+    app.review_pairs(
         intro_text,
         intro_subtext,
         pairs,
@@ -89,7 +89,7 @@ fn display_transaction(pairs: &[TagValue]) -> bool {
 }
 
 #[cfg(any(test, feature = "autoapprove"))]
-fn display_transaction(_pairs: &[TagValue]) -> bool {
+fn display_transaction(_app: &mut sdk::App, _pairs: &[TagValue]) -> bool {
     true
 }
 
@@ -220,8 +220,8 @@ fn sign_input_schnorr(
     })
 }
 
-pub fn handle_sign_psbt(_app: &mut sdk::App, psbt: &[u8]) -> Result<Response, Error> {
-    sdk::ux::show_spinner("Processing...");
+pub fn handle_sign_psbt(app: &mut sdk::App, psbt: &[u8]) -> Result<Response, Error> {
+    app.show_spinner("Processing...");
 
     let psbt = fastpsbt::Psbt::parse(&psbt).map_err(|_| Error::FailedToDeserializePsbt)?;
 
@@ -422,14 +422,14 @@ pub fn handle_sign_psbt(_app: &mut sdk::App, psbt: &[u8]) -> Result<Response, Er
     // show necessary warnings
 
     if warn_unverified_inputs {
-        if !display_warning_unverified_inputs() {
+        if !display_warning_unverified_inputs(app) {
             return Err(Error::UserRejected);
         }
     }
     if inputs_total_amount >= crate::constants::THRESHOLD_WARN_HIGH_FEES_AMOUNT {
         let fee_percent = fee.saturating_mul(100) / inputs_total_amount;
         if fee_percent >= crate::constants::THRESHOLD_WARN_HIGH_FEES_PERCENT {
-            if !display_warning_high_fee(fee_percent) {
+            if !display_warning_high_fee(app, fee_percent) {
                 return Err(Error::UserRejected);
             }
         }
@@ -521,11 +521,11 @@ pub fn handle_sign_psbt(_app: &mut sdk::App, psbt: &[u8]) -> Result<Response, Er
         value: format!("{} {}", fee, COIN_TICKER),
     });
 
-    if !display_transaction(&pairs) {
+    if !display_transaction(app, &pairs) {
         return Err(Error::UserRejected);
     }
 
-    sdk::ux::show_spinner("Signing transaction...");
+    app.show_spinner("Signing transaction...");
 
     /***** Sign transaction *****/
     let unsigned_tx = psbt

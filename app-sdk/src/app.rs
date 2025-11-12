@@ -206,7 +206,6 @@ impl App {
                 Err(e) => panic!("Communication error: {}", e),
             };
             let resp_msg = (self.handler)(self, &req_msg);
-            self.ux_dirty = true; // TODO: remove once handlers can set the 'dirty' state themselves
             crate::comm::send_message(&resp_msg);
         }
     }
@@ -238,5 +237,47 @@ impl App {
             self.home_info_page = Some(raw);
         }
         self.home_info_page.as_ref().unwrap() // safe, just populated
+    }
+
+    // --- UX Flows ---
+    pub fn review_pairs(
+        &mut self,
+        intro_text: &str,
+        intro_subtext: &str,
+        pairs: &[TagValue],
+        final_text: &str,
+        final_button_text: &str,
+        long_press: bool,
+    ) -> bool {
+        self.ux_dirty = true;
+        crate::ux::review_pairs(
+            intro_text,
+            intro_subtext,
+            pairs,
+            final_text,
+            final_button_text,
+            long_press,
+        )
+    }
+
+    pub fn show_spinner(&mut self, text: &str) {
+        self.ux_dirty = true;
+        crate::ux::show_spinner(text);
+    }
+
+    pub fn show_info(&mut self, icon: crate::ux::Icon, text: &str) {
+        self.ux_dirty = true;
+        crate::ux::show_info(icon, text);
+    }
+
+    pub fn show_confirm_reject(
+        &mut self,
+        title: &str,
+        text: &str,
+        confirm: &str,
+        reject: &str,
+    ) -> bool {
+        self.ux_dirty = true;
+        crate::ux::show_confirm_reject(title, text, confirm, reject)
     }
 }
