@@ -40,6 +40,12 @@ pub struct App {
     // Set to true whenever the app's ux is changed, and therefore the home page
     // must be shown again at the end of the message handler.
     ux_dirty: bool,
+
+    // If set to non-zero, it is decremented at each ticker event, and the dashboard is shown once
+    // this reaches zero. It is reset whenever something is shown on-screen, marking the ux dirty.
+    // This allows to show screens with a timeout at the end of a UX flow, without blocking and allowing
+    // further UX flows to override the timeout.
+    cleanup_ticks: usize,
 }
 
 impl App {
@@ -60,7 +66,14 @@ impl App {
             home_info_page: None,
             current_view: View::None,
             ux_dirty: true, // force showing home at startup
+            cleanup_ticks: 0,
         }
+    }
+
+    fn set_ux_dirty(&mut self) {
+        self.ux_dirty = true;
+        // if a timeout to show the dashboard was set, cancel it: a new screen is being shown
+        self.cleanup_ticks = 0;
     }
 
     /// Sets the V-App description shown on the dashboard
@@ -152,10 +165,10 @@ impl App {
     /// or a fatal error occurs.
     pub fn run(&mut self) -> ! {
         use common::ux::Action::*;
-        use common::ux::Event::Action;
+        use common::ux::Event::{Action, Ticker};
 
         loop {
-            if self.ux_dirty {
+            if self.ux_dirty && (self.cleanup_ticks == 0) {
                 // TODO: when the previous view is finished but ended with an on-screen notification
                 // shown for a few seconds, we shouldn't immediately show the home at this point. This
                 // will require a smarter state machine.
@@ -193,6 +206,11 @@ impl App {
                 (View::AppInfoStep(n), Action(PreviousPage)) => {
                     if n > 0 {
                         self.show_step_app_info(n - 1);
+                    }
+                }
+                (_, Ticker) => {
+                    if self.cleanup_ticks > 0 {
+                        self.cleanup_ticks -= 1;
                     }
                 }
                 (view, ev) => {
@@ -249,7 +267,7 @@ impl App {
         final_button_text: &str,
         long_press: bool,
     ) -> bool {
-        self.ux_dirty = true;
+        self.set_ux_dirty();
         crate::ux::review_pairs(
             intro_text,
             intro_subtext,
@@ -261,13 +279,21 @@ impl App {
     }
 
     pub fn show_spinner(&mut self, text: &str) {
-        self.ux_dirty = true;
+        self.set_ux_dirty();
         crate::ux::show_spinner(text);
     }
 
+    /// Shows an informational screen with the given icon and text.
+    /// The screen is shown for about 3 seconds before returning to the dashboard,
+    /// unless a new UX flow is started, which would therefore override the timeout.
     pub fn show_info(&mut self, icon: crate::ux::Icon, text: &str) {
-        self.ux_dirty = true;
-        crate::ux::show_info(icon, text);
+        self.set_ux_dirty();
+        if has_page_api() {
+            ux_generated::show_page_info(icon, text);
+        } else {
+            ux_generated::show_step_info_single(text);
+        }
+        self.cleanup_ticks = 30; // cleanup after about 3 seconds
     }
 
     pub fn show_confirm_reject(
@@ -277,7 +303,7 @@ impl App {
         confirm: &str,
         reject: &str,
     ) -> bool {
-        self.ux_dirty = true;
+        self.set_ux_dirty();
         crate::ux::show_confirm_reject(title, text, confirm, reject)
     }
 }
