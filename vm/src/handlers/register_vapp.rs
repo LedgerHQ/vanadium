@@ -2,8 +2,10 @@ use crate::handlers::lib::vapp::get_vapp_hmac;
 use crate::{hash::Sha256Hasher, AppSW, COMM_BUFFER_SIZE};
 use alloc::vec::Vec;
 use common::manifest::Manifest;
-use include_gif::include_gif;
-use ledger_device_sdk::nbgl::{Field, NbglGlyph, NbglReview};
+use ledger_device_sdk::{
+    include_gif,
+    nbgl::{Field, NbglGlyph, NbglReview},
+};
 
 pub fn handler_register_vapp(
     command: ledger_device_sdk::io::Command<COMM_BUFFER_SIZE>,
