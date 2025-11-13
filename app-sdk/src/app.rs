@@ -258,6 +258,20 @@ impl App {
     }
 
     // --- UX Flows ---
+
+    /// Displays a multi-screen review flow composed of label/value pairs followed by a
+    /// final confirmation screen. The user can navigate forward and backward through
+    /// the content before approving or aborting.
+    ///
+    /// Arguments:
+    /// * `intro_text` - Title or primary text shown on the introductory screen.
+    /// * `intro_subtext` - Secondary descriptive text shown under the intro text.
+    /// * `pairs` - Slice of tag/value entries to review; order is preserved.
+    /// * `final_text` - Text displayed on the final approval screen (e.g. summary).
+    /// * `final_button_text` - Label of the confirmation action the user presses to approve.
+    /// * `long_press` - When true, the final approval may require a long press gesture instead of a simple confirm.
+    ///
+    /// Returns `true` if the user confirms/approves on the final screen; `false` if the user aborts (e.g. quits or rejects).
     pub fn review_pairs(
         &mut self,
         intro_text: &str,
@@ -278,24 +292,30 @@ impl App {
         )
     }
 
+    /// Shows a progress indicator with the provided status text.
+    ///
+    /// Use this while performing an operation that may take noticeable time.
+    /// The call returns immediately after the spinner is displayed, and it stays on the screen
+    /// until something else is shown to replace it.
+    ///
+    /// Arguments:
+    /// * `text` - Short status message describing the ongoing work.
     pub fn show_spinner(&mut self, text: &str) {
         self.set_ux_dirty();
         crate::ux::show_spinner(text);
     }
 
-    /// Shows an informational screen with the given icon and text.
-    /// The screen is shown for about 3 seconds before returning to the dashboard,
-    /// unless a new UX flow is started, which would therefore override the timeout.
-    pub fn show_info(&mut self, icon: crate::ux::Icon, text: &str) {
-        self.set_ux_dirty();
-        if has_page_api() {
-            ux_generated::show_page_info(icon, text);
-        } else {
-            ux_generated::show_step_info_single(text);
-        }
-        self.cleanup_ticks = 30; // cleanup after about 3 seconds
-    }
-
+    /// Presents a confirmation flow consisting of an informational screen and
+    /// explicit confirm/reject actions. The user can navigate between the
+    /// confirm and reject choices before deciding.
+    ///
+    /// Arguments:
+    /// * `title` - Heading shown on the information screen.
+    /// * `text` - Descriptive text shown under the title.
+    /// * `confirm` - Label for the confirm/approve action.
+    /// * `reject` - Label for the reject/abort action.
+    ///
+    /// Returns `true` if the user selects the confirm action; `false` if the user selects reject.
     pub fn show_confirm_reject(
         &mut self,
         title: &str,
@@ -305,5 +325,25 @@ impl App {
     ) -> bool {
         self.set_ux_dirty();
         crate::ux::show_confirm_reject(title, text, confirm, reject)
+    }
+
+    /// Shows a temporary informational screen with an icon and message.
+    ///
+    /// The screen remains visible for a few seconds before automatically returning to the
+    /// dashboard, unless superseded by a new UX flow.
+    ///
+    /// Arguments:
+    /// * `icon` - Visual indicator clarifying the nature of the message.
+    /// * `text` - Informational text to display to the user.
+    ///
+    /// This function does not block for user input; it schedules automatic cleanup.
+    pub fn show_info(&mut self, icon: crate::ux::Icon, text: &str) {
+        self.set_ux_dirty();
+        if has_page_api() {
+            ux_generated::show_page_info(icon, text);
+        } else {
+            ux_generated::show_step_info_single(text);
+        }
+        self.cleanup_ticks = 30; // cleanup after about 3 seconds
     }
 }
