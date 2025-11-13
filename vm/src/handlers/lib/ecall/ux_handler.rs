@@ -3,7 +3,7 @@ use core::ffi::c_void;
 
 use alloc::{ffi::CString, string::String, vec::Vec};
 
-use ledger_secure_sdk_sys as sys;
+use ledger_device_sdk::sys;
 
 use common::ux::{Page, Step};
 
@@ -87,7 +87,7 @@ unsafe extern "C" fn layout_touch_callback(token: core::ffi::c_int, index: u8) {
 #[cfg(any(target_os = "nanosplus", target_os = "nanox"))]
 unsafe extern "C" fn step_button_callback(
     _layout: *mut c_void,
-    button_event: ledger_secure_sdk_sys::nbgl_buttonEvent_t,
+    button_event: sys::nbgl_buttonEvent_t,
 ) {
     let action = match button_event {
         // see nbgl_buttonEvent_t
@@ -278,25 +278,24 @@ impl UxHandler {
                 self.clear_cstrings();
                 self.release_handle();
 
-                let page_confirmation_description =
-                    ledger_secure_sdk_sys::nbgl_pageConfirmationDescription_s {
-                        centeredInfo: ledger_secure_sdk_sys::nbgl_contentCenteredInfo_t {
-                            text1: self.alloc_cstring(Some(title))?,
-                            text2: self.alloc_cstring(Some(text))?,
-                            text3: core::ptr::null(),
-                            icon: core::ptr::null(),
-                            onTop: false,
-                            style: ledger_secure_sdk_sys::LARGE_CASE_INFO,
-                            offsetY: 0,
-                        },
-                        confirmationText: self.alloc_cstring(Some(confirm))?,
-                        confirmationToken: TOKEN_CONFIRM_REJECT,
-                        cancelText: self.alloc_cstring(Some(reject))?,
-                        cancelToken: 255, // appears to be ignored
-                        tuneId: ledger_secure_sdk_sys::TUNE_TAP_CASUAL,
-                        modal: false,
-                    };
-                self.page_handle = ledger_secure_sdk_sys::nbgl_pageDrawConfirmation(
+                let page_confirmation_description = sys::nbgl_pageConfirmationDescription_s {
+                    centeredInfo: sys::nbgl_contentCenteredInfo_t {
+                        text1: self.alloc_cstring(Some(title))?,
+                        text2: self.alloc_cstring(Some(text))?,
+                        text3: core::ptr::null(),
+                        icon: core::ptr::null(),
+                        onTop: false,
+                        style: sys::LARGE_CASE_INFO,
+                        offsetY: 0,
+                    },
+                    confirmationText: self.alloc_cstring(Some(confirm))?,
+                    confirmationToken: TOKEN_CONFIRM_REJECT,
+                    cancelText: self.alloc_cstring(Some(reject))?,
+                    cancelToken: 255, // appears to be ignored
+                    tuneId: sys::TUNE_TAP_CASUAL,
+                    modal: false,
+                };
+                self.page_handle = sys::nbgl_pageDrawConfirmation(
                     Some(layout_touch_callback),
                     &page_confirmation_description,
                 );
@@ -308,7 +307,9 @@ impl UxHandler {
                 self.clear_cstrings();
                 self.release_handle();
 
-                let nav_info = navigation_info.as_ref().map(|ni| {
+                let nav_info = navigation_info
+                    .as_ref()
+                    .map(|ni| {
                         get_ux_handler().cur_page = ni.active_page as u8;
 
                         let common::ux::NavInfo::NavWithButtons {
@@ -317,35 +318,34 @@ impl UxHandler {
                             quit_text,
                         } = &ni.nav_info;
 
-                        if ni.n_pages > 255
-                            || ni.active_page >= ni.n_pages
-                        {
+                        if ni.n_pages > 255 || ni.active_page >= ni.n_pages {
                             return Err(CommEcallError::InvalidParameters(
                                 "Invalid navigation info",
                             ));
                         }
 
-                        Ok(ledger_secure_sdk_sys::nbgl_pageNavigationInfo_t {
+                        Ok(sys::nbgl_pageNavigationInfo_t {
                             activePage: ni.active_page as u8,
-                            nbPages:  ni.n_pages as u8,
+                            nbPages: ni.n_pages as u8,
                             quitToken: TOKEN_QUIT,
-                            navType: ledger_secure_sdk_sys::NAV_WITH_BUTTONS,
+                            navType: sys::NAV_WITH_BUTTONS,
                             progressIndicator: true,
                             tuneId: 0,
                             skipText: self.alloc_cstring(ni.skip_text.as_ref())?,
                             skipToken: TOKEN_SKIP,
                             __bindgen_anon_1:
-                            ledger_secure_sdk_sys::nbgl_pageMultiScreensDescription_s__bindgen_ty_1 {
-                                navWithButtons: ledger_secure_sdk_sys::nbgl_pageNavWithButtons_s {
-                                    quitButton: quit_text.is_some(),
-                                    backButton: *has_back_button,
-                                    visiblePageIndicator: *has_page_indicator, // only has any effect on Flex
-                                    navToken: TOKEN_NAVIGATION,
-                                    quitText: self.alloc_cstring(quit_text.as_ref())?,
-                                }
-                            },
+                                sys::nbgl_pageMultiScreensDescription_s__bindgen_ty_1 {
+                                    navWithButtons: sys::nbgl_pageNavWithButtons_s {
+                                        quitButton: quit_text.is_some(),
+                                        backButton: *has_back_button,
+                                        visiblePageIndicator: *has_page_indicator, // only has any effect on Flex
+                                        navToken: TOKEN_NAVIGATION,
+                                        quitText: self.alloc_cstring(quit_text.as_ref())?,
+                                    },
+                                },
                         })
-                    }).transpose()?;
+                    })
+                    .transpose()?;
                 let navigation_info = match nav_info {
                     Some(ref ni) => ni as *const _,
                     None => core::ptr::null(),
@@ -353,30 +353,28 @@ impl UxHandler {
 
                 match &page_content_info.page_content {
                     common::ux::PageContent::TextSubtext { text, subtext } => {
-                        self.page_handle = ledger_secure_sdk_sys::nbgl_pageDrawGenericContent(
+                        self.page_handle = sys::nbgl_pageDrawGenericContent(
                             Some(layout_touch_callback),
                             navigation_info,
-                            &mut ledger_secure_sdk_sys::nbgl_pageContent_t {
+                            &mut sys::nbgl_pageContent_t {
                                 title: self.alloc_cstring(page_content_info.title.as_ref())?,
                                 isTouchableTitle: false, // unused in nbgl
                                 titleToken: TOKEN_TITLE,
                                 tuneId: 0,
                                 topRightToken: 255,              // not implemented
                                 topRightIcon: core::ptr::null(), // not implemented
-                                type_: ledger_secure_sdk_sys::CENTERED_INFO,
-                                __bindgen_anon_1:
-                                    ledger_secure_sdk_sys::nbgl_pageContent_s__bindgen_ty_1 {
-                                        centeredInfo:
-                                            ledger_secure_sdk_sys::nbgl_contentCenteredInfo_t {
-                                                text1: self.alloc_cstring(Some(text))?,
-                                                text2: self.alloc_cstring(Some(subtext))?,
-                                                text3: core::ptr::null(),
-                                                icon: core::ptr::null(),
-                                                onTop: false,
-                                                style: ledger_secure_sdk_sys::LARGE_CASE_INFO,
-                                                offsetY: 0,
-                                            },
+                                type_: sys::CENTERED_INFO,
+                                __bindgen_anon_1: sys::nbgl_pageContent_s__bindgen_ty_1 {
+                                    centeredInfo: sys::nbgl_contentCenteredInfo_t {
+                                        text1: self.alloc_cstring(Some(text))?,
+                                        text2: self.alloc_cstring(Some(subtext))?,
+                                        text3: core::ptr::null(),
+                                        icon: core::ptr::null(),
+                                        onTop: false,
+                                        style: sys::LARGE_CASE_INFO,
+                                        offsetY: 0,
                                     },
+                                },
                             },
                         );
                     }
@@ -384,68 +382,62 @@ impl UxHandler {
                         let tag_value_list = list
                             .iter()
                             .map(|t| {
-                                let mut res =
-                                    ledger_secure_sdk_sys::nbgl_contentTagValue_t::default();
+                                let mut res = sys::nbgl_contentTagValue_t::default();
                                 res.item = self.alloc_cstring(Some(&t.tag))?;
                                 res.value = self.alloc_cstring(Some(&t.value))?;
                                 Ok(res)
                             })
                             .collect::<Result<Vec<_>, CommEcallError>>()?;
 
-                        self.page_handle = ledger_secure_sdk_sys::nbgl_pageDrawGenericContent(
+                        self.page_handle = sys::nbgl_pageDrawGenericContent(
                             Some(layout_touch_callback),
                             navigation_info,
-                            &mut ledger_secure_sdk_sys::nbgl_pageContent_t {
+                            &mut sys::nbgl_pageContent_t {
                                 title: self.alloc_cstring(page_content_info.title.as_ref())?,
                                 isTouchableTitle: false, // unused in nbgl
                                 titleToken: TOKEN_TITLE,
                                 tuneId: 0,
                                 topRightToken: 255,              // not implemented
                                 topRightIcon: core::ptr::null(), // not implemented
-                                type_: ledger_secure_sdk_sys::TAG_VALUE_LIST,
-                                __bindgen_anon_1:
-                                    ledger_secure_sdk_sys::nbgl_pageContent_s__bindgen_ty_1 {
-                                        tagValueList:
-                                            ledger_secure_sdk_sys::nbgl_contentTagValueList_t {
-                                                pairs: tag_value_list.as_ptr(),
-                                                callback: None,
-                                                nbPairs: tag_value_list.len() as u8,
-                                                startIndex: 0, // unused if no callback
-                                                nbMaxLinesForValue: 0,
-                                                token: 255,
-                                                smallCaseForValue: false,
-                                                wrapping: true,
-                                                actionCallback: None, // not implemented, no events from the tagvalues
-                                                ..Default::default()
-                                            },
+                                type_: sys::TAG_VALUE_LIST,
+                                __bindgen_anon_1: sys::nbgl_pageContent_s__bindgen_ty_1 {
+                                    tagValueList: sys::nbgl_contentTagValueList_t {
+                                        pairs: tag_value_list.as_ptr(),
+                                        callback: None,
+                                        nbPairs: tag_value_list.len() as u8,
+                                        startIndex: 0, // unused if no callback
+                                        nbMaxLinesForValue: 0,
+                                        token: 255,
+                                        smallCaseForValue: false,
+                                        wrapping: true,
+                                        actionCallback: None, // not implemented, no events from the tagvalues
+                                        ..Default::default()
                                     },
+                                },
                             },
                         );
                     }
                     common::ux::PageContent::ConfirmationButton { text, button_text } => {
-                        self.page_handle = ledger_secure_sdk_sys::nbgl_pageDrawGenericContent(
+                        self.page_handle = sys::nbgl_pageDrawGenericContent(
                             Some(layout_touch_callback),
                             navigation_info,
-                            &mut ledger_secure_sdk_sys::nbgl_pageContent_t {
+                            &mut sys::nbgl_pageContent_t {
                                 title: self.alloc_cstring(page_content_info.title.as_ref())?,
                                 isTouchableTitle: false, // unused in nbgl
                                 titleToken: TOKEN_TITLE,
                                 tuneId: 0,
                                 topRightToken: 255,              // not implemented
                                 topRightIcon: core::ptr::null(), // not implemented
-                                type_: ledger_secure_sdk_sys::INFO_BUTTON,
-                                __bindgen_anon_1:
-                                    ledger_secure_sdk_sys::nbgl_pageContent_s__bindgen_ty_1 {
-                                        infoButton:
-                                            ledger_secure_sdk_sys::nbgl_contentInfoButton_t {
-                                                text: self.alloc_cstring(Some(text))?,
-                                                icon: core::ptr::null(),
-                                                buttonText: self
-                                                    .alloc_cstring(Some(button_text))?,
-                                                buttonToken: TOKEN_CONFIRM,
-                                                tuneId: 0,
-                                            },
+                                type_: sys::INFO_BUTTON,
+                                __bindgen_anon_1: sys::nbgl_pageContent_s__bindgen_ty_1 {
+                                    infoButton: sys::nbgl_contentInfoButton_t {
+                                        text: self.alloc_cstring(Some(text))?,
+                                        icon: core::ptr::null(),
+                                        buttonText: self.alloc_cstring(Some(button_text))?,
+                                        buttonToken: TOKEN_CONFIRM,
+                                        tuneId: 0,
                                     },
+                                },
                             },
                         );
                     }
@@ -453,29 +445,26 @@ impl UxHandler {
                         text,
                         long_press_text,
                     } => {
-                        self.page_handle = ledger_secure_sdk_sys::nbgl_pageDrawGenericContent(
+                        self.page_handle = sys::nbgl_pageDrawGenericContent(
                             Some(layout_touch_callback),
                             navigation_info,
-                            &mut ledger_secure_sdk_sys::nbgl_pageContent_t {
+                            &mut sys::nbgl_pageContent_t {
                                 title: self.alloc_cstring(page_content_info.title.as_ref())?,
                                 isTouchableTitle: false, // unused in nbgl
                                 titleToken: TOKEN_TITLE,
                                 tuneId: 0,
                                 topRightToken: 255,              // not implemented
                                 topRightIcon: core::ptr::null(), // not implemented
-                                type_: ledger_secure_sdk_sys::INFO_LONG_PRESS,
-                                __bindgen_anon_1:
-                                    ledger_secure_sdk_sys::nbgl_pageContent_s__bindgen_ty_1 {
-                                        infoLongPress:
-                                            ledger_secure_sdk_sys::nbgl_contentInfoLongPress_t {
-                                                text: self.alloc_cstring(Some(text))?,
-                                                icon: core::ptr::null(),
-                                                longPressText: self
-                                                    .alloc_cstring(Some(long_press_text))?,
-                                                longPressToken: TOKEN_CONFIRM,
-                                                tuneId: 0,
-                                            },
+                                type_: sys::INFO_LONG_PRESS,
+                                __bindgen_anon_1: sys::nbgl_pageContent_s__bindgen_ty_1 {
+                                    infoLongPress: sys::nbgl_contentInfoLongPress_t {
+                                        text: self.alloc_cstring(Some(text))?,
+                                        icon: core::ptr::null(),
+                                        longPressText: self.alloc_cstring(Some(long_press_text))?,
+                                        longPressToken: TOKEN_CONFIRM,
+                                        tuneId: 0,
                                     },
+                                },
                             },
                         );
                     }
@@ -525,7 +514,7 @@ impl UxHandler {
         }
 
         unsafe {
-            ledger_secure_sdk_sys::nbgl_refresh();
+            sys::nbgl_refresh();
         }
         Ok(())
     }
@@ -575,7 +564,7 @@ impl UxHandler {
                         *pos,
                         Some(step_button_callback), // callback
                         core::ptr::null_mut(),      // ticker (todo)
-                        &mut ledger_secure_sdk_sys::nbgl_layoutCenteredInfo_t {
+                        &mut sys::nbgl_layoutCenteredInfo_t {
                             icon: icon.to_icon_details(),
                             text1: self.alloc_cstring(text.as_ref())?,
                             text2: self.alloc_cstring(subtext.as_ref())?,

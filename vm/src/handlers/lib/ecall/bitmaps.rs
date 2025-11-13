@@ -1,4 +1,4 @@
-use ledger_secure_sdk_sys::nbgl_icon_details_t;
+use ledger_device_sdk::sys::nbgl_icon_details_t;
 pub trait ToIconDetails {
     fn to_icon_details(&self) -> *const nbgl_icon_details_t;
 }
@@ -6,7 +6,7 @@ pub trait ToIconDetails {
 #[cfg(any(target_os = "stax", target_os = "flex", target_os = "apex_p"))]
 mod large_screen {
     use super::*;
-    use ledger_secure_sdk_sys::{nbgl_icon_details_t, NBGL_BPP_4};
+    use ledger_device_sdk::sys::{nbgl_icon_details_t, NBGL_BPP_4};
 
     const CHECK_CIRCLE_64PX_BITMAP: [u8; 571] = [
         0x40, 0x00, 0x40, 0x00, 0x21, 0x33, 0x02, 0x00, 0x31, 0x02, 0x1f, 0x8b, 0x08, 0x00, 0x00,
@@ -123,7 +123,7 @@ mod large_screen {
 #[cfg(any(target_os = "nanosplus", target_os = "nanox"))]
 mod small_screen {
     use super::*;
-    use ledger_secure_sdk_sys::{nbgl_icon_details_t, NBGL_BPP_1};
+    use ledger_device_sdk::sys::{nbgl_icon_details_t, NBGL_BPP_1};
 
     const VALIDATE_14X14_BITMAP: [u8; 23] = [
         0x0e, 0x00, 0x0e, 0x00, 0x02, 0x0f, 0x00, 0x00, 0x32, 0xc3, 0xc3, 0xc3, 0xc3, 0xc3, 0xc3,

@@ -1,6 +1,6 @@
 use alloc::vec::Vec;
 use core::fmt;
-use ledger_secure_sdk_sys::{cx_aes_enc_block, cx_aes_init_key_no_throw, cx_aes_key_t, CX_OK};
+use ledger_device_sdk::sys::{cx_aes_enc_block, cx_aes_init_key_no_throw, cx_aes_key_t, CX_OK};
 
 /// AES errors that can occur during cryptographic operations
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -26,7 +26,7 @@ impl fmt::Display for AesError {
     }
 }
 
-/// Wrapper for the AES key from ledger_secure_sdk_sys
+/// Wrapper for the AES key from ledger_device_sdk::sys
 pub struct AesKey {
     key: cx_aes_key_t,
 }
@@ -41,7 +41,7 @@ impl AesKey {
         let mut key_data = [0u8; 16];
         unsafe {
             if CX_OK
-                != ledger_secure_sdk_sys::cx_get_random_bytes(
+                != ledger_device_sdk::sys::cx_get_random_bytes(
                     key_data.as_mut_ptr() as *mut core::ffi::c_void,
                     key_data.len(),
                 )
