@@ -9,7 +9,7 @@ use common::errors::Error;
 #[cfg(not(any(test, feature = "autoapprove")))]
 fn display_address(app: &mut sdk::App, account_name: Option<&str>, addr: &str) -> bool {
     use alloc::vec;
-    use sdk::ux::TagValue;
+    use sdk::ux::{Icon, TagValue};
 
     let mut pairs = match account_name {
         Some(account_name) => {
@@ -31,14 +31,22 @@ fn display_address(app: &mut sdk::App, account_name: Option<&str>, addr: &str) -
     } else {
         ("Verify Bitcoin", "address")
     };
-    app.review_pairs(
+    let approved = app.review_pairs(
         intro_text,
         intro_subtext,
         &pairs,
         "The address is correct",
         "Confirm",
         false,
-    )
+    );
+
+    if approved {
+        app.show_info(Icon::Confirm, "Address verified");
+    } else {
+        app.show_info(Icon::Reject, "Address rejected");
+    }
+
+    approved
 }
 
 #[cfg(any(test, feature = "autoapprove"))]

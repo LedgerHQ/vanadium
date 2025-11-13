@@ -26,9 +26,8 @@ fn get_pubkey_fingerprint(pubkey: &EcfpPublicKey<Secp256k1, 32>) -> u32 {
 
 #[cfg(not(any(test, feature = "autoapprove")))]
 fn display_xpub(app: &mut sdk::App, xpub: &str, path: &[u32]) -> bool {
-    use alloc::string::ToString;
-    use alloc::vec;
-    use sdk::ux::TagValue;
+    use alloc::{string::ToString, vec};
+    use sdk::ux::{Icon, TagValue};
 
     let path =
         bitcoin::bip32::DerivationPath::from(path.iter().map(|&x| x.into()).collect::<Vec<_>>());
@@ -39,7 +38,7 @@ fn display_xpub(app: &mut sdk::App, xpub: &str, path: &[u32]) -> bool {
         ("Verify Bitcoin", "extended public key")
     };
 
-    app.review_pairs(
+    let approved = app.review_pairs(
         intro_text,
         intro_subtext,
         &vec![
@@ -52,10 +51,17 @@ fn display_xpub(app: &mut sdk::App, xpub: &str, path: &[u32]) -> bool {
                 value: xpub.into(),
             },
         ],
-        "The public key is validated",
+        "Verify public key",
         "Confirm",
         false,
-    )
+    );
+    if approved {
+        app.show_info(Icon::Confirm, "Public key verified");
+    } else {
+        app.show_info(Icon::Reject, "Public key rejected");
+    }
+
+    approved
 }
 
 #[cfg(any(test, feature = "autoapprove"))]

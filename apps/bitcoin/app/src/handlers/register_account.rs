@@ -1,10 +1,9 @@
 use common::{
     account::{Account, ProofOfRegistration},
     bip388,
+    errors::Error,
     message::Response,
 };
-
-use common::errors::Error;
 
 #[cfg(not(any(test, feature = "autoapprove")))]
 fn display_wallet_policy(
@@ -13,7 +12,7 @@ fn display_wallet_policy(
     wallet_policy: &bip388::WalletPolicy,
 ) -> bool {
     use alloc::{format, string::ToString, vec::Vec};
-    use sdk::ux::TagValue;
+    use sdk::ux::{Icon, TagValue};
 
     let mut pairs = Vec::with_capacity(2 + wallet_policy.key_information.len());
 
@@ -38,14 +37,22 @@ fn display_wallet_policy(
     } else {
         ("Register Bitcoin", "account")
     };
-    app.review_pairs(
+    let approved = app.review_pairs(
         intro_text,
         intro_subtext,
         &pairs,
         "Confirm registration",
         "Register",
         false,
-    )
+    );
+
+    if approved {
+        app.show_info(Icon::Confirm, "Account registered");
+    } else {
+        app.show_info(Icon::Reject, "Registration cancelled");
+    }
+
+    approved
 }
 
 #[cfg(any(test, feature = "autoapprove"))]

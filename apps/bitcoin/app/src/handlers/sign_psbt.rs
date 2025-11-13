@@ -34,6 +34,9 @@ use sdk::{
 use crate::constants::COIN_TICKER;
 
 #[cfg(not(any(test, feature = "autoapprove")))]
+use sdk::ux::Icon;
+
+#[cfg(not(any(test, feature = "autoapprove")))]
 fn display_warning_high_fee(app: &mut sdk::App, fee_percent: u64) -> bool {
     app.show_confirm_reject(
         "High fees",
@@ -522,6 +525,9 @@ pub fn handle_sign_psbt(app: &mut sdk::App, psbt: &[u8]) -> Result<Response, Err
     });
 
     if !display_transaction(app, &pairs) {
+        #[cfg(not(any(test, feature = "autoapprove")))]
+        app.show_info(Icon::Reject, "Transaction rejected");
+
         return Err(Error::UserRejected);
     }
 
@@ -632,6 +638,9 @@ pub fn handle_sign_psbt(app: &mut sdk::App, psbt: &[u8]) -> Result<Response, Err
             }
         }
     }
+
+    #[cfg(not(any(test, feature = "autoapprove")))]
+    app.show_info(Icon::Confirm, "Transaction signed");
 
     Ok(Response::PsbtSigned(partial_signatures))
 }
