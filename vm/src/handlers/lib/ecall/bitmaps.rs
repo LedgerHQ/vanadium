@@ -1,4 +1,4 @@
-use ledger_secure_sdk_sys::nbgl_icon_details_t;
+use ledger_device_sdk::sys::nbgl_icon_details_t;
 pub trait ToIconDetails {
     fn to_icon_details(&self) -> *const nbgl_icon_details_t;
 }
@@ -6,21 +6,21 @@ pub trait ToIconDetails {
 #[cfg(any(target_os = "stax", target_os = "flex"))]
 mod large_screen {
     use super::*;
-    use ledger_secure_sdk_sys::{nbgl_icon_details_t, NBGL_BPP_4};
+    use ledger_device_sdk::sys::{nbgl_icon_details_t, NBGL_BPP_4};
 
     const CHECK_CIRCLE_64PX: nbgl_icon_details_t = nbgl_icon_details_t {
         width: 64,
         height: 64,
         bpp: NBGL_BPP_4,
         isFile: true,
-        bitmap: unsafe { &ledger_secure_sdk_sys::C_Check_Circle_64px_bitmap } as *const u8,
+        bitmap: unsafe { &ledger_device_sdk::sys::C_Check_Circle_64px_bitmap } as *const u8,
     };
     const DENIED_CIRCLE_64PX: nbgl_icon_details_t = nbgl_icon_details_t {
         width: 64,
         height: 64,
         bpp: NBGL_BPP_4,
         isFile: true,
-        bitmap: unsafe { &ledger_secure_sdk_sys::C_Denied_Circle_64px_bitmap } as *const u8,
+        bitmap: unsafe { &ledger_device_sdk::sys::C_Denied_Circle_64px_bitmap } as *const u8,
     };
 
     impl ToIconDetails for common::ux::Icon {
@@ -40,21 +40,21 @@ mod large_screen {
 #[cfg(target_os = "apex_p")]
 mod apex_screen {
     use super::*;
-    use ledger_secure_sdk_sys::{nbgl_icon_details_t, NBGL_BPP_4};
+    use ledger_device_sdk::sys::{nbgl_icon_details_t, NBGL_BPP_4};
 
     const CHECK_CIRCLE_48PX: nbgl_icon_details_t = nbgl_icon_details_t {
         width: 48,
         height: 48,
         bpp: NBGL_BPP_4,
         isFile: true,
-        bitmap: unsafe { &ledger_secure_sdk_sys::C_Check_Circle_48px_bitmap } as *const u8,
+        bitmap: unsafe { &ledger_device_sdk::sys::C_Check_Circle_48px_bitmap } as *const u8,
     };
     const DENIED_CIRCLE_48PX: nbgl_icon_details_t = nbgl_icon_details_t {
         width: 48,
         height: 48,
         bpp: NBGL_BPP_4,
         isFile: true,
-        bitmap: unsafe { &ledger_secure_sdk_sys::C_Denied_Circle_48px_bitmap } as *const u8,
+        bitmap: unsafe { &ledger_device_sdk::sys::C_Denied_Circle_48px_bitmap } as *const u8,
     };
 
     impl ToIconDetails for common::ux::Icon {
@@ -74,14 +74,14 @@ mod apex_screen {
 #[cfg(any(target_os = "nanosplus", target_os = "nanox"))]
 mod small_screen {
     use super::*;
-    use ledger_secure_sdk_sys::{nbgl_icon_details_t, NBGL_BPP_1};
+    use ledger_device_sdk::sys::{nbgl_icon_details_t, NBGL_BPP_1};
 
     const VALIDATE_14PX: nbgl_icon_details_t = nbgl_icon_details_t {
         width: 14,
         height: 14,
         bpp: NBGL_BPP_1,
         isFile: true,
-        bitmap: unsafe { &ledger_secure_sdk_sys::C_icon_validate_14_bitmap } as *const u8,
+        bitmap: unsafe { &ledger_device_sdk::sys::C_icon_validate_14_bitmap } as *const u8,
     };
 
     const CROSSMARK_14PX: nbgl_icon_details_t = nbgl_icon_details_t {
@@ -89,7 +89,7 @@ mod small_screen {
         height: 14,
         bpp: NBGL_BPP_1,
         isFile: false,
-        bitmap: unsafe { &ledger_secure_sdk_sys::C_icon_crossmark_bitmap } as *const u8,
+        bitmap: unsafe { &ledger_device_sdk::sys::C_icon_crossmark_bitmap } as *const u8,
     };
 
     const PROCESSING_14PX: nbgl_icon_details_t = nbgl_icon_details_t {
@@ -97,7 +97,7 @@ mod small_screen {
         height: 14,
         bpp: NBGL_BPP_1,
         isFile: false,
-        bitmap: unsafe { &ledger_secure_sdk_sys::C_icon_processing_bitmap } as *const u8,
+        bitmap: unsafe { &ledger_device_sdk::sys::C_icon_processing_bitmap } as *const u8,
     };
 
     impl ToIconDetails for common::ux::Icon {

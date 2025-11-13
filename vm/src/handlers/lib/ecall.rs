@@ -14,11 +14,10 @@ use common::{
     ux::Deserializable,
     vm::{Cpu, CpuError, EcallHandler, MemoryError},
 };
-use ledger_device_sdk::{hash::HashInit, io::DecodedEventType};
-use ledger_secure_sdk_sys::{
-    self as sys, cx_ripemd160_t, cx_sha256_t, cx_sha512_t, CX_OK, CX_RIPEMD160, CX_SHA256,
-    CX_SHA512,
+use ledger_device_sdk::sys::{
+    self, cx_ripemd160_t, cx_sha256_t, cx_sha512_t, CX_OK, CX_RIPEMD160, CX_SHA256, CX_SHA512,
 };
+use ledger_device_sdk::{hash::HashInit, io::DecodedEventType};
 
 use crate::io::interrupt;
 
