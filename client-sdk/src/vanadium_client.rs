@@ -21,8 +21,8 @@ use common::client_commands::{
     BufferType, ClientCommandCode, CommitPageMessage, CommitPageProofContinuedMessage,
     CommitPageProofContinuedResponse, CommitPageProofResponse, GetPageMessage,
     GetPageProofContinuedMessage, GetPageProofContinuedResponse, GetPageResponse, Message,
-    MessageDeserializationError, ReceiveBufferMessage, ReceiveBufferResponse, SectionKind,
-    SendBufferContinuedMessage, SendBufferMessage,
+    MessageDeserializationError, PageProofKind, ReceiveBufferMessage, ReceiveBufferResponse,
+    SectionKind, SendBufferContinuedMessage, SendBufferMessage, StorePageProofMessage,
 };
 use common::constants::{DEFAULT_STACK_START, PAGE_SIZE};
 use common::manifest::Manifest;
@@ -131,6 +131,7 @@ struct VAppEngine<E: std::fmt::Debug + Send + Sync + 'static> {
     engine_to_client_sender: mpsc::Sender<VAppMessage>,
     client_to_engine_receiver: mpsc::Receiver<ClientMessage>,
     print_writer: Box<dyn std::io::Write + Send>,
+    stored_code_page_hmacs: Vec<Option<[u8; 32]>>,
 }
 
 impl<E: std::fmt::Debug + Send + Sync + 'static> VAppEngine<E> {
@@ -169,6 +170,7 @@ impl<E: std::fmt::Debug + Send + Sync + 'static> VAppEngine<E> {
             (status, result) = match client_command_code {
                 ClientCommandCode::GetPage => self.process_get_page(&result).await?,
                 ClientCommandCode::CommitPage => self.process_commit_page(&result).await?,
+                ClientCommandCode::StorePageProof => self.process_store_page_proof(&result).await?,
                 _ => return Ok((status, result)),
             }
         }
@@ -207,10 +209,37 @@ impl<E: std::fmt::Debug + Send + Sync + 'static> VAppEngine<E> {
         let is_encrypted = header[0] != 0;
         let nonce: [u8; 12] = header[1..13].try_into().unwrap();
 
-        // Convert HashOutput<32> to [u8; 32]
-        let proof: Vec<[u8; 32]> = proof.into_iter().map(|h| h.0).collect();
+        // If this is a code page and we have a stored HMAC for it, send that instead of the Merkle proof.
+        if section_kind == SectionKind::Code {
+            if let Some(Some(hmac)) = self.stored_code_page_hmacs.get(page_index as usize) {
+                // Build a single-element proof slice containing the HMAC
+                let response = GetPageResponse::new(
+                    (*data).try_into().unwrap(),
+                    is_encrypted,
+                    nonce,
+                    1, // n
+                    1, // t
+                    PageProofKind::Hmac,
+                    &[*hmac],
+                )
+                .serialize();
 
-        // Calculate how many proof elements we can send in one message
+                #[cfg(feature = "debug")]
+                debug!(
+                    "Sending HMAC proof for code page {} instead of Merkle proof",
+                    page_index
+                );
+
+                return self
+                    .transport
+                    .exchange(&apdu_continue(response))
+                    .await
+                    .map_err(VAppEngineError::TransportError);
+            }
+        }
+
+        // Fall back to Merkle proof
+        let proof: Vec<[u8; 32]> = proof.into_iter().map(|h| h.0).collect();
         let t = min(proof.len(), GetPageResponse::max_proof_size()) as u8;
 
         // Create the page response
@@ -220,6 +249,7 @@ impl<E: std::fmt::Debug + Send + Sync + 'static> VAppEngine<E> {
             nonce,
             proof.len() as u8,
             t,
+            PageProofKind::Merkle,
             &proof[0..t as usize],
         )
         .serialize();
@@ -378,6 +408,32 @@ impl<E: std::fmt::Debug + Send + Sync + 'static> VAppEngine<E> {
         }
 
         Ok((status, result))
+    }
+
+    async fn process_store_page_proof(
+        &mut self,
+        command: &[u8],
+    ) -> Result<(StatusWord, Vec<u8>), VAppEngineError<E>> {
+        let msg = StorePageProofMessage::deserialize(command)?;
+
+        #[cfg(feature = "debug")]
+        debug!("<- StorePageProofMessage(page = {})", msg.page_index);
+
+        if msg.section_kind != SectionKind::Code {
+            // The app will never ask to store an hmac as proof for non-code pages
+            return Err(VAppEngineError::AccessViolation);
+        }
+        if msg.page_index as usize >= self.stored_code_page_hmacs.len() {
+            self.stored_code_page_hmacs
+                .resize(msg.page_index as usize + 1, None);
+        }
+        self.stored_code_page_hmacs[msg.page_index as usize] = Some(msg.hmac);
+
+        Ok(self
+            .transport
+            .exchange(&apdu_continue(vec![]))
+            .await
+            .map_err(VAppEngineError::TransportError)?)
     }
 
     async fn process_send_buffer_generic(
@@ -591,6 +647,7 @@ impl<E: std::fmt::Debug + Send + Sync + 'static> VAppEngine<E> {
                 ClientCommandCode::CommitPage => self.process_commit_page(&result).await?,
                 ClientCommandCode::SendBuffer => self.process_send_buffer(&result).await?,
                 ClientCommandCode::ReceiveBuffer => self.process_receive_buffer(&result).await?,
+                ClientCommandCode::StorePageProof => self.process_store_page_proof(&result).await?,
                 ClientCommandCode::SendBufferContinued
                 | ClientCommandCode::GetPageProofContinued
                 | ClientCommandCode::CommitPageProofContinued => {
@@ -704,6 +761,7 @@ impl<E: std::fmt::Debug + Send + Sync + 'static> GenericVanadiumClient<E> {
             engine_to_client_sender,
             client_to_engine_receiver,
             print_writer,
+            stored_code_page_hmacs: Vec::new(),
         };
 
         // Start the VAppEngine in a task
