@@ -16,7 +16,7 @@ pub mod rand;
 pub mod slip21;
 pub mod ux;
 
-pub use app::App;
+pub use app::{App, AppBuilder};
 
 mod ecalls;
 

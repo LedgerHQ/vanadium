@@ -10,7 +10,7 @@ use handlers::*;
 use alloc::vec::Vec;
 
 use common::message::{Request, Response};
-use sdk::App;
+use sdk::{App, AppBuilder};
 
 sdk::bootstrap!();
 
@@ -44,7 +44,7 @@ fn process_message(app: &mut App, request: &[u8]) -> Vec<u8> {
 }
 
 pub fn main() {
-    App::new("Bitcoin", env!("CARGO_PKG_VERSION"), process_message)
+    AppBuilder::new("Bitcoin", env!("CARGO_PKG_VERSION"), process_message)
         .description("Bitcoin is ready")
         .developer("Salvatore Ingala")
         .run();

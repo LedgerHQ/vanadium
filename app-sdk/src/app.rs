@@ -25,6 +25,69 @@ enum View {
     HomeQuitStep,
     AppInfoStep(u8), // generic step to show the app info
 }
+
+/// The AppBuilder is used to configure the App during the building phase.
+pub struct AppBuilder {
+    handler: Handler,
+    app_name: &'static str,
+    version: &'static str,
+    description: Option<String>,
+    developer: Option<String>,
+}
+
+impl AppBuilder {
+    /// Creates a new AppBuilder instance with the given handler.
+    ///
+    /// # Arguments
+    ///
+    /// * `app_name` - The name of the application.
+    /// * `version` - The version of the application.
+    /// * `handler` - The function to handle incoming messages.
+    pub fn new(app_name: &'static str, version: &'static str, handler: Handler) -> Self {
+        Self {
+            handler,
+            app_name,
+            version,
+            description: None,
+            developer: None,
+        }
+    }
+
+    /// Sets the V-App description shown on the dashboard
+    pub fn description(mut self, description: &str) -> Self {
+        self.description = Some(description.to_string());
+        self
+    }
+
+    /// Sets the developer name
+    pub fn developer(mut self, developer: &str) -> Self {
+        self.developer = Some(developer.to_string());
+        self
+    }
+
+    /// Builds the App instance.
+    pub(crate) fn build(self) -> App {
+        App {
+            handler: self.handler,
+            app_name: self.app_name,
+            version: self.version,
+            description: self.description,
+            developer: self.developer,
+            current_view: View::None,
+            home_info_page: None,
+            ux_dirty: true, // force showing home at startup
+            cleanup_ticks: 0,
+        }
+    }
+
+    /// This function shows the dashboard, then enters the core loop of the app.
+    /// It never returns, as it keeps the app running until sdk::exit() is called,
+    /// or a fatal error occurs.
+    pub fn run(self) -> ! {
+        self.build().run_loop()
+    }
+}
+
 /// The App struct represents the context of the application.
 pub struct App {
     handler: Handler,
@@ -49,43 +112,10 @@ pub struct App {
 }
 
 impl App {
-    /// Creates a new App instance with the given handler.
-    ///
-    /// # Arguments
-    ///
-    /// * `app_name` - The name of the application.
-    /// * `version` - The version of the application.
-    /// * `handler` - The function to handle incoming messages.
-    pub fn new(app_name: &'static str, version: &'static str, handler: Handler) -> Self {
-        Self {
-            handler,
-            app_name,
-            version,
-            description: None,
-            developer: None,
-            home_info_page: None,
-            current_view: View::None,
-            ux_dirty: true, // force showing home at startup
-            cleanup_ticks: 0,
-        }
-    }
-
     fn set_ux_dirty(&mut self) {
         self.ux_dirty = true;
         // if a timeout to show the dashboard was set, cancel it: a new screen is being shown
         self.cleanup_ticks = 0;
-    }
-
-    /// Sets the V-App description shown on the dashboard
-    pub fn description(mut self, description: &str) -> Self {
-        self.description = Some(description.to_string());
-        self
-    }
-
-    /// Sets the developer name
-    pub fn developer(mut self, developer: &str) -> Self {
-        self.developer = Some(developer.to_string());
-        self
     }
 
     // Pages
@@ -163,7 +193,7 @@ impl App {
     /// This function shows the dashboard, then enters the core loop of the app.
     /// It never returns, as it keeps the app running until sdk::exit() is called,
     /// or a fatal error occurs.
-    pub fn run(&mut self) -> ! {
+    fn run_loop(&mut self) -> ! {
         use common::ux::Action::*;
         use common::ux::Event::{Action, Ticker};
 
@@ -230,7 +260,7 @@ impl App {
 
     /// This is only useful to produce a valid app instance in tests.
     pub fn singleton() -> Self {
-        App::new("test_app", "0.0.1", |_app, _msg| Vec::new())
+        AppBuilder::new("test_app", "0.0.1", |_app, _msg| Vec::new()).build()
     }
 
     /// Returns a reference to the cached home info page, computing it if needed.

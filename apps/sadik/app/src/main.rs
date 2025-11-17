@@ -4,7 +4,7 @@ use sdk::{
     bignum::{BigNum, BigNumMod, ModulusProvider},
     curve::{Curve as _, EcfpPrivateKey, EcfpPublicKey, Secp256k1Point},
     hash::Hasher,
-    App,
+    App, AppBuilder,
 };
 
 extern crate alloc;
@@ -268,5 +268,5 @@ fn process_message(_app: &mut App, msg: &[u8]) -> Vec<u8> {
 }
 
 pub fn main() {
-    App::new("Sadik", env!("CARGO_PKG_VERSION"), process_message).run();
+    AppBuilder::new("Sadik", env!("CARGO_PKG_VERSION"), process_message).run();
 }
