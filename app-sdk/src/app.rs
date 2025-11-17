@@ -54,13 +54,13 @@ impl AppBuilder {
         }
     }
 
-    /// Sets the V-App description shown on the dashboard
+    /// Sets the V-App description shown on the dashboard.
     pub fn description(mut self, description: &str) -> Self {
         self.description = Some(description.to_string());
         self
     }
 
-    /// Sets the developer name
+    /// Sets the developer name.
     pub fn developer(mut self, developer: &str) -> Self {
         self.developer = Some(developer.to_string());
         self
@@ -113,7 +113,20 @@ pub struct App {
 }
 
 impl App {
-    /// Sends a message to the host and waits for the response.
+    /// Sends a message to the host and waits for a response, processing UX events in the meantime to keep the app responsive.
+    ///
+    /// # Arguments
+    ///
+    /// * `msg` - The message to send to the host.
+    ///
+    /// # Returns
+    ///
+    /// A `Result` containing the response message from the host on success, or a `MessageError` on failure.
+    ///
+    /// # Behavior
+    ///
+    /// This method enters a loop where it continuously processes user interface events and checks for incoming messages.
+    /// It will not return until a message is received or an error occurs.
     pub fn exchange(&mut self, msg: &[u8]) -> Result<Vec<u8>, MessageError> {
         crate::comm::send_message(msg);
         loop {
