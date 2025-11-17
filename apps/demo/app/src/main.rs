@@ -51,8 +51,8 @@ fn display_move(move_num: u8) -> &'static str {
 // Shows the game summary and the app's chosen move
 // Returns true if the user accepts
 #[cfg(not(test))]
-fn show_game_ui(c_a: &[u8; 32], m_b: u8) -> bool {
-    sdk::ux::show_confirm_reject(
+fn show_game_ui(app: &mut App, c_a: &[u8; 32], m_b: u8) -> bool {
+    app.show_confirm_reject(
         "Game started",
         &format!(
             "Alice's commitment: {}\n\nWe'll play: {}",
@@ -65,24 +65,24 @@ fn show_game_ui(c_a: &[u8; 32], m_b: u8) -> bool {
 }
 
 #[cfg(test)]
-fn show_game_ui(_c_a: &[u8; 32], _m_b: u8) -> bool {
+fn show_game_ui(_app: &mut App, _c_a: &[u8; 32], _m_b: u8) -> bool {
     true
 }
 
 // Shows the game's outcome
 #[cfg(not(test))]
-fn show_game_result(m_a: u8, result: u8) {
+fn show_game_result(app: &mut App, m_a: u8, result: u8) {
     let alice_move = display_move(m_a);
     match result {
-        0 => sdk::ux::show_info(
+        0 => app.show_info(
             Icon::None,
             &format!("It's a tie! Both played: {}", alice_move),
         ),
-        1 => sdk::ux::show_info(
+        1 => app.show_info(
             Icon::Success,
             &format!("Alice played: {}\nWe win!", alice_move),
         ),
-        2 => sdk::ux::show_info(
+        2 => app.show_info(
             Icon::Failure,
             &format!("Alice played: {}\nWe lose!", alice_move),
         ),
@@ -91,7 +91,7 @@ fn show_game_result(m_a: u8, result: u8) {
 }
 
 #[cfg(test)]
-fn show_game_result(_m_a: u8, _result: u8) {}
+fn show_game_result(_app: &mut App, _m_a: u8, _result: u8) {}
 
 // generate a uniform random number in [0, 2]
 fn random_move() -> u8 {
@@ -124,7 +124,7 @@ pub enum Command {
     Reveal { m_a: u8, r_a: [u8; 32] },
 }
 
-fn process_commit_command(c_a: [u8; 32]) -> Vec<u8> {
+fn process_commit_command(app: &mut App, c_a: [u8; 32]) -> Vec<u8> {
     // Generate a uniform random move in [0, 2]
     let m_b = random_move();
 
@@ -138,7 +138,7 @@ fn process_commit_command(c_a: [u8; 32]) -> Vec<u8> {
     // store the game state to the global state
     unsafe { GAME_STATE = game_state };
 
-    if show_game_ui(&c_a, m_b) {
+    if show_game_ui(app, &c_a, m_b) {
         // Respond with our move
         vec![m_b]
     } else {
@@ -147,7 +147,7 @@ fn process_commit_command(c_a: [u8; 32]) -> Vec<u8> {
     }
 }
 
-fn process_reveal_command(m_a: u8, r_a: [u8; 32]) -> Vec<u8> {
+fn process_reveal_command(app: &mut App, m_a: u8, r_a: [u8; 32]) -> Vec<u8> {
     // copy the game state locally
     #[allow(static_mut_refs)] // forgive me, I have sinned
     let game_state = unsafe { GAME_STATE.clone() };
@@ -173,12 +173,12 @@ fn process_reveal_command(m_a: u8, r_a: [u8; 32]) -> Vec<u8> {
     unsafe { GAME_STATE = RPSGame::default() }; // Reset the game state
 
     let winner = compute_winner(m_a, game_state.m_b);
-    show_game_result(m_a, winner);
+    show_game_result(app, m_a, winner);
 
     vec![winner]
 }
 
-fn process_message(_app: &mut App, msg: &[u8]) -> Vec<u8> {
+fn process_message(app: &mut App, msg: &[u8]) -> Vec<u8> {
     if msg.is_empty() {
         sdk::exit(0);
     }
@@ -189,13 +189,15 @@ fn process_message(_app: &mut App, msg: &[u8]) -> Vec<u8> {
     };
 
     match command {
-        Command::Commit { c_a } => process_commit_command(c_a),
-        Command::Reveal { m_a, r_a } => process_reveal_command(m_a, r_a),
+        Command::Commit { c_a } => process_commit_command(app, c_a),
+        Command::Reveal { m_a, r_a } => process_reveal_command(app, m_a, r_a),
     }
 }
 
 pub fn main() {
-    App::new(process_message).run();
+    App::new("RPS", env!("CARGO_PKG_VERSION"), process_message)
+        .description("Rock-Paper-Scissors\n\nThe secure version")
+        .run();
 }
 
 #[cfg(test)]
