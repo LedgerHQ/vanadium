@@ -5,6 +5,7 @@ use alloc::{
 use common::ux::TagValue;
 
 use crate::{
+    comm::MessageError,
     ux::{has_page_api, step_pos},
     ux_generated,
 };
@@ -112,10 +113,75 @@ pub struct App {
 }
 
 impl App {
+    /// Sends a message to the host and waits for the response.
+    pub fn exchange(&mut self, msg: &[u8]) -> Result<Vec<u8>, MessageError> {
+        crate::comm::send_message(msg);
+        loop {
+            self.process_ux_events();
+            match crate::comm::receive_message() {
+                Ok(msg) => return Ok(msg),
+                Err(crate::comm::MessageError::NoMessage) => continue,
+                Err(e) => return Err(e),
+            }
+        }
+    }
+
     fn set_ux_dirty(&mut self) {
         self.ux_dirty = true;
         // if a timeout to show the dashboard was set, cancel it: a new screen is being shown
         self.cleanup_ticks = 0;
+    }
+
+    fn process_ux_events(&mut self) {
+        use common::ux::Action::*;
+        use common::ux::Event::{Action, Ticker};
+
+        if self.ux_dirty && (self.cleanup_ticks == 0) {
+            if has_page_api() {
+                self.show_page_home();
+            } else {
+                self.show_step_home_intro();
+            }
+            self.ux_dirty = false;
+        }
+
+        let ev = crate::ux::get_event();
+        match (self.current_view, ev) {
+            // Page API navigation
+            (View::HomePage, Action(Quit)) => crate::ecalls::exit(0),
+            (View::HomePage, Action(TopRight)) => self.show_page_app_info(),
+            (View::AppInfoPage, Action(Quit)) => self.show_page_home(),
+            // Step API navigation
+            (View::HomeIntroStep, Action(NextPage)) => self.show_step_home_app_info(),
+            (View::HomeAppInfoStep, Action(PreviousPage)) => self.show_step_home_intro(),
+            (View::HomeAppInfoStep, Action(Confirm)) => self.show_step_app_info(0),
+            (View::HomeAppInfoStep, Action(NextPage)) => self.show_step_home_quit(),
+            (View::HomeQuitStep, Action(PreviousPage)) => self.show_step_home_app_info(),
+            (View::HomeQuitStep, Action(Confirm)) => crate::ecalls::exit(0),
+            (View::AppInfoStep(n), Action(NextPage)) => {
+                if n + 1 < self.n_appinfo_steps() {
+                    self.show_step_app_info(n + 1);
+                }
+            }
+            (View::AppInfoStep(n), Action(Confirm)) => {
+                if n == self.n_appinfo_steps() - 1 {
+                    self.show_step_home_app_info();
+                }
+            }
+            (View::AppInfoStep(n), Action(PreviousPage)) => {
+                if n > 0 {
+                    self.show_step_app_info(n - 1);
+                }
+            }
+            (_, Ticker) => {
+                if self.cleanup_ticks > 0 {
+                    self.cleanup_ticks -= 1;
+                }
+            }
+            (view, ev) => {
+                crate::println!("Unhandled event {:?} in view {:?}", ev, view);
+            }
+        }
     }
 
     // Pages
@@ -194,59 +260,8 @@ impl App {
     /// It never returns, as it keeps the app running until sdk::exit() is called,
     /// or a fatal error occurs.
     fn run_loop(&mut self) -> ! {
-        use common::ux::Action::*;
-        use common::ux::Event::{Action, Ticker};
-
         loop {
-            if self.ux_dirty && (self.cleanup_ticks == 0) {
-                // TODO: when the previous view is finished but ended with an on-screen notification
-                // shown for a few seconds, we shouldn't immediately show the home at this point. This
-                // will require a smarter state machine.
-                if has_page_api() {
-                    self.show_page_home();
-                } else {
-                    self.show_step_home_intro();
-                }
-                self.ux_dirty = false;
-            }
-
-            let ev = crate::ux::get_event();
-            match (self.current_view, ev) {
-                // Page API navigation
-                (View::HomePage, Action(Quit)) => crate::ecalls::exit(0),
-                (View::HomePage, Action(TopRight)) => self.show_page_app_info(),
-                (View::AppInfoPage, Action(Quit)) => self.show_page_home(),
-                // Step API navigation
-                (View::HomeIntroStep, Action(NextPage)) => self.show_step_home_app_info(),
-                (View::HomeAppInfoStep, Action(PreviousPage)) => self.show_step_home_intro(),
-                (View::HomeAppInfoStep, Action(Confirm)) => self.show_step_app_info(0),
-                (View::HomeAppInfoStep, Action(NextPage)) => self.show_step_home_quit(),
-                (View::HomeQuitStep, Action(PreviousPage)) => self.show_step_home_app_info(),
-                (View::HomeQuitStep, Action(Confirm)) => crate::ecalls::exit(0),
-                (View::AppInfoStep(n), Action(NextPage)) => {
-                    if n + 1 < self.n_appinfo_steps() {
-                        self.show_step_app_info(n + 1);
-                    }
-                }
-                (View::AppInfoStep(n), Action(Confirm)) => {
-                    if n == self.n_appinfo_steps() - 1 {
-                        self.show_step_home_app_info();
-                    }
-                }
-                (View::AppInfoStep(n), Action(PreviousPage)) => {
-                    if n > 0 {
-                        self.show_step_app_info(n - 1);
-                    }
-                }
-                (_, Ticker) => {
-                    if self.cleanup_ticks > 0 {
-                        self.cleanup_ticks -= 1;
-                    }
-                }
-                (view, ev) => {
-                    crate::println!("Unhandled event {:?} in view {:?}", ev, view);
-                }
-            }
+            self.process_ux_events();
 
             let req_msg = match crate::comm::receive_message() {
                 Ok(msg) => msg,
