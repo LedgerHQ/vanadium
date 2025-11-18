@@ -350,8 +350,7 @@ impl<'c, const N: usize> OutsourcedMemory<'c, N> {
             }
 
             // safe conversion since we just validated the length
-            let page_data: [u8; PAGE_SIZE] = decrypted_data.try_into()
-                .map_err(|_| common::vm::MemoryError::GenericError("Failed to convert decrypted data"))?;
+            let page_data: [u8; PAGE_SIZE] = decrypted_data.try_into().unwrap();
 
             Ok((Page { data: page_data }, page_hash))
         } else {
