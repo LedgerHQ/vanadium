@@ -857,7 +857,7 @@ impl<'a, const N: usize> CommEcallHandler<'a, N> {
         for i in 0..path_len {
             let idx = (i * 4) as usize;
             let bytes = &path_local_raw[idx..idx + 4];
-            path_local.push(u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]));
+            path_local.push(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]));
         }
 
         // derive the key
