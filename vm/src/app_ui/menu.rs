@@ -1,5 +1,4 @@
-use include_gif::include_gif;
-use ledger_device_sdk::{io::Comm, nbgl::NbglHomeAndSettings};
+use ledger_device_sdk::{include_gif, io::Comm, nbgl::NbglHomeAndSettings};
 
 use ledger_device_sdk::nbgl::NbglGlyph;
 

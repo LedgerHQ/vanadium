@@ -22,7 +22,7 @@
 // use alloc::vec::Vec;
 
 use ledger_device_sdk::hmac::{sha2::Sha2_512, HMACInit};
-// use ledger_secure_sdk_sys as sys;
+// use ledger_device_sdk::sys;
 
 const SLIP21_MAGIC: &'static str = "Symmetric key seed";
 

@@ -6,14 +6,11 @@ edition = "2021"
 
 [dependencies]
 common = { path = "../common" }
-include_gif = { git = "https://github.com/LedgerHQ/ledger-device-rust-sdk.git", branch = "vanadium" }
 serde = {version="1.0.192", default-features = false, features = ["derive"]}
-serde-json-core = { git = "https://github.com/rust-embedded-community/serde-json-core"}
 hex = { version = "0.4.3", default-features = false, features = ["serde", "alloc"] }
 numtoa = "0.2.4"
 postcard = { version = "1.1.1", default-features = false, features = ["alloc"] }
-ledger_device_sdk = { git = "https://github.com/LedgerHQ/ledger-device-rust-sdk.git", branch = "vanadium", features = ["debug", "nano_nbgl", "io_new"] }
-ledger_secure_sdk_sys = { git = "https://github.com/LedgerHQ/ledger-device-rust-sdk.git", branch = "vanadium" }
+ledger_device_sdk = { git = "https://github.com/LedgerHQ/ledger-device-rust-sdk.git", branch = "vanadium", features = ["debug", "nano_nbgl", "io_new", "sys"] }
 
 zeroize = "1.8.1"
 hex-literal = "0.4.1"
