@@ -8,7 +8,7 @@ use alloc::format;
 use sdk::ux::Icon;
 
 use alloc::{vec, vec::Vec};
-use sdk::{hash::Hasher, App};
+use sdk::{hash::Hasher, App, AppBuilder};
 use serde::{Deserialize, Serialize};
 
 sdk::bootstrap!();
@@ -195,7 +195,7 @@ fn process_message(app: &mut App, msg: &[u8]) -> Vec<u8> {
 }
 
 pub fn main() {
-    App::new("RPS", env!("CARGO_PKG_VERSION"), process_message)
+    AppBuilder::new("RPS", env!("CARGO_PKG_VERSION"), process_message)
         .description("Rock-Paper-Scissors\n\nThe secure version")
         .run();
 }
