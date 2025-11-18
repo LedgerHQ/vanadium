@@ -12,7 +12,7 @@ use crate::{
 
 /// A Handler is a function that is called when a message is received from the host, and
 /// returns the app's response.
-pub type Handler = fn(&mut App, &[u8]) -> Vec<u8>;
+pub type Handler<S = ()> = fn(&mut App<S>, &[u8]) -> Vec<u8>;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum View {
@@ -28,15 +28,18 @@ enum View {
 }
 
 /// The AppBuilder is used to configure the App during the building phase.
-pub struct AppBuilder {
-    handler: Handler,
+pub struct AppBuilder<S = ()> {
+    handler: Handler<S>,
     app_name: &'static str,
     version: &'static str,
     description: Option<String>,
     developer: Option<String>,
 }
 
-impl AppBuilder {
+impl<S> AppBuilder<S>
+where
+    S: Default,
+{
     /// Creates a new AppBuilder instance with the given handler.
     ///
     /// # Arguments
@@ -44,7 +47,7 @@ impl AppBuilder {
     /// * `app_name` - The name of the application.
     /// * `version` - The version of the application.
     /// * `handler` - The function to handle incoming messages.
-    pub fn new(app_name: &'static str, version: &'static str, handler: Handler) -> Self {
+    pub fn new(app_name: &'static str, version: &'static str, handler: Handler<S>) -> Self {
         Self {
             handler,
             app_name,
@@ -67,7 +70,7 @@ impl AppBuilder {
     }
 
     /// Builds the App instance.
-    pub(crate) fn build(self) -> App {
+    pub(crate) fn build(self) -> App<S> {
         App {
             handler: self.handler,
             app_name: self.app_name,
@@ -78,6 +81,7 @@ impl AppBuilder {
             home_info_page: None,
             ux_dirty: true, // force showing home at startup
             cleanup_ticks: 0,
+            state: S::default(),
         }
     }
 
@@ -90,8 +94,8 @@ impl AppBuilder {
 }
 
 /// The App struct represents the context of the application.
-pub struct App {
-    handler: Handler,
+pub struct App<S = ()> {
+    handler: Handler<S>,
     app_name: &'static str,
     version: &'static str,
     description: Option<String>,
@@ -110,9 +114,16 @@ pub struct App {
     // This allows to show screens with a timeout at the end of a UX flow, without blocking and allowing
     // further UX flows to override the timeout.
     cleanup_ticks: usize,
+
+    /// Application-specific persistent state.
+    /// Apps that don't need it just use the default `S = ()`.
+    pub state: S,
 }
 
-impl App {
+impl<S> App<S>
+where
+    S: Default,
+{
     /// Sends a message to the host and waits for a response, processing UX events in the meantime to keep the app responsive.
     ///
     /// # Arguments
