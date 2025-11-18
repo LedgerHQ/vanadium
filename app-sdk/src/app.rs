@@ -141,7 +141,7 @@ where
     pub fn exchange(&mut self, msg: &[u8]) -> Result<Vec<u8>, MessageError> {
         crate::comm::send_message(msg);
         loop {
-            self.process_ux_events();
+            self.process_ux_events(false);
             match crate::comm::receive_message() {
                 Ok(msg) => return Ok(msg),
                 Err(crate::comm::MessageError::NoMessage) => continue,
@@ -156,11 +156,11 @@ where
         self.cleanup_ticks = 0;
     }
 
-    fn process_ux_events(&mut self) {
+    fn process_ux_events(&mut self, show_dashboard: bool) {
         use common::ux::Action::*;
         use common::ux::Event::{Action, Ticker};
 
-        if self.ux_dirty && (self.cleanup_ticks == 0) {
+        if show_dashboard && self.ux_dirty && (self.cleanup_ticks == 0) {
             if has_page_api() {
                 self.show_page_home();
             } else {
@@ -285,7 +285,7 @@ where
     /// or a fatal error occurs.
     fn run_loop(&mut self) -> ! {
         loop {
-            self.process_ux_events();
+            self.process_ux_events(true);
 
             let req_msg = match crate::comm::receive_message() {
                 Ok(msg) => msg,
