@@ -469,8 +469,16 @@ impl<'a, const N: usize> CommEcallHandler<'a, N> {
 
             segment.write_buffer(g_ptr, &response_content)?;
 
-            remaining_length = Some(remaining_length.unwrap() - response_content.len() as u32);
-            g_ptr += response_content.len() as u32;
+            // make sure chunk doesn't exceed remaining length
+            let chunk_len = response_content.len() as u32;
+            let curr_remaining = remaining_length.unwrap();
+            if chunk_len > curr_remaining {
+                return Err(CommEcallError::InvalidResponse(
+                    "Chunk exceeds declared remaining length",
+                ));
+            }
+            remaining_length = Some(curr_remaining - chunk_len);
+            g_ptr += chunk_len;
             total_received += response_content.len();
         }
         Ok(total_received)
@@ -845,10 +853,13 @@ impl<'a, const N: usize> CommEcallHandler<'a, N> {
                 .read_buffer(path.0, &mut path_local_raw[0..(path_len * 4)])?;
         }
 
-        // convert to a slice of u32, by taking 4 bytes at the time as big-endian integers
-        let path_local = unsafe {
-            core::slice::from_raw_parts(path_local_raw.as_ptr() as *const u32, path_len as usize)
-        };
+        // read bytes and combine into u32 values safely (avoid unaligned access)
+        let mut path_local = Vec::with_capacity(path_len as usize);
+        for i in 0..path_len {
+            let idx = (i * 4) as usize;
+            let bytes = &path_local_raw[idx..idx + 4];
+            path_local.push(u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]));
+        }
 
         // derive the key
         let mut private_key_local = Zeroizing::new([0u8; 32]);
@@ -1160,6 +1171,13 @@ impl<'a, const N: usize> CommEcallHandler<'a, N> {
             }
         }
 
+        // validate signature length before writing
+        if signature_len as usize > signature_local.len() {
+            return Err(CommEcallError::GenericError(
+                "Signature length exceeds buffer size",
+            ));
+        }
+
         // copy signature to V-App memory
         cpu.get_segment::<E>(signature.0)?
             .write_buffer(signature.0, &signature_local[0..signature_len as usize])?;
@@ -1298,6 +1316,13 @@ impl<'a, const N: usize> CommEcallHandler<'a, N> {
         if signature_len != 64 {
             return Err(CommEcallError::GenericError(
                 "cx_schnorr_sign_no_throw returned a signature of unexpected length",
+            ));
+        }
+
+        // validate signature length before writing
+        if signature_len as usize > signature_local.len() {
+            return Err(CommEcallError::GenericError(
+                "Signature length exceeds buffer size",
             ));
         }
 

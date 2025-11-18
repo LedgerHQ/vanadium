@@ -343,15 +343,17 @@ impl<'c, const N: usize> OutsourcedMemory<'c, N> {
             let decrypted_data = aes_ctr
                 .decrypt(&nonce, &data)
                 .map_err(|_| common::vm::MemoryError::GenericError("AES decryption failed"))?;
-            assert!(decrypted_data.len() == PAGE_SIZE);
 
-            // TODO: we should modify the decryption so it happens in-place, and we would avoid reallocations
-            Ok((
-                Page {
-                    data: decrypted_data.try_into().unwrap(),
-                },
-                page_hash,
-            ))
+            // validate decrypted size matches expected page size
+            if decrypted_data.len() != PAGE_SIZE {
+                return Err(common::vm::MemoryError::GenericError("Decrypted page size mismatch"));
+            }
+
+            // safe conversion since we just validated the length
+            let page_data: [u8; PAGE_SIZE] = decrypted_data.try_into()
+                .map_err(|_| common::vm::MemoryError::GenericError("Failed to convert decrypted data"))?;
+
+            Ok((Page { data: page_data }, page_hash))
         } else {
             Ok((Page { data }, page_hash))
         }
