@@ -942,17 +942,13 @@ fn get_master_bip32_key() -> XPrv {
 }
 
 // custom master seed used in Vanadium's version of SLIP-21 for compatibility with Bolos
-// const SEED_MASTER_PATH: &'static str = "VANADIUM";
+const SEED_MASTER_PATH: &'static str = "VANADIUM";
 fn slip21_custom_get_seed() -> [u8; 32] {
-    // let m = slip21_get_master_node(&DEFAULT_SEED);
-    // let c = slip21_derive_child_node(&m, SEED_MASTER_PATH.as_bytes());
-    // let mut seed = [0u8; 32];
-    // seed.copy_from_slice(&c[32..64]);
-    // seed
-
-    // TODO: revert this once the Rust SDK has proper SLIP-21 path support
-    // We use a dummy seed for testing purposes.
-    [42u8; 32]
+    let m = slip21_get_master_node(&DEFAULT_SEED);
+    let c = slip21_derive_child_node(&m, SEED_MASTER_PATH.as_bytes());
+    let mut seed = [0u8; 32];
+    seed.copy_from_slice(&c[32..64]);
+    seed
 }
 
 fn slip21_get_master_node(seed: &[u8]) -> [u8; 64] {

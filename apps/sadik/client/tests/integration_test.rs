@@ -260,27 +260,26 @@ async fn test_secp256k1_derive_hd_node() {
     }
 }
 
-// Disabled until SLIP-21 support is implemented properly in the Rust SDK
-// #[tokio::test]
-// async fn test_derive_slip21_key() {
-//     let mut setup = setup().await;
-//     let client = &mut setup.client;
+#[tokio::test]
+async fn test_derive_slip21_key() {
+    let mut setup = setup().await;
+    let client = &mut setup.client;
 
-//     let label1 = b"Vanadium".to_vec();
+    let label1 = b"Vanadium".to_vec();
 
-//     // m/b'Vanadium'
-//     assert_eq!(
-//         client.get_slip21_key(&[&label1]).await.unwrap(),
-//         hex!("ba0ff8c27d6a0c9f7cb3346394b7c57306c5922a2f54a7d51352b9c511e155e0").to_vec()
-//     );
+    // m/b'Vanadium'
+    assert_eq!(
+        client.get_slip21_key(&[&label1]).await.unwrap(),
+        hex!("ba0ff8c27d6a0c9f7cb3346394b7c57306c5922a2f54a7d51352b9c511e155e0").to_vec()
+    );
 
-//     // m/b'Vanadium'/b'Risc-V'
-//     let label2 = b"Risc-V".to_vec();
-//     assert_eq!(
-//         client.get_slip21_key(&[&label1, &label2]).await.unwrap(),
-//         hex!("234bbecf423f05569b6de6cbb56cd73cb9c29dec8c6599551a1a5a85bc445e5f").to_vec()
-//     );
-// }
+    // m/b'Vanadium'/b'Risc-V'
+    let label2 = b"Risc-V".to_vec();
+    assert_eq!(
+        client.get_slip21_key(&[&label1, &label2]).await.unwrap(),
+        hex!("234bbecf423f05569b6de6cbb56cd73cb9c29dec8c6599551a1a5a85bc445e5f").to_vec()
+    );
+}
 
 #[tokio::test]
 async fn test_secp256k1_point_add() {
