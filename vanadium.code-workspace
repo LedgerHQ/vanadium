@@ -74,6 +74,14 @@
       "name": "vnd-sadik-common"
     },
     {
+      "path": "apps/rps/app",
+      "name": "vnd-rps"
+    },
+    {
+      "path": "apps/rps/client",
+      "name": "vnd-rps-client"
+    },
+    {
       "path": "bench",
       "name": "📊 benchmarks"
     },
