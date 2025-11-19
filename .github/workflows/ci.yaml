@@ -238,3 +238,18 @@ jobs:
       vapp_binary_name: 'vnd-bitcoin.vapp'
       models_json: '["nanox","nanosplus","flex","stax","apex_p"]'
       cargo_test_features: 'speculos-tests'
+
+## vnd-rps
+  build_vnd_rps:
+    uses: ./.github/workflows/reusable_vapp_build.yaml
+    with:
+      app_name: "vnd-rps"
+      app_dir: "apps/rps/app"
+      artifact_name: "vnd_rps_riscv_binary"
+      binary_name: "vnd-rps"
+
+  test_vnd_rps_app:
+    uses: ./.github/workflows/reusable_native_tests.yaml
+    with:
+      app_name: "vnd-rps"
+      test_dirs_json: '["apps/rps/app"]'
