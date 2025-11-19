@@ -62,11 +62,6 @@ If you want to run the V-app on a real device, execute instead:
    cargo run -- --hid
    ```
 
-If you want to run the V-app natively, after building it for the native target, use:
-
-   ```sh
-   cargo run -- --native
-   ```
 ## CLI usage
 
 The executable client is a Command Line Interface to the features of the Bitcoin V-App, featuring autocomplete and command history.

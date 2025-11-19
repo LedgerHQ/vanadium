@@ -61,14 +61,6 @@ If you want to run the V-app on a real device, execute instead:
    cargo run -- --hid
    ```
 
-If you want to run the V-app natively, after building it for the native target, use:
-
-   ```sh
-   cargo run -- --native
-   ```
-
-
-
 ## Client commands
 
 Once the client is running, these are the available commands:
