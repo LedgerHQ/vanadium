@@ -1,12 +1,15 @@
 use lazy_static::lazy_static;
 use rand::TryRngCore;
 use std::{
-    io::{self, Read, Write},
+    io::{self, Write},
     net::{TcpListener, TcpStream},
     sync::Mutex,
     thread::sleep,
     time::Duration,
 };
+
+#[cfg(not(feature = "test-mode"))]
+use std::io::Read;
 
 use hmac::{Hmac, Mac};
 use sha2::Sha512;
@@ -184,6 +187,12 @@ pub fn fatal(msg: *const u8, size: usize) -> ! {
     panic!("{}", std::str::from_utf8(data).unwrap());
 }
 
+#[cfg(feature = "test-mode")]
+pub fn xsend(_buffer: *const u8, _size: usize) {
+    panic!("Cannot send or receive bytes in native unit tests");
+}
+
+#[cfg(not(feature = "test-mode"))]
 pub fn xsend(buffer: *const u8, size: usize) {
     // SAFETY: caller guarantees [buffer, buffer+size) is valid.
     let data = unsafe { std::slice::from_raw_parts(buffer, size) };
@@ -198,6 +207,12 @@ pub fn xsend(buffer: *const u8, size: usize) {
         .expect("TCP write failed");
 }
 
+#[cfg(feature = "test-mode")]
+pub fn xrecv(_buffer: *mut u8, _max_size: usize) -> usize {
+    panic!("Cannot send or receive bytes in native unit tests");
+}
+
+#[cfg(not(feature = "test-mode"))]
 pub fn xrecv(buffer: *mut u8, max_size: usize) -> usize {
     let mut stream = TCP_CONN.lock().expect("TCP mutex poisoned");
 
