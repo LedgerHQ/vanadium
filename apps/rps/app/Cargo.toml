@@ -13,4 +13,7 @@ postcard = { version = "1.1.1", default-features = false, features = ["alloc"] }
 sdk = { package = "vanadium-app-sdk", path = "../../../app-sdk"}
 serde = { version = "1.0.215", default-features = false, features = ["alloc", "derive"] }
 
+[dev-dependencies]
+sdk = { package = "vanadium-app-sdk", path = "../../../app-sdk", features = ["test-mode"]}
+
 [workspace]

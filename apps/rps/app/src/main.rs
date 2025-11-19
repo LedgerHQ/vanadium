@@ -110,28 +110,14 @@ fn process_commit_command(app: &mut App<RPSGame>, c_a: [u8; 32]) -> Vec<u8> {
     // Generate a uniform random move in [0, 2]
     let m_b = random_move();
 
-    // Create a new game
-    app.state = RPSGame {
-        is_game_active: true,
-        c_a, // Alice's commitment
-        m_b, // our move
-    };
-
     if show_game_ui(app, &c_a, m_b) {
-        app.show_spinner("Waiting for Alice");
-        // Respond with our move
-        let msg = match app.exchange(&vec![m_b]) {
-            Ok(response) => response,
-            Err(_) => vec![],
+        // Create a new game only if accepted
+        app.state = RPSGame {
+            is_game_active: true,
+            c_a, // Alice's commitment
+            m_b, // our move
         };
-        let command = match postcard::from_bytes::<Command>(&msg) {
-            Ok(cmd) => cmd,
-            Err(_) => return vec![], // Return an empty response on error
-        };
-        match command {
-            Command::Reveal { m_a, r_a } => process_reveal_command(app, m_a, r_a),
-            _ => panic!("Invalid command. Expected: Reveal"),
-        }
+        vec![m_b]
     } else {
         // If the user rejects, we don't play
         vec![]
@@ -176,7 +162,25 @@ fn process_message(app: &mut App<RPSGame>, msg: &[u8]) -> Vec<u8> {
     };
 
     match command {
-        Command::Commit { c_a } => process_commit_command(app, c_a),
+        Command::Commit { c_a } => {
+            let to_send = process_commit_command(app, c_a);
+            if to_send.is_empty() {
+                return vec![];
+            }
+            app.show_spinner("Waiting for Alice");
+            let response = match app.exchange(&to_send) {
+                Ok(resp) => resp,
+                Err(_) => return vec![],
+            };
+            let reveal_command = match postcard::from_bytes::<Command>(&response) {
+                Ok(cmd) => cmd,
+                Err(_) => return vec![],
+            };
+            match reveal_command {
+                Command::Reveal { m_a, r_a } => process_reveal_command(app, m_a, r_a),
+                _ => panic!("Invalid command. Expected: Reveal"),
+            }
+        }
         _ => panic!("Invalid command. Expected: Commit"),
     }
 }
