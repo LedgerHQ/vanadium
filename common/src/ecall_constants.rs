@@ -7,8 +7,6 @@ pub const ECALL_PRINT: u32 = 5;
 // device handling, events, and UX
 
 pub const ECALL_GET_EVENT: u32 = 10;
-pub const ECALL_SHOW_PAGE: u32 = 11; // Flex / Stax
-pub const ECALL_SHOW_STEP: u32 = 12; // Nano X / Nano S+
 pub const ECALL_GET_DEVICE_PROPERTY: u32 = 15;
 
 // Constants used for GET_DEVICE_PROPERTY
@@ -78,3 +76,13 @@ pub const ECALL_ECDSA_SIGN: u32 = 180;
 pub const ECALL_ECDSA_VERIFY: u32 = 181;
 pub const ECALL_SCHNORR_SIGN: u32 = 182;
 pub const ECALL_SCHNORR_VERIFY: u32 = 183;
+
+/// =======================================
+/// Device-specific ECALLs
+/// =======================================
+/// The range 192..255 is reserved for vendor-specific ECALLs
+/// Different implementation of Vanadium can assign different meaning to these ECALLs.
+/// The following ECALLs are defined for Ledger devices.
+
+pub const ECALL_SHOW_PAGE: u32 = 192; // Flex / Stax / Apex_P
+pub const ECALL_SHOW_STEP: u32 = 193; // Nano X / Nano S+
