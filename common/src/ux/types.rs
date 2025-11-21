@@ -10,7 +10,7 @@ pub enum Action {
     Reject = 1,
     Quit = 2,
     Skip = 3,
-    PreviousPage = 4, // TODO: page index is part of the event data
+    PreviousPage = 4,
     NextPage = 5,
     TitleBack = 6,
     TopRight = 7,

@@ -421,9 +421,7 @@ pub fn show_step(_step_desc: *const u8, _step_desc_len: usize) -> u32 {
 pub fn get_device_property(property: u32) -> u32 {
     match property {
         common::ecall_constants::DEVICE_PROPERTY_ID => 0,
-        common::ecall_constants::DEVICE_PROPERTY_SCREEN_SIZE => {
-            0 // TODO: what to return when executing in a shell?
-        }
+        common::ecall_constants::DEVICE_PROPERTY_SCREEN_SIZE => 0, // we are in a shell
         common::ecall_constants::DEVICE_PROPERTY_FEATURES => 0,
         _ => panic!("Unsupported device property: {}", property),
     }

@@ -636,9 +636,6 @@ pub fn as_big_num_mod_ref<'a, const N: usize, M: ModulusProvider<N>>(
 
 #[cfg(test)]
 mod tests {
-    // TODO: these tests are only for the native target. We would like to run them for both the native
-    // and the RISC-V target, inside Vanadium. Perhaps we can make an app specifically to test ecalls.
-
     use super::*;
     use hex_literal::hex;
 

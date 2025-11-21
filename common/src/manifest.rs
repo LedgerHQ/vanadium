@@ -7,7 +7,6 @@ use crate::constants::{page_start, PAGE_SIZE};
 const APP_NAME_MAX_LEN: usize = 32;
 const APP_VERSION_MAX_LEN: usize = 32;
 
-// TODO: copied from vanadium-legacy without much thought; fields are subject to change
 /// The manifest contains all the required info that the application needs in order to execute a V-App.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Manifest {

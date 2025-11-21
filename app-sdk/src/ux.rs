@@ -52,7 +52,6 @@ pub fn get_event() -> Event {
             }
             EventCode::Action => {
                 let action = unsafe { event_data.action };
-                // TODO: sanitize?
                 return Event::Action(action);
             }
             EventCode::Unknown => {
@@ -103,7 +102,6 @@ fn __page_review_pairs(
     // the next page only after showing the current one.
     // While we're computing the page, we're not able to listen to touch events, so it will currently miss
     // user touches something before the precomputation of the next page is completed.
-    // TODO: improve this
 
     // Calculate total number of pages
     let n_pair_pages = ((pairs.len() + 1) / 2) as u32;

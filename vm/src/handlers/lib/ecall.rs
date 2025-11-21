@@ -1040,7 +1040,6 @@ impl<'a, const N: usize> CommEcallHandler<'a, N> {
         }
 
         if k_len > 32 {
-            // TODO: do we need to support any larger?
             return Err(CommEcallError::InvalidParameters("k_len is too large"));
         }
 
