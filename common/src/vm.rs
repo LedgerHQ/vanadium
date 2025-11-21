@@ -715,7 +715,7 @@ impl<'a, M: PagedMemory> Cpu<'a, M> {
                 }
             },
             Op::Break => {
-                todo!();
+                return Err("BREAK instruction is not supported".into());
             },
             Op::Unknown => {
                 return Err("Unknown instruction".into());
