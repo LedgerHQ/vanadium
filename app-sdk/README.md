@@ -10,7 +10,7 @@ Functionalities include:
 - Big integers;
 - Elliptic Curve points, private keys and pubkeys;
 - Hash functions;
-- UX functionality (TODO)
+- Basic UX functionality
 
 # Design principles
 
