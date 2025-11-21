@@ -432,39 +432,38 @@ impl<'a, const N: usize> CommEcallHandler<'a, N> {
         let mut remaining_length = None;
         let mut total_received: usize = 0;
         while remaining_length != Some(0) {
-            let mut comm = self.comm.borrow_mut();
-            let mut resp = comm.begin_response();
-            ReceiveBufferMessage::new().serialize_to_comm(&mut resp);
+            let response_content = {
+                let mut comm = self.comm.borrow_mut();
+                let mut resp = comm.begin_response();
+                ReceiveBufferMessage::new().serialize_to_comm(&mut resp);
 
-            let command = interrupt(resp)?;
+                let command = interrupt(resp)?;
 
-            let raw_data = command.get_data();
-            let response = ReceiveBufferResponse::deserialize(raw_data)?;
+                let raw_data = command.get_data();
+                let response = ReceiveBufferResponse::deserialize(raw_data)?;
 
-            match remaining_length {
-                None => {
-                    // first chunk, check if the total length is acceptable
-                    if response.remaining_length > max_size as u32 {
-                        return Err(CommEcallError::InvalidResponse(
-                            "Received data is too large",
-                        ));
+                match remaining_length {
+                    None => {
+                        // first chunk, check if the total length is acceptable
+                        if response.remaining_length > max_size as u32 {
+                            return Err(CommEcallError::InvalidResponse(
+                                "Received data is too large",
+                            ));
+                        }
+                        remaining_length = Some(response.remaining_length);
                     }
-                    remaining_length = Some(response.remaining_length);
-                }
-                Some(remaining) => {
-                    if remaining != response.remaining_length {
-                        return Err(CommEcallError::InvalidResponse(
-                            "Mismatching remaining length",
-                        ));
+                    Some(remaining) => {
+                        if remaining != response.remaining_length {
+                            return Err(CommEcallError::InvalidResponse(
+                                "Mismatching remaining length",
+                            ));
+                        }
                     }
                 }
-            }
 
-            // We need to clone the content (up to 255 bytes), since it is tied to the `comm` borrow, which we
-            // need to drop before segment.write_buffer.
-            let response_content = response.content.to_vec();
-
-            drop(comm); // TODO: figure out how to avoid having to deal with this drop explicitly
+                // We need to clone the content, since it is tied to the `comm` borrow.
+                response.content.to_vec()
+            };
 
             segment.write_buffer(g_ptr, &response_content)?;
 
