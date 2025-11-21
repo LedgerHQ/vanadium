@@ -37,9 +37,8 @@ impl Segment {
     }
 }
 
-// TODO: we should rename to a more specific name like VAppElfFile
 #[derive(Debug)]
-pub struct ElfFile {
+pub struct VAppElfFile {
     pub code_segment: Segment,
     pub data_segment: Segment,
     pub entrypoint: u32,
@@ -47,7 +46,7 @@ pub struct ElfFile {
     pub manifest: Option<Manifest>,
 }
 
-impl ElfFile {
+impl VAppElfFile {
     pub fn new(path: &Path) -> io::Result<Self> {
         let mut file = File::open(path)?;
         let mut buffer = Vec::new();

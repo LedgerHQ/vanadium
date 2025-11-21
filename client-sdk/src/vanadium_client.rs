@@ -31,7 +31,7 @@ use crate::apdu::{apdu_continue, apdu_register_vapp, apdu_run_vapp, APDUCommand,
 use crate::memory::{MemorySegment, MemorySegmentError};
 use crate::transport::Transport;
 use crate::{
-    elf::{self, ElfFile},
+    elf::{self, VAppElfFile},
     linewriter::Sink,
 };
 
@@ -677,7 +677,7 @@ impl<E: std::fmt::Debug + Send + Sync + 'static> GenericVanadiumClient<E> {
         transport: Arc<dyn Transport<Error = E>>,
         manifest: &Manifest,
         app_hmac: &[u8; 32],
-        elf: &ElfFile,
+        elf: &VAppElfFile,
         print_writer: Box<dyn std::io::Write + Send>,
     ) -> Result<(), VAppEngineError<E>> {
         let mut data = postcard::to_allocvec(manifest)?;
@@ -860,7 +860,7 @@ impl<E: std::fmt::Debug + Send + Sync + 'static> VanadiumAppClient<E> {
         print_writer: Box<dyn std::io::Write + Send>,
     ) -> Result<(Self, [u8; 32]), Box<dyn std::error::Error + Send + Sync>> {
         // Create ELF file and manifest
-        let elf_file = ElfFile::new(Path::new(&elf_path))?;
+        let elf_file = VAppElfFile::new(Path::new(&elf_path))?;
 
         let manifest = if let Some(m) = &elf_file.manifest {
             // If the elf file is a packaged V-App, we use its manifest

@@ -9,7 +9,7 @@ It can be called with no arguments if called from the folder containing the Carg
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use client_sdk::elf::{ElfFile, get_app_metadata};
+use client_sdk::elf::{VAppElfFile, get_app_metadata};
 use client_sdk::memory::MemorySegment;
 use common::constants;
 use common::manifest::Manifest;
@@ -83,7 +83,7 @@ fn main() -> Result<()> {
 }
 
 fn compute_merkle_roots(
-    elf_file: &ElfFile,
+    elf_file: &VAppElfFile,
     stack_start: u32,
     stack_size: u32,
 ) -> Result<([u8; 32], [u8; 32], [u8; 32])> {
@@ -166,7 +166,7 @@ fn create_vapp_package(
     }
 
     // Parse the temporary ELF file with the empty .manifest section
-    let elf_file_with_manifest = ElfFile::new(&temp_elf)?;
+    let elf_file_with_manifest = VAppElfFile::new(&temp_elf)?;
 
     // Compute Merkle roots based on the ELF file with the empty section
     let (code_merkle_root, data_merkle_root, stack_merkle_root) =
