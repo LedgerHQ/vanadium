@@ -241,6 +241,31 @@ impl LedgerHashContext {
     }
 }
 
+// Wraps the cx_ecfp_private_key_t struct to make sure that it is zeroed on drop
+struct ZeroizingPrivateKey(sys::cx_ecfp_private_key_t);
+
+impl Drop for ZeroizingPrivateKey {
+    fn drop(&mut self) {
+        use zeroize::Zeroize;
+        self.0.d.zeroize();
+        self.0.d_len.zeroize();
+        self.0.curve.zeroize();
+    }
+}
+
+impl core::ops::Deref for ZeroizingPrivateKey {
+    type Target = sys::cx_ecfp_private_key_t;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl core::ops::DerefMut for ZeroizingPrivateKey {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+
 pub enum CommEcallError {
     Exit(i32),
     Panic,
@@ -1134,8 +1159,7 @@ impl<'a, const N: usize> CommEcallHandler<'a, N> {
         }
 
         // copy inputs to local memory
-        // TODO: we should zeroize the private key after use
-        let mut privkey_local: sys::cx_ecfp_private_key_t = Default::default();
+        let mut privkey_local = ZeroizingPrivateKey(sys::cx_ecfp_private_key_t::default());
         privkey_local.curve = curve as u8;
         privkey_local.d_len = 32;
         cpu.get_segment::<E>(privkey.0)?
@@ -1152,7 +1176,7 @@ impl<'a, const N: usize> CommEcallHandler<'a, N> {
 
         unsafe {
             let res = sys::cx_ecdsa_sign_no_throw(
-                &mut privkey_local,
+                &mut *privkey_local,
                 ecall_constants::EcdsaSignMode::RFC6979 as u32,
                 ecall_constants::HashId::Sha256 as u8,
                 msg_hash_local.as_ptr(),
@@ -1263,8 +1287,7 @@ impl<'a, const N: usize> CommEcallHandler<'a, N> {
         }
 
         // copy inputs to local memory
-        // TODO: we should zeroize the private key after use
-        let mut privkey_local: sys::cx_ecfp_private_key_t = Default::default();
+        let mut privkey_local = ZeroizingPrivateKey(sys::cx_ecfp_private_key_t::default());
         privkey_local.curve = curve as u8;
         privkey_local.d_len = 32;
         cpu.get_segment::<E>(privkey.0)?
@@ -1294,7 +1317,7 @@ impl<'a, const N: usize> CommEcallHandler<'a, N> {
             };
 
             let res = sys::cx_ecschnorr_sign_no_throw(
-                &mut privkey_local,
+                &mut *privkey_local,
                 mode,
                 ecall_constants::HashId::Sha256 as u8,
                 msg_local.as_ptr(),
