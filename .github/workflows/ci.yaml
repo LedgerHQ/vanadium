@@ -200,6 +200,23 @@ jobs:
       models_json: '["nanox","nanosplus","flex","stax","apex_p"]'
       cargo_test_features: 'speculos-tests'
 
+  ## vnd-template
+
+  # build template V-App
+  build_vnd_template:
+    uses: ./.github/workflows/reusable_vapp_build.yaml
+    with:
+      app_name: "vnd-template"
+      app_dir: "apps/template/app"
+      artifact_name: "vnd_template_riscv_binary"
+      binary_name: "vnd-template"
+
+  test_vnd_template_app:
+    uses: ./.github/workflows/reusable_native_tests.yaml
+    with:
+      app_name: "vnd-template"
+      test_dirs_json: '["apps/template/app"]'
+
   ## vnd-bitcoin
 
   # build bitcoin V-App
