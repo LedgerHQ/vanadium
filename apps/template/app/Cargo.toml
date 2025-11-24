@@ -1,0 +1,20 @@
+[package]
+name = "vnd-template"
+version = "0.1.0"
+edition = "2021"
+
+[package.metadata.vapp]
+name = "Template"
+stack_size = 65536
+
+[dependencies]
+hex = { version = "0.4.3", default-features = false, features = ["alloc"]}
+postcard = { version = "1.1.1", default-features = false, features = ["alloc"] }
+sdk = { git = "https://github.com/LedgerHQ/vanadium.git", package = "vanadium-app-sdk"}
+serde = { version = "1.0.215", default-features = false, features = ["alloc", "derive"] }
+client = { package = "vnd-template-client", path = "../client", default-features = false}
+
+[dev-dependencies]
+sdk = { git = "https://github.com/LedgerHQ/vanadium.git", package = "vanadium-app-sdk", features = ["test-mode"]}
+
+[workspace]
