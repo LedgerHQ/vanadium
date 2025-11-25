@@ -268,7 +268,7 @@ jobs:
       models_json: '["nanox","nanosplus","flex","stax","apex_p"]'
       cargo_test_features: 'speculos-tests'
 
-## vnd-rps
+  ## vnd-rps
   build_vnd_rps:
     uses: ./.github/workflows/reusable_vapp_build.yaml
     with:
