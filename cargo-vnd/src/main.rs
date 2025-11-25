@@ -8,6 +8,7 @@ It can be called with no arguments if called from the folder containing the Carg
 */
 
 use anyhow::{Context, Result};
+use cargo_generate::{GenerateArgs, TemplatePath};
 use clap::{Parser, Subcommand};
 use client_sdk::elf::{VAppElfFile, get_app_metadata};
 use client_sdk::memory::MemorySegment;
@@ -41,6 +42,12 @@ enum Commands {
         /// Output file path (optional, defaults to <crate-name>.vapp)
         #[arg(short, long, value_name = "OUT")]
         output: Option<PathBuf>,
+    },
+    /// Create a new V-App from a template
+    New {
+        /// Name of the new V-App. The template will have two crates: vnd-<name> and vnd-<name>-client
+        #[arg(short, long, value_name = "NAME")]
+        name: String,
     },
 }
 
@@ -77,6 +84,53 @@ fn main() -> Result<()> {
             // if the output path is not provided, default to adding the .vapp extension to the elf
             let output = output.unwrap_or_else(|| elf_path.with_extension("vapp"));
             create_vapp_package(&app_version, &app_metadata, &elf_path, &output)?;
+        }
+        Commands::New { name } => {
+            // Verify that the name is a valid crate name
+
+            // Crate names must be at most 64 characters long
+            const MAX_LENGTH: usize = 64 - "vnd-".len() - "-client".len();
+            if name.len() > MAX_LENGTH {
+                return Err(anyhow::anyhow!(
+                    "Crate name too long. Maximum length is {} characters.",
+                    MAX_LENGTH
+                ));
+            }
+
+            // Check that the name contains only valid characters
+            if !name
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+            {
+                return Err(anyhow::anyhow!(
+                    "Invalid crate name. Only alphanumeric characters, hyphens, and underscores are allowed."
+                ));
+            }
+
+            let app_crate_name = format!("vnd-{}", name);
+            let client_crate_name = format!("vnd-{}-client", name);
+            // binaries without hyphens (necessary for the lib)
+            let client_lib_binary_name = format!("vnd_{}_client", name);
+            let cli_binary_name = format!("vnd_{}_cli", name);
+
+            let args = GenerateArgs {
+                template_path: TemplatePath {
+                    auto_path: Some("https://github.com/LedgerHQ/vanadium.git".to_string()),
+                    branch: Some("template".to_string()),
+                    subfolder: Some("apps/template/generate".to_string()),
+                    ..Default::default()
+                },
+                name: Some(name.clone()),
+                define: vec![
+                    format!("project-app-crate={}", app_crate_name),
+                    format!("project-client-crate={}", client_crate_name),
+                    format!("project-client-lib-binary={}", client_lib_binary_name),
+                    format!("project-cli-binary={}", cli_binary_name),
+                ],
+                verbose: true,
+                ..Default::default()
+            };
+            cargo_generate::generate(args)?;
         }
     }
     Ok(())

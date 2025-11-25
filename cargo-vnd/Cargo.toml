@@ -13,3 +13,4 @@ clap = { version = "4.5.38", features = ["derive"] }
 common = { path = "../common", features = ["serde_json"] }
 client_sdk = { path = "../client-sdk", package="vanadium-client-sdk", features=["cargo_toml"], default-features = false }
 which = "7.0.3"
+cargo-generate = "0.23.7"
