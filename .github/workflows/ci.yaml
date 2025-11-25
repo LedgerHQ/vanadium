@@ -217,6 +217,18 @@ jobs:
       app_name: "vnd-template"
       test_dirs_json: '["apps/template/app"]'
 
+  # check that the generated template is up to date 
+  check_vnd_template:
+    name: Check that the generated template is up to date
+    runs-on: ubuntu-latest
+    steps:
+      - name: Clone
+        uses: actions/checkout@v4
+      - name: Run update-template.sh --check
+        working-directory: apps/template
+        run: |
+          ./update-template.sh --check
+
   ## vnd-bitcoin
 
   # build bitcoin V-App
