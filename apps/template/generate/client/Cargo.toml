@@ -1,0 +1,32 @@
+[package]
+name = "vnd-template-client"
+version = "0.1.0"
+edition = "2021"
+
+[features]
+default = ["client"]
+client = ["dep:tokio", "dep:sdk", "dep:clap"]
+speculos-tests = []
+
+[dependencies]
+# Dependencies used in the 'common' part of this crate, used without the 'client' feature.
+# They must compile in no_std
+postcard = { version = "1.1.1", default-features = false, features = ["alloc"] }
+serde = { version = "1.0.215", default-features = false, features = ["alloc", "derive"] }
+
+# All the following dependencies are only present if the 'client' feature is enabled.
+# They do not require no_std
+clap = { version = "4.5.17", features = ["derive"], optional = true }
+sdk = { git = "https://github.com/LedgerHQ/vanadium.git", package = "vanadium-client-sdk", optional = true}
+tokio = { version = "1.38.1", features = ["io-util", "macros", "net", "rt", "rt-multi-thread", "sync"], optional = true }
+
+[lib]
+name = "{{project-client-lib-binary}}"
+path = "src/lib.rs"
+
+[[bin]]
+name = "{{project-cli-binary}}"
+path = "src/main.rs"
+
+
+[workspace]
