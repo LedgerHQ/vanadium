@@ -28,8 +28,9 @@ from the `cargo-vnd` folder of the vanadium repository.
 
 General usage is displayed when invoking `cargo vnd`, or `cargo vnd <subcommand> -h` for details about specific subcommands.
 
-At this time, there is a single subcommand:
+These are the currently defined commands:
 
+- `new --name <project-name>`: creates a boilerplate V-App, client and CLI interface. It creates a new folder named `<project-name>`, containing the V-App's crate (`vnd-<project-name>`), and the client and CLI interface crate (`vnd-<project-name>-client`).
 - `package`: Prepares a packaged V-App by embedding its manifest in the binary. After building the `release` version for the RISC-V target, call the `cargo vnd package` command with no arguments from the V-App's crate folder. This will produce a binary with the added extension `.vapp`, with the app's manifest embedded in it. The paths of input and output files can be customized with command line arguments if needed.
 
 **Example:**
