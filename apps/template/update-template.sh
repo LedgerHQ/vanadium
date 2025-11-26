@@ -4,6 +4,9 @@ set -e
 # Ensure we are in the directory of the script
 cd "$(dirname "$0")"
 
+(cd app && cargo clean)
+(cd client && cargo clean)
+
 if [ "$1" == "--check" ]; then
     TARGET_DIR=$(mktemp -d)
     trap "rm -rf $TARGET_DIR" EXIT
