@@ -4,12 +4,6 @@ This is the Vanadium Risc-V VM app. For now, it's just boilerplate.
 
 ![Rule enforcer](https://github.com/LedgerHQ/app-boilerplate-rust/actions/workflows/guidelines_enforcer.yml/badge.svg) ![Build and tests](https://github.com/LedgerHQ/app-boilerplate-rust/actions/workflows/build_and_functional_tests.yml/badge.svg)
 
-This is a boilerplate application written in Rust which can be forked to start a new project for the Ledger Nano X/SP, Stax and Flex devices.
-
-:warning: Nano S is not supported
-
-:warning: Nano S+ and Nano X support is in progress. For the time being, we recommend testing on the Flex and Stax targets.
-
 # Quick start guide
 
 # Vanadium binaries
@@ -54,5 +48,5 @@ speculos target/flex/release/app-vanadium
 If you use [just](https://github.com/casey/just), you can also run:
 
 ```bash
-just run-flex
+just run-flex  # or run-nanosplus, run-nanox, run-stax, run-apex_p
 ```
