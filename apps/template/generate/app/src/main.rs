@@ -75,7 +75,7 @@ fn process_message(app: &mut App, msg: &[u8]) -> Vec<u8> {
 
 pub fn main() {
     AppBuilder::new("Template", env!("CARGO_PKG_VERSION"), process_message)
-        .description("Template Vanadium App")
+        .description("Template App")
         .run();
 }
 
