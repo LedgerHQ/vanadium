@@ -1079,6 +1079,8 @@ pub mod client_utils {
         TcpTransportFailed(String),
         /// Failed to create HID transport
         HidTransportFailed(String),
+        /// Hid, Tcp and Native interfaces all failed
+        AllInterfacesFailed,
         /// Failed to create Vanadium app client
         VanadiumClientFailed(String),
     }
@@ -1095,6 +1097,10 @@ pub mod client_utils {
                 ClientUtilsError::HidTransportFailed(msg) => {
                     write!(f, "HID transport failed: {}", msg)
                 }
+                ClientUtilsError::AllInterfacesFailed => write!(
+                    f,
+                    "Failed to connect to a device or speculos running vanadium, or the native app"
+                ),
                 ClientUtilsError::VanadiumClientFailed(msg) => {
                     write!(f, "Vanadium client failed: {}", msg)
                 }
@@ -1221,7 +1227,10 @@ pub mod client_utils {
                 if let Ok(client) = create_tcp_client(&app_path, None, get_writer()).await {
                     return Ok(client.0);
                 }
-                create_native_client(Some(&tcp_addr), get_writer()).await
+                if let Ok(client) = create_native_client(Some(&tcp_addr), get_writer()).await {
+                    return Ok(client);
+                }
+                Err(ClientUtilsError::AllInterfacesFailed)
             }
             ClientType::Native => create_native_client(Some(&tcp_addr), get_writer()).await,
             ClientType::Tcp => create_tcp_client(&app_path, None, get_writer())
