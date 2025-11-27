@@ -56,6 +56,10 @@ struct Args {
     #[arg(long, group = "interface")]
     hid: bool,
 
+    /// Use Speculos emulator interface
+    #[arg(long, group = "interface")]
+    sym: bool,
+
     /// Use the native interface
     #[arg(long, group = "interface")]
     native: bool,
@@ -69,8 +73,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ClientType::Hid
     } else if args.native {
         ClientType::Native
-    } else {
+    } else if args.sym {
         ClientType::Tcp
+    } else {
+        ClientType::Any
     };
     let mut demo_client =
         RPSClient::new(create_default_client("vnd-rps", client_type, None).await?);
