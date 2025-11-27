@@ -65,11 +65,6 @@ struct Args {
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
 
-    if args.hid && args.native {
-        eprintln!("The --native and --hid options are mutually exclusive.");
-        std::process::exit(1);
-    }
-
     let client_type = if args.hid {
         ClientType::Hid
     } else if args.native {
