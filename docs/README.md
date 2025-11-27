@@ -2,7 +2,7 @@
 
 With the exception of the Vanadium app itself, which is an embedded Ledger app on the `ARM` target, all the other crates target either the `native` or the `riscv` targets.
 
-- The `native` target is currently `x86_64-unknown-linux-gnu`, but more native targets might be added in the future. It has `riscv` and `native` targets, in `no_std` mode.
+- The `native` target is what is running in your machine.
 - The `riscv` target is currently `riscv32imc-unknown-none`.
 
 > **⚠️ WARNING: The native target is insecure.**<br> While it is possible to compile and run the V-Apps on native targets, this is only intended for development and testing purposes. The cryptographic primitives are not hardened against side channels, or other kinds of attacks.

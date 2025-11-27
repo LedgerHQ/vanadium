@@ -1,12 +1,12 @@
 
 # build for both native and riscv targets
 build:
-  cargo build --release --target=x86_64-unknown-linux-gnu
+  cargo build --release
   cargo build --release --target=riscv32imc-unknown-none-elf
 
 # build for native target
 build-native:
-  cargo build --release --target=x86_64-unknown-linux-gnu
+  cargo build --release
 
 # build for riscv target
 build-riscv:

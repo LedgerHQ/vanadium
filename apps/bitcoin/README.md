@@ -21,7 +21,7 @@ In order to build the app for the Risc-V target, enter the `app` folder and run:
 In order to build the app for the native target, enter the `app` folder and run:
 
    ```sh
-  cargo build --release --target=x86_64-unknown-linux-gnu
+  cargo build --release
    ```
 
 ## Run the V-App
