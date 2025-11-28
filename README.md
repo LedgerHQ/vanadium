@@ -128,9 +128,30 @@ To run on the device emulator, you first need the **Vanadium VM** binary.
     ```
 
 ### 4. Run on Ledger Device
-1.  Install the Vanadium App on your device (via [Ledger VSCode Extension](https://marketplace.visualstudio.com/items?itemName=LedgerHQ.ledger-dev-tools)).
-2.  Connect your device and open the Vanadium App.
-3.  Run the client:
+
+On all devices except Nano X, you can sideload the Vanadium app.
+
+One option is to use the [Ledger VSCode Extension](https://marketplace.visualstudio.com/items?itemName=LedgerHQ.ledger-dev-tools).
+
+Alternatively, install the following dependencies:
+
+```bash
+sudo apt install libudev-dev libusb-1.0-0-dev python3-venv
+```
+
+Then, connect and unlock the device, and run:
+
+```bash
+cd vm
+# Download binaries if not already present
+if [ ! -d "target" ]; then bash download_vanadium.sh; fi
+bash load_vanadium.sh    
+```
+
+Once Vanadium is installed:
+
+1.  Connect your device and open the Vanadium App.
+2.  Run the client:
     ```bash
     cd hello/client
     cargo run -- --hid
