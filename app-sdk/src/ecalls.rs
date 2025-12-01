@@ -377,6 +377,8 @@ forward_to_ecall! {
     pub fn hash_init(hash_id: u32, ctx: *mut u8);
     pub fn hash_update(hash_id: u32, ctx: *mut u8, data: *const u8, len: usize) -> u32;
     pub fn hash_final(hash_id: u32, ctx: *mut u8, digest: *const u8) -> u32;
+    pub fn sys_memcpy(dest: *mut u8, src: *const u8, n: usize) -> *mut u8;
+    pub fn sys_memset(dest: *mut u8, ch: i32, n: usize) -> *mut u8;
 }
 
 #[cfg(test)]
