@@ -1080,7 +1080,11 @@ pub mod client_utils {
         /// Failed to create HID transport
         HidTransportFailed(String),
         /// Hid, Tcp and Native interfaces all failed
-        AllInterfacesFailed,
+        AllInterfacesFailed {
+            hid_error: Box<ClientUtilsError>,
+            tcp_error: Box<ClientUtilsError>,
+            native_error: Box<ClientUtilsError>,
+        },
         /// Failed to create Vanadium app client
         VanadiumClientFailed(String),
     }
@@ -1097,9 +1101,17 @@ pub mod client_utils {
                 ClientUtilsError::HidTransportFailed(msg) => {
                     write!(f, "HID transport failed: {}", msg)
                 }
-                ClientUtilsError::AllInterfacesFailed => write!(
+                ClientUtilsError::AllInterfacesFailed {
+                    hid_error,
+                    tcp_error,
+                    native_error,
+                } => write!(
                     f,
-                    "Failed to connect to a device or speculos running vanadium, or the native app"
+                    "Failed to connect to a device or speculos running vanadium, or the native app.\n\
+                    HID error: {}\n\
+                    TCP error: {}\n\
+                    Native error: {}",
+                    hid_error, tcp_error, native_error
                 ),
                 ClientUtilsError::VanadiumClientFailed(msg) => {
                     write!(f, "Vanadium client failed: {}", msg)
@@ -1221,16 +1233,23 @@ pub mod client_utils {
 
         match client_type {
             ClientType::Any => {
-                if let Ok(client) = create_hid_client(&app_path, None, get_writer()).await {
-                    return Ok(client.0);
-                }
-                if let Ok(client) = create_tcp_client(&app_path, None, get_writer()).await {
-                    return Ok(client.0);
-                }
-                if let Ok(client) = create_native_client(Some(&tcp_addr), get_writer()).await {
-                    return Ok(client);
-                }
-                Err(ClientUtilsError::AllInterfacesFailed)
+                let hid_error = match create_hid_client(&app_path, None, get_writer()).await {
+                    Ok(client) => return Ok(client.0),
+                    Err(e) => e,
+                };
+                let tcp_error = match create_tcp_client(&app_path, None, get_writer()).await {
+                    Ok(client) => return Ok(client.0),
+                    Err(e) => e,
+                };
+                let native_error = match create_native_client(Some(&tcp_addr), get_writer()).await {
+                    Ok(client) => return Ok(client),
+                    Err(e) => e,
+                };
+                Err(ClientUtilsError::AllInterfacesFailed {
+                    hid_error: Box::new(hid_error),
+                    tcp_error: Box::new(tcp_error),
+                    native_error: Box::new(native_error),
+                })
             }
             ClientType::Native => create_native_client(Some(&tcp_addr), get_writer()).await,
             ClientType::Tcp => create_tcp_client(&app_path, None, get_writer())
