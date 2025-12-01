@@ -860,7 +860,8 @@ impl<E: std::fmt::Debug + Send + Sync + 'static> VanadiumAppClient<E> {
         print_writer: Box<dyn std::io::Write + Send>,
     ) -> Result<(Self, [u8; 32]), Box<dyn std::error::Error + Send + Sync>> {
         // Create ELF file and manifest
-        let elf_file = VAppElfFile::new(Path::new(&elf_path))?;
+        let elf_file = VAppElfFile::new(Path::new(&elf_path))
+            .map_err(|e| format!("Failed to create ELF file from path '{}': {}", elf_path, e))?;
 
         let manifest = if let Some(m) = &elf_file.manifest {
             // If the elf file is a packaged V-App, we use its manifest
