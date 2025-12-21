@@ -10,11 +10,6 @@ use std::{
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpStream,
-    sync::{
-        mpsc::{self, error::TryRecvError},
-        Mutex,
-    },
-    task::JoinHandle,
 };
 
 use common::client_commands::{
@@ -35,14 +30,9 @@ use crate::{
     linewriter::Sink,
 };
 
-enum VAppMessage {
-    SendBuffer(Vec<u8>),
-    SendPanicBuffer(String),
-    VAppExited { status: i32 },
-}
-
-enum ClientMessage {
-    ReceiveBuffer(Vec<u8>),
+enum VAppResponse {
+    Message(Vec<u8>),
+    Exited(i32),
 }
 
 #[derive(Debug)]
@@ -128,13 +118,14 @@ struct VAppEngine<E: std::fmt::Debug + Send + Sync + 'static> {
     data_seg: MemorySegment,
     stack_seg: MemorySegment,
     transport: Arc<dyn Transport<Error = E>>,
-    engine_to_client_sender: mpsc::Sender<VAppMessage>,
-    client_to_engine_receiver: mpsc::Receiver<ClientMessage>,
-    print_writer: Box<dyn std::io::Write + Send>,
+    print_writer: Box<dyn std::io::Write + Send + Sync>,
+    pending_receive_buffer: Option<Vec<u8>>,
+    current_status: StatusWord,
+    current_result: Vec<u8>,
 }
 
 impl<E: std::fmt::Debug + Send + Sync + 'static> VAppEngine<E> {
-    pub async fn run(mut self, app_hmac: [u8; 32]) -> Result<(), VAppEngineError<E>> {
+    async fn start(&mut self, app_hmac: [u8; 32]) -> Result<(), VAppEngineError<E>> {
         let serialized_manifest = postcard::to_allocvec(&self.manifest)?;
 
         let (status, result) = self
@@ -143,7 +134,77 @@ impl<E: std::fmt::Debug + Send + Sync + 'static> VAppEngine<E> {
             .await
             .map_err(VAppEngineError::TransportError)?;
 
-        self.busy_loop(status, result).await
+        self.current_status = status;
+        self.current_result = result;
+        Ok(())
+    }
+
+    async fn step(&mut self) -> Result<Option<VAppResponse>, VAppEngineError<E>> {
+        if self.current_status == StatusWord::OK {
+            if self.current_result.len() != 4 {
+                return Err(VAppEngineError::ResponseError(
+                    "The V-App should return a 4-byte exit code",
+                ));
+            }
+            let st = i32::from_be_bytes(self.current_result.clone().try_into().unwrap());
+            return Ok(Some(VAppResponse::Exited(st)));
+        }
+
+        if self.current_status == StatusWord::VMRuntimeError {
+            return Err(VAppEngineError::VMRuntimeError);
+        }
+
+        if self.current_status == StatusWord::VAppPanic {
+            return Err(VAppEngineError::VAppPanic);
+        }
+
+        if self.current_status != StatusWord::InterruptedExecution {
+            return Err(VAppEngineError::InterruptedExecutionExpected);
+        }
+
+        if self.current_result.len() == 0 {
+            return Err(VAppEngineError::ResponseError("empty command"));
+        }
+
+        let client_command_code: ClientCommandCode = self.current_result[0]
+            .try_into()
+            .map_err(|_| VAppEngineError::InvalidCommandCode)?;
+
+        let result = match client_command_code {
+            ClientCommandCode::GetPage => {
+                let (status, result) = self.process_get_page(&self.current_result.clone()).await?;
+                self.current_status = status;
+                self.current_result = result;
+                None
+            }
+            ClientCommandCode::CommitPage => {
+                let (status, result) = self
+                    .process_commit_page(&self.current_result.clone())
+                    .await?;
+                self.current_status = status;
+                self.current_result = result;
+                None
+            }
+            ClientCommandCode::SendBuffer => {
+                self.process_send_buffer(&self.current_result.clone())
+                    .await?
+            }
+            ClientCommandCode::ReceiveBuffer => {
+                let (status, result) = self
+                    .process_receive_buffer(&self.current_result.clone())
+                    .await?;
+                self.current_status = status;
+                self.current_result = result;
+                None
+            }
+            ClientCommandCode::SendBufferContinued
+            | ClientCommandCode::GetPageProofContinued
+            | ClientCommandCode::CommitPageProofContinued => {
+                return Err(VAppEngineError::ResponseError("Unexpected command"));
+            }
+        };
+
+        Ok(result)
     }
 
     // Sends and APDU and repeatedly processes the response if it's a GetPage or CommitPage client command.
@@ -441,44 +502,41 @@ impl<E: std::fmt::Debug + Send + Sync + 'static> VAppEngine<E> {
         Ok((buffer_type, buf))
     }
 
-    // receive a buffer sent by the V-App via xsend; send it to the VappEngine
+    // receive a buffer sent by the V-App via xsend
     async fn process_send_buffer(
         &mut self,
         command: &[u8],
-    ) -> Result<(StatusWord, Vec<u8>), VAppEngineError<E>> {
+    ) -> Result<Option<VAppResponse>, VAppEngineError<E>> {
         let (buffer_type, buf) = self.process_send_buffer_generic(command).await?;
 
-        match buffer_type {
-            BufferType::VAppMessage => {
-                // Send the buffer back to the client via engine_to_client_sender
-                self.engine_to_client_sender
-                    .send(VAppMessage::SendBuffer(buf))
-                    .await
-                    .map_err(|e| VAppEngineError::GenericError(Box::new(e)))?;
-            }
+        let response = match buffer_type {
+            BufferType::VAppMessage => Some(VAppResponse::Message(buf)),
             BufferType::Panic => {
                 let panic_message = String::from_utf8(buf)
                     .map_err(|e| VAppEngineError::GenericError(Box::new(e)))?;
-
-                // Send the panic message back to the client via engine_to_client_sender
-                self.engine_to_client_sender
-                    .send(VAppMessage::SendPanicBuffer(panic_message))
-                    .await
-                    .map_err(|e| VAppEngineError::GenericError(Box::new(e)))?;
+                return Err(VAppEngineError::GenericError(
+                    format!("V-App panicked: {}", panic_message).into(),
+                ));
             }
             BufferType::Print => {
                 self.print_writer
                     .write(&buf)
                     .map_err(|e| VAppEngineError::GenericError(Box::new(e)))?;
+                None
             }
-        }
+        };
 
         // Continue processing
-        self.exchange_and_process_page_requests(&apdu_continue(vec![]))
-            .await
+        let (status, result) = self
+            .exchange_and_process_page_requests(&apdu_continue(vec![]))
+            .await?;
+        self.current_status = status;
+        self.current_result = result;
+
+        Ok(response)
     }
 
-    // the V-App is expecting a buffer via xrecv; get it from the VAppEngine, and send it to the V-App
+    // the V-App is expecting a buffer via xrecv; get it from pending_receive_buffer, and send it to the V-App
     async fn process_receive_buffer(
         &mut self,
         command: &[u8],
@@ -488,21 +546,14 @@ impl<E: std::fmt::Debug + Send + Sync + 'static> VAppEngine<E> {
         #[cfg(feature = "debug")]
         debug!("<- ReceiveBufferMessage()");
 
-        let msg = self.client_to_engine_receiver.try_recv();
-        let bytes: Vec<u8> = match msg {
-            Ok(ClientMessage::ReceiveBuffer(b)) => b,
-            Err(TryRecvError::Empty) => {
-                // if there is no data to send to the V-App, respond with an empty buffer
-                let data = ReceiveBufferResponse::new(0, &[]).serialize();
-                return self
-                    .exchange_and_process_page_requests(&apdu_continue(data))
-                    .await;
-            }
-            Err(_) => {
-                return Err(VAppEngineError::ResponseError(
-                    "Failed to receive buffer from client",
-                ))
-            }
+        let bytes: Vec<u8> = if let Some(buf) = self.pending_receive_buffer.take() {
+            buf
+        } else {
+            // if there is no data to send to the V-App, respond with an empty buffer
+            let data = ReceiveBufferResponse::new(0, &[]).serialize();
+            return self
+                .exchange_and_process_page_requests(&apdu_continue(data))
+                .await;
         };
 
         let mut remaining_len = bytes.len() as u32;
@@ -543,69 +594,25 @@ impl<E: std::fmt::Debug + Send + Sync + 'static> VAppEngine<E> {
         }
     }
 
-    async fn busy_loop(
-        &mut self,
-        first_sw: StatusWord,
-        first_result: Vec<u8>,
-    ) -> Result<(), VAppEngineError<E>> {
-        let mut status = first_sw;
-        let mut result = first_result;
+    pub async fn send_message(&mut self, message: Vec<u8>) -> Result<Vec<u8>, VAppEngineError<E>> {
+        self.pending_receive_buffer = Some(message);
 
         loop {
-            if status == StatusWord::OK {
-                if result.len() != 4 {
-                    return Err(VAppEngineError::ResponseError(
-                        "The V-App should return a 4-byte exit code",
+            match self.step().await? {
+                Some(VAppResponse::Message(buf)) => return Ok(buf),
+                Some(VAppResponse::Exited(status)) => {
+                    return Err(VAppEngineError::GenericError(
+                        format!("V-App exited with status {}", status).into(),
                     ));
                 }
-                let st = i32::from_be_bytes(result.try_into().unwrap());
-                self.engine_to_client_sender
-                    .send(VAppMessage::VAppExited { status: st })
-                    .await
-                    .map_err(|e| VAppEngineError::GenericError(Box::new(e)))?;
-                return Ok(());
-            }
-
-            if status == StatusWord::VMRuntimeError {
-                return Err(VAppEngineError::VMRuntimeError);
-            }
-
-            if status == StatusWord::VAppPanic {
-                return Err(VAppEngineError::VAppPanic);
-            }
-
-            if status != StatusWord::InterruptedExecution {
-                return Err(VAppEngineError::InterruptedExecutionExpected);
-            }
-
-            if result.len() == 0 {
-                return Err(VAppEngineError::ResponseError("empty command"));
-            }
-
-            let client_command_code: ClientCommandCode = result[0]
-                .try_into()
-                .map_err(|_| VAppEngineError::InvalidCommandCode)?;
-
-            (status, result) = match client_command_code {
-                ClientCommandCode::GetPage => self.process_get_page(&result).await?,
-                ClientCommandCode::CommitPage => self.process_commit_page(&result).await?,
-                ClientCommandCode::SendBuffer => self.process_send_buffer(&result).await?,
-                ClientCommandCode::ReceiveBuffer => self.process_receive_buffer(&result).await?,
-                ClientCommandCode::SendBufferContinued
-                | ClientCommandCode::GetPageProofContinued
-                | ClientCommandCode::CommitPageProofContinued => {
-                    // not a top-level command, part of the handling of some other command
-                    return Err(VAppEngineError::ResponseError("Unexpected command"));
-                }
+                None => continue,
             }
         }
     }
 }
 
 struct GenericVanadiumClient<E: std::fmt::Debug + Send + Sync + 'static> {
-    client_to_engine_sender: Option<mpsc::Sender<ClientMessage>>,
-    engine_to_client_receiver: Option<Mutex<mpsc::Receiver<VAppMessage>>>,
-    vapp_engine_handle: Option<JoinHandle<Result<(), VAppEngineError<E>>>>,
+    engine: Option<VAppEngine<E>>,
 }
 
 #[derive(Debug)]
@@ -639,11 +646,7 @@ impl std::error::Error for VanadiumClientError {
 
 impl<E: std::fmt::Debug + Send + Sync + 'static> GenericVanadiumClient<E> {
     pub fn new() -> Self {
-        Self {
-            client_to_engine_sender: None,
-            engine_to_client_receiver: None,
-            vapp_engine_handle: None,
-        }
+        Self { engine: None }
     }
 
     pub async fn register_vapp(
@@ -672,17 +675,14 @@ impl<E: std::fmt::Debug + Send + Sync + 'static> GenericVanadiumClient<E> {
         }
     }
 
-    pub fn run_vapp(
+    pub async fn run_vapp(
         &mut self,
         transport: Arc<dyn Transport<Error = E>>,
         manifest: &Manifest,
         app_hmac: &[u8; 32],
         elf: &VAppElfFile,
-        print_writer: Box<dyn std::io::Write + Send>,
+        print_writer: Box<dyn std::io::Write + Send + Sync>,
     ) -> Result<(), VAppEngineError<E>> {
-        let mut data = postcard::to_allocvec(manifest)?;
-        data.extend_from_slice(app_hmac);
-
         // Create the memory segments for the code, data, and stack sections
         let code_seg = MemorySegment::new(elf.code_segment.start, &elf.code_segment.data);
         let data_seg = MemorySegment::new(elf.data_segment.start, &elf.data_segment.data);
@@ -691,65 +691,31 @@ impl<E: std::fmt::Debug + Send + Sync + 'static> GenericVanadiumClient<E> {
             &vec![0; (manifest.stack_end - manifest.stack_start) as usize],
         );
 
-        let (client_to_engine_sender, client_to_engine_receiver) =
-            mpsc::channel::<ClientMessage>(10);
-        let (engine_to_client_sender, engine_to_client_receiver) = mpsc::channel::<VAppMessage>(10);
-
-        let vapp_engine = VAppEngine {
+        let mut vapp_engine = VAppEngine {
             manifest: manifest.clone(),
             code_seg,
             data_seg,
             stack_seg,
             transport,
-            engine_to_client_sender,
-            client_to_engine_receiver,
             print_writer,
+            pending_receive_buffer: None,
+            current_status: StatusWord::OK,
+            current_result: Vec::new(),
         };
 
-        // Start the VAppEngine in a task
-        let app_hmac_clone = *app_hmac;
-        let vapp_engine_handle = tokio::spawn(async move {
-            let res = vapp_engine.run(app_hmac_clone).await;
-            if let Err(e) = &res {
-                println!("VAppEngine error: {:?}", e);
-            }
-            res
-        });
-
-        // Store the senders and receivers
-        self.client_to_engine_sender = Some(client_to_engine_sender);
-        self.engine_to_client_receiver = Some(Mutex::new(engine_to_client_receiver));
-        self.vapp_engine_handle = Some(vapp_engine_handle);
+        vapp_engine.start(*app_hmac).await?;
+        self.engine = Some(vapp_engine);
 
         Ok(())
     }
 
     pub async fn send_message(&mut self, message: &[u8]) -> Result<Vec<u8>, VanadiumClientError> {
-        // Send the message to VAppEngine when receive_buffer is called
-        self.client_to_engine_sender
-            .as_ref()
-            .ok_or("VAppEngine not running")?
-            .send(ClientMessage::ReceiveBuffer(message.to_vec()))
-            .await
-            .map_err(|_| "Failed to send message to VAppEngine")?;
+        let engine = self.engine.as_mut().ok_or("VAppEngine not running")?;
 
-        // Wait for the response from VAppEngine
-        match self.engine_to_client_receiver.as_mut() {
-            Some(engine_to_client_receiver) => {
-                let mut receiver = engine_to_client_receiver.lock().await;
-                match receiver.recv().await {
-                    Some(VAppMessage::SendBuffer(buf)) => Ok(buf),
-                    Some(VAppMessage::SendPanicBuffer(panic_msg)) => {
-                        Err(VanadiumClientError::VAppPanicked(panic_msg))
-                    }
-                    Some(VAppMessage::VAppExited { status }) => {
-                        Err(VanadiumClientError::VAppExited(status))
-                    }
-                    None => Err("VAppEngine stopped".into()),
-                }
-            }
-            None => Err("VAppEngine not running".into()),
-        }
+        engine
+            .send_message(message.to_vec())
+            .await
+            .map_err(|e| VanadiumClientError::GenericError(e.to_string()))
     }
 }
 
@@ -857,7 +823,7 @@ impl<E: std::fmt::Debug + Send + Sync + 'static> VanadiumAppClient<E> {
         elf_path: &str,
         transport: Arc<dyn Transport<Error = E>>,
         app_hmac: Option<[u8; 32]>,
-        print_writer: Box<dyn std::io::Write + Send>,
+        print_writer: Box<dyn std::io::Write + Send + Sync>,
     ) -> Result<(Self, [u8; 32]), Box<dyn std::error::Error + Send + Sync>> {
         // Create ELF file and manifest
         let elf_file = VAppElfFile::new(Path::new(&elf_path))
@@ -943,7 +909,9 @@ impl<E: std::fmt::Debug + Send + Sync + 'static> VanadiumAppClient<E> {
             app_hmac.unwrap_or(client.register_vapp(transport.clone(), &manifest).await?);
 
         // run the V-App
-        client.run_vapp(transport, &manifest, &app_hmac, &elf_file, print_writer)?;
+        client
+            .run_vapp(transport, &manifest, &app_hmac, &elf_file, print_writer)
+            .await?;
 
         Ok((Self { client }, app_hmac))
     }
@@ -965,14 +933,14 @@ impl<E: std::fmt::Debug + Send + Sync + 'static> VAppTransport for VanadiumAppCl
 /// Client that talks to the V-App over a length-prefixed TCP stream.
 pub struct NativeAppClient {
     stream: TcpStream,
-    print_writer: Box<dyn std::io::Write + Send>,
+    print_writer: Box<dyn std::io::Write + Send + Sync>,
 }
 
 impl NativeAppClient {
     /// `addr` is something like `"127.0.0.1:5555"`.
     pub async fn new(
         addr: &str,
-        print_writer: Box<dyn std::io::Write + Send>,
+        print_writer: Box<dyn std::io::Write + Send + Sync>,
     ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         let stream = TcpStream::connect(addr).await?;
         stream.set_nodelay(true)?;
@@ -1054,7 +1022,7 @@ pub mod client_utils {
     use crate::transport::{TransportHID, TransportTcp, TransportWrapper};
     use crate::transport_native_hid::TransportNativeHID;
 
-    struct SharedWriter(Arc<std::sync::Mutex<Box<dyn std::io::Write + Send>>>);
+    struct SharedWriter(Arc<std::sync::Mutex<Box<dyn std::io::Write + Send + Sync>>>);
 
     impl std::io::Write for SharedWriter {
         fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
@@ -1126,7 +1094,7 @@ pub mod client_utils {
     /// Creates a client for a V-App compiled using the native target. Uses TCP for communication
     pub async fn create_native_client(
         tcp_addr: Option<&str>,
-        print_writer: Option<Box<dyn std::io::Write + Send>>,
+        print_writer: Option<Box<dyn std::io::Write + Send + Sync>>,
     ) -> Result<Box<dyn VAppTransport + Send>, ClientUtilsError> {
         let addr = tcp_addr.unwrap_or("127.0.0.1:2323");
 
@@ -1142,7 +1110,7 @@ pub mod client_utils {
     pub async fn create_tcp_client(
         app_path: &str,
         app_hmac: Option<[u8; 32]>,
-        print_writer: Option<Box<dyn std::io::Write + Send>>,
+        print_writer: Option<Box<dyn std::io::Write + Send + Sync>>,
     ) -> Result<(Box<dyn VAppTransport + Send>, [u8; 32]), ClientUtilsError> {
         let transport_raw = Arc::new(TransportTcp::new_default().await.map_err(|e| {
             ClientUtilsError::TcpTransportFailed(format!(
@@ -1165,7 +1133,7 @@ pub mod client_utils {
     pub async fn create_hid_client(
         app_path: &str,
         app_hmac: Option<[u8; 32]>,
-        print_writer: Option<Box<dyn std::io::Write + Send>>,
+        print_writer: Option<Box<dyn std::io::Write + Send + Sync>>,
     ) -> Result<(Box<dyn VAppTransport + Send>, [u8; 32]), ClientUtilsError> {
         let hid_api = hidapi::HidApi::new().map_err(|e| {
             ClientUtilsError::HidTransportFailed(format!("Unable to create HID API: {}", e))
@@ -1215,7 +1183,7 @@ pub mod client_utils {
     pub async fn create_default_client(
         app_name: &str,
         client_type: ClientType,
-        print_writer: Option<Box<dyn std::io::Write + Send>>,
+        print_writer: Option<Box<dyn std::io::Write + Send + Sync>>,
     ) -> Result<Box<dyn VAppTransport + Send>, ClientUtilsError> {
         let app_path = format!(
             "../app/target/riscv32imc-unknown-none-elf/release/{}",
@@ -1229,7 +1197,7 @@ pub mod client_utils {
         let get_writer = || {
             shared_writer
                 .as_ref()
-                .map(|w| Box::new(SharedWriter(w.clone())) as Box<dyn std::io::Write + Send>)
+                .map(|w| Box::new(SharedWriter(w.clone())) as Box<dyn std::io::Write + Send + Sync>)
         };
 
         match client_type {
