@@ -798,11 +798,14 @@ impl<'a, const N: usize> CommEcallHandler<'a, N> {
             data_seg.read_buffer(data_ptr, &mut data_local[0..copy_size])?;
 
             unsafe {
-                sys::cx_hash_update(
+                let err = sys::cx_hash_update(
                     ctx_local.as_mut_ptr() as *mut sys::cx_hash_header_s,
                     data_local.as_ptr(),
                     copy_size as usize,
                 );
+                if err != CX_OK {
+                    return Err(CommEcallError::GenericError("hash update failed"));
+                }
             }
 
             data_remaining -= copy_size;
@@ -837,10 +840,13 @@ impl<'a, const N: usize> CommEcallHandler<'a, N> {
         let mut digest_local: [u8; 64] = [0; 64];
 
         unsafe {
-            sys::cx_hash_final(
+            let err = sys::cx_hash_final(
                 ctx_local.as_mut_ptr() as *mut sys::cx_hash_header_s,
                 digest_local.as_mut_ptr(),
             );
+            if err != CX_OK {
+                return Err(CommEcallError::GenericError("hash final failed"));
+            }
         }
 
         // actual length of the digest
@@ -1398,7 +1404,7 @@ impl<'a, const N: usize> CommEcallHandler<'a, N> {
         cpu.get_segment::<E>(pubkey.0)?
             .read_buffer(pubkey.0, &mut pubkey_local.W)?;
 
-        let mut msg_local = vec![0; 128];
+        let mut msg_local = vec![0; msg_len];
         cpu.get_segment::<E>(msg.0)?
             .read_buffer(msg.0, &mut msg_local)?;
 
