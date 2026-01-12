@@ -188,7 +188,7 @@ impl UxHandler {
     pub unsafe fn alloc_cstring(
         &mut self,
         string: Option<&String>,
-    ) -> Result<*const i8, CommEcallError> {
+    ) -> Result<*const core::ffi::c_char, CommEcallError> {
         if let Some(string) = string {
             self.cstrings.push(CString::new(string.clone())?);
             return Ok(self.cstrings[self.cstrings.len() - 1].as_ptr());
