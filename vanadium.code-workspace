@@ -19,7 +19,7 @@
       "path": "macros"
     },
     {
-      "path": "docs",
+      "path": "docs"
     },
     {
       "path": "libs/bitcoin_hashes",
@@ -61,6 +61,7 @@
       "path": "apps/template/client",
       "name": "vnd-template-client"
     },
+    {
       "path": "apps/test/app",
       "name": "vnd-test"
     },
