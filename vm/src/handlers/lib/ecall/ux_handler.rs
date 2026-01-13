@@ -1,5 +1,6 @@
 #[cfg(any(target_os = "nanosplus", target_os = "nanox"))]
 use core::ffi::c_void;
+use core::mem::MaybeUninit;
 
 use alloc::{ffi::CString, string::String, vec::Vec};
 
@@ -26,23 +27,44 @@ const TOKEN_TITLE: u8 = 6;
 #[cfg(any(target_os = "stax", target_os = "flex", target_os = "apex_p"))]
 const TOKEN_TOPRIGHT: u8 = 7;
 
-static mut LAST_EVENT: Option<(common::ux::EventCode, common::ux::EventData)> = None;
+// We use MaybeUninit to make sure that the static variable does not create
+// a .data section, which is not allowed.
+static mut LAST_EVENT: MaybeUninit<Option<(common::ux::EventCode, common::ux::EventData)>> =
+    MaybeUninit::uninit();
+static mut LAST_EVENT_INITIALIZED: bool = false;
+
+fn init_last_event() {
+    #[allow(static_mut_refs)]
+    unsafe {
+        if !LAST_EVENT_INITIALIZED {
+            LAST_EVENT.write(None);
+            LAST_EVENT_INITIALIZED = true;
+        }
+    }
+}
 
 pub fn get_last_event() -> Option<(common::ux::EventCode, common::ux::EventData)> {
+    init_last_event();
     // Safe in a single-threaded environment
     #[allow(static_mut_refs)]
     unsafe {
-        LAST_EVENT.take()
+        LAST_EVENT.assume_init_mut().take()
     }
 }
 
 fn store_new_event(event_code: common::ux::EventCode, event_data: common::ux::EventData) {
+    init_last_event();
     // We store the new event if there was no stored event, or there is just a ticker
     // Otherwise we drop the new event
     #[allow(static_mut_refs)]
     unsafe {
-        if LAST_EVENT.is_none() || LAST_EVENT.as_ref().unwrap().0 == common::ux::EventCode::Ticker {
-            LAST_EVENT = Some((event_code, event_data));
+        if !LAST_EVENT_INITIALIZED {
+            LAST_EVENT.write(None);
+            LAST_EVENT_INITIALIZED = true;
+        }
+        let last_event = LAST_EVENT.assume_init_mut();
+        if last_event.is_none() || last_event.as_ref().unwrap().0 == common::ux::EventCode::Ticker {
+            *last_event = Some((event_code, event_data));
         }
     }
 }
