@@ -32,6 +32,7 @@ use crate::{
 
 enum VAppResponse {
     Message(Vec<u8>),
+    Panic(String),
     Exited(i32),
 }
 
@@ -514,9 +515,7 @@ impl<E: std::fmt::Debug + Send + Sync + 'static> VAppEngine<E> {
             BufferType::Panic => {
                 let panic_message = String::from_utf8(buf)
                     .map_err(|e| VAppEngineError::GenericError(Box::new(e)))?;
-                return Err(VAppEngineError::GenericError(
-                    format!("V-App panicked: {}", panic_message).into(),
-                ));
+                Some(VAppResponse::Panic(panic_message))
             }
             BufferType::Print => {
                 self.print_writer
@@ -600,6 +599,11 @@ impl<E: std::fmt::Debug + Send + Sync + 'static> VAppEngine<E> {
         loop {
             match self.step().await? {
                 Some(VAppResponse::Message(buf)) => return Ok(buf),
+                Some(VAppResponse::Panic(msg)) => {
+                    return Err(VAppEngineError::GenericError(
+                        format!("V-App panicked: {}", msg).into(),
+                    ));
+                }
                 Some(VAppResponse::Exited(status)) => {
                     return Err(VAppEngineError::GenericError(
                         format!("V-App exited with status {}", status).into(),
@@ -617,8 +621,6 @@ struct GenericVanadiumClient<E: std::fmt::Debug + Send + Sync + 'static> {
 
 #[derive(Debug)]
 enum VanadiumClientError {
-    VAppPanicked(String),
-    VAppExited(i32),
     GenericError(String),
 }
 
@@ -631,8 +633,6 @@ impl From<&str> for VanadiumClientError {
 impl std::fmt::Display for VanadiumClientError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            VanadiumClientError::VAppPanicked(msg) => write!(f, "VApp panicked: {}", msg),
-            VanadiumClientError::VAppExited(code) => write!(f, "VApp exited with code: {}", code),
             VanadiumClientError::GenericError(msg) => write!(f, "Generic error: {}", msg),
         }
     }
@@ -722,6 +722,8 @@ impl<E: std::fmt::Debug + Send + Sync + 'static> GenericVanadiumClient<E> {
 /// Represents errors that can occur during the execution of a V-App.
 #[derive(Debug)]
 pub enum VAppExecutionError {
+    /// Indicates that the V-App has panicked with the specific message.
+    AppPanicked(String),
     /// Indicates that the V-App has exited with the specific status code.
     /// Useful to handle a graceful exit of the V-App.
     AppExited(i32),
@@ -732,6 +734,7 @@ pub enum VAppExecutionError {
 impl std::fmt::Display for VAppExecutionError {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         match self {
+            VAppExecutionError::AppPanicked(msg) => write!(f, "V-App panicked: {}", msg),
             VAppExecutionError::AppExited(code) => write!(f, "V-App exited with status {}", code),
             VAppExecutionError::Other(e) => write!(f, "{}", e),
         }
@@ -741,8 +744,9 @@ impl std::fmt::Display for VAppExecutionError {
 impl std::error::Error for VAppExecutionError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
+            VAppExecutionError::AppPanicked(_) => None,
+            VAppExecutionError::AppExited(_) => None,
             VAppExecutionError::Other(e) => Some(&**e),
-            _ => None,
         }
     }
 }
@@ -924,13 +928,10 @@ impl<E: std::fmt::Debug + Send + Sync + 'static> SyncVanadiumAppClient<E> {
 #[async_trait]
 impl<E: std::fmt::Debug + Send + Sync + 'static> VAppTransport for SyncVanadiumAppClient<E> {
     async fn send_message(&mut self, msg: &[u8]) -> Result<Vec<u8>, VAppExecutionError> {
-        match self.client.send_message(msg).await {
-            Ok(response) => Ok(response),
-            Err(VanadiumClientError::VAppExited(status)) => {
-                Err(VAppExecutionError::AppExited(status))
-            }
-            Err(e) => Err(VAppExecutionError::Other(Box::new(e))),
-        }
+        self.client
+            .send_message(msg)
+            .await
+            .map_err(|e| VAppExecutionError::Other(Box::new(e)))
     }
 }
 
@@ -1025,6 +1026,21 @@ impl<E: std::fmt::Debug + Send + Sync + 'static> VanadiumAppClient<E> {
                                     }
                                 }
                             }
+                            Ok(Some(VAppResponse::Panic(msg))) => {
+                                // V-App panicked
+                                if let Some(resp_tx) = pending_response.take() {
+                                    if resp_tx
+                                        .send(Err(VAppExecutionError::AppPanicked(msg)))
+                                        .is_err()
+                                    {
+                                        #[cfg(feature = "debug")]
+                                        log::debug!(
+                                            "Failed to send app panic error: receiver dropped"
+                                        );
+                                    }
+                                }
+                                break;
+                            }
                             Ok(Some(VAppResponse::Exited(status))) => {
                                 // V-App exited
                                 if let Some(resp_tx) = pending_response.take() {
@@ -1090,9 +1106,9 @@ impl<E: std::fmt::Debug + Send + Sync + 'static> Drop for VanadiumAppClient<E> {
 
         // Wait for the worker thread to finish
         if let Some(handle) = self.worker_handle.take() {
-            if let Err(e) = handle.join() {
+            if let Err(_e) = handle.join() {
                 #[cfg(feature = "debug")]
-                log::debug!("Worker thread panicked: {:?}", e);
+                log::debug!("Worker thread panicked: {:?}", _e);
             }
         }
     }
