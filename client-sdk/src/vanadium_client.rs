@@ -32,6 +32,7 @@ use crate::{
 
 enum VAppResponse {
     Message(Vec<u8>),
+    Panic(String),
     Exited(i32),
 }
 
@@ -162,7 +163,7 @@ impl<E: std::fmt::Debug + Send + Sync + 'static> VAppEngine<E> {
             return Err(VAppEngineError::InterruptedExecutionExpected);
         }
 
-        if self.current_result.len() == 0 {
+        if self.current_result.is_empty() {
             return Err(VAppEngineError::ResponseError("empty command"));
         }
 
@@ -514,9 +515,7 @@ impl<E: std::fmt::Debug + Send + Sync + 'static> VAppEngine<E> {
             BufferType::Panic => {
                 let panic_message = String::from_utf8(buf)
                     .map_err(|e| VAppEngineError::GenericError(Box::new(e)))?;
-                return Err(VAppEngineError::GenericError(
-                    format!("V-App panicked: {}", panic_message).into(),
-                ));
+                Some(VAppResponse::Panic(panic_message))
             }
             BufferType::Print => {
                 self.print_writer
@@ -600,6 +599,11 @@ impl<E: std::fmt::Debug + Send + Sync + 'static> VAppEngine<E> {
         loop {
             match self.step().await? {
                 Some(VAppResponse::Message(buf)) => return Ok(buf),
+                Some(VAppResponse::Panic(msg)) => {
+                    return Err(VAppEngineError::GenericError(
+                        format!("V-App panicked: {}", msg).into(),
+                    ));
+                }
                 Some(VAppResponse::Exited(status)) => {
                     return Err(VAppEngineError::GenericError(
                         format!("V-App exited with status {}", status).into(),
@@ -617,8 +621,6 @@ struct GenericVanadiumClient<E: std::fmt::Debug + Send + Sync + 'static> {
 
 #[derive(Debug)]
 enum VanadiumClientError {
-    VAppPanicked(String),
-    VAppExited(i32),
     GenericError(String),
 }
 
@@ -631,8 +633,6 @@ impl From<&str> for VanadiumClientError {
 impl std::fmt::Display for VanadiumClientError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            VanadiumClientError::VAppPanicked(msg) => write!(f, "VApp panicked: {}", msg),
-            VanadiumClientError::VAppExited(code) => write!(f, "VApp exited with code: {}", code),
             VanadiumClientError::GenericError(msg) => write!(f, "Generic error: {}", msg),
         }
     }
@@ -722,16 +722,19 @@ impl<E: std::fmt::Debug + Send + Sync + 'static> GenericVanadiumClient<E> {
 /// Represents errors that can occur during the execution of a V-App.
 #[derive(Debug)]
 pub enum VAppExecutionError {
+    /// Indicates that the V-App has panicked with the specific message.
+    AppPanicked(String),
     /// Indicates that the V-App has exited with the specific status code.
     /// Useful to handle a graceful exit of the V-App.
     AppExited(i32),
     /// Any other error.
-    Other(Box<dyn std::error::Error>),
+    Other(Box<dyn std::error::Error + Send + Sync>),
 }
 
 impl std::fmt::Display for VAppExecutionError {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         match self {
+            VAppExecutionError::AppPanicked(msg) => write!(f, "V-App panicked: {}", msg),
             VAppExecutionError::AppExited(code) => write!(f, "V-App exited with status {}", code),
             VAppExecutionError::Other(e) => write!(f, "{}", e),
         }
@@ -741,8 +744,9 @@ impl std::fmt::Display for VAppExecutionError {
 impl std::error::Error for VAppExecutionError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
+            VAppExecutionError::AppPanicked(_) => None,
+            VAppExecutionError::AppExited(_) => None,
             VAppExecutionError::Other(e) => Some(&**e),
-            _ => None,
         }
     }
 }
@@ -767,37 +771,41 @@ pub trait VAppTransport {
     async fn send_message(&mut self, msg: &[u8]) -> Result<Vec<u8>, VAppExecutionError>;
 }
 
-/// Implementation of a VAppTransport using the Vanadium VM.
-pub struct VanadiumAppClient<E: std::fmt::Debug + Send + Sync + 'static> {
+/// Implementation of a VAppTransport using the Vanadium VM (synchronous version).
+pub struct SyncVanadiumAppClient<E: std::fmt::Debug + Send + Sync + 'static> {
     client: GenericVanadiumClient<E>,
 }
 
 #[derive(Debug)]
-pub enum VanadiumAppClientError<E: std::fmt::Debug + Send + Sync + 'static> {
+pub enum SyncVanadiumAppClientError<E: std::fmt::Debug + Send + Sync + 'static> {
     VAppEngineError(VAppEngineError<E>),
 }
 
-impl<E: std::fmt::Debug + Send + Sync + 'static> std::fmt::Display for VanadiumAppClientError<E> {
+impl<E: std::fmt::Debug + Send + Sync + 'static> std::fmt::Display
+    for SyncVanadiumAppClientError<E>
+{
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            VanadiumAppClientError::VAppEngineError(e) => write!(f, "VAppEngine error: {}", e),
+            SyncVanadiumAppClientError::VAppEngineError(e) => write!(f, "VAppEngine error: {}", e),
         }
     }
 }
 
-impl<E: std::fmt::Debug + Send + Sync + 'static> std::error::Error for VanadiumAppClientError<E> {
+impl<E: std::fmt::Debug + Send + Sync + 'static> std::error::Error
+    for SyncVanadiumAppClientError<E>
+{
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            VanadiumAppClientError::VAppEngineError(e) => Some(e),
+            SyncVanadiumAppClientError::VAppEngineError(e) => Some(e),
         }
     }
 }
 
 impl<E: std::fmt::Debug + Send + Sync + 'static> From<VAppEngineError<E>>
-    for VanadiumAppClientError<E>
+    for SyncVanadiumAppClientError<E>
 {
     fn from(error: VAppEngineError<E>) -> Self {
-        VanadiumAppClientError::VAppEngineError(error)
+        SyncVanadiumAppClientError::VAppEngineError(error)
     }
 }
 
@@ -818,7 +826,7 @@ fn get_cargo_toml_path(elf_path: &str) -> Option<PathBuf> {
     None
 }
 
-impl<E: std::fmt::Debug + Send + Sync + 'static> VanadiumAppClient<E> {
+impl<E: std::fmt::Debug + Send + Sync + 'static> SyncVanadiumAppClient<E> {
     pub async fn new(
         elf_path: &str,
         transport: Arc<dyn Transport<Error = E>>,
@@ -918,15 +926,206 @@ impl<E: std::fmt::Debug + Send + Sync + 'static> VanadiumAppClient<E> {
 }
 
 #[async_trait]
+impl<E: std::fmt::Debug + Send + Sync + 'static> VAppTransport for SyncVanadiumAppClient<E> {
+    async fn send_message(&mut self, msg: &[u8]) -> Result<Vec<u8>, VAppExecutionError> {
+        self.client
+            .send_message(msg)
+            .await
+            .map_err(|e| VAppExecutionError::Other(Box::new(e)))
+    }
+}
+
+/// This client runs a background task that continuously steps the V-App engine,
+/// preventing the device from appearing frozen when waiting for messages from the host.
+pub struct VanadiumAppClient<E: std::fmt::Debug + Send + Sync + 'static> {
+    message_tx: tokio::sync::mpsc::UnboundedSender<(
+        Vec<u8>,
+        tokio::sync::oneshot::Sender<Result<Vec<u8>, VAppExecutionError>>,
+    )>,
+    shutdown_tx: Option<tokio::sync::oneshot::Sender<()>>,
+    worker_handle: Option<tokio::task::JoinHandle<()>>,
+    _phantom: std::marker::PhantomData<E>,
+}
+
+impl<E: std::fmt::Debug + Send + Sync + 'static> VanadiumAppClient<E> {
+    /// Creates a new VanadiumAppClient.
+    ///
+    /// This creates a Vanadium client with a background task that
+    /// continuously steps the engine to keep the device responsive.
+    pub async fn new(
+        elf_path: &str,
+        transport: Arc<dyn Transport<Error = E>>,
+        app_hmac: Option<[u8; 32]>,
+        print_writer: Box<dyn std::io::Write + Send + Sync>,
+    ) -> Result<(Self, [u8; 32]), Box<dyn std::error::Error + Send + Sync>> {
+        let (sync_client, hmac) =
+            SyncVanadiumAppClient::new(elf_path, transport, app_hmac, print_writer).await?;
+        Ok((Self::from_sync(sync_client), hmac))
+    }
+
+    /// Creates a new VanadiumAppClient from an existing SyncVanadiumAppClient.
+    ///
+    /// The provided client will be moved into a background task that
+    /// continuously steps the engine to keep the device responsive.
+    fn from_sync(client: SyncVanadiumAppClient<E>) -> Self {
+        let (message_tx, message_rx) = tokio::sync::mpsc::unbounded_channel::<(
+            Vec<u8>,
+            tokio::sync::oneshot::Sender<Result<Vec<u8>, VAppExecutionError>>,
+        )>();
+
+        // Create shutdown channel
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+
+        // Spawn a background task that continuously steps the engine
+        let worker_handle = tokio::spawn(Self::worker_loop(client, message_rx, shutdown_rx));
+
+        Self {
+            message_tx,
+            shutdown_tx: Some(shutdown_tx),
+            worker_handle: Some(worker_handle),
+            _phantom: std::marker::PhantomData,
+        }
+    }
+
+    /// Background worker loop that continuously steps the V-App engine.
+    async fn worker_loop(
+        mut client: SyncVanadiumAppClient<E>,
+        mut message_rx: tokio::sync::mpsc::UnboundedReceiver<(
+            Vec<u8>,
+            tokio::sync::oneshot::Sender<Result<Vec<u8>, VAppExecutionError>>,
+        )>,
+        mut shutdown_rx: tokio::sync::oneshot::Receiver<()>,
+    ) {
+        let mut pending_response: Option<
+            tokio::sync::oneshot::Sender<Result<Vec<u8>, VAppExecutionError>>,
+        > = None;
+
+        loop {
+            // Check for shutdown signal (non-blocking)
+            if shutdown_rx.try_recv().is_ok() {
+                break;
+            }
+
+            // Only accept new messages when there's no pending response
+            // This enforces strict message-response pattern and prevents race conditions
+            if pending_response.is_none() {
+                if let Ok((msg, resp_tx)) = message_rx.try_recv() {
+                    // Set the pending message on the engine
+                    if let Some(engine) = client.client.engine.as_mut() {
+                        // Check if there's already a pending message that hasn't been consumed by the device
+                        if engine.pending_receive_buffer.is_some() {
+                            #[cfg(feature = "debug")]
+                            log::warn!("Message sent before device called xrecv - previous queued message will be lost");
+                        }
+                        engine.pending_receive_buffer = Some(msg);
+                        pending_response = Some(resp_tx);
+                    } else if resp_tx
+                        .send(Err(VAppExecutionError::Other("Engine not running".into())))
+                        .is_err()
+                    {
+                        #[cfg(feature = "debug")]
+                        log::debug!("Failed to send error response: receiver dropped");
+                    }
+                }
+            }
+
+            // Step the engine
+            if let Some(engine) = client.client.engine.as_mut() {
+                match engine.step().await {
+                    Ok(Some(VAppResponse::Message(response))) => {
+                        // We got a response - send it to the pending request
+                        if let Some(resp_tx) = pending_response.take() {
+                            if resp_tx.send(Ok(response)).is_err() {
+                                #[cfg(feature = "debug")]
+                                log::debug!("Failed to send response: receiver dropped");
+                            }
+                        } else {
+                            // Received a message without a pending request - this shouldn't happen
+                            // in a strict message-response pattern
+                            #[cfg(feature = "debug")]
+                            log::debug!(
+                                "Warning: Received unsolicited message from V-App, dropping it"
+                            );
+                        }
+                    }
+                    Ok(Some(VAppResponse::Panic(msg))) => {
+                        // V-App panicked
+                        if let Some(resp_tx) = pending_response.take() {
+                            if resp_tx
+                                .send(Err(VAppExecutionError::AppPanicked(msg)))
+                                .is_err()
+                            {
+                                #[cfg(feature = "debug")]
+                                log::debug!("Failed to send app panic error: receiver dropped");
+                            }
+                        }
+                        break;
+                    }
+                    Ok(Some(VAppResponse::Exited(status))) => {
+                        // V-App exited
+                        if let Some(resp_tx) = pending_response.take() {
+                            if resp_tx
+                                .send(Err(VAppExecutionError::AppExited(status)))
+                                .is_err()
+                            {
+                                #[cfg(feature = "debug")]
+                                log::debug!("Failed to send app exited error: receiver dropped");
+                            }
+                        }
+                        break;
+                    }
+                    Ok(None) => {
+                        // No response yet, continue stepping
+                    }
+                    Err(e) => {
+                        // Error occurred - send it to pending request and exit
+                        if let Some(resp_tx) = pending_response.take() {
+                            if resp_tx
+                                .send(Err(VAppExecutionError::Other(Box::new(e))))
+                                .is_err()
+                            {
+                                #[cfg(feature = "debug")]
+                                log::debug!("Failed to send engine error: receiver dropped");
+                            }
+                        }
+                        break;
+                    }
+                }
+            } else {
+                break;
+            }
+
+            // Small yield to avoid busy-waiting and allow other tasks to run
+            tokio::task::yield_now().await;
+        }
+    }
+}
+
+impl<E: std::fmt::Debug + Send + Sync + 'static> Drop for VanadiumAppClient<E> {
+    fn drop(&mut self) {
+        // Signal the worker task to shutdown
+        if let Some(shutdown_tx) = self.shutdown_tx.take() {
+            // Send shutdown signal; if it fails, the task already exited
+            let _ = shutdown_tx.send(());
+        }
+
+        // Abort the worker task if it's still running
+        if let Some(handle) = self.worker_handle.take() {
+            handle.abort();
+        }
+    }
+}
+
+#[async_trait]
 impl<E: std::fmt::Debug + Send + Sync + 'static> VAppTransport for VanadiumAppClient<E> {
     async fn send_message(&mut self, msg: &[u8]) -> Result<Vec<u8>, VAppExecutionError> {
-        match self.client.send_message(msg).await {
-            Ok(response) => Ok(response),
-            Err(VanadiumClientError::VAppExited(status)) => {
-                Err(VAppExecutionError::AppExited(status))
-            }
-            Err(e) => Err(VAppExecutionError::Other(Box::new(e))),
-        }
+        let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
+        self.message_tx
+            .send((msg.to_vec(), resp_tx))
+            .map_err(|_| VAppExecutionError::Other("Worker task died".into()))?;
+        resp_rx
+            .await
+            .map_err(|_| VAppExecutionError::Other("Worker task died".into()))?
     }
 }
 
