@@ -175,7 +175,7 @@ jobs:
       vapp_artifact_name: 'vnd_test_riscv_binary'
       vapp_binary_name: 'vnd-test.vapp'
       models_json: '["nanox","nanosplus","flex","stax","apex_p"]'
-      cargo_test_features: 'speculos-tests'
+      cargo_test_features: 'speculos-tests,debug'
 
   ## vnd-sadik
 
@@ -198,7 +198,7 @@ jobs:
       vapp_artifact_name: 'vnd_sadik_riscv_binary'
       vapp_binary_name: 'vnd-sadik.vapp'
       models_json: '["nanox","nanosplus","flex","stax","apex_p"]'
-      cargo_test_features: 'speculos-tests'
+      cargo_test_features: 'speculos-tests,debug'
 
   ## vnd-template
 
@@ -266,7 +266,7 @@ jobs:
       vapp_artifact_name: 'vnd_bitcoin_riscv_autoapprove_binary'
       vapp_binary_name: 'vnd-bitcoin.vapp'
       models_json: '["nanox","nanosplus","flex","stax","apex_p"]'
-      cargo_test_features: 'speculos-tests'
+      cargo_test_features: 'speculos-tests,debug'
 
   ## vnd-rps
   build_vnd_rps:
