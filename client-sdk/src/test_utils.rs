@@ -176,6 +176,15 @@ pub async fn setup_test<C, F>(
 where
     F: FnOnce(Box<dyn VAppTransport + Send + Sync>) -> C,
 {
+    // Initialize logger for tests (ignore error if already initialized)
+    #[cfg(feature = "debug")]
+    {
+        let _ = env_logger::builder()
+            .is_test(true)
+            .filter_level(log::LevelFilter::Debug)
+            .try_init();
+    }
+
     TestSetup::new(vanadium_binary, |transport| async move {
         let print_writer = Box::new(FileLineWriter::new("print.log", true, true));
         let (vanadium_client, _) =

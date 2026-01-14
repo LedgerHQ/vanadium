@@ -6,7 +6,7 @@ edition = "2021"
 [features]
 default = ["cargo_toml", "transport"]
 transport = ["hidapi", "ledger-apdu"]
-debug = ["dep:log"]
+debug = ["dep:log", "dep:env_logger"]
 
 # utilities for integration tests
 test-utils = ["transport"]
@@ -29,4 +29,5 @@ postcard = { version = "1.1.1", default-features = false, features = ["alloc"] }
 sha2 = "0.10.8"
 tokio = { version = "1.38.1", features = ["io-util", "macros", "net", "process", "rt", "sync", "time"] }
 log = { version = "0.4.27", optional = true }
+env_logger = { version = "0.11", optional = true }
 byteorder = "1.5.0"
