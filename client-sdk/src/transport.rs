@@ -115,6 +115,7 @@ impl Transport for TransportTcp {
         req[4..].copy_from_slice(&command_bytes);
 
         stream.write_all(&req).await?;
+        stream.flush().await?;
         self.total_sent
             .fetch_add(req.len() as u64, Ordering::Relaxed);
 
