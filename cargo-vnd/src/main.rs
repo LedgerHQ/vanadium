@@ -48,6 +48,10 @@ enum Commands {
         /// Name of the new V-App. The template will have two crates: vnd-<name> and vnd-<name>-client
         #[arg(short, long, value_name = "NAME")]
         name: String,
+
+        /// Path to a local template directory (optional, defaults to fetching from GitHub)
+        #[arg(long, value_name = "PATH")]
+        template_path: Option<PathBuf>,
     },
 }
 
@@ -85,7 +89,10 @@ fn main() -> Result<()> {
             let output = output.unwrap_or_else(|| elf_path.with_extension("vapp"));
             create_vapp_package(&app_version, &app_metadata, &elf_path, &output)?;
         }
-        Commands::New { name } => {
+        Commands::New {
+            name,
+            template_path,
+        } => {
             // Verify that the name is a valid crate name
 
             // Crate names must be at most 64 characters long
@@ -113,13 +120,24 @@ fn main() -> Result<()> {
             let client_lib_binary_name = format!("vnd_{}_client", name);
             let cli_binary_name = format!("vnd_{}_cli", name);
 
-            let args = GenerateArgs {
-                template_path: TemplatePath {
+            let template_path = if let Some(local_path) = template_path {
+                // Use local template path
+                TemplatePath {
+                    path: Some(local_path.to_string_lossy().to_string()),
+                    ..Default::default()
+                }
+            } else {
+                // Use remote GitHub template
+                TemplatePath {
                     auto_path: Some("https://github.com/LedgerHQ/vanadium.git".to_string()),
                     branch: Some("master".to_string()),
                     subfolder: Some("apps/template/generate".to_string()),
                     ..Default::default()
-                },
+                }
+            };
+
+            let args = GenerateArgs {
+                template_path,
                 name: Some(name.clone()),
                 define: vec![
                     format!("project-app-crate={}", app_crate_name),
@@ -128,6 +146,8 @@ fn main() -> Result<()> {
                     format!("project-cli-binary={}", cli_binary_name),
                 ],
                 verbose: true,
+                allow_commands: false,
+                no_workspace: true,
                 ..Default::default()
             };
             cargo_generate::generate(args)?;
