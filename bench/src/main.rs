@@ -4,6 +4,7 @@ use sdk::transport::{TransportHID, TransportWrapper};
 use sdk::transport_native_hid::TransportNativeHID;
 use sdk::vanadium_client::VanadiumAppClient;
 use std::env;
+use std::io::Sink;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -29,9 +30,14 @@ async fn run_bench_case(
         "cases/{}/target/riscv32imc-unknown-none-elf/release/{}",
         case, crate_name
     );
-    let (client_raw, _) = VanadiumAppClient::new(&app_path_str, transport, None)
-        .await
-        .map_err(|_| "Failed to create client")?;
+    let (client_raw, _) = VanadiumAppClient::new(
+        &app_path_str,
+        transport,
+        None,
+        Box::new(Sink::default()),
+    )
+    .await
+    .map_err(|_| "Failed to create client")?;
     let mut client = BenchClient::new(Box::new(client_raw));
     let start = Instant::now();
     client.run_and_exit(repetitions).await?;
