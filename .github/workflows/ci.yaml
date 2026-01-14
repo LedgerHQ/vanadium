@@ -51,6 +51,35 @@ jobs:
       builder: ledger-app-builder
       cargo_ledger_build_args: "--features run_tests"
 
+  # Build benchmark runner crate for native target
+  build_benchmark_runner:
+    name: benchmark runner, Build on native target
+    runs-on: ubuntu-latest
+    steps:
+      - name: Set up Rust toolchain
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          profile: minimal
+      - name: Cache cargo dirs
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-cargo-bench-runner-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-bench-runner-
+      - name: Install dependencies
+        run: |
+          sudo apt-get update && \
+          sudo apt-get install -y libudev-dev pkg-config
+      - name: Clone
+        uses: actions/checkout@v4
+      - name: Build benchmark runner
+        working-directory: bench
+        run: cargo build
+
   # Build benchmark testcases
   # Even if we don't run them in the CI, it's good to ensure they can at least compile
   build_benchmark_test_cases:
