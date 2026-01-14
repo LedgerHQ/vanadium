@@ -1003,6 +1003,11 @@ impl<E: std::fmt::Debug + Send + Sync + 'static> VanadiumAppClient<E> {
                         if let Ok((msg, resp_tx)) = message_rx.try_recv() {
                             // Set the pending message on the engine
                             if let Some(engine) = client.client.engine.as_mut() {
+                                // Check if there's already a pending message that hasn't been consumed by the device
+                                if engine.pending_receive_buffer.is_some() {
+                                    #[cfg(feature = "debug")]
+                                    log::warn!("Message sent before device called xrecv - previous queued message will be lost");
+                                }
                                 engine.pending_receive_buffer = Some(msg);
                                 pending_response = Some(resp_tx);
                             } else {
