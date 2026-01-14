@@ -311,3 +311,37 @@ jobs:
     with:
       app_name: "vnd-rps"
       test_dirs_json: '["apps/rps/app"]'
+
+  ## cargo-vnd tool test
+  test_cargo_vnd_new:
+    name: Test 'cargo vnd new' command
+    runs-on: ubuntu-latest
+    steps:
+      - name: Set up Rust toolchain
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          profile: minimal
+      - name: Add RISC-V target
+        run: rustup target add riscv32imc-unknown-none-elf
+      - name: Install dependencies
+        run: |
+          sudo apt-get update && \
+          sudo apt-get install -y libudev-dev pkg-config
+      - name: Clone
+        uses: actions/checkout@v4
+      - name: Install binutils-riscv64-unknown-elf
+        run: |
+          sudo apt-get update && \
+          sudo apt-get install -y binutils-riscv64-unknown-elf
+      - name: Install cargo-vnd
+        working-directory: cargo-vnd
+        run: cargo install --path .
+      - name: Create new V-App using cargo vnd new
+        run: cargo vnd new --name testapp --template-path "$(pwd)/apps/template/generate"
+      - name: Build the app for RISC-V target
+        working-directory: testapp/app
+        run: cargo build --release --target=riscv32imc-unknown-none-elf
+      - name: Build the client
+        working-directory: testapp/client
+        run: cargo build --release
