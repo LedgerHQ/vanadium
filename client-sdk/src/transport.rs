@@ -119,10 +119,8 @@ impl Transport for TransportTcp {
             .fetch_add(req.len() as u64, Ordering::Relaxed);
 
         let mut buff = [0u8; 4];
-        let len = match stream.read(&mut buff).await? {
-            4 => u32::from_be_bytes(buff),
-            _ => return Err("Invalid Length".into()),
-        };
+        stream.read_exact(&mut buff).await?;
+        let len = u32::from_be_bytes(buff);
         self.total_received.fetch_add(4, Ordering::Relaxed); // length header
 
         let mut resp = vec![0u8; len as usize + 2];
