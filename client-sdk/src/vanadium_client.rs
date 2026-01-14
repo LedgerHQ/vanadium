@@ -997,19 +997,22 @@ impl<E: std::fmt::Debug + Send + Sync + 'static> VanadiumAppClient<E> {
                         break;
                     }
 
-                    // Check for new messages (non-blocking)
-                    if let Ok((msg, resp_tx)) = message_rx.try_recv() {
-                        // Set the pending message on the engine
-                        if let Some(engine) = client.client.engine.as_mut() {
-                            engine.pending_receive_buffer = Some(msg);
-                            pending_response = Some(resp_tx);
-                        } else {
-                            if resp_tx
-                                .send(Err(VAppExecutionError::Other("Engine not running".into())))
-                                .is_err()
-                            {
-                                #[cfg(feature = "debug")]
-                                log::debug!("Failed to send error response: receiver dropped");
+                    // Only accept new messages when there's no pending response
+                    // This enforces strict message-response pattern and prevents race conditions
+                    if pending_response.is_none() {
+                        if let Ok((msg, resp_tx)) = message_rx.try_recv() {
+                            // Set the pending message on the engine
+                            if let Some(engine) = client.client.engine.as_mut() {
+                                engine.pending_receive_buffer = Some(msg);
+                                pending_response = Some(resp_tx);
+                            } else {
+                                if resp_tx
+                                    .send(Err(VAppExecutionError::Other("Engine not running".into())))
+                                    .is_err()
+                                {
+                                    #[cfg(feature = "debug")]
+                                    log::debug!("Failed to send error response: receiver dropped");
+                                }
                             }
                         }
                     }
@@ -1024,6 +1027,11 @@ impl<E: std::fmt::Debug + Send + Sync + 'static> VanadiumAppClient<E> {
                                         #[cfg(feature = "debug")]
                                         log::debug!("Failed to send response: receiver dropped");
                                     }
+                                } else {
+                                    // Received a message without a pending request - this shouldn't happen
+                                    // in a strict message-response pattern
+                                    #[cfg(feature = "debug")]
+                                    log::debug!("Warning: Received unsolicited message from V-App, dropping it");
                                 }
                             }
                             Ok(Some(VAppResponse::Panic(msg))) => {
