@@ -327,13 +327,9 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update && \
-          sudo apt-get install -y libudev-dev pkg-config
+          sudo apt-get install -y libudev-dev pkg-config binutils-riscv64-unknown-elf
       - name: Clone
         uses: actions/checkout@v4
-      - name: Install binutils-riscv64-unknown-elf
-        run: |
-          sudo apt-get update && \
-          sudo apt-get install -y binutils-riscv64-unknown-elf
       - name: Install cargo-vnd
         working-directory: cargo-vnd
         run: cargo install --path .
