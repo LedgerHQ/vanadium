@@ -179,9 +179,16 @@ where
     // Initialize logger for tests (ignore error if already initialized)
     #[cfg(feature = "debug")]
     {
+        // Open/create test.log in append mode for logging
+        let log_file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open("test.log")
+            .expect("Failed to open test.log for logging");
+
         let _ = env_logger::builder()
-            .is_test(true)
             .filter_level(log::LevelFilter::Debug)
+            .target(env_logger::Target::Pipe(Box::new(log_file)))
             .try_init();
     }
 
