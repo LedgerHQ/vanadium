@@ -3,6 +3,10 @@ name = "vndbench-_baseline"
 version = "0.1.0"
 edition = "2021"
 
+[package.metadata.vapp]
+name = "Bench"
+stack_size = 65536
+
 [dependencies]
 sdk = { package = "vanadium-app-sdk", path = "../../../app-sdk"}
 
