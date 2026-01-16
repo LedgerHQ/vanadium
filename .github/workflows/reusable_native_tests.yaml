@@ -37,12 +37,11 @@ jobs:
         test_dir: ${{ fromJson(inputs.test_dirs_json) }}
     steps:
       - name: Set up Rust toolchain
-        uses: actions-rs/toolchain@v1
+        uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ inputs.rust_toolchain }}
-          target: ${{ inputs.rust_target }}
+          targets: ${{ inputs.rust_target }}
           components: rustfmt, clippy
-          profile: minimal
 
       - name: Cache cargo dirs
         uses: actions/cache@v4
