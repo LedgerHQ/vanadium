@@ -8,7 +8,7 @@ target = "nanosplus"
 # The value of CUSTOM_IO_APDU_BUFFER_SIZE needs to be compatible with the MAX_APDU_DATA_SIZE
 # constant, taking into account the overhead for APDU headers
 LEDGER_SDK_EXTRA_DEFINES="CUSTOM_IO_APDU_BUFFER_SIZE=600"
-HEAP_SIZE = "nanox: 14336, nanosplus: 31744, flex: 26624, stax: 26624, apex_p: 26624"
+HEAP_SIZE = "nanox: 14336, nanosplus: 31744, flex: 25600, stax: 25600, apex_p: 25600"
 
 [unstable]
 build-std = ["core", "alloc"]
