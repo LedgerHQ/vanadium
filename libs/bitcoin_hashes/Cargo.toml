@@ -14,20 +14,22 @@ rust-version = "1.56.1"
 exclude = ["tests", "contrib"]
 
 [features]
-default = ["std"]
+default = ["std", "target_native"]
 std = ["alloc", "hex/std", "bitcoin-io/std"]
 alloc = ["hex/alloc"]
 # If you want I/O you must enable either "std" or "io".
 io = ["bitcoin-io"]
 # Smaller (but slower) implementation of sha256, sha512 and ripemd160
 small-hash = []
+target_native = ["sdk/target_native"]
+target_vanadium_ledger = ["sdk/target_vanadium_ledger"]
 
 [package.metadata.docs.rs]
 all-features = true
 rustdoc-args = ["--cfg", "docsrs"]
 
 [dependencies]
-sdk = { package = "vanadium-app-sdk", path = "../../app-sdk"}
+sdk = { package = "vanadium-app-sdk", path = "../../app-sdk", default-features = false }
 
 hex = { package = "hex-conservative", version = "0.2.0", default-features = false }
 

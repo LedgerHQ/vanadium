@@ -103,7 +103,7 @@ jobs:
         working-directory: bench
         run: |
           for case_dir in ./cases/*; do
-            (cd "$case_dir" && cargo +stable build --release --target=riscv32imc-unknown-none-elf) || exit 1
+            (cd "$case_dir" && cargo +stable build --release --target=riscv32imc-unknown-none-elf --no-default-features --features target_vanadium_ledger) || exit 1
           done
 
   # VM app tests in speculos
@@ -327,7 +327,7 @@ jobs:
         run: cargo vnd new --name testapp --template-path "$(pwd)/apps/template/generate"
       - name: Build the app for RISC-V target
         working-directory: testapp/app
-        run: cargo build --release --target=riscv32imc-unknown-none-elf
+        run: cargo build --release --target=riscv32imc-unknown-none-elf --no-default-features --features target_vanadium_ledger
       - name: Build the client
         working-directory: testapp/client
         run: cargo build --release

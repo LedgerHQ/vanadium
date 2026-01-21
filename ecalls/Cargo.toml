@@ -3,5 +3,10 @@ name = "vanadium-ecalls"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+default = ["target_native"]
+target_native = ["common/target_native"]
+target_vanadium_ledger = ["common/target_vanadium_ledger"]
+
 [dependencies]
-common = { path = "../common" }
+common = { path = "../common", default-features = false }

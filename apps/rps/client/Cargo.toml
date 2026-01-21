@@ -4,6 +4,10 @@ version = "0.1.0"
 edition = "2021"
 
 [features]
+default = ["target_all"]
+target_native = ["sdk/target_native"]
+target_vanadium_ledger = ["sdk/target_vanadium_ledger"]
+target_all = ["sdk/target_all"]
 speculos-tests = []
 
 [dependencies]
@@ -11,7 +15,7 @@ clap = { version = "4.5.17", features = ["derive"] }
 hex = "0.4.3"
 postcard = { version = "1.1.1", default-features = false, features = ["alloc"] }
 rand = "0.9.1"
-sdk = { package = "vanadium-client-sdk", path = "../../../client-sdk"}
+sdk = { package = "vanadium-client-sdk", path = "../../../client-sdk" }
 serde = { version = "1.0.215", default-features = false, features = ["alloc", "derive"] }
 sha2 = "0.10.9"
 tokio = { version = "1.38.1", features = ["io-util", "macros", "net", "rt", "rt-multi-thread", "sync"] }

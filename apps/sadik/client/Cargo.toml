@@ -4,6 +4,10 @@ version = "0.1.0"
 edition = "2021"
 
 [features]
+default = ["target_all"]
+target_native = ["sdk/target_native"]
+target_vanadium_ledger = ["sdk/target_vanadium_ledger"]
+target_all = ["sdk/target_all"]
 speculos-tests = []
 debug = ["dep:env_logger", "sdk/debug"]
 
@@ -14,7 +18,7 @@ env_logger = { version = "0.11.8", optional = true }
 hex = "0.4.3"
 hidapi = "2.6.3"
 postcard = { version = "1.1.1", features = ["alloc"] }
-sdk = { package = "vanadium-client-sdk", path = "../../../client-sdk"}
+sdk = { package = "vanadium-client-sdk", path = "../../../client-sdk" }
 serde = "1.0.215"
 tokio = { version = "1.38.1", features = ["io-util", "macros", "net", "rt", "rt-multi-thread", "sync"] }
 

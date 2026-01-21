@@ -1,8 +1,15 @@
-#![cfg_attr(target_arch = "riscv32", no_main, no_std)]
+#![cfg_attr(feature = "target_vanadium_ledger", no_main, no_std)]
+
+// Ensure exactly one target feature is enabled
+#[cfg(all(feature = "target_native", feature = "target_vanadium_ledger"))]
+compile_error!("Features `target_native` and `target_vanadium_ledger` are mutually exclusive. Enable only one.");
+
+#[cfg(not(any(feature = "target_native", feature = "target_vanadium_ledger")))]
+compile_error!("Either `target_native` or `target_vanadium_ledger` feature must be enabled.");
 
 extern crate alloc;
 
-#[cfg(not(target_arch = "riscv32"))]
+#[cfg(feature = "target_native")]
 extern crate lazy_static;
 
 use alloc::vec::Vec;
@@ -20,10 +27,10 @@ pub use app::{App, AppBuilder};
 
 mod ecalls;
 
-#[cfg(target_arch = "riscv32")]
+#[cfg(feature = "target_vanadium_ledger")]
 mod ecalls_riscv;
 
-#[cfg(not(target_arch = "riscv32"))]
+#[cfg(feature = "target_native")]
 mod ecalls_native;
 
 #[allow(unused_assignments)]
@@ -31,20 +38,20 @@ mod ux_generated {
     include!(concat!(env!("OUT_DIR"), "/ux_generated.rs"));
 }
 
-#[cfg(target_arch = "riscv32")]
+#[cfg(feature = "target_vanadium_ledger")]
 use embedded_alloc::Heap;
 
-#[cfg(target_arch = "riscv32")]
+#[cfg(feature = "target_vanadium_ledger")]
 include!(concat!(env!("OUT_DIR"), "/heap_config.rs"));
 
-#[cfg(target_arch = "riscv32")]
+#[cfg(feature = "target_vanadium_ledger")]
 static mut HEAP_MEM: [u8; VAPP_HEAP_SIZE] = [0; VAPP_HEAP_SIZE];
 
-#[cfg(target_arch = "riscv32")]
+#[cfg(feature = "target_vanadium_ledger")]
 #[global_allocator]
 static HEAP: Heap = Heap::empty();
 
-#[cfg(target_arch = "riscv32")]
+#[cfg(feature = "target_vanadium_ledger")]
 fn init_heap() {
     unsafe {
         #[allow(static_mut_refs)]
@@ -64,8 +71,8 @@ unsafe impl critical_section::Impl for CriticalSection {
     unsafe fn release(_restore_state: RawRestoreState) {}
 }
 
-// Allocator initialization for riscv32 targets
-#[cfg(target_arch = "riscv32")]
+// Allocator initialization for target_vanadium_ledger targets
+#[cfg(feature = "target_vanadium_ledger")]
 #[no_mangle]
 pub extern "C" fn rust_init_heap() {
     init_heap();
@@ -79,7 +86,7 @@ pub fn exit(status: i32) -> ! {
     ecalls::exit(status);
 }
 
-#[cfg(target_arch = "riscv32")]
+#[cfg(feature = "target_vanadium_ledger")]
 #[panic_handler]
 fn my_panic(info: &core::panic::PanicInfo) -> ! {
     let message = if let Some(location) = info.location() {
@@ -148,14 +155,14 @@ macro_rules! println {
 #[macro_export]
 macro_rules! bootstrap {
     () => {
-        #[cfg(target_arch = "riscv32")]
+        #[cfg(feature = "target_vanadium_ledger")]
         #[no_mangle]
         pub fn _start() {
             $crate::rust_init_heap();
             main()
         }
 
-        #[cfg(target_arch = "riscv32")]
+        #[cfg(feature = "target_vanadium_ledger")]
         use $crate::{print, println};
     };
 }

@@ -7,8 +7,13 @@ edition = "2021"
 name = "Bench"
 stack_size = 65536
 
+[features]
+default = ["target_native"]
+target_native = ["sdk/target_native"]
+target_vanadium_ledger = ["sdk/target_vanadium_ledger"]
+
 [dependencies]
 bs58 = { version = "0.5.1", default-features = false, features = ["alloc"] }
-sdk = { package = "vanadium-app-sdk", path = "../../../app-sdk"}
+sdk = { package = "vanadium-app-sdk", path = "../../../app-sdk", default-features = false }
 
 [workspace]

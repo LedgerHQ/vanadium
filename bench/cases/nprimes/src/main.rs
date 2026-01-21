@@ -1,7 +1,7 @@
 // This test computes the number of primes up to 4000 using the Sieve of Eratosthenes algorithm.
 // It measure a relatively memory-intensive operation, which will cause a significant number of page loads and commits.
 
-#![cfg_attr(target_arch = "riscv32", no_std, no_main)]
+#![cfg_attr(feature = "target_vanadium_ledger", no_std, no_main)]
 
 extern crate alloc;
 

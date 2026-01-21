@@ -1,7 +1,7 @@
-#[cfg(target_arch = "riscv32")]
+#[cfg(feature = "target_vanadium_ledger")]
 use crate::ecalls_riscv as ecalls_module;
 
-#[cfg(not(target_arch = "riscv32"))]
+#[cfg(feature = "target_native")]
 use crate::ecalls_native as ecalls_module;
 
 use common::ux::EventData;
@@ -372,7 +372,7 @@ forward_to_ecall! {
     ) -> u32;
 }
 
-#[cfg(target_arch = "riscv32")]
+#[cfg(feature = "target_vanadium_ledger")]
 forward_to_ecall! {
     pub fn hash_init(hash_id: u32, ctx: *mut u8);
     pub fn hash_update(hash_id: u32, ctx: *mut u8, data: *const u8, len: usize) -> u32;

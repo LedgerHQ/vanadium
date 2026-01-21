@@ -13,8 +13,10 @@ rust-version = "1.56.1"
 exclude = ["tests", "contrib"]
 
 [features]
-default = ["std"]
+default = ["std", "target_native"]
 std = ["hashes/std", "internals/std"]
+target_native = ["hashes/target_native"]
+target_vanadium_ledger = ["hashes/target_vanadium_ledger"]
 
 [package.metadata.docs.rs]
 all-features = true

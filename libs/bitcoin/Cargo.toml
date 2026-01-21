@@ -7,12 +7,14 @@ repository = "https://github.com/rust-bitcoin/rust-bitcoin/"
 documentation = "https://docs.rs/bitcoin/"
 
 [features]
-default = ["secp-lowmemory"]
+default = ["secp-lowmemory", "target_native"]
 std = []
 rand-std = []
 rand = []
 serde = ["actual-serde", "hashes/serde", "secp256k1/serde", "internals/serde", "units/serde"]
 secp-lowmemory = ["secp256k1/lowmemory"]
+target_native = ["sdk/target_native", "hashes/target_native", "secp256k1/target_native", "base58/target_native"]
+target_vanadium_ledger = ["sdk/target_vanadium_ledger", "hashes/target_vanadium_ledger", "secp256k1/target_vanadium_ledger", "base58/target_vanadium_ledger"]
 
 
 [lib]
@@ -32,7 +34,7 @@ hex = { package = "hex-conservative", version = "0.2.0", default-features = fals
 hex_lit = "0.1.1"
 internals = { package = "bitcoin-internals", version = "0.3.0", features = ["alloc"] }
 io = { package = "bitcoin-io", version = "0.1.1", default-features = false, features = ["alloc"] }
-sdk = { package = "vanadium-app-sdk", path = "../../app-sdk"}
+sdk = { package = "vanadium-app-sdk", path = "../../app-sdk", default-features = false }
 units = { package = "bitcoin-units", version = "0.1.0", default-features = false, features = ["alloc"] }
 
 base64 = { version = "0.21.3", optional = true, default-features = false, features = ["alloc"] }
@@ -56,3 +58,10 @@ opt-level = 3
 lto = true
 
 [workspace]
+
+[patch.crates-io.bitcoin_hashes]
+path = "../bitcoin_hashes"
+[patch.crates-io.secp256k1]
+path = "../secp256k1"
+[patch.crates-io.base58ck]
+path = "../base58"

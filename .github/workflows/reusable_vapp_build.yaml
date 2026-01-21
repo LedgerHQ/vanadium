@@ -73,7 +73,7 @@ jobs:
         working-directory: ${{ inputs.app_dir }}
         run: |
           set -e
-          cargo +${{ inputs.rust_toolchain }} build --release --target ${{ inputs.riscv_target }} ${{ inputs.extra_build_args }}
+          cargo +${{ inputs.rust_toolchain }} build --release --target ${{ inputs.riscv_target }} --no-default-features --features target_vanadium_ledger ${{ inputs.extra_build_args }}
           cargo vnd package
 
       - name: Upload V-App artifact

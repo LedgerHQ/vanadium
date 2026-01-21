@@ -36,7 +36,7 @@ These are the currently defined commands:
 **Example:**
 
 ```
-cargo build --release --target riscv32imc-unknown-none-elf
+cargo build --release --target riscv32imc-unknown-none-elf --no-default-features --features target_vanadium_ledger
 cargo vnd package
 ```
 

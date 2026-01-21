@@ -8,20 +8,23 @@ name = "Bitcoin"
 stack_size = 65536
 
 [features]
+default = ["target_native"]
+target_native = ["sdk/target_native", "bitcoin/target_native", "common/target_native"]
+target_vanadium_ledger = ["sdk/target_vanadium_ledger", "bitcoin/target_vanadium_ledger", "common/target_vanadium_ledger"]
 autoapprove = []  # used for integration tests
 
 [dependencies]
 bitcoin = { version = "0.32.0", features = ["serde"], default-features = false }
-common = { package = "vnd-bitcoin-common", path = "../common"}
+common = { package = "vnd-bitcoin-common", path = "../common", default-features = false }
 hex = { version = "0.4.3", default-features = false, features = ["alloc"] }
 hex-literal = "0.4.1"
 nom = { version = "7.1.3", default-features = false, features = ["alloc"] }
 postcard = { version = "1.1.1", default-features = false, features = ["alloc"] }
-sdk = { package = "vanadium-app-sdk", path = "../../../app-sdk"}
+sdk = { package = "vanadium-app-sdk", path = "../../../app-sdk", default-features = false }
 
 [dev-dependencies]
 base64 = { version = "0.22.1", default-features = false, features = ["alloc"] }
-sdk = { package = "vanadium-app-sdk", path = "../../../app-sdk", features = ["test-mode"]}
+sdk = { package = "vanadium-app-sdk", path = "../../../app-sdk", default-features = false, features = ["test-mode", "target_native"] }
 
 [profile.release]
 opt-level = "s"
@@ -37,5 +40,7 @@ path = "../../../libs/bitcoin"
 path = "../../../libs/bitcoin_hashes"
 [patch.crates-io.secp256k1]
 path = "../../../libs/secp256k1"
+[patch.crates-io.base58ck]
+path = "../../../libs/base58"
 [patch.crates-io.getrandom]
 path = "../../../libs/getrandom"
