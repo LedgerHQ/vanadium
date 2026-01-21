@@ -1,6 +1,6 @@
 pub use common::accumulator::Hasher;
 
-#[cfg(not(target_arch = "riscv32"))]
+#[cfg(feature = "target_native")]
 mod hashers {
     use super::*;
     use ripemd::Ripemd160 as Ripemd160Real;
@@ -37,7 +37,7 @@ mod hashers {
     impl_hash!(Ripemd160, Ripemd160Real, 20);
 }
 
-#[cfg(target_arch = "riscv32")]
+#[cfg(feature = "target_vanadium_ledger")]
 mod hashers {
     use super::*;
     use crate::ecalls;

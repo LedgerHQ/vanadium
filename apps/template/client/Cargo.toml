@@ -4,8 +4,11 @@ version = "0.1.0"
 edition = "2021"
 
 [features]
-default = ["client"]
-client = ["dep:tokio", "dep:sdk", "dep:clap"]
+default = ["client", "target_all"]
+client = ["dep:tokio", "dep:clap"]
+target_native = ["dep:sdk", "sdk/target_native"]
+target_vanadium_ledger = ["dep:sdk", "sdk/target_vanadium_ledger"]
+target_all = ["dep:sdk", "sdk/target_all"]
 speculos-tests = []
 
 [dependencies]
@@ -17,7 +20,7 @@ serde = { version = "1.0.215", default-features = false, features = ["alloc", "d
 # All the following dependencies are only present if the 'client' feature is enabled.
 # They do not require no_std
 clap = { version = "4.5.17", features = ["derive"], optional = true }
-sdk = { git = "https://github.com/LedgerHQ/vanadium.git", package = "vanadium-client-sdk", optional = true}
+sdk = { git = "https://github.com/LedgerHQ/vanadium.git", package = "vanadium-client-sdk", optional = true }
 tokio = { version = "1.38.1", features = ["io-util", "macros", "net", "rt", "rt-multi-thread", "sync"], optional = true }
 
 [lib]

@@ -4,7 +4,10 @@ version = "0.1.0"
 edition = "2021"
 
 [features]
-default = []
+default = ["target_all"]
+target_native = ["sdk/target_native"]
+target_vanadium_ledger = ["sdk/target_vanadium_ledger"]
+target_all = ["sdk/target_all"]
 debug = ["dep:env_logger", "sdk/debug"]
 speculos-tests = []
 
@@ -13,7 +16,7 @@ bitcoin = { version = "0.32.0" }
 common = { package = "vnd-bitcoin-common", path = "../common"}
 hex = "0.4.3"
 hidapi = "2.6.3"
-sdk = { package = "vanadium-client-sdk", path = "../../../client-sdk"}
+sdk = { package = "vanadium-client-sdk", path = "../../../client-sdk" }
 serde = "1.0.219"
 tokio = { version = "1.38.1", features = ["io-util", "macros", "net", "rt", "rt-multi-thread", "sync"] }
 
@@ -28,7 +31,7 @@ base64 = { version = "0.22.1", default-features = false, features = ["alloc"] }
 env_logger = { version = "0.11.8", optional = true }
 
 [dev-dependencies]
-sdk = { package = "vanadium-client-sdk", path = "../../../client-sdk", features = ["test-utils"]}
+sdk = { package = "vanadium-client-sdk", path = "../../../client-sdk", features = ["test-utils"] }
 
 
 [lib]
@@ -48,5 +51,7 @@ path = "../../../libs/bitcoin"
 path = "../../../libs/bitcoin_hashes"
 [patch.crates-io.secp256k1]
 path = "../../../libs/secp256k1"
+[patch.crates-io.base58ck]
+path = "../../../libs/base58"
 [patch.crates-io.getrandom]
 path = "../../../libs/getrandom"

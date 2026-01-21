@@ -7,11 +7,15 @@ edition = "2021"
 name = "Sadik"
 stack_size = 65536
 
+[features]
+default = ["target_native"]
+target_native = ["sdk/target_native"]
+target_vanadium_ledger = ["sdk/target_vanadium_ledger"]
 
 [dependencies]
 common = { package = "vnd-sadik-common", path = "../common"}
 postcard = { version = "1.1.1", default-features = false, features = ["alloc"] }
-sdk = { package = "vanadium-app-sdk", path = "../../../app-sdk"}
+sdk = { package = "vanadium-app-sdk", path = "../../../app-sdk", default-features = false }
 serde = { version = "1.0.215", default-features = false, features = ["alloc"] }
 
 [workspace]

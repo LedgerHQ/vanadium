@@ -1,7 +1,7 @@
 // This test computes the SHA256 hash of a message repeatedly, using the SHA256 implementation from the `sha2` crate.
 // It does not use the SDK's hash functionality, which would avoid most of the VM's slowdown by using ECALLs.
 
-#![cfg_attr(target_arch = "riscv32", no_std, no_main)]
+#![cfg_attr(feature = "target_vanadium_ledger", no_std, no_main)]
 
 use sha2::Digest;
 

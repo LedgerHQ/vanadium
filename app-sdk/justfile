@@ -2,13 +2,13 @@
 # build for both native and riscv targets
 build:
   cargo build --release
-  cargo build --release --target=riscv32imc-unknown-none-elf
+  cargo build --release --target=riscv32imc-unknown-none-elf --no-default-features --features target_vanadium_ledger
 
 # build for native target
 build-native:
   cargo build --release
 
-# build for riscv target
+# build for riscv target (Ledger Vanadium)
 build-riscv:
-  cargo build --release --target=riscv32imc-unknown-none-elf
+  cargo build --release --target=riscv32imc-unknown-none-elf --no-default-features --features target_vanadium_ledger
 

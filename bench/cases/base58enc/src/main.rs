@@ -1,6 +1,6 @@
 // This test computes the cost of encoding 32 bytes to base58 using the `bs58` crate.,
 
-#![cfg_attr(target_arch = "riscv32", no_std, no_main)]
+#![cfg_attr(feature = "target_vanadium_ledger", no_std, no_main)]
 
 extern crate alloc;
 

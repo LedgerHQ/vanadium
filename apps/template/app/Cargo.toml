@@ -7,14 +7,19 @@ edition = "2021"
 name = "Template"
 stack_size = 65536
 
+[features]
+default = ["target_native"]
+target_native = ["sdk/target_native"]
+target_vanadium_ledger = ["sdk/target_vanadium_ledger"]
+
 [dependencies]
 hex = { version = "0.4.3", default-features = false, features = ["alloc"]}
 postcard = { version = "1.1.1", default-features = false, features = ["alloc"] }
-sdk = { git = "https://github.com/LedgerHQ/vanadium.git", package = "vanadium-app-sdk"}
+sdk = { git = "https://github.com/LedgerHQ/vanadium.git", package = "vanadium-app-sdk", default-features = false }
 serde = { version = "1.0.215", default-features = false, features = ["alloc", "derive"] }
 client = { package = "vnd-template-client", path = "../client", default-features = false}
 
 [dev-dependencies]
-sdk = { git = "https://github.com/LedgerHQ/vanadium.git", package = "vanadium-app-sdk", features = ["test-mode"]}
+sdk = { git = "https://github.com/LedgerHQ/vanadium.git", package = "vanadium-app-sdk", default-features = false, features = ["test-mode", "target_native"] }
 
 [workspace]

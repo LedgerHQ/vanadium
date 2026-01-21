@@ -1,4 +1,4 @@
-#![cfg_attr(target_arch = "riscv32", no_std, no_main)]
+#![cfg_attr(feature = "target_vanadium_ledger", no_std, no_main)]
 
 extern crate alloc;
 

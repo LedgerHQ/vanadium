@@ -4,7 +4,15 @@ version = "0.1.0"
 edition = "2021"
 
 [features]
-default = ["cargo_toml", "transport"]
+default = ["cargo_toml", "transport", "target_all"]
+
+# Target features - controls which transports and protocol variants are available
+# Note: These features do NOT propagate to app-sdk since client-sdk is always native.
+# They only control which transport protocols/methods are available in the client.
+target_native = []
+target_vanadium_ledger = []
+target_all = ["target_native", "target_vanadium_ledger"]
+
 transport = ["hidapi", "ledger-apdu"]
 debug = ["dep:log", "dep:env_logger"]
 
@@ -13,7 +21,10 @@ test-utils = ["transport"]
 
 [dependencies]
 
-app-sdk = { package = "vanadium-app-sdk", path = "../app-sdk"}
+# app-sdk is only used for shared types (hash module)
+# We use target_native since the client runs natively, regardless of which features
+# are enabled on this crate.
+app-sdk = { package = "vanadium-app-sdk", path = "../app-sdk", default-features = false, features = ["target_native"] }
 
 # If enabled as a feature, the client will load "unpackaged" V-Apps by looking Cargo.toml
 # to reconstruct the manifest. Otherwise, only packaged V-Apps will be loaded.
