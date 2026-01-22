@@ -913,8 +913,10 @@ impl<E: std::fmt::Debug + Send + Sync + 'static> SyncVanadiumAppClient<E> {
         let mut client = GenericVanadiumClient::new();
 
         // Register the V-App if the hmac was not given
-        let app_hmac =
-            app_hmac.unwrap_or(client.register_vapp(transport.clone(), &manifest).await?);
+        let app_hmac = match app_hmac {
+            Some(hmac) => hmac,
+            None => client.register_vapp(transport.clone(), &manifest).await?,
+        };
 
         // run the V-App
         client
