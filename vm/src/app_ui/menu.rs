@@ -14,10 +14,16 @@ pub fn ui_menu_main(_: &mut Comm<{ crate::COMM_BUFFER_SIZE }>) -> NbglHomeAndSet
     const VANADIUM_ICON: NbglGlyph =
         NbglGlyph::from_include(include_gif!("icons/vanadium_14x14.gif", NBGL));
 
+    #[cfg(any(target_os = "nanosplus", target_os = "nanox"))]
+    const TAGLINE: &str = "Vanadium\nDeveloper preview\nOnly use a test seed";
+
+    #[cfg(any(target_os = "flex", target_os = "stax", target_os = "apex_p"))]
+    const TAGLINE: &str = "\nDeveloper preview\nOnly use a test seed";
+
     // Display the home screen.
     NbglHomeAndSettings::new()
         .glyph(&VANADIUM_ICON)
-        .tagline("Unlimited power\nfor your apps\n(developer preview)")
+        .tagline(TAGLINE)
         .infos(
             "Vanadium",
             env!("CARGO_PKG_VERSION"),
