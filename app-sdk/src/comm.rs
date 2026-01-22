@@ -108,7 +108,15 @@ pub fn receive_message() -> Result<Vec<u8>, MessageError> {
         // Send ACK to maintain the alternating protocol.
         xsend(&ACK);
 
-        let chunk_len = xrecv_to(unsafe { &mut *chunk });
+        let chunk_len = loop {
+            // TODO: this is a workaround for a bug in VanadiumAsyncClient: while returning a 0-length message
+            // is expected when idle, this shouldn't happen when we are in the middle of receiving a message.
+            // This makes it tolerate the occasional 0-length chunk, but ideally this should be fixed in the client.
+            let len = xrecv_to(unsafe { &mut *chunk });
+            if len != 0 {
+                break len;
+            }
+        };
 
         if chunk_len == 0 {
             return Err(MessageError::FailedToReadMessage);
