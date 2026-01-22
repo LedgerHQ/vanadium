@@ -135,6 +135,15 @@ impl<E: std::fmt::Debug + Send + Sync + 'static> VAppEngine<E> {
             .await
             .map_err(VAppEngineError::TransportError)?;
 
+        if status != StatusWord::OK {
+            match status {
+                StatusWord::SignatureFail => {
+                    return Err(VAppEngineError::ResponseError("Invalid app HMAC"))
+                }
+                _ => return Err(VAppEngineError::ResponseError("Failed to run V-App")),
+            }
+        }
+
         self.current_status = status;
         self.current_result = result;
         Ok(())
