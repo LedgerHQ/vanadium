@@ -835,6 +835,79 @@ fn get_cargo_toml_path(elf_path: &str) -> Option<PathBuf> {
     None
 }
 
+/// Loads or constructs a manifest from an already-parsed ELF file.
+///
+/// If the ELF file contains an embedded manifest, it is returned directly.
+/// Otherwise, if the `cargo_toml` feature is enabled, the manifest is constructed
+/// from the Cargo.toml file and the ELF file's segments.
+fn load_manifest_from_elf_file(
+    elf_file: &VAppElfFile,
+    elf_path: &str,
+) -> Result<Manifest, Box<dyn std::error::Error + Send + Sync>> {
+    if let Some(m) = &elf_file.manifest {
+        return Ok(m.clone());
+    }
+
+    #[cfg(not(feature = "cargo_toml"))]
+    {
+        return Err("No manifest found in the ELF file".into());
+    }
+
+    #[cfg(feature = "cargo_toml")]
+    {
+        let cargo_toml_path = get_cargo_toml_path(elf_path).ok_or("Failed to find Cargo.toml")?;
+
+        let (_, app_version, app_metadata) = elf::get_app_metadata(&cargo_toml_path)?;
+
+        let app_name = app_metadata
+            .get("name")
+            .ok_or("App name missing in metadata")?
+            .as_str()
+            .ok_or("App name is not a string")?;
+
+        let stack_size = app_metadata
+            .get("stack_size")
+            .ok_or("Stack size missing in metadata")?
+            .as_integer()
+            .ok_or("Stack size is not a number")? as u32;
+
+        let stack_start = DEFAULT_STACK_START;
+        let stack_end = stack_start + stack_size;
+
+        let code_merkle_root: [u8; 32] =
+            MemorySegment::new(elf_file.code_segment.start, &elf_file.code_segment.data)
+                .get_content_root()
+                .clone()
+                .into();
+        let data_merkle_root: [u8; 32] =
+            MemorySegment::new(elf_file.data_segment.start, &elf_file.data_segment.data)
+                .get_content_root()
+                .clone()
+                .into();
+        let stack_merkle_root: [u8; 32] =
+            MemorySegment::new(stack_start, &vec![0u8; (stack_end - stack_start) as usize])
+                .get_content_root()
+                .clone()
+                .into();
+
+        Ok(Manifest::new(
+            0,
+            app_name,
+            &app_version,
+            elf_file.entrypoint,
+            elf_file.code_segment.start,
+            elf_file.code_segment.end,
+            code_merkle_root,
+            elf_file.data_segment.start,
+            elf_file.data_segment.end,
+            data_merkle_root,
+            stack_start,
+            stack_end,
+            stack_merkle_root,
+        )?)
+    }
+}
+
 impl<E: std::fmt::Debug + Send + Sync + 'static> SyncVanadiumAppClient<E> {
     pub async fn new(
         elf_path: &str,
@@ -846,78 +919,7 @@ impl<E: std::fmt::Debug + Send + Sync + 'static> SyncVanadiumAppClient<E> {
         let elf_file = VAppElfFile::new(Path::new(&elf_path))
             .map_err(|e| format!("Failed to create ELF file from path '{}': {}", elf_path, e))?;
 
-        let manifest = if let Some(m) = &elf_file.manifest {
-            // If the elf file is a packaged V-App, we use its manifest
-            m.clone()
-        } else {
-            // There is no Manifest in the elf file.
-            // Depending on the value of the cargo_toml feature, we either return an error or
-            // try to create a valid Manifest based on the Cargo.toml file.
-
-            #[cfg(not(feature = "cargo_toml"))]
-            {
-                return Err("No manifest found in the ELF file".into());
-            }
-
-            #[cfg(feature = "cargo_toml")]
-            {
-                // We create one based on the elf file and the apps's Cargo.toml.
-                // This is useful during development.
-
-                let cargo_toml_path =
-                    get_cargo_toml_path(elf_path).ok_or("Failed to find Cargo.toml")?;
-
-                let (_, app_version, app_metadata) = elf::get_app_metadata(&cargo_toml_path)?;
-
-                let app_name = app_metadata
-                    .get("name")
-                    .ok_or("App name missing in metadata")?
-                    .as_str()
-                    .ok_or("App name is not a string")?;
-
-                let stack_size = app_metadata
-                    .get("stack_size")
-                    .ok_or("Stack size missing in metadata")?
-                    .as_integer()
-                    .ok_or("Stack size is not a number")?;
-                let stack_size = stack_size as u32;
-
-                let stack_start = DEFAULT_STACK_START;
-                let stack_end = stack_start + stack_size;
-
-                let code_merkle_root: [u8; 32] =
-                    MemorySegment::new(elf_file.code_segment.start, &elf_file.code_segment.data)
-                        .get_content_root()
-                        .clone()
-                        .into();
-                let data_merkle_root: [u8; 32] =
-                    MemorySegment::new(elf_file.data_segment.start, &elf_file.data_segment.data)
-                        .get_content_root()
-                        .clone()
-                        .into();
-                let stack_merkle_root: [u8; 32] =
-                    MemorySegment::new(stack_start, &vec![0u8; (stack_end - stack_start) as usize])
-                        .get_content_root()
-                        .clone()
-                        .into();
-
-                Manifest::new(
-                    0,
-                    app_name,
-                    &app_version,
-                    elf_file.entrypoint,
-                    elf_file.code_segment.start,
-                    elf_file.code_segment.end,
-                    code_merkle_root,
-                    elf_file.data_segment.start,
-                    elf_file.data_segment.end,
-                    data_merkle_root,
-                    stack_start,
-                    stack_end,
-                    stack_merkle_root,
-                )?
-            }
-        };
+        let manifest = load_manifest_from_elf_file(&elf_file, elf_path)?;
 
         let mut client = GenericVanadiumClient::new();
 
@@ -1229,8 +1231,89 @@ impl VAppTransport for NativeAppClient {
 ///
 pub mod client_utils {
     use super::*;
+    use crate::hash::Sha256;
     use crate::transport::{TransportHID, TransportTcp, TransportWrapper};
     use crate::transport_native_hid::TransportNativeHID;
+    use serde::{Deserialize, Serialize};
+    use std::fs;
+    use std::path::Path;
+
+    const HMAC_CACHE_FILE: &str = "app.hmac.json";
+
+    /// Cached HMAC data stored in app.hmac.json
+    #[derive(Serialize, Deserialize)]
+    struct HmacCache {
+        app_hash: String,
+        app_hmac: String,
+    }
+
+    /// Computes the V-App hash from the manifest using SHA-256
+    fn compute_vapp_hash(manifest: &Manifest) -> [u8; 32] {
+        manifest.get_vapp_hash::<Sha256, 32>()
+    }
+
+    /// Tries to load the cached HMAC if it exists and the app hash matches
+    fn load_cached_hmac(manifest: &Manifest) -> Option<[u8; 32]> {
+        let cache_path = Path::new(HMAC_CACHE_FILE);
+        if !cache_path.exists() {
+            return None;
+        }
+
+        // Read and parse the cache file
+        let content = fs::read_to_string(cache_path).ok()?;
+        let cache: HmacCache = serde_json::from_str(&content).ok()?;
+
+        // Compute current app hash from manifest
+        let current_hash = compute_vapp_hash(manifest);
+        let current_hash_hex = hex::encode(current_hash);
+
+        // Verify the hash matches
+        if cache.app_hash != current_hash_hex {
+            // Hash doesn't match, delete the cache file
+            let _ = fs::remove_file(cache_path);
+            return None;
+        }
+
+        // Parse the cached HMAC
+        let hmac_bytes = hex::decode(&cache.app_hmac).ok()?;
+        if hmac_bytes.len() != 32 {
+            let _ = fs::remove_file(cache_path);
+            return None;
+        }
+
+        let mut hmac = [0u8; 32];
+        hmac.copy_from_slice(&hmac_bytes);
+        Some(hmac)
+    }
+
+    /// Saves the app hash and HMAC to the cache file
+    fn save_hmac_cache(manifest: &Manifest, hmac: &[u8; 32]) -> Result<(), ClientUtilsError> {
+        let app_hash = compute_vapp_hash(manifest);
+        let cache = HmacCache {
+            app_hash: hex::encode(app_hash),
+            app_hmac: hex::encode(hmac),
+        };
+
+        let content = serde_json::to_string_pretty(&cache).map_err(|e| {
+            ClientUtilsError::VanadiumClientFailed(format!("Failed to serialize HMAC cache: {}", e))
+        })?;
+
+        fs::write(HMAC_CACHE_FILE, content).map_err(|e| {
+            ClientUtilsError::VanadiumClientFailed(format!("Failed to write HMAC cache: {}", e))
+        })?;
+
+        Ok(())
+    }
+
+    /// Loads the manifest from an ELF file, constructing it if necessary
+    fn load_manifest_from_elf(app_path: &str) -> Result<Manifest, ClientUtilsError> {
+        let elf_file = VAppElfFile::new(Path::new(app_path)).map_err(|e| {
+            ClientUtilsError::VanadiumClientFailed(format!("Failed to load ELF: {}", e))
+        })?;
+
+        load_manifest_from_elf_file(&elf_file, app_path)
+            .map_err(|e| ClientUtilsError::VanadiumClientFailed(e.to_string()))
+    }
 
     struct SharedWriter(Arc<std::sync::Mutex<Box<dyn std::io::Write + Send + Sync>>>);
 
@@ -1316,12 +1399,39 @@ pub mod client_utils {
         Ok(Box::new(client))
     }
 
-    /// Creates a Vanadium client using TCP transport (for Speculos)
+    /// Creates a Vanadium client using TCP transport (for Speculos).
+    /// If `use_cache` is true, attempts to load/save HMAC from/to app.hmac.json.
     pub async fn create_tcp_client(
         app_path: &str,
         app_hmac: Option<[u8; 32]>,
         print_writer: Option<Box<dyn std::io::Write + Send + Sync>>,
     ) -> Result<(Box<dyn VAppTransport + Send>, [u8; 32]), ClientUtilsError> {
+        create_tcp_client_with_cache(app_path, app_hmac, print_writer, false).await
+    }
+
+    /// Creates a Vanadium client using TCP transport (for Speculos).
+    /// If `use_cache` is true, attempts to load/save HMAC from/to app.hmac.json.
+    pub async fn create_tcp_client_with_cache(
+        app_path: &str,
+        app_hmac: Option<[u8; 32]>,
+        print_writer: Option<Box<dyn std::io::Write + Send + Sync>>,
+        use_cache: bool,
+    ) -> Result<(Box<dyn VAppTransport + Send>, [u8; 32]), ClientUtilsError> {
+        // Load manifest for caching if needed
+        let manifest = if use_cache {
+            Some(load_manifest_from_elf(app_path)?)
+        } else {
+            None
+        };
+
+        // Try to load cached HMAC if use_cache is enabled and no HMAC was provided
+        let cached_hmac = if use_cache && app_hmac.is_none() {
+            manifest.as_ref().and_then(load_cached_hmac)
+        } else {
+            None
+        };
+        let effective_hmac = app_hmac.or(cached_hmac);
+
         let transport_raw = Arc::new(TransportTcp::new_default().await.map_err(|e| {
             ClientUtilsError::TcpTransportFailed(format!(
                 "Unable to get TCP transport. Is speculos running? {}",
@@ -1333,9 +1443,22 @@ pub mod client_utils {
         // if no print_writer is provided, default to Sink
         let print_writer = print_writer.unwrap_or_else(|| Box::new(Sink::default()));
         let (client, hmac) =
-            VanadiumAppClient::new(app_path, Arc::new(transport), app_hmac, print_writer)
+            VanadiumAppClient::new(app_path, Arc::new(transport), effective_hmac, print_writer)
                 .await
                 .map_err(|e| ClientUtilsError::VanadiumClientFailed(e.to_string()))?;
+
+        // Save HMAC to cache if we didn't use a cached one (i.e., registration was done)
+        if use_cache && cached_hmac.is_none() {
+            if let Some(ref m) = manifest {
+                if let Err(e) = save_hmac_cache(m, &hmac) {
+                    // Log warning but don't fail - caching is optional
+                    #[cfg(feature = "debug")]
+                    log::warn!("Failed to save HMAC cache: {}", e);
+                    let _ = e; // Suppress unused warning when debug feature is disabled
+                }
+            }
+        }
+
         Ok((Box::new(client), hmac))
     }
 
@@ -1345,6 +1468,32 @@ pub mod client_utils {
         app_hmac: Option<[u8; 32]>,
         print_writer: Option<Box<dyn std::io::Write + Send + Sync>>,
     ) -> Result<(Box<dyn VAppTransport + Send>, [u8; 32]), ClientUtilsError> {
+        create_hid_client_with_cache(app_path, app_hmac, print_writer, false).await
+    }
+
+    /// Creates a Vanadium client using HID transport (for real device).
+    /// If `use_cache` is true, attempts to load/save HMAC from/to app.hmac.json.
+    pub async fn create_hid_client_with_cache(
+        app_path: &str,
+        app_hmac: Option<[u8; 32]>,
+        print_writer: Option<Box<dyn std::io::Write + Send + Sync>>,
+        use_cache: bool,
+    ) -> Result<(Box<dyn VAppTransport + Send>, [u8; 32]), ClientUtilsError> {
+        // Load manifest for caching if needed
+        let manifest = if use_cache {
+            Some(load_manifest_from_elf(app_path)?)
+        } else {
+            None
+        };
+
+        // Try to load cached HMAC if use_cache is enabled and no HMAC was provided
+        let cached_hmac = if use_cache && app_hmac.is_none() {
+            manifest.as_ref().and_then(load_cached_hmac)
+        } else {
+            None
+        };
+        let effective_hmac = app_hmac.or(cached_hmac);
+
         let hid_api = hidapi::HidApi::new().map_err(|e| {
             ClientUtilsError::HidTransportFailed(format!("Unable to create HID API: {}", e))
         })?;
@@ -1361,9 +1510,22 @@ pub mod client_utils {
         // if no print_writer is provided, default to Sink
         let print_writer = print_writer.unwrap_or_else(|| Box::new(Sink::default()));
         let (client, hmac) =
-            VanadiumAppClient::new(app_path, Arc::new(transport), app_hmac, print_writer)
+            VanadiumAppClient::new(app_path, Arc::new(transport), effective_hmac, print_writer)
                 .await
                 .map_err(|e| ClientUtilsError::VanadiumClientFailed(e.to_string()))?;
+
+        // Save HMAC to cache if we didn't use a cached one (i.e., registration was done)
+        if use_cache && cached_hmac.is_none() {
+            if let Some(ref m) = manifest {
+                if let Err(e) = save_hmac_cache(m, &hmac) {
+                    // Log warning but don't fail - caching is optional
+                    #[cfg(feature = "debug")]
+                    log::warn!("Failed to save HMAC cache: {}", e);
+                    let _ = e; // Suppress unused warning when debug feature is disabled
+                }
+            }
+        }
+
         Ok((Box::new(client), hmac))
     }
 
@@ -1412,14 +1574,16 @@ pub mod client_utils {
 
         match client_type {
             ClientType::Any => {
-                let hid_error = match create_hid_client(&app_path, None, get_writer()).await {
-                    Ok(client) => return Ok(client.0),
-                    Err(e) => e,
-                };
-                let tcp_error = match create_tcp_client(&app_path, None, get_writer()).await {
-                    Ok(client) => return Ok(client.0),
-                    Err(e) => e,
-                };
+                let hid_error =
+                    match create_hid_client_with_cache(&app_path, None, get_writer(), true).await {
+                        Ok(client) => return Ok(client.0),
+                        Err(e) => e,
+                    };
+                let tcp_error =
+                    match create_tcp_client_with_cache(&app_path, None, get_writer(), true).await {
+                        Ok(client) => return Ok(client.0),
+                        Err(e) => e,
+                    };
                 let native_error = match create_native_client(Some(&tcp_addr), get_writer()).await {
                     Ok(client) => return Ok(client),
                     Err(e) => e,
@@ -1431,10 +1595,10 @@ pub mod client_utils {
                 })
             }
             ClientType::Native => create_native_client(Some(&tcp_addr), get_writer()).await,
-            ClientType::Tcp => create_tcp_client(&app_path, None, get_writer())
+            ClientType::Tcp => create_tcp_client_with_cache(&app_path, None, get_writer(), true)
                 .await
                 .map(|(c, _hmac)| c),
-            ClientType::Hid => create_hid_client(&app_path, None, get_writer())
+            ClientType::Hid => create_hid_client_with_cache(&app_path, None, get_writer(), true)
                 .await
                 .map(|(c, _hmac)| c),
         }
