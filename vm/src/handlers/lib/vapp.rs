@@ -9,7 +9,7 @@ use crate::hash::Sha256Hasher;
 /// Encapsulates the key used for the V-App registration.
 /// It is generated on first use, and stored in the NVM.
 #[derive(Default)]
-pub struct VappRegistrationKey;
+struct VappRegistrationKey;
 
 // We use the initial value (all zeros) to mark the key as uninitialized.
 // We generate a new random key at first use.
