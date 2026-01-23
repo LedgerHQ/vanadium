@@ -135,7 +135,7 @@ impl<E: std::fmt::Debug + Send + Sync + 'static> VAppEngine<E> {
             .await
             .map_err(VAppEngineError::TransportError)?;
 
-        if status != StatusWord::OK {
+        if status != StatusWord::OK && status != StatusWord::InterruptedExecution {
             match status {
                 StatusWord::SignatureFail => {
                     return Err(VAppEngineError::ResponseError("Invalid app HMAC"))
