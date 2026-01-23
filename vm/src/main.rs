@@ -30,8 +30,8 @@ mod app_tests;
 use alloc::{string::ToString, vec::Vec};
 use app_ui::menu::ui_menu_main;
 use handlers::{
-    get_version::handler_get_version, register_vapp::handler_register_vapp,
-    start_vapp::handler_start_vapp,
+    get_vanadium_id::handler_get_vanadium_id, get_version::handler_get_version,
+    register_vapp::handler_register_vapp, start_vapp::handler_start_vapp,
 };
 use ledger_device_sdk::{
     io::{ApduHeader, Comm, Command, Reply, StatusWords},
@@ -191,6 +191,7 @@ pub enum Instruction {
     GetAppName,
     RegisterVApp,
     StartVApp,
+    GetVanadiumId,
     Continue(u8, u8), // client response to a request from the VM
 }
 
@@ -214,7 +215,8 @@ impl TryFrom<ApduHeader> for Instruction {
             (1, 0, 0) => Ok(Instruction::GetAppName),
             (2, 0, 0) => Ok(Instruction::RegisterVApp),
             (3, 0, 0) => Ok(Instruction::StartVApp),
-            (0..=3, _, _) => Err(AppSW::WrongP1P2),
+            (4, 0, 0) => Ok(Instruction::GetVanadiumId),
+            (0..=4, _, _) => Err(AppSW::WrongP1P2),
             (0xff, p1, p2) => Ok(Instruction::Continue(p1, p2)),
             (_, _, _) => Err(AppSW::InsNotSupported),
         }
@@ -263,6 +265,7 @@ fn handle_apdu(command: Command<COMM_BUFFER_SIZE>) -> Result<Vec<u8>, AppSW> {
         Instruction::GetVersion => handler_get_version(command),
         Instruction::RegisterVApp => handler_register_vapp(command),
         Instruction::StartVApp => handler_start_vapp(command),
+        Instruction::GetVanadiumId => handler_get_vanadium_id(command),
         Instruction::Continue(_, _) => Err(AppSW::InsNotSupported), // 'Continue' command is only allowed when requested by the VM
     }
 }
