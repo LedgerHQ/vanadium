@@ -46,6 +46,8 @@ pub enum VAppEngineError<E: std::fmt::Debug + Send + Sync + 'static> {
     ResponseError(&'static str),
     VMRuntimeError,
     VAppPanic,
+    InvalidAppHmac,
+    UnexpectedStatusWord(StatusWord),
     GenericError(Box<dyn std::error::Error + Send + Sync>),
 }
 
@@ -64,6 +66,10 @@ impl<E: std::fmt::Debug + Send + Sync + 'static> std::fmt::Display for VAppEngin
             VAppEngineError::ResponseError(e) => write!(f, "Invalid response: {}", e),
             VAppEngineError::VMRuntimeError => write!(f, "VM runtime error"),
             VAppEngineError::VAppPanic => write!(f, "V-App panicked"),
+            VAppEngineError::InvalidAppHmac => write!(f, "Invalid app HMAC"),
+            VAppEngineError::UnexpectedStatusWord(sw) => {
+                write!(f, "Failed to run V-App: unexpected status word {:?}", sw)
+            }
             VAppEngineError::GenericError(e) => write!(f, "Generic error: {}", e),
         }
     }
@@ -80,6 +86,8 @@ impl<E: std::fmt::Debug + Send + Sync + 'static> std::error::Error for VAppEngin
             VAppEngineError::ResponseError(_) => None,
             VAppEngineError::VMRuntimeError => None,
             VAppEngineError::VAppPanic => None,
+            VAppEngineError::InvalidAppHmac => None,
+            VAppEngineError::UnexpectedStatusWord(_) => None,
             VAppEngineError::GenericError(e) => Some(&**e),
         }
     }
@@ -137,10 +145,8 @@ impl<E: std::fmt::Debug + Send + Sync + 'static> VAppEngine<E> {
 
         if status != StatusWord::OK && status != StatusWord::InterruptedExecution {
             match status {
-                StatusWord::SignatureFail => {
-                    return Err(VAppEngineError::ResponseError("Invalid app HMAC"))
-                }
-                _ => return Err(VAppEngineError::ResponseError("Failed to run V-App")),
+                StatusWord::SignatureFail => return Err(VAppEngineError::InvalidAppHmac),
+                _ => return Err(VAppEngineError::UnexpectedStatusWord(status)),
             }
         }
 
