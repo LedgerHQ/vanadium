@@ -132,6 +132,7 @@ ledger_device_sdk::set_panic!(handle_panic);
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AppSW {
     Deny = 0x6985,
+    StoreFull = 0x6A84,
     IncorrectData = 0x6A80,
     WrongP1P2 = 0x6A86,
     InsNotSupported = 0x6D00,
@@ -167,6 +168,7 @@ impl From<Reply> for AppSW {
     fn from(r: Reply) -> Self {
         match r.0 {
             x if x == AppSW::Deny as u16 => AppSW::Deny,
+            x if x == AppSW::StoreFull as u16 => AppSW::StoreFull,
             x if x == AppSW::IncorrectData as u16 => AppSW::IncorrectData,
             x if x == AppSW::WrongP1P2 as u16 => AppSW::WrongP1P2,
             x if x == AppSW::InsNotSupported as u16 => AppSW::InsNotSupported,

@@ -3,6 +3,8 @@
 pub enum StatusWord {
     /// Rejected by user
     Deny = 0x6985,
+    /// App store is full, cannot register more V-Apps
+    StoreFull = 0x6A84,
     /// Incorrect Data
     IncorrectData = 0x6A80,
     /// Not Supported
@@ -40,6 +42,7 @@ impl TryFrom<u16> for StatusWord {
     fn try_from(value: u16) -> Result<Self, Self::Error> {
         match value {
             0x6985 => Ok(StatusWord::Deny),
+            0x6A84 => Ok(StatusWord::StoreFull),
             0x6A80 => Ok(StatusWord::IncorrectData),
             0x6A82 => Ok(StatusWord::NotSupported),
             0x6A86 => Ok(StatusWord::WrongP1P2),
@@ -102,14 +105,12 @@ pub fn apdu_register_vapp(serialized_manifest: Vec<u8>) -> APDUCommand {
     }
 }
 
-pub fn apdu_run_vapp(serialized_manifest: Vec<u8>, app_hmac: [u8; 32]) -> APDUCommand {
-    let mut data = serialized_manifest;
-    data.extend_from_slice(&app_hmac);
+pub fn apdu_run_vapp(serialized_manifest: Vec<u8>) -> APDUCommand {
     APDUCommand {
         cla: 0xE0,
         ins: 3,
         p1: 0,
         p2: 0,
-        data,
+        data: serialized_manifest,
     }
 }

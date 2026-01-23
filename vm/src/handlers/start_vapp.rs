@@ -2,7 +2,6 @@ use core::cell::RefCell;
 
 use alloc::vec::Vec;
 use alloc::{boxed::Box, rc::Rc};
-use subtle::ConstantTimeEq;
 
 use common::client_commands::SectionKind;
 use common::manifest::Manifest;
@@ -12,32 +11,33 @@ use super::lib::{
     ecall::{CommEcallError, CommEcallHandler},
     evict::{LruEvictionStrategy, TwoQEvictionStrategy},
     outsourced_mem::OutsourcedMemory,
-    vapp::get_vapp_hmac,
 };
-use crate::aes::{AesCtr, AesKey};
-use crate::{println, AppSW, COMM_BUFFER_SIZE};
+use crate::{
+    aes::{AesCtr, AesKey},
+    hash::Sha256Hasher,
+    println,
+    vapp::VAppStore,
+    AppSW, COMM_BUFFER_SIZE,
+};
 
 pub fn handler_start_vapp(
     command: ledger_device_sdk::io::Command<COMM_BUFFER_SIZE>,
 ) -> Result<Vec<u8>, AppSW> {
     let data_raw = command.get_data();
 
-    let (manifest, provided_hmac) =
+    let (manifest, rest) =
         postcard::take_from_bytes::<Manifest>(data_raw).map_err(|_| AppSW::IncorrectData)?;
 
-    if provided_hmac.len() != 32 {
-        return Err(AppSW::IncorrectData);
+    if rest.len() != 0 {
+        return Err(AppSW::IncorrectData); // extra data
     }
 
-    let vapp_hmac = get_vapp_hmac(&manifest);
+    // Compute the vapp_hash and verify the app is registered
+    let vapp_hash = manifest.get_vapp_hash::<Sha256Hasher, 32>();
 
-    // It's critical to use a constant time comparison to prevent timing attacks
-    if provided_hmac.ct_ne(&vapp_hmac).into() {
-        return Err(AppSW::SignatureFail);
+    if !VAppStore::is_registered(&vapp_hash) {
+        return Err(AppSW::SignatureFail); // App not registered
     }
-
-    println!("Running app with Manifest: {:?}", manifest);
-    println!("hmac: {:?}", provided_hmac);
 
     let comm = command.into_comm();
     let comm = Rc::new(RefCell::new(comm));

@@ -1,79 +1,218 @@
-use common::manifest::Manifest;
-use ledger_device_sdk::hmac::{self, HMACInit};
-
-use crate::hash::Sha256Hasher;
-
+use common::manifest::{Manifest, APP_NAME_MAX_LEN, APP_VERSION_MAX_LEN};
 use ledger_device_sdk::nvm::*;
 use ledger_device_sdk::NVMData;
 
-/// Encapsulates the key used for the V-App registration.
-/// It is generated on first use, and stored in the NVM.
-pub struct VappRegistrationKey;
+use crate::hash::Sha256Hasher;
 
-impl Default for VappRegistrationKey {
-    fn default() -> Self {
-        VappRegistrationKey
-    }
+/// Maximum number of V-Apps that can be registered.
+pub const MAX_REGISTERED_VAPPS: usize = 32;
+
+/// A registered V-App entry stored in NVRAM.
+/// Uses fixed-size arrays for deterministic storage layout.
+#[derive(Clone, Copy)]
+#[repr(C)]
+pub struct VAppEntry {
+    /// SHA-256 hash of the V-App manifest. All zeros indicates an empty slot.
+    pub vapp_hash: [u8; 32],
+    /// App name, null-padded to 32 bytes.
+    pub app_name: [u8; APP_NAME_MAX_LEN],
+    /// App version, null-padded to 32 bytes.
+    pub app_version: [u8; APP_VERSION_MAX_LEN],
 }
 
-// We use the initial value (all zeros) to mark the key as uninitialized.
-// We generate a new random key at first use.
-
-#[link_section = ".nvm_data"]
-static mut VAPP_REGISTRATION_KEY: NVMData<AtomicStorage<[u8; 32]>> =
-    NVMData::new(AtomicStorage::new(&[0u8; 32]));
-
-// check whether the key is all zeros with a constant time comparison
-fn is_all_zeros_ct(data: &[u8]) -> bool {
-    let mut data_or = 0u8;
-    for &byte in data.iter() {
-        data_or |= byte;
-    }
-    data_or == 0
-}
-
-impl VappRegistrationKey {
-    fn ensure_initialized() {
-        // if the key is all zeros, initialize it with 32 random bytes
-        let nvm_key = &raw mut VAPP_REGISTRATION_KEY;
-        unsafe {
-            let storage = (*nvm_key).get_mut();
-
-            // check whether the key is all zeros with a constant time comparison
-            if is_all_zeros_ct(storage.get_ref().as_slice()) {
-                let mut new_key = [0u8; 32];
-                ledger_device_sdk::random::rand_bytes(&mut new_key);
-                storage.update(&new_key);
-            }
+impl VAppEntry {
+    /// Creates an empty entry (sentinel value).
+    pub const fn empty() -> Self {
+        Self {
+            vapp_hash: [0u8; 32],
+            app_name: [0u8; APP_NAME_MAX_LEN],
+            app_version: [0u8; APP_VERSION_MAX_LEN],
         }
     }
 
-    #[inline(never)]
-    pub fn get_ref(&mut self) -> &AtomicStorage<[u8; 32]> {
-        Self::ensure_initialized();
-
-        let data = &raw const VAPP_REGISTRATION_KEY;
-        unsafe { (*data).get_ref() }
+    /// Gets the app name as a string slice (up to first null byte, or the maximum length
+    /// of APP_NAME_MAX_LEN).
+    pub fn get_app_name(&self) -> &str {
+        let len = self
+            .app_name
+            .iter()
+            .position(|&b| b == 0)
+            .unwrap_or(APP_NAME_MAX_LEN);
+        core::str::from_utf8(&self.app_name[..len]).unwrap_or("")
     }
 
-    pub fn get_key(&mut self) -> &[u8; 32] {
-        self.get_ref().get_ref()
+    /// Gets the app version as a string slice (up to first null byte, or the maximum length
+    /// of APP_VERSION_MAX_LEN).
+    #[allow(dead_code)] // Will be used by device UI for app management
+    pub fn get_app_version(&self) -> &str {
+        let len = self
+            .app_version
+            .iter()
+            .position(|&b| b == 0)
+            .unwrap_or(APP_VERSION_MAX_LEN);
+        core::str::from_utf8(&self.app_version[..len]).unwrap_or("")
     }
 }
 
-/// Computes the HMAC for the V-App.
-///
-/// SECURITY: The caller is responsible for ensuring that comparisons involving the
-/// result of this function run in constant time, in order to prevent timing attacks.
-pub fn get_vapp_hmac(manifest: &Manifest) -> [u8; 32] {
-    let vapp_hash: [u8; 32] = manifest.get_vapp_hash::<Sha256Hasher, 32>();
+/// Error type for V-App store operations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VAppStoreError {
+    /// The store is full and cannot accept new registrations.
+    StoreFull,
+    /// The app name is too long.
+    NameTooLong,
+    /// The app version is too long.
+    VersionTooLong,
+}
 
-    let mut vapp_key = VappRegistrationKey;
+// Use the SDK's Collection type which handles atomic storage properly.
+// This follows the same NVM access pattern as the original VappRegistrationKey.
+#[link_section = ".nvm_data"]
+static mut VAPP_STORE: NVMData<Collection<VAppEntry, MAX_REGISTERED_VAPPS>> =
+    NVMData::new(Collection::new(VAppEntry::empty()));
 
-    let mut sha2 = hmac::sha2::Sha2_256::new(vapp_key.get_key());
-    sha2.update(&vapp_hash).expect("Should never fail");
-    let mut vapp_hmac = [0u8; 32];
-    sha2.finalize(&mut vapp_hmac).expect("Should never fail");
+/// The V-App store manages registered V-Apps in NVRAM.
+pub struct VAppStore;
 
-    vapp_hmac
+impl VAppStore {
+    /// Gets a mutable reference to the collection.
+    /// Following the same pattern as the original VappRegistrationKey.
+    #[inline(never)]
+    fn get_collection_mut() -> &'static mut Collection<VAppEntry, MAX_REGISTERED_VAPPS> {
+        let data = &raw mut VAPP_STORE;
+        unsafe { (*data).get_mut() }
+    }
+
+    /// Gets a reference to the collection.
+    #[inline(never)]
+    fn get_collection_ref() -> &'static Collection<VAppEntry, MAX_REGISTERED_VAPPS> {
+        let data = &raw const VAPP_STORE;
+        unsafe { (*data).get_ref() }
+    }
+
+    /// Checks if a V-App with the given hash is registered.
+    pub fn is_registered(vapp_hash: &[u8; 32]) -> bool {
+        Self::find_by_hash(vapp_hash).is_some()
+    }
+
+    /// Finds an entry by its vapp_hash. Returns the index if found.
+    /// We don't use a constant time comparison, as knowledge about which apps are registered is not
+    /// considered sensitive information.
+    pub fn find_by_hash(vapp_hash: &[u8; 32]) -> Option<usize> {
+        let collection = Self::get_collection_ref();
+        for i in 0..collection.len() {
+            if let Some(entry) = collection.get(i) {
+                if &entry.vapp_hash == vapp_hash {
+                    return Some(i);
+                }
+            }
+        }
+        None
+    }
+
+    /// Finds an entry by app name. Returns the index if found.
+    /// We don't use a constant time comparison, as knowledge about which apps are registered is not
+    /// considered sensitive information.
+    pub fn find_by_name(app_name: &str) -> Option<usize> {
+        let collection = Self::get_collection_ref();
+        for i in 0..collection.len() {
+            if let Some(entry) = collection.get(i) {
+                if entry.get_app_name() == app_name {
+                    return Some(i);
+                }
+            }
+        }
+        None
+    }
+
+    /// Registers a V-App. If an app with the same name exists, it will be overwritten.
+    /// Returns Ok(()) on success, or an error if the store is full or parameters are invalid.
+    pub fn register(manifest: &Manifest) -> Result<(), VAppStoreError> {
+        let app_name = manifest.get_app_name();
+        let app_version = manifest.get_app_version();
+
+        if app_name.len() > APP_NAME_MAX_LEN {
+            return Err(VAppStoreError::NameTooLong);
+        }
+        if app_version.len() > APP_VERSION_MAX_LEN {
+            return Err(VAppStoreError::VersionTooLong);
+        }
+
+        // Compute the V-App hash from the manifest
+        let vapp_hash = manifest.get_vapp_hash::<Sha256Hasher, 32>();
+
+        // Create the new entry
+        let mut entry = VAppEntry::empty();
+        entry.vapp_hash.copy_from_slice(&vapp_hash);
+        entry.app_name[..app_name.len()].copy_from_slice(app_name.as_bytes());
+        entry.app_version[..app_version.len()].copy_from_slice(app_version.as_bytes());
+
+        // Check if an app with the same name already exists (for update/overwrite)
+        if let Some(existing_index) = Self::find_by_name(app_name) {
+            // Remove the old entry and add the new one
+            let collection = Self::get_collection_mut();
+            collection.remove(existing_index);
+            collection
+                .add(&entry)
+                .map_err(|_| VAppStoreError::StoreFull)?;
+        } else {
+            // Add new entry
+            let collection = Self::get_collection_mut();
+            collection
+                .add(&entry)
+                .map_err(|_| VAppStoreError::StoreFull)?;
+        }
+
+        Ok(())
+    }
+
+    /// Unregisters a V-App at the given index by removing the entry.
+    #[allow(dead_code)] // Will be used by device UI for app management
+    pub fn unregister(index: usize) -> bool {
+        let collection = Self::get_collection_mut();
+        if index >= collection.len() {
+            return false;
+        }
+        collection.remove(index);
+        true
+    }
+
+    /// Returns the number of registered V-Apps.
+    #[allow(dead_code)] // Will be used by device UI for app management
+    pub fn count() -> usize {
+        Self::get_collection_ref().len()
+    }
+
+    /// Gets an entry at the given index.
+    #[allow(dead_code)] // Will be used by device UI for app management
+    pub fn get_entry(index: usize) -> Option<&'static VAppEntry> {
+        Self::get_collection_ref().get(index)
+    }
+
+    /// Returns an iterator over all registered V-Apps.
+    #[allow(dead_code)] // Will be used by device UI for app management
+    pub fn iter() -> VAppStoreIter {
+        VAppStoreIter { current_index: 0 }
+    }
+}
+
+/// Iterator over registered V-Apps.
+#[allow(dead_code)] // Will be used by device UI for app management
+pub struct VAppStoreIter {
+    current_index: usize,
+}
+
+impl Iterator for VAppStoreIter {
+    type Item = (usize, VAppEntry);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let collection = VAppStore::get_collection_ref();
+        if self.current_index < collection.len() {
+            let index = self.current_index;
+            self.current_index += 1;
+            collection.get(index).map(|entry| (index, *entry))
+        } else {
+            None
+        }
+    }
 }

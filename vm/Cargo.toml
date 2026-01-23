@@ -7,14 +7,13 @@ edition = "2021"
 [dependencies]
 common = { path = "../common" }
 serde = {version="1.0.192", default-features = false, features = ["derive"]}
-hex = { version = "0.4.3", default-features = false, features = ["serde", "alloc"] }
+hex = { version = "0.4.3", default-features = false }
 numtoa = "0.2.4"
 postcard = { version = "1.1.1", default-features = false, features = ["alloc"] }
 ledger_device_sdk = { git = "https://github.com/LedgerHQ/ledger-device-rust-sdk.git", branch = "vanadium", features = ["debug", "nano_nbgl", "io_new", "sys"] }
 
 zeroize = "1.8.1"
 hex-literal = "0.4.1"
-subtle = { version = "2.6.0", default-features = false }
 
 [profile.release]
 opt-level = 3

@@ -46,7 +46,8 @@ pub enum VAppEngineError<E: std::fmt::Debug + Send + Sync + 'static> {
     ResponseError(&'static str),
     VMRuntimeError,
     VAppPanic,
-    InvalidAppHmac,
+    AppNotRegistered,
+    StoreFull,
     UnexpectedStatusWord(StatusWord),
     GenericError(Box<dyn std::error::Error + Send + Sync>),
 }
@@ -66,7 +67,8 @@ impl<E: std::fmt::Debug + Send + Sync + 'static> std::fmt::Display for VAppEngin
             VAppEngineError::ResponseError(e) => write!(f, "Invalid response: {}", e),
             VAppEngineError::VMRuntimeError => write!(f, "VM runtime error"),
             VAppEngineError::VAppPanic => write!(f, "V-App panicked"),
-            VAppEngineError::InvalidAppHmac => write!(f, "Invalid app HMAC"),
+            VAppEngineError::AppNotRegistered => write!(f, "App not registered on device"),
+            VAppEngineError::StoreFull => write!(f, "App store is full"),
             VAppEngineError::UnexpectedStatusWord(sw) => {
                 write!(f, "Failed to run V-App: unexpected status word {:?}", sw)
             }
@@ -86,7 +88,8 @@ impl<E: std::fmt::Debug + Send + Sync + 'static> std::error::Error for VAppEngin
             VAppEngineError::ResponseError(_) => None,
             VAppEngineError::VMRuntimeError => None,
             VAppEngineError::VAppPanic => None,
-            VAppEngineError::InvalidAppHmac => None,
+            VAppEngineError::AppNotRegistered => None,
+            VAppEngineError::StoreFull => None,
             VAppEngineError::UnexpectedStatusWord(_) => None,
             VAppEngineError::GenericError(e) => Some(&**e),
         }
@@ -134,18 +137,18 @@ struct VAppEngine<E: std::fmt::Debug + Send + Sync + 'static> {
 }
 
 impl<E: std::fmt::Debug + Send + Sync + 'static> VAppEngine<E> {
-    async fn start(&mut self, app_hmac: [u8; 32]) -> Result<(), VAppEngineError<E>> {
+    async fn start(&mut self) -> Result<(), VAppEngineError<E>> {
         let serialized_manifest = postcard::to_allocvec(&self.manifest)?;
 
         let (status, result) = self
             .transport
-            .exchange(&apdu_run_vapp(serialized_manifest, app_hmac))
+            .exchange(&apdu_run_vapp(serialized_manifest))
             .await
             .map_err(VAppEngineError::TransportError)?;
 
         if status != StatusWord::OK && status != StatusWord::InterruptedExecution {
             match status {
-                StatusWord::SignatureFail => return Err(VAppEngineError::InvalidAppHmac),
+                StatusWord::SignatureFail => return Err(VAppEngineError::AppNotRegistered),
                 _ => return Err(VAppEngineError::UnexpectedStatusWord(status)),
             }
         }
@@ -668,24 +671,19 @@ impl<E: std::fmt::Debug + Send + Sync + 'static> GenericVanadiumClient<E> {
         &self,
         transport: Arc<dyn Transport<Error = E>>,
         manifest: &Manifest,
-    ) -> Result<[u8; 32], &'static str> {
+    ) -> Result<(), &'static str> {
         let serialized_manifest =
             postcard::to_allocvec(manifest).map_err(|_| "manifest serialization failed")?;
 
-        let (status, result) = transport
+        let (status, _result) = transport
             .exchange(&apdu_register_vapp(serialized_manifest))
             .await
             .map_err(|_| "exchange failed")?;
 
         match status {
-            StatusWord::OK => {
-                if result.len() != 32 {
-                    return Err("Invalid response length");
-                }
-                let mut hmac = [0u8; 32];
-                hmac.copy_from_slice(&result);
-                Ok(hmac)
-            }
+            StatusWord::OK => Ok(()),
+            StatusWord::StoreFull => Err("App store is full"),
+            StatusWord::Deny => Err("User denied registration"),
             _ => Err("Failed to register vapp"),
         }
     }
@@ -694,7 +692,6 @@ impl<E: std::fmt::Debug + Send + Sync + 'static> GenericVanadiumClient<E> {
         &mut self,
         transport: Arc<dyn Transport<Error = E>>,
         manifest: &Manifest,
-        app_hmac: &[u8; 32],
         elf: &VAppElfFile,
         print_writer: Box<dyn std::io::Write + Send + Sync>,
     ) -> Result<(), VAppEngineError<E>> {
@@ -718,7 +715,7 @@ impl<E: std::fmt::Debug + Send + Sync + 'static> GenericVanadiumClient<E> {
             current_result: Vec::new(),
         };
 
-        vapp_engine.start(*app_hmac).await?;
+        vapp_engine.start().await?;
         self.engine = Some(vapp_engine);
 
         Ok(())
@@ -731,6 +728,13 @@ impl<E: std::fmt::Debug + Send + Sync + 'static> GenericVanadiumClient<E> {
             .send_message(message.to_vec())
             .await
             .map_err(|e| VanadiumClientError::GenericError(e.to_string()))
+    }
+
+    /// Replaces the print writer used by the engine.
+    pub fn set_print_writer(&mut self, print_writer: Box<dyn std::io::Write + Send + Sync>) {
+        if let Some(engine) = self.engine.as_mut() {
+            engine.print_writer = print_writer;
+        }
     }
 }
 
@@ -845,9 +849,8 @@ impl<E: std::fmt::Debug + Send + Sync + 'static> SyncVanadiumAppClient<E> {
     pub async fn new(
         elf_path: &str,
         transport: Arc<dyn Transport<Error = E>>,
-        app_hmac: Option<[u8; 32]>,
         print_writer: Box<dyn std::io::Write + Send + Sync>,
-    ) -> Result<(Self, [u8; 32]), Box<dyn std::error::Error + Send + Sync>> {
+    ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         // Create ELF file and manifest
         let elf_file = VAppElfFile::new(Path::new(&elf_path))
             .map_err(|e| format!("Failed to create ELF file from path '{}': {}", elf_path, e))?;
@@ -927,18 +930,32 @@ impl<E: std::fmt::Debug + Send + Sync + 'static> SyncVanadiumAppClient<E> {
 
         let mut client = GenericVanadiumClient::new();
 
-        // Register the V-App if the hmac was not given
-        let app_hmac = match app_hmac {
-            Some(hmac) => hmac,
-            None => client.register_vapp(transport.clone(), &manifest).await?,
-        };
+        // Try to run the V-App first (in case it's already registered)
+        // Use a dummy Sink writer for this speculative attempt, preserving the real writer for later
+        let sink_writer: Box<dyn std::io::Write + Send + Sync> =
+            Box::new(crate::linewriter::Sink::default());
+        match client
+            .run_vapp(transport.clone(), &manifest, &elf_file, sink_writer)
+            .await
+        {
+            Ok(()) => {
+                // App was already registered, replace the Sink with the real print_writer
+                client.set_print_writer(print_writer);
+                Ok(Self { client })
+            }
+            Err(VAppEngineError::AppNotRegistered) => {
+                // App not registered, need to register first
+                client.register_vapp(transport.clone(), &manifest).await?;
 
-        // run the V-App
-        client
-            .run_vapp(transport, &manifest, &app_hmac, &elf_file, print_writer)
-            .await?;
+                // Now run the V-App
+                client
+                    .run_vapp(transport, &manifest, &elf_file, print_writer)
+                    .await?;
 
-        Ok((Self { client }, app_hmac))
+                Ok(Self { client })
+            }
+            Err(e) => Err(e.into()),
+        }
     }
 }
 
@@ -972,12 +989,10 @@ impl<E: std::fmt::Debug + Send + Sync + 'static> VanadiumAppClient<E> {
     pub async fn new(
         elf_path: &str,
         transport: Arc<dyn Transport<Error = E>>,
-        app_hmac: Option<[u8; 32]>,
         print_writer: Box<dyn std::io::Write + Send + Sync>,
-    ) -> Result<(Self, [u8; 32]), Box<dyn std::error::Error + Send + Sync>> {
-        let (sync_client, hmac) =
-            SyncVanadiumAppClient::new(elf_path, transport, app_hmac, print_writer).await?;
-        Ok((Self::from_sync(sync_client), hmac))
+    ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+        let sync_client = SyncVanadiumAppClient::new(elf_path, transport, print_writer).await?;
+        Ok(Self::from_sync(sync_client))
     }
 
     /// Creates a new VanadiumAppClient from an existing SyncVanadiumAppClient.
@@ -1325,9 +1340,8 @@ pub mod client_utils {
     /// Creates a Vanadium client using TCP transport (for Speculos)
     pub async fn create_tcp_client(
         app_path: &str,
-        app_hmac: Option<[u8; 32]>,
         print_writer: Option<Box<dyn std::io::Write + Send + Sync>>,
-    ) -> Result<(Box<dyn VAppTransport + Send>, [u8; 32]), ClientUtilsError> {
+    ) -> Result<Box<dyn VAppTransport + Send>, ClientUtilsError> {
         let transport_raw = Arc::new(TransportTcp::new_default().await.map_err(|e| {
             ClientUtilsError::TcpTransportFailed(format!(
                 "Unable to get TCP transport. Is speculos running? {}",
@@ -1338,19 +1352,17 @@ pub mod client_utils {
 
         // if no print_writer is provided, default to Sink
         let print_writer = print_writer.unwrap_or_else(|| Box::new(Sink::default()));
-        let (client, hmac) =
-            VanadiumAppClient::new(app_path, Arc::new(transport), app_hmac, print_writer)
-                .await
-                .map_err(|e| ClientUtilsError::VanadiumClientFailed(e.to_string()))?;
-        Ok((Box::new(client), hmac))
+        let client = VanadiumAppClient::new(app_path, Arc::new(transport), print_writer)
+            .await
+            .map_err(|e| ClientUtilsError::VanadiumClientFailed(e.to_string()))?;
+        Ok(Box::new(client))
     }
 
     /// Creates a Vanadium client using HID transport (for real device)
     pub async fn create_hid_client(
         app_path: &str,
-        app_hmac: Option<[u8; 32]>,
         print_writer: Option<Box<dyn std::io::Write + Send + Sync>>,
-    ) -> Result<(Box<dyn VAppTransport + Send>, [u8; 32]), ClientUtilsError> {
+    ) -> Result<Box<dyn VAppTransport + Send>, ClientUtilsError> {
         let hid_api = hidapi::HidApi::new().map_err(|e| {
             ClientUtilsError::HidTransportFailed(format!("Unable to create HID API: {}", e))
         })?;
@@ -1366,11 +1378,10 @@ pub mod client_utils {
 
         // if no print_writer is provided, default to Sink
         let print_writer = print_writer.unwrap_or_else(|| Box::new(Sink::default()));
-        let (client, hmac) =
-            VanadiumAppClient::new(app_path, Arc::new(transport), app_hmac, print_writer)
-                .await
-                .map_err(|e| ClientUtilsError::VanadiumClientFailed(e.to_string()))?;
-        Ok((Box::new(client), hmac))
+        let client = VanadiumAppClient::new(app_path, Arc::new(transport), print_writer)
+            .await
+            .map_err(|e| ClientUtilsError::VanadiumClientFailed(e.to_string()))?;
+        Ok(Box::new(client))
     }
 
     pub enum ClientType {
@@ -1418,12 +1429,12 @@ pub mod client_utils {
 
         match client_type {
             ClientType::Any => {
-                let hid_error = match create_hid_client(&app_path, None, get_writer()).await {
-                    Ok(client) => return Ok(client.0),
+                let hid_error = match create_hid_client(&app_path, get_writer()).await {
+                    Ok(client) => return Ok(client),
                     Err(e) => e,
                 };
-                let tcp_error = match create_tcp_client(&app_path, None, get_writer()).await {
-                    Ok(client) => return Ok(client.0),
+                let tcp_error = match create_tcp_client(&app_path, get_writer()).await {
+                    Ok(client) => return Ok(client),
                     Err(e) => e,
                 };
                 let native_error = match create_native_client(Some(&tcp_addr), get_writer()).await {
@@ -1437,12 +1448,8 @@ pub mod client_utils {
                 })
             }
             ClientType::Native => create_native_client(Some(&tcp_addr), get_writer()).await,
-            ClientType::Tcp => create_tcp_client(&app_path, None, get_writer())
-                .await
-                .map(|(c, _hmac)| c),
-            ClientType::Hid => create_hid_client(&app_path, None, get_writer())
-                .await
-                .map(|(c, _hmac)| c),
+            ClientType::Tcp => create_tcp_client(&app_path, get_writer()).await,
+            ClientType::Hid => create_hid_client(&app_path, get_writer()).await,
         }
     }
 }

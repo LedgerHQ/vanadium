@@ -1,5 +1,8 @@
-use crate::handlers::lib::vapp::get_vapp_hmac;
-use crate::{hash::Sha256Hasher, AppSW, COMM_BUFFER_SIZE};
+use crate::{
+    hash::Sha256Hasher,
+    vapp::{VAppStore, VAppStoreError},
+    AppSW, COMM_BUFFER_SIZE,
+};
 use alloc::vec::Vec;
 use common::manifest::Manifest;
 use ledger_device_sdk::{
@@ -29,8 +32,10 @@ pub fn handler_register_vapp(
     const VANADIUM_ICON: NbglGlyph =
         NbglGlyph::from_include(include_gif!("icons/vanadium_16x16.gif", NBGL));
 
-    let vapp_hash = manifest.get_vapp_hash::<Sha256Hasher, 32>();
-    let vapp_hash_hex = hex::encode(vapp_hash);
+    let vapp_hash: [u8; 32] = manifest.get_vapp_hash::<Sha256Hasher, 32>();
+    let mut vapp_hash_hex = [0u8; 64];
+    hex::encode_to_slice(vapp_hash, &mut vapp_hash_hex).unwrap();
+    let vapp_hash_hex_str = core::str::from_utf8(&vapp_hash_hex).unwrap();
     let approved = {
         #[cfg(feature = "blind_registration")]
         {
@@ -58,7 +63,7 @@ pub fn handler_register_vapp(
                     },
                     Field {
                         name: "Hash",
-                        value: vapp_hash_hex.as_str(),
+                        value: vapp_hash_hex_str,
                     },
                 ])
         }
@@ -68,7 +73,11 @@ pub fn handler_register_vapp(
         return Err(AppSW::Deny);
     }
 
-    let vapp_hmac = get_vapp_hmac(&manifest);
+    // Register the V-App in the store
+    VAppStore::register(&manifest).map_err(|e| match e {
+        VAppStoreError::StoreFull => AppSW::StoreFull,
+        VAppStoreError::NameTooLong | VAppStoreError::VersionTooLong => AppSW::IncorrectData,
+    })?;
 
-    Ok(vapp_hmac.to_vec())
+    Ok(Vec::new())
 }
