@@ -35,6 +35,8 @@ Registration allows the user to trust the V-App hash from that moment onward. Du
 
 See [manifest.md](manifest.md) for more information about the V-App hash.
 
-Once the user approves, a HMAC is returned. This HMAC authorizes launching the V-App.
+Once the user approves, the V-App is stored in a persistent registry on the device. The Vanadium VM app can store up to 32 registered V-Apps. If a V-App with the same name is already registered, it will be replaced with the new version.
 
-Note: The HMAC is invalidated if the Vanadium app is deleted or reinstalled.
+When launching a V-App, the Vanadium VM verifies that the V-App hash matches one of the registered entries before allowing execution.
+
+Note: The V-App registry is cleared if the Vanadium app is deleted or reinstalled.

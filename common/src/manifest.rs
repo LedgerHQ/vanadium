@@ -4,8 +4,11 @@ use serde::{self, Deserialize, Serialize};
 use crate::accumulator::Hasher;
 use crate::constants::{page_start, PAGE_SIZE};
 
-const APP_NAME_MAX_LEN: usize = 32;
-const APP_VERSION_MAX_LEN: usize = 32;
+/// Maximum length for app name.
+pub const APP_NAME_MAX_LEN: usize = 32;
+
+/// Maximum length for app version.
+pub const APP_VERSION_MAX_LEN: usize = 32;
 
 /// The manifest contains all the required info that the application needs in order to execute a V-App.
 #[derive(Serialize, Deserialize, Debug, Clone)]
