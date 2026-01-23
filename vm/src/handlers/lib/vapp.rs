@@ -33,6 +33,13 @@ fn is_all_zeros_ct(data: &[u8]) -> bool {
 }
 
 impl VappRegistrationKey {
+    /// Generates a new random key and stores it in NVM.
+    unsafe fn generate_new_key(storage: &mut AtomicStorage<[u8; 32]>) {
+        let mut new_key = [0u8; 32];
+        ledger_device_sdk::random::rand_bytes(&mut new_key);
+        storage.update(&new_key);
+    }
+
     fn ensure_initialized() {
         // if the key is all zeros, initialize it with 32 random bytes
         let nvm_key = &raw mut VAPP_REGISTRATION_KEY;
@@ -41,10 +48,18 @@ impl VappRegistrationKey {
 
             // check whether the key is all zeros with a constant time comparison
             if is_all_zeros_ct(storage.get_ref().as_slice()) {
-                let mut new_key = [0u8; 32];
-                ledger_device_sdk::random::rand_bytes(&mut new_key);
-                storage.update(&new_key);
+                Self::generate_new_key(storage);
             }
+        }
+    }
+
+    /// Generates a new random key, replacing the existing one.
+    /// This invalidates all previously generated HMACs.
+    fn regenerate() {
+        let nvm_key = &raw mut VAPP_REGISTRATION_KEY;
+        unsafe {
+            let storage = (*nvm_key).get_mut();
+            Self::generate_new_key(storage);
         }
     }
 
@@ -59,6 +74,25 @@ impl VappRegistrationKey {
     pub fn get_key(&self) -> &[u8; 32] {
         self.get_ref().get_ref()
     }
+}
+
+/// Returns a deterministic Vanadium ID derived from the VappRegistrationKey.
+///
+/// The ID is computed as SHA256("\x0bVanadium ID" || VappRegistrationKey).
+#[must_use]
+pub fn get_vanadium_id() -> [u8; 32] {
+    let key = VappRegistrationKey.get_key();
+    let mut hasher = Sha256Hasher::new();
+    hasher.update(b"\x0bVanadium ID");
+    hasher.update(key);
+    hasher.finalize()
+}
+
+/// Regenerates the V-App registration key with new random bytes.
+///
+/// This invalidates all previously generated HMACs and changes the Vanadium ID.
+pub fn reinitialize_vanadium_id() {
+    VappRegistrationKey::regenerate();
 }
 
 /// Computes the HMAC for the V-App.
