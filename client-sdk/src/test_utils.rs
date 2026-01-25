@@ -1,7 +1,7 @@
 use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener};
-use std::process::{Child, Command};
+use std::process::{Child, Command, Stdio};
 use std::sync::Arc;
 use tokio::time::{sleep, Duration};
 
@@ -73,12 +73,27 @@ async fn spawn_speculos_and_transport(vanadium_binary: &str) -> (Child, Arc<Tran
             .expect("Failed to bind to an ephemeral port to select APDU port");
 
         // --- 1) Spawn speculos on that port ---
+        // Create log files for speculos outputs
+        let stdout_file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open("speculos_stdout.log")
+            .expect("Failed to open speculos_stdout.log");
+
+        let stderr_file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open("speculos_stderr.log")
+            .expect("Failed to open speculos_stderr.log");
+
         let mut child = Command::new("speculos")
             .arg(vanadium_binary)
             .arg("--display")
             .arg("headless")
             .arg("--apdu-port")
             .arg(port.to_string())
+            .stdout(Stdio::from(stdout_file))
+            .stderr(Stdio::from(stderr_file))
             .spawn()
             .expect("Failed to spawn speculos process");
 
