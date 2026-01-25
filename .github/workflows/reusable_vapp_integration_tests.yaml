@@ -108,4 +108,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: ${{ inputs.app_name }}_logs_${{ matrix.model }}
-          path: ${{ inputs.client_dir }}/test.log
+          path: |
+            ${{ inputs.client_dir }}/test.log
+            ${{ inputs.client_dir }}/speculos_stdout.log
+            ${{ inputs.client_dir }}/speculos_stderr.log
