@@ -3,7 +3,6 @@ use common::client_commands::Message;
 pub mod ecall;
 pub mod evict;
 pub mod outsourced_mem;
-pub mod vapp;
 
 trait SerializeToComm<const N: usize> {
     fn serialize_to_comm(&self, response: &mut ledger_device_sdk::io::CommandResponse<'_, N>);
