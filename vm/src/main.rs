@@ -23,12 +23,13 @@ mod app_ui;
 mod handlers;
 mod hash;
 mod io;
+mod vapp;
 
 #[cfg(feature = "run_tests")]
 mod app_tests;
 
 use alloc::{string::ToString, vec::Vec};
-use app_ui::menu::ui_menu_main;
+use app_ui::menu::show_home;
 use handlers::{
     get_version::handler_get_version, register_vapp::handler_register_vapp,
     start_vapp::handler_start_vapp,
@@ -232,8 +233,7 @@ extern "C" fn sample_main() {
     let mut comm = Comm::<COMM_BUFFER_SIZE>::new();
     init_comm(&mut comm);
 
-    let mut home = ui_menu_main(&mut comm);
-    home.show_and_return();
+    show_home(&mut comm);
 
     loop {
         let command = comm.next_command();
@@ -245,7 +245,7 @@ extern "C" fn sample_main() {
                 let _ = comm.send(&[], sw);
             }
         };
-        home.show_and_return();
+        show_home(&mut comm);
     }
 }
 
