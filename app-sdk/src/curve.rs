@@ -149,7 +149,7 @@ where
     ///
     /// Returns `true` if both coordinates are zero, otherwise `false`.
     pub fn is_zero(&self) -> bool {
-        self.x.ct_eq(&Self::ZERO).unwrap_u8() == 1 && self.y.ct_eq(&Self::ZERO).unwrap_u8() == 1
+        (self.x.ct_eq(&Self::ZERO) & self.y.ct_eq(&Self::ZERO)).unwrap_u8() == 1
     }
 }
 
