@@ -255,7 +255,7 @@ impl<const N: usize, M: ModulusProvider<N>> BigNumMod<N, M> {
     /// Panics if the size `N` is larger than `MAX_BIGNUMBER_SIZE`, if `N` is too small to hold a u32,
     /// or if the modulus is zero.
     #[inline]
-    pub const fn from_u32(value: u32) -> Self {
+    pub fn from_u32(value: u32) -> Self {
         if N > MAX_BIGNUMBER_SIZE {
             panic!("Buffer too large");
         }
@@ -263,11 +263,11 @@ impl<const N: usize, M: ModulusProvider<N>> BigNumMod<N, M> {
             panic!("Buffer too small");
         }
         let mut buffer = [0u8; N];
-        let bytes = value.to_be_bytes();
-        buffer[N - 4] = bytes[0];
-        buffer[N - 3] = bytes[1];
-        buffer[N - 2] = bytes[2];
-        buffer[N - 1] = bytes[3];
+        buffer[N - 4..N].copy_from_slice(&value.to_be_bytes());
+
+        if 1 != ecalls::bn_modm(buffer.as_mut_ptr(), buffer.as_ptr(), N, M::M.as_ptr(), N) {
+            panic!("bn_modm failed");
+        }
 
         Self {
             buffer,
