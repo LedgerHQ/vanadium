@@ -213,8 +213,11 @@ impl<const N: usize, M: ModulusProvider<N>> BigNumMod<N, M> {
     ///
     /// # Panics
     ///
-    /// Panics if the modulus is zero.
+    /// Panics if the size `N` is larger than `MAX_BIGNUMBER_SIZE`, or if the modulus is zero.
     pub fn from_be_bytes(buffer: [u8; N]) -> Self {
+        if N > MAX_BIGNUMBER_SIZE {
+            panic!("Buffer too large");
+        }
         // reduce the buffer by the modulus
         let mut buffer = buffer;
         if 1 != ecalls::bn_modm(buffer.as_mut_ptr(), buffer.as_ptr(), N, M::M.as_ptr(), N) {
@@ -229,7 +232,14 @@ impl<const N: usize, M: ModulusProvider<N>> BigNumMod<N, M> {
 
     /// Creates a new `BigNumMod` from a big-endian byte array without reducing it modulo the modulus.
     /// It is responsibility of the caller to guarantee that the buffer is indeed smaller than the modulus.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the size `N` is larger than `MAX_BIGNUMBER_SIZE`.
     pub const fn from_be_bytes_noreduce(buffer: [u8; N]) -> Self {
+        if N > MAX_BIGNUMBER_SIZE {
+            panic!("Buffer too large");
+        }
         Self {
             buffer,
             _marker: PhantomData,
@@ -242,9 +252,13 @@ impl<const N: usize, M: ModulusProvider<N>> BigNumMod<N, M> {
     ///
     /// # Panics
     ///
-    /// Panics if the modulus is zero.
+    /// Panics if the size `N` is larger than `MAX_BIGNUMBER_SIZE`, if `N` is too small to hold a u32,
+    /// or if the modulus is zero.
     #[inline]
     pub const fn from_u32(value: u32) -> Self {
+        if N > MAX_BIGNUMBER_SIZE {
+            panic!("Buffer too large");
+        }
         if N <= 4 {
             panic!("Buffer too small");
         }
