@@ -368,7 +368,7 @@ impl PublicKey {
                 }
 
                 // compute the y coordinate
-                let x_bn = sdk::bignum::as_big_num_mod_ref::<32, P>(x);
+                let x_bn = unsafe { sdk::bignum::as_big_num_mod_ref::<32, P>(x) };
                 let y_bn = secp256k1_compute_y_with_parity(x_bn, header & 1)?;
                 let y = y_bn.to_be_bytes();
                 Ok(PublicKey(Secp256k1Point::new(*x, y)))
@@ -391,8 +391,8 @@ impl PublicKey {
 
                 let point = sdk::curve::Secp256k1Point::new(*x, *y);
 
-                let x_bn = sdk::bignum::as_big_num_mod_ref::<32, P>(x);
-                let y_bn = sdk::bignum::as_big_num_mod_ref::<32, P>(y);
+                let x_bn = unsafe { sdk::bignum::as_big_num_mod_ref::<32, P>(x) };
+                let y_bn = unsafe { sdk::bignum::as_big_num_mod_ref::<32, P>(y) };
                 let lhs = y_bn * y_bn;
                 let rhs = x_bn * x_bn * x_bn + crate::sdk_helpers::SEVEN;
                 if !lhs.unsafe_eq(&rhs) {
