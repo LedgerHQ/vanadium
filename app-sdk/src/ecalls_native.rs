@@ -26,7 +26,7 @@ use k256::{
     ecdsa::{self, signature::hazmat::PrehashVerifier},
     elliptic_curve::{
         sec1::{FromEncodedPoint, ToEncodedPoint},
-        PrimeField,
+        Group, PrimeField,
     },
     schnorr, EncodedPoint, ProjectivePoint, Scalar,
 };
@@ -687,19 +687,75 @@ pub fn derive_slip21_node(labels: *const u8, labels_len: usize, out: *mut u8) ->
 
 pub fn ecfp_add_point(curve: u32, r: *mut u8, p: *const u8, q: *const u8) -> u32 {
     if curve != CurveKind::Secp256k1 as u32 {
-        panic!("Unsupported curve");
+        return 0;
     }
 
     let p_slice = unsafe { std::slice::from_raw_parts(p, 65) };
     let q_slice = unsafe { std::slice::from_raw_parts(q, 65) };
 
-    let p_point = EncodedPoint::from_bytes(p_slice).expect("Invalid point P");
-    let q_point = EncodedPoint::from_bytes(q_slice).expect("Invalid point Q");
+    // Helper to validate a point and copy it to the result
+    let validate_and_copy = |point_slice: &[u8], source: *const u8| -> u32 {
+        let encoded = match EncodedPoint::from_bytes(point_slice) {
+            Ok(enc) => enc,
+            Err(_) => return 0,
+        };
+        if ProjectivePoint::from_encoded_point(&encoded)
+            .is_none()
+            .into()
+        {
+            return 0;
+        }
+        unsafe {
+            std::ptr::copy_nonoverlapping(source, r, 65);
+        }
+        1
+    };
 
-    let p_point = ProjectivePoint::from_encoded_point(&p_point).unwrap();
-    let q_point = ProjectivePoint::from_encoded_point(&q_point).unwrap();
+    // Handle point at infinity: represented as prefix byte 0x00
+    match (p_slice[0] == 0x00, q_slice[0] == 0x00) {
+        (true, true) => {
+            unsafe {
+                std::ptr::write_bytes(r, 0, 65);
+            }
+            return 1;
+        }
+        (true, false) => return validate_and_copy(q_slice, q),
+        (false, true) => return validate_and_copy(p_slice, p),
+        (false, false) => { /* Continue with normal addition */ }
+    }
 
-    let result_point = p_point + q_point;
+    // Validate and decode point P
+    let p_point = match EncodedPoint::from_bytes(p_slice) {
+        Ok(enc) => enc,
+        Err(_) => return 0,
+    };
+    let p_point: ProjectivePoint = match ProjectivePoint::from_encoded_point(&p_point).into() {
+        Some(pt) => pt,
+        None => return 0,
+    };
+
+    // Validate and decode point Q
+    let q_point = match EncodedPoint::from_bytes(q_slice) {
+        Ok(enc) => enc,
+        Err(_) => return 0,
+    };
+    let q_point: ProjectivePoint = match ProjectivePoint::from_encoded_point(&q_point).into() {
+        Some(pt) => pt,
+        None => return 0,
+    };
+
+    let result_point: ProjectivePoint = p_point + q_point;
+
+    // Check if result is the point at infinity
+    // The k256 library may panic when encoding the point at infinity,
+    // so we check for it first
+    if bool::from(result_point.is_identity()) {
+        // Encode point at infinity as all zeros (65 bytes)
+        unsafe {
+            std::ptr::write_bytes(r, 0, 65);
+        }
+        return 1;
+    }
 
     let result_encoded = result_point.to_encoded_point(false);
     let result_bytes = result_encoded.as_bytes();
@@ -713,26 +769,45 @@ pub fn ecfp_add_point(curve: u32, r: *mut u8, p: *const u8, q: *const u8) -> u32
 
 pub fn ecfp_scalar_mult(curve: u32, r: *mut u8, p: *const u8, k: *const u8, k_len: usize) -> u32 {
     if curve != CurveKind::Secp256k1 as u32 {
-        panic!("Unsupported curve");
+        return 0;
     }
     if k_len > 32 {
-        panic!("k_len is too large");
+        return 0;
     }
 
     let p_slice = unsafe { std::slice::from_raw_parts(p, 65) };
     let k_slice = unsafe { std::slice::from_raw_parts(k, k_len) };
 
-    let p_point = EncodedPoint::from_bytes(p_slice).expect("Invalid point P");
-    let p_point = ProjectivePoint::from_encoded_point(&p_point).unwrap();
+    // Validate and decode point P
+    let p_point = match EncodedPoint::from_bytes(p_slice) {
+        Ok(enc) => enc,
+        Err(_) => return 0,
+    };
+    let p_point: ProjectivePoint = match ProjectivePoint::from_encoded_point(&p_point).into() {
+        Some(pt) => pt,
+        None => return 0,
+    };
 
     // pad k_scalar to 32 bytes with initial zeros without using unsafe code
     let mut k_scalar = [0u8; 32];
     k_scalar[32 - k_len..].copy_from_slice(k_slice);
-    let k_scalar = Scalar::from_repr(k_scalar.into()).unwrap();
+    let k_scalar: Scalar = match Scalar::from_repr(k_scalar.into()).into() {
+        Some(scalar) => scalar,
+        None => return 0,
+    };
 
-    let result_point = p_point * k_scalar;
+    let result_point: ProjectivePoint = p_point * k_scalar;
+
+    // Check if result is the point at infinity
+    if bool::from(result_point.is_identity()) {
+        // Encode point at infinity as all zeros (65 bytes)
+        unsafe {
+            std::ptr::write_bytes(r, 0, 65);
+        }
+        return 1;
+    }
+
     let result_encoded = result_point.to_encoded_point(false);
-
     let result_bytes = result_encoded.as_bytes();
 
     unsafe {

@@ -82,12 +82,25 @@ where
 
 /// A representation of an elliptic curve point in uncompressed form.
 ///
-/// The format is:
+/// # Point Encoding
+///
+/// Regular points use the SEC1 uncompressed format:
 ///
 /// `prefix | X-coordinate | Y-coordinate`
 ///
-/// Where `prefix` is always `0x04` for uncompressed points, and `X` and `Y` are `SCALAR_LENGTH`
+/// Where `prefix` is `0x04` for valid curve points, and `X` and `Y` are `SCALAR_LENGTH`
 /// byte arrays representing the coordinates.
+///
+/// # Point at Infinity (Identity Element)
+///
+/// The point at infinity is represented as 65 bytes of `0x00` (when `SCALAR_LENGTH = 32`).
+/// This special encoding uses prefix `0x00` with zero coordinates:
+///
+/// `0x00 | 0x00...00 (32 bytes) | 0x00...00 (32 bytes)`
+///
+/// The point at infinity serves as the identity element for elliptic curve operations:
+/// - **Addition**: `P + O = P` and `O + P = P` for any point `P`
+/// - **Scalar multiplication**: `k * O = O` for any scalar `k`, and `0 * P = O` for any point `P`
 ///
 /// # Type Parameters
 /// * `C` - The curve type implementing `Curve<SCALAR_LENGTH>`.
@@ -110,12 +123,15 @@ where
 {
     const ZERO: [u8; SCALAR_LENGTH] = [0u8; SCALAR_LENGTH];
 
-    /// Checks if the point corresponds to the identity element by verifying
-    /// whether both x and y coordinates are zero.
+    /// Checks if the point corresponds to the identity element (point at infinity)
+    /// by verifying whether both x and y coordinates are zero.
+    ///
+    /// The point at infinity is represented with prefix `0x00` and zero coordinates.
     ///
     /// Guaranteed to run in constant time.
     ///
-    /// Returns `true` if both coordinates are zero, otherwise `false`.
+    /// # Returns
+    /// `true` if this is the point at infinity, `false` otherwise.
     pub fn is_zero(&self) -> bool {
         (self.x.ct_eq(&Self::ZERO) & self.y.ct_eq(&Self::ZERO)).unwrap_u8() == 1
     }
@@ -125,10 +141,14 @@ impl<C, const SCALAR_LENGTH: usize> Default for Point<C, SCALAR_LENGTH>
 where
     C: Curve<SCALAR_LENGTH>,
 {
+    /// Creates the point at infinity (identity element).
+    ///
+    /// The point at infinity is represented with prefix `0x00` and zero coordinates,
+    /// serving as the identity element for elliptic curve group operations.
     fn default() -> Self {
         Self {
             curve_marker: PhantomData,
-            prefix: 0x04,
+            prefix: 0x00,
             x: [0u8; SCALAR_LENGTH],
             y: [0u8; SCALAR_LENGTH],
         }
@@ -150,6 +170,9 @@ where
 
     /// Creates a new Point with the given coordinates.
     ///
+    /// This creates a regular curve point with prefix `0x04` (SEC1 uncompressed format).
+    /// To create the point at infinity, use `Point::default()` instead.
+    ///
     /// # Arguments
     ///
     /// * `x` - The x-coordinate of the point.
@@ -157,7 +180,7 @@ where
     ///
     /// # Returns
     ///
-    /// A new `Point` instance.
+    /// A new `Point` instance with the specified coordinates.
     pub fn new(x: [u8; SCALAR_LENGTH], y: [u8; SCALAR_LENGTH]) -> Self {
         Self {
             curve_marker: PhantomData,
@@ -274,12 +297,10 @@ where
 // We could implement this for any SCALAR_LENGTH, but this currently requires
 // the #![feature(generic_const_exprs)], as the byte size is 1 + 2*SCALAR_LENGTH.
 impl<C: Curve<32>> Point<C, 32> {
-    /// Scalar value 1 in big-endian 32-byte representation.
-    const SCALAR_ONE: [u8; 32] = {
-        let mut arr = [0u8; 32];
-        arr[31] = 1;
-        arr
-    };
+    const SCALAR_ONE: [u8; 32] = [
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 1,
+    ];
 
     /// Converts the point to a byte array.
     ///
@@ -302,11 +323,15 @@ impl<C: Curve<32>> Point<C, 32> {
     /// # Returns
     ///
     /// A `Result` containing the `Point` on success, or an error message if:
-    /// - The prefix byte is not `0x04` (uncompressed point format)
-    /// - The point does not lie on the curve
+    /// - The prefix byte is not `0x04` (uncompressed point format) or `0x00` (point at infinity)
+    /// - For `0x04` prefix, the point does not lie on the curve
     pub fn from_bytes(bytes: &[u8; 65]) -> Result<Self, &'static str> {
+        if bytes[0] == 0x00 {
+            return Ok(Point::default());
+        }
+
         if bytes[0] != 0x04 {
-            return Err("Invalid point prefix. Expected 0x04");
+            return Err("Invalid point prefix. Expected 0x04 or 0x00");
         }
 
         let point: Self = Self {
@@ -316,7 +341,7 @@ impl<C: Curve<32>> Point<C, 32> {
             y: bytes[33..65].try_into().unwrap(),
         };
 
-        // Validate point is on curve by attempting scalar multiplication with 1.
+        // Validate point is on curve by attempting scalar multiplication by 1.
         // If the point is not on the curve, the underlying ecall will fail.
         let mut result: Point<C, 32> = Point::default();
         if 1 != ecalls::ecfp_scalar_mult(
@@ -710,5 +735,72 @@ mod tests {
 
         let pubkey = privkey.to_public_key();
         pubkey.schnorr_verify(msg.as_bytes(), &signature).unwrap();
+    }
+
+    #[test]
+    fn test_point_from_bytes_invalid_point() {
+        // A point with valid format (0x04 prefix) but coordinates not on the secp256k1 curve
+        let invalid_point = hex!(
+            "04"
+            "0000000000000000000000000000000000000000000000000000000000000001"
+            "0000000000000000000000000000000000000000000000000000000000000002"
+        );
+
+        let result = Secp256k1Point::from_bytes(&invalid_point);
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err(), "Point is not on the curve");
+    }
+
+    #[test]
+    fn test_point_from_bytes_invalid_prefix() {
+        // A point with invalid prefix
+        let invalid_prefix = hex!(
+            "03"
+            "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
+            "483ada7726a3c4655da4fbfc0e1108a8fd17b448a68554199c47d08ffb10d4b8"
+        );
+
+        let result = Secp256k1Point::from_bytes(&invalid_prefix);
+        assert!(result.is_err());
+        assert_eq!(
+            result.unwrap_err(),
+            "Invalid point prefix. Expected 0x04 or 0x00"
+        );
+    }
+
+    #[test]
+    fn test_point_from_bytes_valid_generator() {
+        // The secp256k1 generator point - should succeed
+        let generator_bytes = hex!(
+            "04"
+            "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
+            "483ada7726a3c4655da4fbfc0e1108a8fd17b448a68554199c47d08ffb10d4b8"
+        );
+
+        let result = Secp256k1Point::from_bytes(&generator_bytes);
+        assert!(result.is_ok());
+        let point = result.unwrap();
+        assert_eq!(
+            point.x,
+            hex!("79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798")
+        );
+        assert_eq!(
+            point.y,
+            hex!("483ada7726a3c4655da4fbfc0e1108a8fd17b448a68554199c47d08ffb10d4b8")
+        );
+    }
+
+    #[test]
+    fn test_point_from_bytes_point_at_infinity() {
+        // Point at infinity: 0x00 prefix with zero coordinates
+        let infinity_bytes = [0u8; 65];
+
+        let result = Secp256k1Point::from_bytes(&infinity_bytes);
+        assert!(result.is_ok());
+        let point = result.unwrap();
+        assert!(point.is_zero());
+        assert_eq!(point.prefix, 0x00);
+        assert_eq!(point.x, [0u8; 32]);
+        assert_eq!(point.y, [0u8; 32]);
     }
 }
