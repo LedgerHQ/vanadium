@@ -173,14 +173,17 @@ fn process_message(_app: &mut App, msg: &[u8]) -> Vec<u8> {
         Command::ECPointOperation { curve, operation } => match curve {
             Curve::Secp256k1 => match operation {
                 ECPointOperation::Add(p, q) => {
-                    let p = Secp256k1Point::from_bytes(p.as_slice().try_into().unwrap());
-                    let q = Secp256k1Point::from_bytes(q.as_slice().try_into().unwrap());
-                    (p + q).to_bytes().to_vec()
+                    let p_bytes: [u8; 65] = p.as_slice().try_into().unwrap();
+                    let p = Secp256k1Point::from_bytes(&p_bytes).unwrap();
+                    let q_bytes: [u8; 65] = q.as_slice().try_into().unwrap();
+                    let q = Secp256k1Point::from_bytes(&q_bytes).unwrap();
+                    (&p + &q).to_bytes().to_vec()
                 }
                 ECPointOperation::ScalarMult(p, k) => {
-                    let p = Secp256k1Point::from_bytes(p.as_slice().try_into().unwrap());
+                    let p_bytes: [u8; 65] = p.as_slice().try_into().unwrap();
+                    let p = Secp256k1Point::from_bytes(&p_bytes).unwrap();
                     let k: [u8; 32] = k.as_slice().try_into().unwrap();
-                    (p * &k).to_bytes().to_vec()
+                    (&p * &k).to_bytes().to_vec()
                 }
             },
         },
