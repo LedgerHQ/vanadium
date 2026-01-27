@@ -320,6 +320,115 @@ async fn test_secp256k1_point_scalarmul() {
 }
 
 #[tokio::test]
+async fn test_secp256k1_point_add_with_identity() {
+    let mut setup = setup().await;
+
+    // Point at infinity (identity element) - 65 bytes of 0x00
+    let identity = [0u8; 65];
+
+    let p = hex!("042748bce8ffc3f815e69e594ae974be5e9a3be69a233d5557ea9c92b71d69367b747206115143153c85f3e8bb94d392bd955d36f1f0204921e6dd7684e81bdaab");
+
+    // P + O = P
+    let res = setup
+        .client
+        .ecpoint_add(common::Curve::Secp256k1, &p, &identity)
+        .await
+        .unwrap();
+    assert_eq!(res, p);
+
+    // O + P = P
+    let res = setup
+        .client
+        .ecpoint_add(common::Curve::Secp256k1, &identity, &p)
+        .await
+        .unwrap();
+    assert_eq!(res, p);
+
+    // O + O = O
+    let res = setup
+        .client
+        .ecpoint_add(common::Curve::Secp256k1, &identity, &identity)
+        .await
+        .unwrap();
+    assert_eq!(res, identity);
+}
+
+#[tokio::test]
+async fn test_secp256k1_point_add_inverse() {
+    let mut setup = setup().await;
+
+    // Point at infinity (identity element)
+    let identity = [0u8; 65];
+
+    // A point P
+        let p = hex!("0479be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798483ada7726a3c4655da4fbfc0e1108a8fd17b448a68554199c47d08ffb10d4b8");
+
+    // Negation of P (flip the y-coordinate)
+    let p_neg = hex!("0479be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798b7c52588d95c3b9aa25b0403f1eef75702e84bb7597aabe663b82f6f04ef2777"); 
+
+    // P + (-P) = O
+    let res = setup
+        .client
+        .ecpoint_add(common::Curve::Secp256k1, &p, &p_neg)
+        .await
+        .unwrap();
+    assert_eq!(res, identity);
+}
+
+#[tokio::test]
+async fn test_secp256k1_scalarmul_by_zero() {
+    let mut setup = setup().await;
+
+    // Point at infinity (identity element)
+    let identity = [0u8; 65];
+
+    let p = hex!("0479be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798483ada7726a3c4655da4fbfc0e1108a8fd17b448a68554199c47d08ffb10d4b8");
+    let zero = hex!("0000000000000000000000000000000000000000000000000000000000000000");
+
+    // P * 0 = O
+    let res = setup
+        .client
+        .ecpoint_scalarmult(common::Curve::Secp256k1, &p, &zero)
+        .await
+        .unwrap();
+    assert_eq!(res, identity);
+}
+
+#[tokio::test]
+async fn test_secp256k1_scalarmul_by_one() {
+    let mut setup = setup().await;
+
+    let p = hex!("0479be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798483ada7726a3c4655da4fbfc0e1108a8fd17b448a68554199c47d08ffb10d4b8");
+    let one = hex!("0000000000000000000000000000000000000000000000000000000000000001");
+
+    // P * 1 = P
+    let res = setup
+        .client
+        .ecpoint_scalarmult(common::Curve::Secp256k1, &p, &one)
+        .await
+        .unwrap();
+    assert_eq!(res, p);
+}
+
+#[tokio::test]
+async fn test_secp256k1_scalarmul_identity() {
+    let mut setup = setup().await;
+
+    // Point at infinity (identity element)
+    let identity = [0u8; 65];
+
+    let k = hex!("22445566778899aabbccddeeff0011223344556677889900aabbccddeeff0011");
+
+    // O * k = O
+    let res = setup
+        .client
+        .ecpoint_scalarmult(common::Curve::Secp256k1, &identity, &k)
+        .await
+        .unwrap();
+    assert_eq!(res, identity);
+}
+
+#[tokio::test]
 async fn test_secp256k1_ecdsa_sign() {
     let mut setup = setup().await;
     let msg =

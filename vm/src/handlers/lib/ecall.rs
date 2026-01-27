@@ -1038,15 +1038,35 @@ impl<'a, const N: usize> CommEcallHandler<'a, N> {
             .read_buffer(q.0, &mut q_local.W)?;
 
         let mut r_local: sys::cx_ecfp_public_key_t = Default::default();
-        unsafe {
-            let res = sys::cx_ecfp_add_point_no_throw(
-                curve as u8,
-                r_local.W.as_mut_ptr(),
-                p_local.W.as_ptr(),
-                q_local.W.as_ptr(),
-            );
-            if res != CX_OK {
-                return Err(CommEcallError::GenericError("add_point failed"));
+
+        // Check for point at infinity cases (first byte is 0)
+        let p_is_infinity = p_local.W[0] == 0;
+        let q_is_infinity = q_local.W[0] == 0;
+
+        if p_is_infinity && q_is_infinity {
+            // Both are infinity - return infinity
+            r_local.W = [0u8; 65];
+        } else if p_is_infinity {
+            // p is infinity - return q
+            r_local.W = q_local.W;
+        } else if q_is_infinity {
+            // q is infinity - return p
+            r_local.W = p_local.W;
+        } else {
+            // Neither is infinity - perform the addition
+            unsafe {
+                let res = sys::cx_ecfp_add_point_no_throw(
+                    curve as u8,
+                    r_local.W.as_mut_ptr(),
+                    p_local.W.as_ptr(),
+                    q_local.W.as_ptr(),
+                );
+                if res == sys::CX_EC_INFINITE_POINT {
+                    // Point at infinity - represent as 65 bytes of 0x00
+                    r_local.W = [0u8; 65];
+                } else if res != CX_OK {
+                    return Err(CommEcallError::GenericError("add_point failed"));
+                }
             }
         }
 
@@ -1082,19 +1102,40 @@ impl<'a, const N: usize> CommEcallHandler<'a, N> {
         cpu.get_segment::<E>(p.0)?
             .read_buffer(p.0, &mut r_local.W)?;
 
+        // Check if p is the point at infinity (first byte is 0)
+        if r_local.W[0] == 0 {
+            // Point at infinity - return directly
+            let segment = cpu.get_segment::<E>(r.0)?;
+            segment.write_buffer(r.0, &r_local.W)?;
+            return Ok(1);
+        }
+
         let mut k_local: [u8; 32] = [0; 32];
         cpu.get_segment::<E>(k.0)?
             .read_buffer(k.0, &mut k_local[0..k_len])?;
 
-        unsafe {
-            let res = sys::cx_ecfp_scalar_mult_no_throw(
-                curve as u8,
-                r_local.W.as_mut_ptr(),
-                k_local.as_ptr(),
-                k_len,
-            );
-            if res != CX_OK {
-                return Err(CommEcallError::GenericError("scalar_mult failed"));
+        // Check if scalar is identically 0
+        let mut is_zero = 0u8;
+        for &b in &k_local[0..k_len] {
+            is_zero |= b;
+        }
+        if is_zero == 0 {
+            // Return point at infinity directly
+            r_local.W = [0u8; 65];
+        } else {
+            unsafe {
+                let res = sys::cx_ecfp_scalar_mult_no_throw(
+                    curve as u8,
+                    r_local.W.as_mut_ptr(),
+                    k_local.as_ptr(),
+                    k_len,
+                );
+                if res == sys::CX_EC_INFINITE_POINT {
+                    // Point at infinity - represent as 65 bytes of 0x00
+                    r_local.W = [0u8; 65];
+                } else if res != CX_OK {
+                    return Err(CommEcallError::GenericError("scalar_mult failed"));
+                }
             }
         }
 
