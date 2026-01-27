@@ -32,6 +32,7 @@ use crate::ecalls;
 pub trait Curve<const SCALAR_LENGTH: usize>: Sized {
     fn derive_hd_node(path: &[u32]) -> Result<HDPrivNode<Self, SCALAR_LENGTH>, &'static str>;
     fn get_master_fingerprint() -> u32;
+    fn curve_kind() -> CurveKind;
 }
 
 /// A struct representing a Hierarchical Deterministic (HD) node composed of a private key, and a 32-byte chaincode.
@@ -76,39 +77,6 @@ where
             "HDPrivNode {{ chaincode: {:?}, privkey: [REDACTED] }}",
             self.chaincode
         )
-    }
-}
-
-// A trait to simplify the implementation of `Curve` for different curves.
-trait HasCurveKind<const SCALAR_LENGTH: usize> {
-    // Returns the value that represents this curve in ECALLs.
-    fn get_curve_kind() -> CurveKind;
-}
-
-impl<C, const SCALAR_LENGTH: usize> Curve<SCALAR_LENGTH> for C
-where
-    C: HasCurveKind<SCALAR_LENGTH>,
-{
-    fn derive_hd_node(path: &[u32]) -> Result<HDPrivNode<C, SCALAR_LENGTH>, &'static str> {
-        let curve_kind = C::get_curve_kind();
-        let mut result = HDPrivNode::default();
-
-        if 1 != ecalls::derive_hd_node(
-            curve_kind as u32,
-            path.as_ptr(),
-            path.len(),
-            result.privkey.as_mut_ptr(),
-            result.chaincode.as_mut_ptr(),
-        ) {
-            return Err("Failed to derive HD node");
-        }
-
-        Ok(result)
-    }
-
-    fn get_master_fingerprint() -> u32 {
-        let curve_kind = C::get_curve_kind();
-        ecalls::get_master_fingerprint(curve_kind as u32)
     }
 }
 
@@ -306,6 +274,13 @@ where
 // We could implement this for any SCALAR_LENGTH, but this currently requires
 // the #![feature(generic_const_exprs)], as the byte size is 1 + 2*SCALAR_LENGTH.
 impl<C: Curve<32>> Point<C, 32> {
+    /// Scalar value 1 in big-endian 32-byte representation.
+    const SCALAR_ONE: [u8; 32] = {
+        let mut arr = [0u8; 32];
+        arr[31] = 1;
+        arr
+    };
+
     /// Converts the point to a byte array.
     ///
     /// # Returns
@@ -318,7 +293,7 @@ impl<C: Curve<32>> Point<C, 32> {
         unsafe { &*(self as *const Self as *const [u8; 65]) }
     }
 
-    /// Creates a point from a byte array.
+    /// Creates a point from a byte array, validating that it lies on the curve.
     ///
     /// # Arguments
     ///
@@ -326,20 +301,41 @@ impl<C: Curve<32>> Point<C, 32> {
     ///
     /// # Returns
     ///
-    /// A new instance of `Self`.
-    pub fn from_bytes(bytes: &[u8; 65]) -> &Self {
+    /// A `Result` containing the `Point` on success, or an error message if:
+    /// - The prefix byte is not `0x04` (uncompressed point format)
+    /// - The point does not lie on the curve
+    pub fn from_bytes(bytes: &[u8; 65]) -> Result<Self, &'static str> {
         if bytes[0] != 0x04 {
-            panic!("Invalid point prefix. Expected 0x04");
+            return Err("Invalid point prefix. Expected 0x04");
         }
-        // SAFETY: The input slice has exactly 65 bytes and must match
-        // the memory layout of `Point`. The prefix is validated.
-        unsafe { &*(bytes as *const [u8; 65] as *const Self) }
+
+        let point: Self = Self {
+            curve_marker: PhantomData,
+            prefix: bytes[0],
+            x: bytes[1..33].try_into().unwrap(),
+            y: bytes[33..65].try_into().unwrap(),
+        };
+
+        // Validate point is on curve by attempting scalar multiplication with 1.
+        // If the point is not on the curve, the underlying ecall will fail.
+        let mut result: Point<C, 32> = Point::default();
+        if 1 != ecalls::ecfp_scalar_mult(
+            C::curve_kind() as u32,
+            result.as_mut_ptr(),
+            point.as_ptr(),
+            Self::SCALAR_ONE.as_ptr(),
+            32,
+        ) {
+            return Err("Point is not on the curve");
+        }
+
+        Ok(point)
     }
 }
 
 impl<C, const SCALAR_LENGTH: usize> Add for &Point<C, SCALAR_LENGTH>
 where
-    C: Curve<SCALAR_LENGTH> + HasCurveKind<SCALAR_LENGTH>,
+    C: Curve<SCALAR_LENGTH>,
 {
     type Output = Point<C, SCALAR_LENGTH>;
 
@@ -347,7 +343,7 @@ where
         let mut result = Point::default();
 
         if 1 != ecalls::ecfp_add_point(
-            C::get_curve_kind() as u32,
+            C::curve_kind() as u32,
             result.as_mut_ptr(),
             self.as_ptr(),
             other.as_ptr(),
@@ -361,7 +357,7 @@ where
 
 impl<C, const SCALAR_LENGTH: usize> Mul<&[u8; SCALAR_LENGTH]> for &Point<C, SCALAR_LENGTH>
 where
-    C: Curve<SCALAR_LENGTH> + HasCurveKind<SCALAR_LENGTH>,
+    C: Curve<SCALAR_LENGTH>,
 {
     type Output = Point<C, SCALAR_LENGTH>;
 
@@ -369,7 +365,7 @@ where
         let mut result = Point::default();
 
         if 1 != ecalls::ecfp_scalar_mult(
-            C::get_curve_kind() as u32,
+            C::curve_kind() as u32,
             result.as_mut_ptr(),
             self.as_ptr(),
             scalar.as_ptr(),
@@ -385,8 +381,28 @@ where
 #[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Secp256k1;
 
-impl HasCurveKind<32> for Secp256k1 {
-    fn get_curve_kind() -> CurveKind {
+impl Curve<32> for Secp256k1 {
+    fn derive_hd_node(path: &[u32]) -> Result<HDPrivNode<Self, 32>, &'static str> {
+        let mut result = HDPrivNode::default();
+
+        if 1 != ecalls::derive_hd_node(
+            Self::curve_kind() as u32,
+            path.as_ptr(),
+            path.len(),
+            result.privkey.as_mut_ptr(),
+            result.chaincode.as_mut_ptr(),
+        ) {
+            return Err("Failed to derive HD node");
+        }
+
+        Ok(result)
+    }
+
+    fn get_master_fingerprint() -> u32 {
+        ecalls::get_master_fingerprint(Self::curve_kind() as u32)
+    }
+
+    fn curve_kind() -> CurveKind {
         CurveKind::Secp256k1
     }
 }
@@ -420,7 +436,7 @@ impl EcfpPrivateKey<Secp256k1, 32> {
     pub fn ecdsa_sign_hash(&self, msg_hash: &[u8; 32]) -> Result<Vec<u8>, &'static str> {
         let mut result = [0u8; 71];
         let sig_size = ecalls::ecdsa_sign(
-            Secp256k1::get_curve_kind() as u32,
+            Secp256k1::curve_kind() as u32,
             EcdsaSignMode::RFC6979 as u32,
             HashId::Sha256 as u32,
             self.private_key.as_ptr(),
@@ -452,7 +468,7 @@ impl EcfpPrivateKey<Secp256k1, 32> {
     ) -> Result<Vec<u8>, &'static str> {
         let mut result = [0u8; 64];
         let sig_size = ecalls::schnorr_sign(
-            Secp256k1::get_curve_kind() as u32,
+            Secp256k1::curve_kind() as u32,
             SchnorrSignMode::BIP340 as u32,
             HashId::Sha256 as u32,
             self.private_key.as_ptr(),
@@ -477,7 +493,7 @@ impl EcfpPublicKey<Secp256k1, 32> {
         signature: &[u8],
     ) -> Result<(), &'static str> {
         if 1 != ecalls::ecdsa_verify(
-            Secp256k1::get_curve_kind() as u32,
+            Secp256k1::curve_kind() as u32,
             self.public_key.as_ptr(),
             msg_hash.as_ptr(),
             signature.as_ptr(),
@@ -490,7 +506,7 @@ impl EcfpPublicKey<Secp256k1, 32> {
 
     pub fn schnorr_verify(&self, msg: &[u8], signature: &[u8]) -> Result<(), &'static str> {
         if 1 != ecalls::schnorr_verify(
-            Secp256k1::get_curve_kind() as u32,
+            Secp256k1::curve_kind() as u32,
             SchnorrSignMode::BIP340 as u32,
             HashId::Sha256 as u32,
             self.public_key.as_ptr(),
