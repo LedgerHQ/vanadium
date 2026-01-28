@@ -639,7 +639,7 @@ impl<const N: usize, M: ModulusProvider<N>> core::ops::Neg for &BigNumMod<N, M> 
 /// Converts a byte array to a `BigNum` reference.
 ///
 /// # Safety
-/// It is the responsibility of the caller to make sure that the byte array is represents a
+/// It is the responsibility of the caller to make sure that the byte array represents a
 /// number smaller than the modulus.
 pub unsafe fn as_big_num_mod_ref<'a, const N: usize, M: ModulusProvider<N>>(
     buf: &'a [u8; N],
