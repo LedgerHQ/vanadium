@@ -1115,11 +1115,11 @@ impl<'a, const N: usize> CommEcallHandler<'a, N> {
             .read_buffer(k.0, &mut k_local[0..k_len])?;
 
         // Check if scalar is identically 0
-        let mut is_zero = 0u8;
+        let mut any_nonzero = 0u8;
         for &b in &k_local[0..k_len] {
-            is_zero |= b;
+            any_nonzero |= b;
         }
-        if is_zero == 0 {
+        if any_nonzero == 0 {
             // Return point at infinity directly
             r_local.W = [0u8; 65];
         } else {
