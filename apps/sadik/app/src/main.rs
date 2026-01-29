@@ -168,7 +168,9 @@ fn process_message(_app: &mut App, msg: &[u8]) -> Vec<u8> {
         },
         Command::DeriveSlip21Key { labels } => {
             let labels_slices: Vec<&[u8]> = labels.iter().map(|v| v.as_slice()).collect();
-            sdk::slip21::derive_slip21_key(&labels_slices).to_vec()
+            sdk::slip21::derive_slip21_key(&labels_slices)
+                .dangerous_as_raw_bytes()
+                .to_vec()
         }
         Command::ECPointOperation { curve, operation } => match curve {
             Curve::Secp256k1 => match operation {
