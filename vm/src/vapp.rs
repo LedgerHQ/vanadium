@@ -76,7 +76,6 @@ pub struct VAppStore;
 
 impl VAppStore {
     /// Gets a mutable reference to the collection.
-    /// Following the same pattern as the original VappRegistrationKey.
     #[inline(never)]
     fn get_collection_mut() -> &'static mut Collection<VAppEntry, MAX_REGISTERED_VAPPS> {
         let data = &raw mut VAPP_STORE;
@@ -193,6 +192,12 @@ impl VAppStore {
     #[allow(dead_code)] // Will be used by device UI for app management
     pub fn iter() -> VAppStoreIter {
         VAppStoreIter { current_index: 0 }
+    }
+
+    /// Uninstalls all V-Apps by clearing the collection.
+    pub fn uninstall_all() {
+        let collection = Self::get_collection_mut();
+        collection.clear();
     }
 }
 

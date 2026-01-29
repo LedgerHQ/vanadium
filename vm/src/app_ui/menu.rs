@@ -72,13 +72,7 @@ unsafe extern "C" fn show_home_callback() {
 unsafe extern "C" fn choice_callback(confirmed: bool) {
     if confirmed {
         // Uninstall all registered V-Apps
-        loop {
-            let count = VAppStore::count();
-            if count == 0 {
-                break;
-            }
-            VAppStore::unregister(count - 1);
-        }
+        VAppStore::uninstall_all();
         // Show success status
         nbgl_useCaseStatus(
             UNINSTALL_SUCCESS.as_ptr() as *const c_char,
