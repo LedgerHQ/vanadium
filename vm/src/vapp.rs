@@ -215,6 +215,16 @@ impl VAppStore {
     pub fn iter() -> VAppStoreIter {
         VAppStoreIter { current_index: 0 }
     }
+
+    /// Uninstalls all V-Apps by clearing all entries in storage.
+    pub fn uninstall_all() {
+        let storage = Self::get_storage_mut();
+        for i in 0..MAX_REGISTERED_VAPPS {
+            if storage[i].is_initialized() {
+                storage[i].clear();
+            }
+        }
+    }
 }
 
 /// Iterator over registered V-Apps.
