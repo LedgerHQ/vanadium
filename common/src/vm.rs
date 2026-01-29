@@ -362,7 +362,7 @@ pub trait EcallHandler {
 pub enum CpuError<E: fmt::Debug> {
     EcallError(E),
     MemoryError(MemoryError),
-    GenericError(&'static str), // TODO: make errors more specific
+    GenericError(&'static str),
 }
 
 impl<E: fmt::Debug> core::error::Error for CpuError<E> {
