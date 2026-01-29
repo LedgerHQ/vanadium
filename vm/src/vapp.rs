@@ -1,6 +1,7 @@
 use common::manifest::{Manifest, APP_NAME_MAX_LEN, APP_VERSION_MAX_LEN};
-use ledger_device_sdk::nvm::*;
 use ledger_device_sdk::NVMData;
+
+use crate::nvm::LazyStorage;
 
 use crate::hash::Sha256Hasher;
 
@@ -65,27 +66,26 @@ pub enum VAppStoreError {
     VersionTooLong,
 }
 
-// Use the SDK's Collection type which handles atomic storage properly.
-// This follows the same NVM access pattern as the original VappRegistrationKey.
+// Use a fixed-length array of LazyStorage for zero-initialized NVM storage.
+// Each slot can be independently initialized or cleared.
 #[link_section = ".nvm_data"]
-static mut VAPP_STORE: NVMData<Collection<VAppEntry, MAX_REGISTERED_VAPPS>> =
-    NVMData::new(Collection::new(VAppEntry::empty()));
+static mut VAPP_STORE: NVMData<[LazyStorage<VAppEntry>; MAX_REGISTERED_VAPPS]> =
+    NVMData::new([LazyStorage::new(); MAX_REGISTERED_VAPPS]);
 
 /// The V-App store manages registered V-Apps in NVRAM.
 pub struct VAppStore;
 
 impl VAppStore {
-    /// Gets a mutable reference to the collection.
-    /// Following the same pattern as the original VappRegistrationKey.
+    /// Gets a mutable reference to the storage array.
     #[inline(never)]
-    fn get_collection_mut() -> &'static mut Collection<VAppEntry, MAX_REGISTERED_VAPPS> {
+    fn get_storage_mut() -> &'static mut [LazyStorage<VAppEntry>; MAX_REGISTERED_VAPPS] {
         let data = &raw mut VAPP_STORE;
         unsafe { (*data).get_mut() }
     }
 
-    /// Gets a reference to the collection.
+    /// Gets a reference to the storage array.
     #[inline(never)]
-    fn get_collection_ref() -> &'static Collection<VAppEntry, MAX_REGISTERED_VAPPS> {
+    fn get_storage_ref() -> &'static [LazyStorage<VAppEntry>; MAX_REGISTERED_VAPPS] {
         let data = &raw const VAPP_STORE;
         unsafe { (*data).get_ref() }
     }
@@ -99,9 +99,10 @@ impl VAppStore {
     /// We don't use a constant time comparison, as knowledge about which apps are registered is not
     /// considered sensitive information.
     pub fn find_by_hash(vapp_hash: &[u8; 32]) -> Option<usize> {
-        let collection = Self::get_collection_ref();
-        for i in 0..collection.len() {
-            if let Some(entry) = collection.get(i) {
+        let storage = Self::get_storage_ref();
+        for i in 0..MAX_REGISTERED_VAPPS {
+            if storage[i].is_initialized() {
+                let entry = storage[i].get_ref();
                 if &entry.vapp_hash == vapp_hash {
                     return Some(i);
                 }
@@ -114,9 +115,10 @@ impl VAppStore {
     /// We don't use a constant time comparison, as knowledge about which apps are registered is not
     /// considered sensitive information.
     pub fn find_by_name(app_name: &str) -> Option<usize> {
-        let collection = Self::get_collection_ref();
-        for i in 0..collection.len() {
-            if let Some(entry) = collection.get(i) {
+        let storage = Self::get_storage_ref();
+        for i in 0..MAX_REGISTERED_VAPPS {
+            if storage[i].is_initialized() {
+                let entry = storage[i].get_ref();
                 if entry.get_app_name() == app_name {
                     return Some(i);
                 }
@@ -147,46 +149,65 @@ impl VAppStore {
         entry.app_name[..app_name.len()].copy_from_slice(app_name.as_bytes());
         entry.app_version[..app_version.len()].copy_from_slice(app_version.as_bytes());
 
+        let storage = Self::get_storage_mut();
+
         // Check if an app with the same name already exists (for update/overwrite)
         if let Some(existing_index) = Self::find_by_name(app_name) {
-            // Remove the old entry and add the new one
-            let collection = Self::get_collection_mut();
-            collection.remove(existing_index);
-            collection
-                .add(&entry)
-                .map_err(|_| VAppStoreError::StoreFull)?;
+            // Update the existing entry
+            storage[existing_index].update(&entry);
+            Ok(())
         } else {
-            // Add new entry
-            let collection = Self::get_collection_mut();
-            collection
-                .add(&entry)
-                .map_err(|_| VAppStoreError::StoreFull)?;
+            // Find first uninitialized slot and add new entry
+            for i in 0..MAX_REGISTERED_VAPPS {
+                if !storage[i].is_initialized() {
+                    storage[i].initialize(&entry);
+                    return Ok(());
+                }
+            }
+            // No free slots
+            Err(VAppStoreError::StoreFull)
         }
-
-        Ok(())
     }
 
-    /// Unregisters a V-App at the given index by removing the entry.
+    /// Unregisters a V-App at the given index by clearing the entry.
     #[allow(dead_code)] // Will be used by device UI for app management
     pub fn unregister(index: usize) -> bool {
-        let collection = Self::get_collection_mut();
-        if index >= collection.len() {
+        if index >= MAX_REGISTERED_VAPPS {
             return false;
         }
-        collection.remove(index);
+        let storage = Self::get_storage_mut();
+        if !storage[index].is_initialized() {
+            return false;
+        }
+        storage[index].clear();
         true
     }
 
     /// Returns the number of registered V-Apps.
     #[allow(dead_code)] // Will be used by device UI for app management
     pub fn count() -> usize {
-        Self::get_collection_ref().len()
+        let storage = Self::get_storage_ref();
+        let mut count = 0;
+        for i in 0..MAX_REGISTERED_VAPPS {
+            if storage[i].is_initialized() {
+                count += 1;
+            }
+        }
+        count
     }
 
     /// Gets an entry at the given index.
     #[allow(dead_code)] // Will be used by device UI for app management
     pub fn get_entry(index: usize) -> Option<&'static VAppEntry> {
-        Self::get_collection_ref().get(index)
+        if index >= MAX_REGISTERED_VAPPS {
+            return None;
+        }
+        let storage = Self::get_storage_ref();
+        if storage[index].is_initialized() {
+            Some(storage[index].get_ref())
+        } else {
+            None
+        }
     }
 
     /// Returns an iterator over all registered V-Apps.
@@ -206,13 +227,15 @@ impl Iterator for VAppStoreIter {
     type Item = (usize, VAppEntry);
 
     fn next(&mut self) -> Option<Self::Item> {
-        let collection = VAppStore::get_collection_ref();
-        if self.current_index < collection.len() {
+        let storage = VAppStore::get_storage_ref();
+        // Find next initialized slot
+        while self.current_index < MAX_REGISTERED_VAPPS {
             let index = self.current_index;
             self.current_index += 1;
-            collection.get(index).map(|entry| (index, *entry))
-        } else {
-            None
+            if storage[index].is_initialized() {
+                return Some((index, *storage[index].get_ref()));
+            }
         }
+        None
     }
 }
