@@ -423,6 +423,10 @@ impl<'a> CommitPageProofResponse<'a> {
             proof,
         }
     }
+
+    pub const fn max_proof_size() -> usize {
+        (MAX_APDU_DATA_SIZE - 2 - 32) / 32
+    }
 }
 
 impl<'a> Message<'a> for CommitPageProofResponse<'a> {
@@ -514,6 +518,10 @@ impl<'a> CommitPageProofContinuedResponse<'a> {
     pub fn new(t: u8, proof: &'a [[u8; 32]]) -> Self {
         CommitPageProofContinuedResponse { t, proof }
     }
+
+    pub const fn max_proof_size() -> usize {
+        (MAX_APDU_DATA_SIZE - 1) / 32
+    }
 }
 
 impl<'a> Message<'a> for CommitPageProofContinuedResponse<'a> {
@@ -589,6 +597,10 @@ impl<'a> SendBufferMessage<'a> {
             data,
         }
     }
+
+    pub const fn max_data_size() -> usize {
+        MAX_APDU_DATA_SIZE - 6
+    }
 }
 
 impl<'a> Message<'a> for SendBufferMessage<'a> {
@@ -636,6 +648,10 @@ impl<'a> SendBufferContinuedMessage<'a> {
             command_code: ClientCommandCode::SendBufferContinued,
             data,
         }
+    }
+
+    pub const fn max_data_size() -> usize {
+        MAX_APDU_DATA_SIZE - 1
     }
 }
 
@@ -711,6 +727,10 @@ impl<'a> ReceiveBufferResponse<'a> {
             remaining_length,
             content,
         }
+    }
+
+    pub const fn max_chunk_size() -> usize {
+        MAX_APDU_DATA_SIZE - 4
     }
 }
 
