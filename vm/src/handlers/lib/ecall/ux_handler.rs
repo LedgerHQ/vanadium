@@ -99,10 +99,9 @@ unsafe extern "C" fn layout_touch_callback(token: core::ffi::c_int, index: u8) {
         }
     };
 
-    store_new_event(
-        common::ux::EventCode::Action,
-        common::ux::EventData { action },
-    );
+    let mut event_data = common::ux::EventData::default();
+    event_data.action = action;
+    store_new_event(common::ux::EventCode::Action, event_data);
 }
 
 // nbgl_stepButtonCallback_t
@@ -122,10 +121,9 @@ unsafe extern "C" fn step_button_callback(
         }
     };
 
-    store_new_event(
-        common::ux::EventCode::Action,
-        common::ux::EventData { action },
-    );
+    let mut event_data = common::ux::EventData::default();
+    event_data.action = action;
+    store_new_event(common::ux::EventCode::Action, event_data);
 }
 
 // encapsulates all the global state related to Events and UX handling
