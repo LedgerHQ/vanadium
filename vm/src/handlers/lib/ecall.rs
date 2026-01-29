@@ -195,6 +195,13 @@ impl fmt::Display for LedgerHashContextError {
 
 impl core::error::Error for LedgerHashContextError {}
 
+// Compile-time size validation for EventData union
+// Ensures that EventData is exactly 16 bytes with no unexpected padding
+const _: () = assert!(
+    core::mem::size_of::<common::ux::EventData>() == 16,
+    "EventData must be exactly 16 bytes for safe transmutation to [u8; 16]"
+);
+
 // A union of all the supported hash contexts, in the same memory layout used in the Ledger SDK
 #[repr(C)]
 union LedgerHashContext {
@@ -960,6 +967,11 @@ impl<'a, const N: usize> CommEcallHandler<'a, N> {
             }
         }
 
+        // Validate that pubkey.W has the expected 65-byte uncompressed public key format.
+        if pubkey.W_len != 65 {
+            return Err(CommEcallError::GenericError("Invalid public key length"));
+        }
+
         let mut sha_hasher = ledger_device_sdk::hash::sha2::Sha2_256::new();
         sha_hasher.update(&[02u8 + (pubkey.W[64] % 2)]).unwrap();
         sha_hasher.update(&pubkey.W[1..33]).unwrap();
@@ -1476,6 +1488,9 @@ impl<'a, const N: usize> CommEcallHandler<'a, N> {
     ) -> Result<u32, CommEcallError> {
         if let Some((event_code, event_data)) = get_last_event() {
             // transmute the EventData as a [u8]
+            // SAFETY: EventData is #[repr(C)] with size 16 bytes. All event data is initialized
+            // via EventData::default() which zeros all 16 bytes before setting specific fields.
+            // This ensures no uninitialized padding bytes exist when transmuting to &[u8].
             let event_data_raw = unsafe {
                 core::slice::from_raw_parts(
                     &event_data as *const _ as *const u8,
