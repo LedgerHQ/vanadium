@@ -102,15 +102,13 @@ mod hashers {
                     self
                 }
 
-                fn digest(self, digest: &mut [u8; $digest_size]) {
+                fn digest(mut self, digest: &mut [u8; $digest_size]) {
                     if digest.len() != $digest_size {
                         panic!("Invalid digest size");
                     }
-                    // TODO: how to avoid the clone here?
-                    let mut self_clone = self.clone();
                     if 0 == ecalls::hash_final(
                         HashId::$name as u32,
-                        &mut self_clone.0 as *mut _ as *mut u8,
+                        &mut self.0 as *mut _ as *mut u8,
                         digest.as_mut_ptr(),
                     ) {
                         panic!("Failed to finalize hash");
