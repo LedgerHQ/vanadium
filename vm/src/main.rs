@@ -147,8 +147,7 @@ pub enum AppSW {
 
     VMRuntimeError = 0xB020,
     VAppPanic = 0xB021,
-
-    Unknown = 0xCCCC,
+    DecodingFailed = 0xCCCC,
 
     Ok = 0x9000,
 }
@@ -165,29 +164,6 @@ impl From<AppSW> for u16 {
     }
 }
 
-// TODO: get rid of this
-impl From<Reply> for AppSW {
-    fn from(r: Reply) -> Self {
-        match r.0 {
-            x if x == AppSW::Deny as u16 => AppSW::Deny,
-            x if x == AppSW::StoreFull as u16 => AppSW::StoreFull,
-            x if x == AppSW::IncorrectData as u16 => AppSW::IncorrectData,
-            x if x == AppSW::WrongP1P2 as u16 => AppSW::WrongP1P2,
-            x if x == AppSW::InsNotSupported as u16 => AppSW::InsNotSupported,
-            x if x == AppSW::ClaNotSupported as u16 => AppSW::ClaNotSupported,
-            x if x == AppSW::SignatureFail as u16 => AppSW::SignatureFail,
-            x if x == AppSW::KeyDeriveFail as u16 => AppSW::KeyDeriveFail,
-            x if x == AppSW::VersionParsingFail as u16 => AppSW::VersionParsingFail,
-            x if x == AppSW::InterruptedExecution as u16 => AppSW::InterruptedExecution,
-            x if x == AppSW::WrongApduLength as u16 => AppSW::WrongApduLength,
-            x if x == AppSW::VMRuntimeError as u16 => AppSW::VMRuntimeError,
-            x if x == AppSW::VAppPanic as u16 => AppSW::VAppPanic,
-            x if x == AppSW::Ok as u16 => AppSW::Ok,
-            _ => AppSW::Unknown,
-        }
-    }
-}
-
 /// Possible input commands received through APDUs.
 #[derive(Debug, Copy, Clone)]
 pub enum Instruction {
@@ -199,7 +175,7 @@ pub enum Instruction {
 }
 
 impl TryFrom<ApduHeader> for Instruction {
-    type Error = AppSW;
+    type Error = Reply;
 
     /// APDU parsing logic.
     ///
@@ -218,9 +194,9 @@ impl TryFrom<ApduHeader> for Instruction {
             (1, 0, 0) => Ok(Instruction::GetAppName),
             (2, 0, 0) => Ok(Instruction::RegisterVApp),
             (3, 0, 0) => Ok(Instruction::StartVApp),
-            (0..=3, _, _) => Err(AppSW::WrongP1P2),
+            (0..=3, _, _) => Err(AppSW::WrongP1P2.into()),
             (0xff, p1, p2) => Ok(Instruction::Continue(p1, p2)),
-            (_, _, _) => Err(AppSW::InsNotSupported),
+            (_, _, _) => Err(AppSW::InsNotSupported.into()),
         }
     }
 }
@@ -260,7 +236,7 @@ extern "C" fn sample_main() {
 fn handle_apdu(command: Command<COMM_BUFFER_SIZE>) -> Result<Vec<u8>, AppSW> {
     let ins: Instruction = command
         .decode::<Instruction>()
-        .map_err(|sw| AppSW::from(sw))?;
+        .map_err(|_| AppSW::DecodingFailed)?;
     match ins {
         Instruction::GetAppName => Ok(env!("CARGO_PKG_NAME").as_bytes().to_vec()),
         Instruction::GetVersion => handler_get_version(command),
