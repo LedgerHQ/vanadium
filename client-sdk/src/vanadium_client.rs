@@ -396,8 +396,7 @@ impl<E: std::fmt::Debug + Send + Sync + 'static> VAppEngine<E> {
         let proof: Vec<[u8; 32]> = proof.into_iter().map(|h| h.into()).collect();
 
         // Calculate how many proof elements we can send in one message
-        let max_proof_elements = (255 - 2 - 32) / 32; // 2 bytes for n and t, 32 bytes for new_root, then 32 bytes for each proof element
-        let t = min(proof.len(), max_proof_elements) as u8;
+        let t = min(proof.len(), CommitPageProofResponse::max_proof_size()) as u8;
 
         // Create the proof response
         let response =
@@ -413,9 +412,6 @@ impl<E: std::fmt::Debug + Send + Sync + 'static> VAppEngine<E> {
         // If there are more proof elements to send and VM requests them
         if t < proof.len() as u8 && status == StatusWord::InterruptedExecution && !result.is_empty()
         {
-            // CommitPageProofContinuedMessage have a different size
-            let max_proof_elements = (255 - 2) / 32; // 2 bytes for n and t, 32 bytes per proof element
-
             CommitPageProofContinuedMessage::deserialize(&result)?;
 
             #[cfg(feature = "debug")]
@@ -426,7 +422,10 @@ impl<E: std::fmt::Debug + Send + Sync + 'static> VAppEngine<E> {
             // Send remaining proof elements, potentially in multiple messages
             while offset < proof.len() {
                 let remaining = proof.len() - offset;
-                let t = min(remaining, max_proof_elements) as u8;
+                let t = min(
+                    remaining,
+                    CommitPageProofContinuedResponse::max_proof_size(),
+                ) as u8;
 
                 let response =
                     CommitPageProofContinuedResponse::new(t, &proof[offset..offset + t as usize])
@@ -577,8 +576,10 @@ impl<E: std::fmt::Debug + Send + Sync + 'static> VAppEngine<E> {
         let mut offset: usize = 0;
 
         loop {
-            // TODO: check if correct when the buffer is long
-            let chunk_len = min(remaining_len, 255 - 4);
+            let chunk_len = min(
+                remaining_len,
+                ReceiveBufferResponse::max_chunk_size() as u32,
+            );
             let data = ReceiveBufferResponse::new(
                 remaining_len,
                 &bytes[offset..offset + chunk_len as usize],
