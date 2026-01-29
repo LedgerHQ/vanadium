@@ -23,6 +23,7 @@ mod app_ui;
 mod handlers;
 mod hash;
 mod io;
+mod nvm;
 mod vapp;
 
 #[cfg(feature = "run_tests")]
