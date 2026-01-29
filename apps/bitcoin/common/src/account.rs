@@ -137,7 +137,8 @@ impl ProofOfRegistration {
     pub fn new(id: &[u8; 32]) -> Self {
         let por_key = sdk::slip21::derive_slip21_key(&[&POR_MAGIC]);
 
-        let mut mac = HmacEngine::<bitcoin::hashes::sha256::Hash>::new(&por_key);
+        let mut mac =
+            HmacEngine::<bitcoin::hashes::sha256::Hash>::new(por_key.dangerous_as_raw_bytes());
         mac.input(id);
         Self(Hmac::<bitcoin::hashes::sha256::Hash>::from_engine(mac).to_byte_array())
     }
