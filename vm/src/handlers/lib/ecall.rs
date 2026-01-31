@@ -2,6 +2,7 @@ use core::{
     cell::{RefCell, RefMut},
     cmp::min,
     fmt,
+    mem::MaybeUninit,
 };
 
 use alloc::{format, rc::Rc, string::String, vec, vec::Vec};
@@ -10,6 +11,7 @@ use common::{
         BufferType, Message, MessageDeserializationError, ReceiveBufferMessage,
         ReceiveBufferResponse, SendBufferContinuedMessage, SendBufferMessage,
     },
+    constants::PAGE_SIZE,
     ecall_constants::{self, *},
     ux::Deserializable,
     vm::{Cpu, CpuError, EcallHandler, MemoryError},
@@ -1481,6 +1483,58 @@ impl<'a, const N: usize> CommEcallHandler<'a, N> {
         Ok(res as u32)
     }
 
+    fn handle_memcpy<E: fmt::Debug>(
+        &self,
+        cpu: &mut Cpu<OutsourcedMemory<'_, N>>,
+        dest: GuestPointer,
+        src: GuestPointer,
+        len: usize,
+    ) -> Result<u32, CommEcallError> {
+        let mut buf: MaybeUninit<[u8; PAGE_SIZE]> = MaybeUninit::uninit();
+
+        // SAFETY: We will fully initialize any parts of the buffer we read.
+        let buf_slice: &mut [u8] =
+            unsafe { core::slice::from_raw_parts_mut(buf.as_mut_ptr() as *mut u8, PAGE_SIZE) };
+
+        let mut offset = 0;
+        while offset < len {
+            let src_segment = cpu.get_segment::<E>(src.0)?;
+            let copy_size = min(PAGE_SIZE, len - offset);
+            src_segment.read_buffer(src.0 + offset as u32, &mut buf_slice[..copy_size])?;
+
+            let dest_segment = cpu.get_segment::<E>(dest.0)?;
+            dest_segment.write_buffer(dest.0 + offset as u32, &buf_slice[..copy_size])?;
+            offset += copy_size;
+        }
+        Ok(dest.0)
+    }
+
+    fn handle_memset<E: fmt::Debug>(
+        &self,
+        cpu: &mut Cpu<OutsourcedMemory<'_, N>>,
+        dest: GuestPointer,
+        ch: i32,
+        len: usize,
+    ) -> Result<u32, CommEcallError> {
+        let mut buf: MaybeUninit<[u8; PAGE_SIZE]> = MaybeUninit::uninit();
+
+        // SAFETY: We will fully initialize any parts of the buffer we write.
+        // TODO: maybe we should just use a static buffer for all the ecalls?
+        let buf_slice: &mut [u8] =
+            unsafe { core::slice::from_raw_parts_mut(buf.as_mut_ptr() as *mut u8, PAGE_SIZE) };
+
+        let mut offset = 0;
+        while offset < len {
+            let copy_size = min(PAGE_SIZE, len - offset);
+            buf_slice[..copy_size].fill(ch as u8); // TODO: very redundant, optimize this
+
+            let dest_segment = cpu.get_segment::<E>(dest.0)?;
+            dest_segment.write_buffer(dest.0 + offset as u32, &buf_slice[..copy_size])?;
+            offset += copy_size;
+        }
+        Ok(dest.0)
+    }
+
     fn handle_get_event<E: fmt::Debug>(
         &self,
         cpu: &mut Cpu<OutsourcedMemory<'_, N>>,
@@ -1665,6 +1719,24 @@ impl<'a, const N: usize> EcallHandler for CommEcallHandler<'a, N> {
                 self.handle_print::<CommEcallError>(cpu, GPreg!(A0), reg!(A1) as usize)
                     .map_err(|_| CommEcallError::GenericError("print failed"))?;
                 reg!(A0) = 1;
+            }
+            ECALL_MEMCPY => {
+                crate::println!("@@@ memcpy, {} bytes", reg!(A2));
+                reg!(A0) = self.handle_memcpy::<CommEcallError>(
+                    cpu,
+                    GPreg!(A0),
+                    GPreg!(A1),
+                    reg!(A2) as usize,
+                )?;
+            }
+            ECALL_MEMSET => {
+                crate::println!("@@@ memset, {} bytes", reg!(A2));
+                reg!(A0) = self.handle_memset::<CommEcallError>(
+                    cpu,
+                    GPreg!(A0),
+                    reg!(A1) as i32,
+                    reg!(A2) as usize,
+                )?;
             }
             ECALL_GET_EVENT => {
                 reg!(A0) = self.handle_get_event::<CommEcallError>(cpu, GPreg!(A0))?;

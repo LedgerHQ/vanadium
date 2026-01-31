@@ -166,3 +166,29 @@ macro_rules! bootstrap {
         use $crate::{print, println};
     };
 }
+
+#[no_mangle]
+#[inline(never)]
+#[cfg(target_arch = "riscv32")]
+pub unsafe extern "C" fn memcpy(dest: *mut u8, src: *const u8, n: usize) -> *mut u8 {
+    ecalls::sys_memcpy(dest, src, n)
+}
+
+#[no_mangle]
+#[inline(never)]
+#[cfg(target_arch = "riscv32")]
+pub unsafe extern "C" fn memset(dest: *mut u8, ch: i32, n: usize) -> *mut u8 {
+    ecalls::sys_memset(dest, ch, n)
+}
+
+// TODO: do we want to implement and replace memcpy/memset on native targets?
+//       It isn't really useful, but it could be worth reducing the difference
+//       between targets (or properly document the differences).
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn test_placeholder() {
+        assert_eq!(1 + 1, 2);
+    }
+}
