@@ -1,6 +1,6 @@
 use client::BenchClient;
 use hidapi::HidApi;
-use sdk::transport::{TransportHID, TransportWrapper};
+use sdk::transport::{Transport, TransportHID, TransportWrapper};
 use sdk::transport_native_hid::TransportNativeHID;
 use sdk::vanadium_client::VanadiumAppClient;
 use std::env;
@@ -40,6 +40,34 @@ async fn run_bench_case(
     Ok(total_ms)
 }
 
+async fn get_running_app_name(
+    transport: &Arc<TransportHID>,
+) -> Result<String, Box<dyn std::error::Error>> {
+    let (sw, resp) = transport
+        .exchange(&sdk::transport::APDUCommand {
+            cla: 0xB0,
+            ins: 0x01,
+            p1: 0,
+            p2: 0,
+            data: vec![],
+        })
+        .await
+        .map_err(|e| format!("Failed to get app name: {:?}", e))?;
+
+    if sw != sdk::transport::StatusWord::OK {
+        return Err(format!("Failed to get app name: SW={:04X}", sw as u16).into());
+    }
+
+    // the second byte is the length of the app, followed by the app name
+    let app_name_len = *resp.get(1).ok_or("Response too short")?;
+    let app_name_bytes = resp
+        .get(2..(2 + app_name_len as usize))
+        .ok_or("Invalid app name length")?;
+    let app_name =
+        String::from_utf8(app_name_bytes.to_vec()).map_err(|_| "Invalid UTF-8 in app name")?;
+    Ok(app_name)
+}
+
 #[tokio::main(flavor = "multi_thread")]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = env::args().skip(1).collect();
@@ -47,6 +75,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         TransportNativeHID::new(&HidApi::new().expect("Unable to get connect to the device"))
             .unwrap(),
     ));
+
+    let running_app_name = get_running_app_name(&transport_raw)
+        .await
+        .unwrap_or("".to_string());
+    if running_app_name != "Vanadium" {
+        println!("Please make sure the device is unlocked and the Vanadium app is open.");
+        return Ok(());
+    }
+
     let transport = Arc::new(TransportWrapper::new(transport_raw.clone()));
 
     let testcases: Vec<_> = if args.is_empty() {
