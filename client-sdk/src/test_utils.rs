@@ -209,13 +209,12 @@ where
 
     TestSetup::new(vanadium_binary, |transport| async move {
         let print_writer = Box::new(FileLineWriter::new("print.log", true, true));
-        let vanadium_client =
-            VanadiumAppClient::new(vapp_binary, transport, print_writer)
-                .await
-                .expect(&format!(
-                    "Failed to create client for vapp binary: {}",
-                    vapp_binary
-                ));
+        let vanadium_client = VanadiumAppClient::with_vapp(vapp_binary, transport, print_writer)
+            .await
+            .expect(&format!(
+                "Failed to create client for vapp binary: {}",
+                vapp_binary
+            ));
 
         create_client(Box::new(vanadium_client))
     })
