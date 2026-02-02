@@ -17,7 +17,7 @@ use tokio::{
     sync::Mutex,
 };
 
-use crate::apdu::{APDUCommand, StatusWord};
+pub use crate::apdu::{APDUCommand, StatusWord};
 
 /// Generic trait to abstract the communication layer between the host and a Ledger device.
 #[async_trait]
