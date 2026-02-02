@@ -29,9 +29,10 @@ async fn run_bench_case(
         "cases/{}/target/riscv32imc-unknown-none-elf/release/{}",
         case, crate_name
     );
-    let client_raw = VanadiumAppClient::new(&app_path_str, transport, Box::new(std::io::sink()))
-        .await
-        .map_err(|_| "Failed to create client")?;
+    let client_raw =
+        VanadiumAppClient::with_vapp(&app_path_str, transport, Box::new(std::io::sink()))
+            .await
+            .map_err(|_| "Failed to create client")?;
     let mut client = BenchClient::new(Box::new(client_raw));
     let start = Instant::now();
     client.run_and_exit(repetitions).await?;

@@ -637,6 +637,7 @@ impl<E: std::fmt::Debug + Send + Sync + 'static> VAppEngine<E> {
 }
 
 struct GenericVanadiumClient<E: std::fmt::Debug + Send + Sync + 'static> {
+    transport: Arc<dyn Transport<Error = E>>,
     engine: Option<VAppEngine<E>>,
 }
 
@@ -657,6 +658,8 @@ pub enum VanadiumClientError {
     TransportError(String),
     AppInfoParsingError(String),
     InvalidAppName(String),
+    VAppAlreadyRunning,
+    VAppNotRunning,
 }
 
 impl From<&str> for VanadiumClientError {
@@ -674,6 +677,8 @@ impl std::fmt::Display for VanadiumClientError {
                 write!(f, "Failed to parse app info: {}", msg)
             }
             VanadiumClientError::InvalidAppName(msg) => write!(f, "Invalid app name: {}", msg),
+            VanadiumClientError::VAppAlreadyRunning => write!(f, "A V-App is already running"),
+            VanadiumClientError::VAppNotRunning => write!(f, "No V-App is currently running"),
         }
     }
 }
@@ -685,16 +690,32 @@ impl std::error::Error for VanadiumClientError {
 }
 
 impl<E: std::fmt::Debug + Send + Sync + 'static> GenericVanadiumClient<E> {
-    pub fn new() -> Self {
-        Self { engine: None }
+    pub fn new(transport: Arc<dyn Transport<Error = E>>) -> Self {
+        Self {
+            transport,
+            engine: None,
+        }
+    }
+
+    /// Returns whether a V-App is currently running.
+    pub fn is_vapp_running(&self) -> bool {
+        self.engine.is_some()
+    }
+
+    /// Stops the currently running V-App, if any.
+    pub fn stop_vapp(&mut self) {
+        self.engine = None;
+    }
+
+    /// Returns a reference to the transport.
+    pub fn transport(&self) -> &Arc<dyn Transport<Error = E>> {
+        &self.transport
     }
 
     /// Retrieves the app name, version, and device model from the Vanadium app.
-    pub async fn get_app_info(
-        &self,
-        transport: Arc<dyn Transport<Error = E>>,
-    ) -> Result<AppInfo, VanadiumClientError> {
-        let (status, result) = transport
+    pub async fn get_app_info(&self) -> Result<AppInfo, VanadiumClientError> {
+        let (status, result) = self
+            .transport
             .exchange(&apdu_get_app_info())
             .await
             .map_err(|_| VanadiumClientError::TransportError("exchange failed".to_string()))?;
@@ -772,15 +793,12 @@ impl<E: std::fmt::Debug + Send + Sync + 'static> GenericVanadiumClient<E> {
         })
     }
 
-    pub async fn register_vapp(
-        &self,
-        transport: Arc<dyn Transport<Error = E>>,
-        manifest: &Manifest,
-    ) -> Result<(), &'static str> {
+    pub async fn register_vapp(&self, manifest: &Manifest) -> Result<(), &'static str> {
         let serialized_manifest =
             postcard::to_allocvec(manifest).map_err(|_| "manifest serialization failed")?;
 
-        let (status, _result) = transport
+        let (status, _result) = self
+            .transport
             .exchange(&apdu_register_vapp(serialized_manifest))
             .await
             .map_err(|_| "exchange failed")?;
@@ -795,7 +813,6 @@ impl<E: std::fmt::Debug + Send + Sync + 'static> GenericVanadiumClient<E> {
 
     pub async fn run_vapp(
         &mut self,
-        transport: Arc<dyn Transport<Error = E>>,
         manifest: &Manifest,
         elf: &VAppElfFile,
         print_writer: Box<dyn std::io::Write + Send + Sync>,
@@ -813,7 +830,7 @@ impl<E: std::fmt::Debug + Send + Sync + 'static> GenericVanadiumClient<E> {
             code_seg,
             data_seg,
             stack_seg,
-            transport,
+            transport: self.transport.clone(),
             print_writer,
             pending_receive_buffer: None,
             current_status: StatusWord::OK,
@@ -846,6 +863,8 @@ impl<E: std::fmt::Debug + Send + Sync + 'static> GenericVanadiumClient<E> {
 /// Represents errors that can occur during the execution of a V-App.
 #[derive(Debug)]
 pub enum VAppExecutionError {
+    /// Indicates that no V-App is currently running.
+    VAppNotRunning,
     /// Indicates that the V-App has panicked with the specific message.
     AppPanicked(String),
     /// Indicates that the V-App has exited with the specific status code.
@@ -858,6 +877,7 @@ pub enum VAppExecutionError {
 impl std::fmt::Display for VAppExecutionError {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         match self {
+            VAppExecutionError::VAppNotRunning => write!(f, "No V-App is currently running"),
             VAppExecutionError::AppPanicked(msg) => write!(f, "V-App panicked: {}", msg),
             VAppExecutionError::AppExited(code) => write!(f, "V-App exited with status {}", code),
             VAppExecutionError::Other(e) => write!(f, "{}", e),
@@ -868,6 +888,7 @@ impl std::fmt::Display for VAppExecutionError {
 impl std::error::Error for VAppExecutionError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
+            VAppExecutionError::VAppNotRunning => None,
             VAppExecutionError::AppPanicked(_) => None,
             VAppExecutionError::AppExited(_) => None,
             VAppExecutionError::Other(e) => Some(&**e),
@@ -917,92 +938,101 @@ fn get_cargo_toml_path(elf_path: &str) -> Option<PathBuf> {
     None
 }
 
+// Helper function to load ELF and create manifest from elf_path
+fn load_elf_and_manifest(
+    elf_path: &str,
+) -> Result<(VAppElfFile, Manifest), Box<dyn std::error::Error + Send + Sync>> {
+    let elf_file = VAppElfFile::new(Path::new(&elf_path))
+        .map_err(|e| format!("Failed to create ELF file from path '{}': {}", elf_path, e))?;
+
+    let manifest = if let Some(m) = &elf_file.manifest {
+        // If the elf file is a packaged V-App, we use its manifest
+        m.clone()
+    } else {
+        // There is no Manifest in the elf file.
+        // Depending on the value of the cargo_toml feature, we either return an error or
+        // try to create a valid Manifest based on the Cargo.toml file.
+
+        #[cfg(not(feature = "cargo_toml"))]
+        {
+            return Err("No manifest found in the ELF file".into());
+        }
+
+        #[cfg(feature = "cargo_toml")]
+        {
+            // We create one based on the elf file and the app's Cargo.toml.
+            // This is useful during development.
+
+            let cargo_toml_path =
+                get_cargo_toml_path(elf_path).ok_or("Failed to find Cargo.toml")?;
+
+            let (_, vapp_version, vapp_metadata) = elf::get_vapp_metadata(&cargo_toml_path)?;
+
+            let vapp_name = vapp_metadata
+                .get("name")
+                .ok_or("V-App name missing in metadata")?
+                .as_str()
+                .ok_or("V-App name is not a string")?;
+
+            let stack_size = vapp_metadata
+                .get("stack_size")
+                .ok_or("Stack size missing in metadata")?
+                .as_integer()
+                .ok_or("Stack size is not a number")?;
+            let stack_size = stack_size as u32;
+
+            let stack_start = DEFAULT_STACK_START;
+            let stack_end = stack_start + stack_size;
+
+            let code_merkle_root: [u8; 32] =
+                MemorySegment::new(elf_file.code_segment.start, &elf_file.code_segment.data)
+                    .get_content_root()
+                    .clone()
+                    .into();
+            let data_merkle_root: [u8; 32] =
+                MemorySegment::new(elf_file.data_segment.start, &elf_file.data_segment.data)
+                    .get_content_root()
+                    .clone()
+                    .into();
+            let stack_merkle_root: [u8; 32] =
+                MemorySegment::new(stack_start, &vec![0u8; (stack_end - stack_start) as usize])
+                    .get_content_root()
+                    .clone()
+                    .into();
+
+            Manifest::new(
+                0,
+                vapp_name,
+                &vapp_version,
+                elf_file.entrypoint,
+                elf_file.code_segment.start,
+                elf_file.code_segment.end,
+                code_merkle_root,
+                elf_file.data_segment.start,
+                elf_file.data_segment.end,
+                data_merkle_root,
+                stack_start,
+                stack_end,
+                stack_merkle_root,
+            )?
+        }
+    };
+
+    Ok((elf_file, manifest))
+}
+
 impl<E: std::fmt::Debug + Send + Sync + 'static> SyncVanadiumAppClient<E> {
+    /// Creates a new SyncVanadiumAppClient connected to a Vanadium instance.
+    ///
+    /// This creates a client without starting any V-App. Use `start_vapp` to run a V-App.
+    /// This constructor verifies that the connected device is running the Vanadium app.
     pub async fn new(
-        elf_path: &str,
         transport: Arc<dyn Transport<Error = E>>,
-        print_writer: Box<dyn std::io::Write + Send + Sync>,
     ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
-        // Create ELF file and manifest
-        let elf_file = VAppElfFile::new(Path::new(&elf_path))
-            .map_err(|e| format!("Failed to create ELF file from path '{}': {}", elf_path, e))?;
-
-        let manifest = if let Some(m) = &elf_file.manifest {
-            // If the elf file is a packaged V-App, we use its manifest
-            m.clone()
-        } else {
-            // There is no Manifest in the elf file.
-            // Depending on the value of the cargo_toml feature, we either return an error or
-            // try to create a valid Manifest based on the Cargo.toml file.
-
-            #[cfg(not(feature = "cargo_toml"))]
-            {
-                return Err("No manifest found in the ELF file".into());
-            }
-
-            #[cfg(feature = "cargo_toml")]
-            {
-                // We create one based on the elf file and the apps's Cargo.toml.
-                // This is useful during development.
-
-                let cargo_toml_path =
-                    get_cargo_toml_path(elf_path).ok_or("Failed to find Cargo.toml")?;
-
-                let (_, vapp_version, vapp_metadata) = elf::get_vapp_metadata(&cargo_toml_path)?;
-
-                let vapp_name = vapp_metadata
-                    .get("name")
-                    .ok_or("V-App name missing in metadata")?
-                    .as_str()
-                    .ok_or("V-App name is not a string")?;
-
-                let stack_size = vapp_metadata
-                    .get("stack_size")
-                    .ok_or("Stack size missing in metadata")?
-                    .as_integer()
-                    .ok_or("Stack size is not a number")?;
-                let stack_size = stack_size as u32;
-
-                let stack_start = DEFAULT_STACK_START;
-                let stack_end = stack_start + stack_size;
-
-                let code_merkle_root: [u8; 32] =
-                    MemorySegment::new(elf_file.code_segment.start, &elf_file.code_segment.data)
-                        .get_content_root()
-                        .clone()
-                        .into();
-                let data_merkle_root: [u8; 32] =
-                    MemorySegment::new(elf_file.data_segment.start, &elf_file.data_segment.data)
-                        .get_content_root()
-                        .clone()
-                        .into();
-                let stack_merkle_root: [u8; 32] =
-                    MemorySegment::new(stack_start, &vec![0u8; (stack_end - stack_start) as usize])
-                        .get_content_root()
-                        .clone()
-                        .into();
-
-                Manifest::new(
-                    0,
-                    vapp_name,
-                    &vapp_version,
-                    elf_file.entrypoint,
-                    elf_file.code_segment.start,
-                    elf_file.code_segment.end,
-                    code_merkle_root,
-                    elf_file.data_segment.start,
-                    elf_file.data_segment.end,
-                    data_merkle_root,
-                    stack_start,
-                    stack_end,
-                    stack_merkle_root,
-                )?
-            }
-        };
+        let client = GenericVanadiumClient::new(transport);
 
         // Verify we're actually connecting to the Ledger Vanadium app
-        let client_temp = GenericVanadiumClient::new();
-        let app_info = client_temp.get_app_info(transport.clone()).await?;
+        let app_info = client.get_app_info().await?;
         if app_info.name != "Vanadium" {
             return Err(VanadiumClientError::InvalidAppName(format!(
                 "Expected app name 'Vanadium', got '{}'",
@@ -1011,48 +1041,94 @@ impl<E: std::fmt::Debug + Send + Sync + 'static> SyncVanadiumAppClient<E> {
             .into());
         }
 
-        let mut client = GenericVanadiumClient::new();
+        Ok(Self { client })
+    }
+
+    /// Creates a new SyncVanadiumAppClient and immediately starts a V-App.
+    ///
+    /// This is a convenience method equivalent to calling `new()` followed by `start_vapp()`.
+    /// Provided for backward compatibility.
+    pub async fn with_vapp(
+        elf_path: &str,
+        transport: Arc<dyn Transport<Error = E>>,
+        print_writer: Box<dyn std::io::Write + Send + Sync>,
+    ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+        let mut client = Self::new(transport).await?;
+        client.start_vapp(elf_path, print_writer).await?;
+        Ok(client)
+    }
+
+    /// Starts a V-App from the given ELF file path.
+    ///
+    /// This will automatically register the V-App if it's not already registered on the device.
+    /// Returns an error if a V-App is already running; call `stop_vapp()` first.
+    pub async fn start_vapp(
+        &mut self,
+        elf_path: &str,
+        print_writer: Box<dyn std::io::Write + Send + Sync>,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        if self.client.is_vapp_running() {
+            return Err(VanadiumClientError::VAppAlreadyRunning.into());
+        }
+
+        let (elf_file, manifest) = load_elf_and_manifest(elf_path)?;
 
         // Try to run the V-App first (in case it's already registered)
         // Use a dummy Sink writer for this speculative attempt, preserving the real writer for later
         let sink_writer: Box<dyn std::io::Write + Send + Sync> =
             Box::new(crate::linewriter::Sink::default());
-        match client
-            .run_vapp(transport.clone(), &manifest, &elf_file, sink_writer)
+        match self
+            .client
+            .run_vapp(&manifest, &elf_file, sink_writer)
             .await
         {
             Ok(()) => {
                 // App was already registered, replace the Sink with the real print_writer
-                client.set_print_writer(print_writer);
-                Ok(Self { client })
+                self.client.set_print_writer(print_writer);
+                Ok(())
             }
             Err(VAppEngineError::AppNotRegistered) => {
                 // App not registered, need to register first
-                client.register_vapp(transport.clone(), &manifest).await?;
+                self.client.register_vapp(&manifest).await?;
 
                 // Now run the V-App
-                client
-                    .run_vapp(transport, &manifest, &elf_file, print_writer)
+                self.client
+                    .run_vapp(&manifest, &elf_file, print_writer)
                     .await?;
 
-                Ok(Self { client })
+                Ok(())
             }
             Err(e) => Err(e.into()),
         }
     }
 
-    /// Retrieves the app name, version, and device model.
-    pub async fn get_app_info(
-        &mut self,
-        transport: Arc<dyn Transport<Error = E>>,
-    ) -> Result<AppInfo, VanadiumClientError> {
-        self.client.get_app_info(transport).await
+    /// Returns whether a V-App is currently running.
+    pub fn is_vapp_running(&self) -> bool {
+        self.client.is_vapp_running()
+    }
+
+    /// Stops the currently running V-App, if any.
+    pub fn stop_vapp(&mut self) {
+        self.client.stop_vapp();
+    }
+
+    /// Returns a reference to the transport.
+    pub fn transport(&self) -> &Arc<dyn Transport<Error = E>> {
+        self.client.transport()
+    }
+
+    /// Retrieves the app name, version, and device model from the Vanadium app.
+    pub async fn get_app_info(&self) -> Result<AppInfo, VanadiumClientError> {
+        self.client.get_app_info().await
     }
 }
 
 #[async_trait]
 impl<E: std::fmt::Debug + Send + Sync + 'static> VAppTransport for SyncVanadiumAppClient<E> {
     async fn send_message(&mut self, msg: &[u8]) -> Result<Vec<u8>, VAppExecutionError> {
+        if !self.client.is_vapp_running() {
+            return Err(VAppExecutionError::VAppNotRunning);
+        }
         self.client
             .send_message(msg)
             .await
@@ -1060,55 +1136,65 @@ impl<E: std::fmt::Debug + Send + Sync + 'static> VAppTransport for SyncVanadiumA
     }
 }
 
-enum WorkerMessage<E: std::fmt::Debug + Send + Sync + 'static> {
+enum WorkerMessage {
     SendMessage(
         Vec<u8>,
         tokio::sync::oneshot::Sender<Result<Vec<u8>, VAppExecutionError>>,
     ),
-    GetAppInfo(
-        Arc<dyn Transport<Error = E>>,
-        tokio::sync::oneshot::Sender<Result<AppInfo, VanadiumClientError>>,
+    GetAppInfo(tokio::sync::oneshot::Sender<Result<AppInfo, VanadiumClientError>>),
+    StartVApp(
+        String,                                // elf_path
+        Box<dyn std::io::Write + Send + Sync>, // print_writer
+        tokio::sync::oneshot::Sender<Result<(), Box<dyn std::error::Error + Send + Sync>>>,
     ),
+    StopVApp(tokio::sync::oneshot::Sender<()>),
+    IsVAppRunning(tokio::sync::oneshot::Sender<bool>),
 }
 
 /// This client runs a background task that continuously steps the V-App engine,
 /// preventing the device from appearing frozen when waiting for messages from the host.
 pub struct VanadiumAppClient<E: std::fmt::Debug + Send + Sync + 'static> {
     transport: Arc<dyn Transport<Error = E>>,
-    message_tx: tokio::sync::mpsc::UnboundedSender<WorkerMessage<E>>,
+    message_tx: tokio::sync::mpsc::UnboundedSender<WorkerMessage>,
     shutdown_tx: Option<tokio::sync::oneshot::Sender<()>>,
     worker_handle: Option<tokio::task::JoinHandle<()>>,
     _phantom: std::marker::PhantomData<E>,
 }
 
 impl<E: std::fmt::Debug + Send + Sync + 'static> VanadiumAppClient<E> {
-    /// Creates a new VanadiumAppClient.
+    /// Creates a new VanadiumAppClient connected to a Vanadium instance.
     ///
-    /// This creates a Vanadium client with a background task that
-    /// continuously steps the engine to keep the device responsive.
+    /// This creates a client without starting any V-App. Use `start_vapp` to run a V-App.
+    /// This constructor verifies that the connected device is running the Vanadium app.
     pub async fn new(
+        transport: Arc<dyn Transport<Error = E>>,
+    ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+        let sync_client = SyncVanadiumAppClient::new(transport.clone()).await?;
+        Ok(Self::from_sync(sync_client, transport))
+    }
+
+    /// Creates a new VanadiumAppClient and immediately starts a V-App.
+    ///
+    /// This is a convenience method equivalent to calling `new()` followed by `start_vapp()`.
+    pub async fn with_vapp(
         elf_path: &str,
         transport: Arc<dyn Transport<Error = E>>,
         print_writer: Box<dyn std::io::Write + Send + Sync>,
     ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
-        let sync_client = SyncVanadiumAppClient::new(elf_path, transport, print_writer).await?;
-        Ok(Self::from_sync(sync_client))
+        let mut client = Self::new(transport).await?;
+        client.start_vapp(elf_path, print_writer).await?;
+        Ok(client)
     }
 
     /// Creates a new VanadiumAppClient from an existing SyncVanadiumAppClient.
     ///
     /// The provided client will be moved into a background task that
     /// continuously steps the engine to keep the device responsive.
-    fn from_sync(client: SyncVanadiumAppClient<E>) -> Self {
-        // Extract transport from the running engine before moving client
-        let transport = if let Some(engine) = &client.client.engine {
-            engine.transport.clone()
-        } else {
-            // This shouldn't happen, but provide a fallback
-            unreachable!("Engine should be running when creating VanadiumAppClient")
-        };
-
-        let (message_tx, message_rx) = tokio::sync::mpsc::unbounded_channel::<WorkerMessage<E>>();
+    fn from_sync(
+        client: SyncVanadiumAppClient<E>,
+        transport: Arc<dyn Transport<Error = E>>,
+    ) -> Self {
+        let (message_tx, message_rx) = tokio::sync::mpsc::unbounded_channel::<WorkerMessage>();
 
         // Create shutdown channel
         let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
@@ -1125,10 +1211,70 @@ impl<E: std::fmt::Debug + Send + Sync + 'static> VanadiumAppClient<E> {
         }
     }
 
+    /// Starts a V-App from the given ELF file path.
+    ///
+    /// This will automatically register the V-App if it's not already registered on the device.
+    /// Returns an error if a V-App is already running; call `stop_vapp()` first.
+    pub async fn start_vapp(
+        &mut self,
+        elf_path: &str,
+        print_writer: Box<dyn std::io::Write + Send + Sync>,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
+        self.message_tx
+            .send(WorkerMessage::StartVApp(
+                elf_path.to_string(),
+                print_writer,
+                resp_tx,
+            ))
+            .map_err(|_| "Worker task died")?;
+        resp_rx.await.map_err(|_| "Worker task died")??;
+        Ok(())
+    }
+
+    /// Stops the currently running V-App, if any.
+    pub async fn stop_vapp(&mut self) -> Result<(), VanadiumClientError> {
+        let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
+        self.message_tx
+            .send(WorkerMessage::StopVApp(resp_tx))
+            .map_err(|_| VanadiumClientError::GenericError("Worker task died".to_string()))?;
+        resp_rx
+            .await
+            .map_err(|_| VanadiumClientError::GenericError("Worker task died".to_string()))?;
+        Ok(())
+    }
+
+    /// Returns whether a V-App is currently running.
+    pub async fn is_vapp_running(&self) -> Result<bool, VanadiumClientError> {
+        let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
+        self.message_tx
+            .send(WorkerMessage::IsVAppRunning(resp_tx))
+            .map_err(|_| VanadiumClientError::GenericError("Worker task died".to_string()))?;
+        resp_rx
+            .await
+            .map_err(|_| VanadiumClientError::GenericError("Worker task died".to_string()))
+    }
+
+    /// Returns a reference to the transport.
+    pub fn transport(&self) -> &Arc<dyn Transport<Error = E>> {
+        &self.transport
+    }
+
+    /// Retrieves the app name, version, and device model.
+    pub async fn get_app_info(&self) -> Result<AppInfo, VanadiumClientError> {
+        let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
+        self.message_tx
+            .send(WorkerMessage::GetAppInfo(resp_tx))
+            .map_err(|_| VanadiumClientError::GenericError("Worker task died".to_string()))?;
+        resp_rx
+            .await
+            .map_err(|_| VanadiumClientError::GenericError("Worker task died".to_string()))?
+    }
+
     /// Background worker loop that continuously steps the V-App engine.
     async fn worker_loop(
         mut client: SyncVanadiumAppClient<E>,
-        mut message_rx: tokio::sync::mpsc::UnboundedReceiver<WorkerMessage<E>>,
+        mut message_rx: tokio::sync::mpsc::UnboundedReceiver<WorkerMessage>,
         mut shutdown_rx: tokio::sync::oneshot::Receiver<()>,
     ) {
         let mut pending_response: Option<
@@ -1141,42 +1287,71 @@ impl<E: std::fmt::Debug + Send + Sync + 'static> VanadiumAppClient<E> {
                 break;
             }
 
-            // Only accept new messages when there's no pending response
-            // This enforces strict message-response pattern and prevents race conditions
-            if pending_response.is_none() {
-                if let Ok(msg) = message_rx.try_recv() {
-                    match msg {
-                        WorkerMessage::SendMessage(data, resp_tx) => {
-                            // Set the pending message on the engine
-                            if let Some(engine) = client.client.engine.as_mut() {
-                                // Check if there's already a pending message that hasn't been consumed by the device
-                                if engine.pending_receive_buffer.is_some() {
-                                    #[cfg(feature = "debug")]
-                                    log::warn!("Message sent before device called xrecv - previous queued message will be lost");
-                                }
-                                engine.pending_receive_buffer = Some(data);
-                                pending_response = Some(resp_tx);
-                            } else if resp_tx
-                                .send(Err(VAppExecutionError::Other("Engine not running".into())))
+            // Process incoming messages
+            // Only accept SendMessage when there's no pending response
+            if let Ok(msg) = message_rx.try_recv() {
+                match msg {
+                    WorkerMessage::SendMessage(data, resp_tx) => {
+                        if pending_response.is_some() {
+                            // Already have a pending response, reject this one
+                            if resp_tx
+                                .send(Err(VAppExecutionError::Other(
+                                    "Another message is already pending".into(),
+                                )))
                                 .is_err()
                             {
                                 #[cfg(feature = "debug")]
-                                log::debug!("Failed to send error response: receiver dropped");
+                                log::debug!("Failed to send rejection: receiver dropped");
                             }
-                        }
-                        WorkerMessage::GetAppInfo(transport, resp_tx) => {
-                            // Handle GetAppInfo request
-                            let result = client.client.get_app_info(transport).await;
-                            if resp_tx.send(result).is_err() {
+                        } else if let Some(engine) = client.client.engine.as_mut() {
+                            // Check if there's already a pending message that hasn't been consumed by the device
+                            if engine.pending_receive_buffer.is_some() {
                                 #[cfg(feature = "debug")]
-                                log::debug!("Failed to send app info response: receiver dropped");
+                                log::warn!("Message sent before device called xrecv - previous queued message will be lost");
                             }
+                            engine.pending_receive_buffer = Some(data);
+                            pending_response = Some(resp_tx);
+                        } else if resp_tx
+                            .send(Err(VAppExecutionError::VAppNotRunning))
+                            .is_err()
+                        {
+                            #[cfg(feature = "debug")]
+                            log::debug!("Failed to send error response: receiver dropped");
                         }
+                    }
+                    WorkerMessage::GetAppInfo(resp_tx) => {
+                        // Handle GetAppInfo request - this works even without a running V-App
+                        let result = client.get_app_info().await;
+                        if resp_tx.send(result).is_err() {
+                            #[cfg(feature = "debug")]
+                            log::debug!("Failed to send app info response: receiver dropped");
+                        }
+                    }
+                    WorkerMessage::StartVApp(elf_path, print_writer, resp_tx) => {
+                        // Start a V-App
+                        let result = client.start_vapp(&elf_path, print_writer).await;
+                        if resp_tx.send(result).is_err() {
+                            #[cfg(feature = "debug")]
+                            log::debug!("Failed to send start_vapp response: receiver dropped");
+                        }
+                    }
+                    WorkerMessage::StopVApp(resp_tx) => {
+                        // Stop the V-App
+                        client.stop_vapp();
+                        // Clear any pending response since the V-App is being stopped
+                        if let Some(pending_tx) = pending_response.take() {
+                            let _ = pending_tx
+                                .send(Err(VAppExecutionError::Other("V-App was stopped".into())));
+                        }
+                        let _ = resp_tx.send(());
+                    }
+                    WorkerMessage::IsVAppRunning(resp_tx) => {
+                        let _ = resp_tx.send(client.is_vapp_running());
                     }
                 }
             }
 
-            // Step the engine
+            // Step the engine if a V-App is running
             if let Some(engine) = client.client.engine.as_mut() {
                 match engine.step().await {
                     Ok(Some(VAppResponse::Message(response))) => {
@@ -1196,50 +1371,30 @@ impl<E: std::fmt::Debug + Send + Sync + 'static> VanadiumAppClient<E> {
                         }
                     }
                     Ok(Some(VAppResponse::Panic(msg))) => {
-                        // V-App panicked
+                        // V-App panicked - clear engine and notify pending request
+                        client.stop_vapp();
                         if let Some(resp_tx) = pending_response.take() {
-                            if resp_tx
-                                .send(Err(VAppExecutionError::AppPanicked(msg)))
-                                .is_err()
-                            {
-                                #[cfg(feature = "debug")]
-                                log::debug!("Failed to send app panic error: receiver dropped");
-                            }
+                            let _ = resp_tx.send(Err(VAppExecutionError::AppPanicked(msg)));
                         }
-                        break;
                     }
                     Ok(Some(VAppResponse::Exited(status))) => {
-                        // V-App exited
+                        // V-App exited - clear engine and notify pending request
+                        client.stop_vapp();
                         if let Some(resp_tx) = pending_response.take() {
-                            if resp_tx
-                                .send(Err(VAppExecutionError::AppExited(status)))
-                                .is_err()
-                            {
-                                #[cfg(feature = "debug")]
-                                log::debug!("Failed to send app exited error: receiver dropped");
-                            }
+                            let _ = resp_tx.send(Err(VAppExecutionError::AppExited(status)));
                         }
-                        break;
                     }
                     Ok(None) => {
                         // No response yet, continue stepping
                     }
                     Err(e) => {
-                        // Error occurred - send it to pending request and exit
+                        // Error occurred - clear engine and notify pending request
+                        client.stop_vapp();
                         if let Some(resp_tx) = pending_response.take() {
-                            if resp_tx
-                                .send(Err(VAppExecutionError::Other(Box::new(e))))
-                                .is_err()
-                            {
-                                #[cfg(feature = "debug")]
-                                log::debug!("Failed to send engine error: receiver dropped");
-                            }
+                            let _ = resp_tx.send(Err(VAppExecutionError::Other(Box::new(e))));
                         }
-                        break;
                     }
                 }
-            } else {
-                break;
             }
 
             // Small yield to avoid busy-waiting and allow other tasks to run
@@ -1260,19 +1415,6 @@ impl<E: std::fmt::Debug + Send + Sync + 'static> Drop for VanadiumAppClient<E> {
         if let Some(handle) = self.worker_handle.take() {
             handle.abort();
         }
-    }
-}
-
-impl<E: std::fmt::Debug + Send + Sync + 'static> VanadiumAppClient<E> {
-    /// Retrieves the app name, version, and device model.
-    pub async fn get_app_info(&mut self) -> Result<AppInfo, VanadiumClientError> {
-        let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
-        self.message_tx
-            .send(WorkerMessage::GetAppInfo(self.transport.clone(), resp_tx))
-            .map_err(|_| VanadiumClientError::GenericError("Worker task died".to_string()))?;
-        resp_rx
-            .await
-            .map_err(|_| VanadiumClientError::GenericError("Worker task died".to_string()))?
     }
 }
 
@@ -1480,7 +1622,7 @@ pub mod client_utils {
 
         // if no print_writer is provided, default to Sink
         let print_writer = print_writer.unwrap_or_else(|| Box::new(Sink::default()));
-        let client = VanadiumAppClient::new(vapp_path, Arc::new(transport), print_writer)
+        let client = VanadiumAppClient::with_vapp(vapp_path, Arc::new(transport), print_writer)
             .await
             .map_err(|e| ClientUtilsError::VanadiumClientFailed(e.to_string()))?;
         Ok(Box::new(client))
@@ -1506,7 +1648,7 @@ pub mod client_utils {
 
         // if no print_writer is provided, default to Sink
         let print_writer = print_writer.unwrap_or_else(|| Box::new(Sink::default()));
-        let client = VanadiumAppClient::new(vapp_path, Arc::new(transport), print_writer)
+        let client = VanadiumAppClient::with_vapp(vapp_path, Arc::new(transport), print_writer)
             .await
             .map_err(|e| ClientUtilsError::VanadiumClientFailed(e.to_string()))?;
         Ok(Box::new(client))
