@@ -45,17 +45,17 @@ impl std::error::Error for BenchClientError {
 // The V-App will perform the computation for the given number of repetitions,
 // then immediately exit.
 pub struct BenchClient {
-    app_transport: Box<dyn VAppTransport + Send + Sync>,
+    vapp_transport: Box<dyn VAppTransport + Send + Sync>,
 }
 
 impl BenchClient {
-    pub fn new(app_transport: Box<dyn VAppTransport + Send + Sync>) -> Self {
-        Self { app_transport }
+    pub fn new(vapp_transport: Box<dyn VAppTransport + Send + Sync>) -> Self {
+        Self { vapp_transport }
     }
 
     pub async fn run_and_exit(&mut self, repetitions: u64) -> Result<(), BenchClientError> {
         match self
-            .app_transport
+            .vapp_transport
             .send_message(&repetitions.to_be_bytes())
             .await
         {

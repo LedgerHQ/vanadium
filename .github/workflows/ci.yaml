@@ -17,19 +17,19 @@ jobs:
   test_app_sdk:
     uses: ./.github/workflows/reusable_native_tests.yaml
     with:
-      app_name: "app-sdk"
+      vapp_name: "app-sdk"
       test_dirs_json: '["app-sdk"]'
 
   test_client_sdk:
     uses: ./.github/workflows/reusable_native_tests.yaml
     with:
-      app_name: "client-sdk"
+      vapp_name: "client-sdk"
       test_dirs_json: '["client-sdk"]'
 
   test_common:
     uses: ./.github/workflows/reusable_native_tests.yaml
     with:
-      app_name: "common"
+      vapp_name: "common"
       test_dirs_json: '["common"]'
        
   # build Vanadium VM app
@@ -158,7 +158,7 @@ jobs:
   test_vlib_bitcoin:
     uses: ./.github/workflows/reusable_native_tests.yaml
     with:
-      app_name: "vlib-bitcoin"
+      vapp_name: "vlib-bitcoin"
       test_dirs_json: '["libs/bitcoin"]'
       cargo_test_args: '--features serde'
 
@@ -170,28 +170,28 @@ jobs:
   build_vnd_test:
     uses: ./.github/workflows/reusable_vapp_build.yaml
     with:
-      app_name: "vnd-test"
-      app_dir: "apps/test/app"
+      vapp_name: "vnd-test"
+      vapp_dir: "apps/test/app"
       artifact_name: "vnd_test_riscv_binary"
       binary_name: "vnd-test"
 
   test_vnd_test_app:
     uses: ./.github/workflows/reusable_native_tests.yaml
     with:
-      app_name: "vnd-test-app"
+      vapp_name: "vnd-test-app"
       test_dirs_json: '["apps/test/app"]'
 
   test_vnd_test_app_client:
     uses: ./.github/workflows/reusable_native_tests.yaml
     with:
-      app_name: "vnd-test-client"
+      vapp_name: "vnd-test-client"
       test_dirs_json: '["apps/test/client"]'
 
   vnd_test_speculos_integration_tests:
     needs: [build_vanadium_app, build_vnd_test]
     uses: ./.github/workflows/reusable_vapp_integration_tests.yaml
     with:
-      app_name: 'vnd-test'
+      vapp_name: 'vnd-test'
       client_dir: 'apps/test/client'
       vanadium_artifact_name: 'vanadium_binaries'
       vapp_artifact_name: 'vnd_test_riscv_binary'
@@ -205,8 +205,8 @@ jobs:
   build_vnd_sadik:
     uses: ./.github/workflows/reusable_vapp_build.yaml
     with:
-      app_name: "vnd-sadik"
-      app_dir: "apps/sadik/app"
+      vapp_name: "vnd-sadik"
+      vapp_dir: "apps/sadik/app"
       artifact_name: "vnd_sadik_riscv_binary"
       binary_name: "vnd-sadik"
 
@@ -214,7 +214,7 @@ jobs:
     needs: [build_vanadium_app, build_vnd_sadik]
     uses: ./.github/workflows/reusable_vapp_integration_tests.yaml
     with:
-      app_name: 'vnd-sadik'
+      vapp_name: 'vnd-sadik'
       client_dir: 'apps/sadik/client'
       vanadium_artifact_name: 'vanadium_binaries'
       vapp_artifact_name: 'vnd_sadik_riscv_binary'
@@ -228,15 +228,15 @@ jobs:
   build_vnd_template:
     uses: ./.github/workflows/reusable_vapp_build.yaml
     with:
-      app_name: "vnd-template"
-      app_dir: "apps/template/app"
+      vapp_name: "vnd-template"
+      vapp_dir: "apps/template/app"
       artifact_name: "vnd_template_riscv_binary"
       binary_name: "vnd-template"
 
   test_vnd_template_app:
     uses: ./.github/workflows/reusable_native_tests.yaml
     with:
-      app_name: "vnd-template"
+      vapp_name: "vnd-template"
       test_dirs_json: '["apps/template/app"]'
 
   # check that the generated template is up to date 
@@ -257,8 +257,8 @@ jobs:
   build_vnd_bitcoin:
     uses: ./.github/workflows/reusable_vapp_build.yaml
     with:
-      app_name: "vnd-bitcoin"
-      app_dir: "apps/bitcoin/app"
+      vapp_name: "vnd-bitcoin"
+      vapp_dir: "apps/bitcoin/app"
       artifact_name: "vnd_bitcoin_riscv_binary"
       binary_name: "vnd-bitcoin"
 
@@ -266,8 +266,8 @@ jobs:
   build_vnd_bitcoin_autoapprove:
     uses: ./.github/workflows/reusable_vapp_build.yaml
     with:
-      app_name: "vnd-bitcoin-autoapprove"
-      app_dir: "apps/bitcoin/app"
+      vapp_name: "vnd-bitcoin-autoapprove"
+      vapp_dir: "apps/bitcoin/app"
       artifact_name: "vnd_bitcoin_riscv_autoapprove_binary"
       binary_name: "vnd-bitcoin"
       extra_build_args: '--features autoapprove'
@@ -275,14 +275,14 @@ jobs:
   test_vnd_bitcoin_app:
     uses: ./.github/workflows/reusable_native_tests.yaml
     with:
-      app_name: "vnd-bitcoin"
+      vapp_name: "vnd-bitcoin"
       test_dirs_json: '["apps/bitcoin/common","apps/bitcoin/app"]'
 
   vnd_bitcoin_integration_tests:
     needs: [build_vanadium_app, build_vnd_bitcoin_autoapprove]
     uses: ./.github/workflows/reusable_vapp_integration_tests.yaml
     with:
-      app_name: 'vnd-bitcoin'
+      vapp_name: 'vnd-bitcoin'
       client_dir: 'apps/bitcoin/client'
       vanadium_artifact_name: 'vanadium_binaries'
       vapp_artifact_name: 'vnd_bitcoin_riscv_autoapprove_binary'
@@ -294,15 +294,15 @@ jobs:
   build_vnd_rps:
     uses: ./.github/workflows/reusable_vapp_build.yaml
     with:
-      app_name: "vnd-rps"
-      app_dir: "apps/rps/app"
+      vapp_name: "vnd-rps"
+      vapp_dir: "apps/rps/app"
       artifact_name: "vnd_rps_riscv_binary"
       binary_name: "vnd-rps"
 
   test_vnd_rps_app:
     uses: ./.github/workflows/reusable_native_tests.yaml
     with:
-      app_name: "vnd-rps"
+      vapp_name: "vnd-rps"
       test_dirs_json: '["apps/rps/app"]'
 
   ## cargo-vnd tool test

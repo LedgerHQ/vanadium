@@ -948,15 +948,15 @@ impl<E: std::fmt::Debug + Send + Sync + 'static> SyncVanadiumAppClient<E> {
                 let cargo_toml_path =
                     get_cargo_toml_path(elf_path).ok_or("Failed to find Cargo.toml")?;
 
-                let (_, app_version, app_metadata) = elf::get_app_metadata(&cargo_toml_path)?;
+                let (_, vapp_version, vapp_metadata) = elf::get_vapp_metadata(&cargo_toml_path)?;
 
-                let app_name = app_metadata
+                let vapp_name = vapp_metadata
                     .get("name")
-                    .ok_or("App name missing in metadata")?
+                    .ok_or("V-App name missing in metadata")?
                     .as_str()
-                    .ok_or("App name is not a string")?;
+                    .ok_or("V-App name is not a string")?;
 
-                let stack_size = app_metadata
+                let stack_size = vapp_metadata
                     .get("stack_size")
                     .ok_or("Stack size missing in metadata")?
                     .as_integer()
@@ -984,8 +984,8 @@ impl<E: std::fmt::Debug + Send + Sync + 'static> SyncVanadiumAppClient<E> {
 
                 Manifest::new(
                     0,
-                    app_name,
-                    &app_version,
+                    vapp_name,
+                    &vapp_version,
                     elf_file.entrypoint,
                     elf_file.code_segment.start,
                     elf_file.code_segment.end,
@@ -1467,7 +1467,7 @@ pub mod client_utils {
 
     /// Creates a Vanadium client using TCP transport (for Speculos)
     pub async fn create_tcp_client(
-        app_path: &str,
+        vapp_path: &str,
         print_writer: Option<Box<dyn std::io::Write + Send + Sync>>,
     ) -> Result<Box<dyn VAppTransport + Send>, ClientUtilsError> {
         let transport_raw = Arc::new(TransportTcp::new_default().await.map_err(|e| {
@@ -1480,7 +1480,7 @@ pub mod client_utils {
 
         // if no print_writer is provided, default to Sink
         let print_writer = print_writer.unwrap_or_else(|| Box::new(Sink::default()));
-        let client = VanadiumAppClient::new(app_path, Arc::new(transport), print_writer)
+        let client = VanadiumAppClient::new(vapp_path, Arc::new(transport), print_writer)
             .await
             .map_err(|e| ClientUtilsError::VanadiumClientFailed(e.to_string()))?;
         Ok(Box::new(client))
@@ -1488,7 +1488,7 @@ pub mod client_utils {
 
     /// Creates a Vanadium client using HID transport (for real device)
     pub async fn create_hid_client(
-        app_path: &str,
+        vapp_path: &str,
         print_writer: Option<Box<dyn std::io::Write + Send + Sync>>,
     ) -> Result<Box<dyn VAppTransport + Send>, ClientUtilsError> {
         let hid_api = hidapi::HidApi::new().map_err(|e| {
@@ -1506,7 +1506,7 @@ pub mod client_utils {
 
         // if no print_writer is provided, default to Sink
         let print_writer = print_writer.unwrap_or_else(|| Box::new(Sink::default()));
-        let client = VanadiumAppClient::new(app_path, Arc::new(transport), print_writer)
+        let client = VanadiumAppClient::new(vapp_path, Arc::new(transport), print_writer)
             .await
             .map_err(|e| ClientUtilsError::VanadiumClientFailed(e.to_string()))?;
         Ok(Box::new(client))
@@ -1536,13 +1536,13 @@ pub mod client_utils {
     /// This function is mostly meant for testing and development purposes, as a production release would likely
     /// have more specific requirements.
     pub async fn create_default_client(
-        app_name: &str,
+        vapp_name: &str,
         client_type: ClientType,
         print_writer: Option<Box<dyn std::io::Write + Send + Sync>>,
     ) -> Result<Box<dyn VAppTransport + Send>, ClientUtilsError> {
-        let app_path = format!(
+        let vapp_path = format!(
             "../app/target/riscv32imc-unknown-none-elf/release/{}",
-            app_name
+            vapp_name
         );
 
         let tcp_addr = std::env::var("VAPP_ADDRESS").unwrap_or_else(|_| "127.0.0.1:2323".into());
@@ -1557,11 +1557,11 @@ pub mod client_utils {
 
         match client_type {
             ClientType::Any => {
-                let hid_error = match create_hid_client(&app_path, get_writer()).await {
+                let hid_error = match create_hid_client(&vapp_path, get_writer()).await {
                     Ok(client) => return Ok(client),
                     Err(e) => e,
                 };
-                let tcp_error = match create_tcp_client(&app_path, get_writer()).await {
+                let tcp_error = match create_tcp_client(&vapp_path, get_writer()).await {
                     Ok(client) => return Ok(client),
                     Err(e) => e,
                 };
@@ -1576,8 +1576,8 @@ pub mod client_utils {
                 })
             }
             ClientType::Native => create_native_client(Some(&tcp_addr), get_writer()).await,
-            ClientType::Tcp => create_tcp_client(&app_path, get_writer()).await,
-            ClientType::Hid => create_hid_client(&app_path, get_writer()).await,
+            ClientType::Tcp => create_tcp_client(&vapp_path, get_writer()).await,
+            ClientType::Hid => create_hid_client(&vapp_path, get_writer()).await,
         }
     }
 }

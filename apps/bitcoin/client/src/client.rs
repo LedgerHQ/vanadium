@@ -65,16 +65,16 @@ impl std::error::Error for BitcoinClientError {
 }
 
 pub struct BitcoinClient {
-    app_transport: Box<dyn VAppTransport + Send>,
+    vapp_transport: Box<dyn VAppTransport + Send>,
 }
 
 impl<'a> BitcoinClient {
-    pub fn new(app_transport: Box<dyn VAppTransport + Send>) -> Self {
-        Self { app_transport }
+    pub fn new(vapp_transport: Box<dyn VAppTransport + Send>) -> Self {
+        Self { vapp_transport }
     }
 
     async fn send_message(&mut self, out: &[u8]) -> Result<Vec<u8>, BitcoinClientError> {
-        sdk::comm::send_message(&mut self.app_transport, out)
+        sdk::comm::send_message(&mut self.vapp_transport, out)
             .await
             .map_err(BitcoinClientError::from)
     }

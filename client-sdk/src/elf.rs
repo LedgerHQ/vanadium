@@ -152,7 +152,7 @@ impl VAppElfFile {
 }
 
 #[cfg(feature = "cargo_toml")]
-pub fn get_app_metadata(
+pub fn get_vapp_metadata(
     cargo_toml_path: &std::path::PathBuf,
 ) -> Result<(String, String, cargo_toml::Value), &'static str> {
     let manifest = cargo_toml::Manifest::from_path(&cargo_toml_path)

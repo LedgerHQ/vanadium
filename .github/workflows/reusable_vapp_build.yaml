@@ -3,11 +3,11 @@ name: Reusable V-App Build
 on:
   workflow_call:
     inputs:
-      app_name:
+      vapp_name:
         description: "Human readable name for the V-App (e.g. vnd-test)"
         required: true
         type: string
-      app_dir:
+      vapp_dir:
         description: "Relative path to the app crate directory (e.g. apps/test/app)"
         required: true
         type: string
@@ -37,7 +37,7 @@ on:
 
 jobs:
   build:
-    name: Build ${{ inputs.app_name }} (RISC-V)
+    name: Build ${{ inputs.vapp_name }} (RISC-V)
     runs-on: ubuntu-latest
     steps:
       - name: Set up Rust toolchain
@@ -70,7 +70,7 @@ jobs:
           cargo install --path ./cargo-vnd
 
       - name: Build
-        working-directory: ${{ inputs.app_dir }}
+        working-directory: ${{ inputs.vapp_dir }}
         run: |
           set -e
           cargo +${{ inputs.rust_toolchain }} build --release --target ${{ inputs.riscv_target }} --no-default-features --features target_vanadium_ledger ${{ inputs.extra_build_args }}
@@ -80,4 +80,4 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: ${{ inputs.artifact_name }}
-          path: ${{ inputs.app_dir }}/target/${{ inputs.riscv_target }}/release/${{ inputs.binary_name }}*
+          path: ${{ inputs.vapp_dir }}/target/${{ inputs.riscv_target }}/release/${{ inputs.binary_name }}*
