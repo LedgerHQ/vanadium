@@ -30,7 +30,7 @@ enum View {
 /// The AppBuilder is used to configure the App during the building phase.
 pub struct AppBuilder<S = ()> {
     handler: Handler<S>,
-    app_name: &'static str,
+    vapp_name: &'static str,
     version: &'static str,
     description: Option<String>,
     developer: Option<String>,
@@ -44,13 +44,13 @@ where
     ///
     /// # Arguments
     ///
-    /// * `app_name` - The name of the application.
+    /// * `vapp_name` - The name of the application.
     /// * `version` - The version of the application.
     /// * `handler` - The function to handle incoming messages.
-    pub fn new(app_name: &'static str, version: &'static str, handler: Handler<S>) -> Self {
+    pub fn new(vapp_name: &'static str, version: &'static str, handler: Handler<S>) -> Self {
         Self {
             handler,
-            app_name,
+            vapp_name,
             version,
             description: None,
             developer: None,
@@ -73,7 +73,7 @@ where
     pub(crate) fn build(self) -> App<S> {
         App {
             handler: self.handler,
-            app_name: self.app_name,
+            vapp_name: self.vapp_name,
             version: self.version,
             description: self.description,
             developer: self.developer,
@@ -96,7 +96,7 @@ where
 /// The App struct represents the context of the application.
 pub struct App<S = ()> {
     handler: Handler<S>,
-    app_name: &'static str,
+    vapp_name: &'static str,
     version: &'static str,
     description: Option<String>,
     // Optional developer name
@@ -256,7 +256,7 @@ where
             0 => ux_generated::show_step_btext_subtext(
                 step_pos(n_steps, 0),
                 "V-App Name",
-                self.app_name,
+                self.vapp_name,
             ),
             1 => {
                 ux_generated::show_step_btext_subtext(step_pos(n_steps, 1), "Version", self.version)
@@ -308,7 +308,7 @@ where
             let mut fields: Vec<TagValue> = Vec::new();
             fields.push(TagValue {
                 tag: "V-App name".into(),
-                value: self.app_name.to_string(),
+                value: self.vapp_name.to_string(),
             });
             fields.push(TagValue {
                 tag: "Version".into(),

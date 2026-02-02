@@ -10,7 +10,7 @@ It can be called with no arguments if called from the folder containing the Carg
 use anyhow::{Context, Result};
 use cargo_generate::{GenerateArgs, TemplatePath};
 use clap::{Parser, Subcommand};
-use client_sdk::elf::{VAppElfFile, get_app_metadata};
+use client_sdk::elf::{VAppElfFile, get_vapp_metadata};
 use client_sdk::memory::MemorySegment;
 use common::constants;
 use common::manifest::Manifest;
@@ -72,9 +72,10 @@ fn main() -> Result<()> {
             let cargo_toml_path = cargo_toml_path
                 .unwrap_or_else(|| std::env::current_dir().unwrap().join("Cargo.toml"));
 
-            let (app_crate_name, app_version, app_metadata) = get_app_metadata(&cargo_toml_path)
-                .map_err(|e| anyhow::anyhow!(e))
-                .context("Failed to get app metadata from Cargo.toml")?;
+            let (vapp_crate_name, vapp_version, vapp_metadata) =
+                get_vapp_metadata(&cargo_toml_path)
+                    .map_err(|e| anyhow::anyhow!(e))
+                    .context("Failed to get V-App metadata from Cargo.toml")?;
 
             let elf_path = match app {
                 Some(path) => path,
@@ -83,11 +84,11 @@ fn main() -> Result<()> {
                     .parent()
                     .unwrap()
                     .join("target/riscv32imc-unknown-none-elf/release")
-                    .join(app_crate_name),
+                    .join(vapp_crate_name),
             };
             // if the output path is not provided, default to adding the .vapp extension to the elf
             let output = output.unwrap_or_else(|| elf_path.with_extension("vapp"));
-            create_vapp_package(&app_version, &app_metadata, &elf_path, &output)?;
+            create_vapp_package(&vapp_version, &vapp_metadata, &elf_path, &output)?;
         }
         Commands::New {
             name,
@@ -114,7 +115,7 @@ fn main() -> Result<()> {
                 ));
             }
 
-            let app_crate_name = format!("vnd-{}", name);
+            let vapp_crate_name = format!("vnd-{}", name);
             let client_crate_name = format!("vnd-{}-client", name);
             // binaries without hyphens (necessary for the lib and when importing in source code)
             let client_lib_binary_name = format!("vnd_{}_client", name);
@@ -140,7 +141,7 @@ fn main() -> Result<()> {
                 template_path,
                 name: Some(name.clone()),
                 define: vec![
-                    format!("project-app-crate={}", app_crate_name),
+                    format!("project-app-crate={}", vapp_crate_name),
                     format!("project-client-crate={}", client_crate_name),
                     format!("project-client-lib-binary={}", client_lib_binary_name),
                     format!("project-cli-binary={}", cli_binary_name),
@@ -181,8 +182,8 @@ fn compute_merkle_roots(
 }
 
 fn create_vapp_package(
-    app_version: &str,
-    app_metadata: &client_sdk::cargo_toml::Value,
+    vapp_version: &str,
+    vapp_metadata: &client_sdk::cargo_toml::Value,
     input: &PathBuf,
     output: &PathBuf,
 ) -> Result<()> {
@@ -194,13 +195,13 @@ fn create_vapp_package(
 
     let section_name = ".manifest";
 
-    let app_name = app_metadata
+    let app_name = vapp_metadata
         .get("name")
         .context("App name missing in metadata")?
         .as_str()
         .context("App name is not a string")?;
 
-    let stack_size = app_metadata
+    let stack_size = vapp_metadata
         .get("stack_size")
         .context("Stack size missing in metadata")?
         .as_integer()
@@ -253,7 +254,7 @@ fn create_vapp_package(
     let manifest = Manifest::new(
         0,
         app_name,
-        app_version,
+        vapp_version,
         elf_file_with_manifest.entrypoint,
         elf_file_with_manifest.code_segment.start,
         elf_file_with_manifest.code_segment.end,

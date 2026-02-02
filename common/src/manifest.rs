@@ -14,8 +14,8 @@ pub const APP_VERSION_MAX_LEN: usize = 32;
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Manifest {
     pub manifest_version: u32,
-    pub app_name: String,
-    pub app_version: String,
+    pub vapp_name: String,
+    pub vapp_version: String,
     pub entrypoint: u32,
     pub code_start: u32,
     pub code_end: u32,
@@ -29,11 +29,11 @@ pub struct Manifest {
 }
 
 impl Manifest {
-    // Helper function to create a Manifest with the app_name and app_version set from &str
+    // Helper function to create a Manifest with the vapp_name and vapp_version set from &str
     pub fn new(
         manifest_version: u32,
-        app_name: &str,
-        app_version: &str,
+        vapp_name: &str,
+        vapp_version: &str,
         entrypoint: u32,
         code_start: u32,
         code_end: u32,
@@ -45,11 +45,11 @@ impl Manifest {
         stack_end: u32,
         stack_merkle_root: [u8; 32],
     ) -> Result<Self, &'static str> {
-        if app_name.len() > APP_NAME_MAX_LEN {
-            return Err("app_name is too long");
+        if vapp_name.len() > APP_NAME_MAX_LEN {
+            return Err("vapp_name is too long");
         }
-        if app_version.len() > APP_VERSION_MAX_LEN {
-            return Err("app_version is too long");
+        if vapp_version.len() > APP_VERSION_MAX_LEN {
+            return Err("vapp_version is too long");
         }
         if entrypoint < code_start || entrypoint >= code_end {
             return Err("entrypoint must be within the code section");
@@ -57,26 +57,26 @@ impl Manifest {
         if entrypoint % 2 != 0 {
             return Err("entrypoint must be 2-byte aligned");
         }
-        if !app_name.chars().all(|c| c.is_ascii_graphic() || c == ' ') {
-            return Err("app_name contains non-printable ASCII characters");
+        if !vapp_name.chars().all(|c| c.is_ascii_graphic() || c == ' ') {
+            return Err("vapp_name contains non-printable ASCII characters");
         }
-        if !app_version
+        if !vapp_version
             .chars()
             .all(|c| c.is_ascii_graphic() || c == ' ')
         {
-            return Err("app_version contains non-printable ASCII characters");
+            return Err("vapp_version contains non-printable ASCII characters");
         }
-        if app_name.starts_with(' ') || app_name.ends_with(' ') {
-            return Err("app_name must not start or end with a space");
+        if vapp_name.starts_with(' ') || vapp_name.ends_with(' ') {
+            return Err("vapp_name must not start or end with a space");
         }
-        if app_version.starts_with(' ') || app_version.ends_with(' ') {
-            return Err("app_version must not start or end with a space");
+        if vapp_version.starts_with(' ') || vapp_version.ends_with(' ') {
+            return Err("vapp_version must not start or end with a space");
         }
 
         Ok(Self {
             manifest_version,
-            app_name: app_name.to_string(),
-            app_version: app_version.to_string(),
+            vapp_name: vapp_name.to_string(),
+            vapp_version: vapp_version.to_string(),
             entrypoint,
             code_start,
             code_end,
@@ -91,11 +91,11 @@ impl Manifest {
     }
 
     pub fn get_app_name(&self) -> &str {
-        &self.app_name
+        &self.vapp_name
     }
 
     pub fn get_app_version(&self) -> &str {
-        &self.app_version
+        &self.vapp_version
     }
 
     #[inline]
@@ -143,15 +143,15 @@ impl Manifest {
         // Hash manifest_version
         hasher.update(&self.manifest_version.to_be_bytes());
 
-        // Hash app_name (length prefixed, as it's variable length)
-        let name_len = self.app_name.len() as u8;
+        // Hash vapp_name (length prefixed, as it's variable length)
+        let name_len = self.vapp_name.len() as u8;
         hasher.update(&[name_len]);
-        hasher.update(self.app_name.as_bytes());
+        hasher.update(self.vapp_name.as_bytes());
 
-        // Hash app_version (length prefixed, as it's variable length)
-        let version_len = self.app_version.len() as u8;
+        // Hash vapp_version (length prefixed, as it's variable length)
+        let version_len = self.vapp_version.len() as u8;
         hasher.update(&[version_len]);
-        hasher.update(self.app_version.as_bytes());
+        hasher.update(self.vapp_version.as_bytes());
 
         // Hash entrypoint
         hasher.update(&self.entrypoint.to_be_bytes());

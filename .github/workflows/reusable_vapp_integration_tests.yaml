@@ -3,8 +3,8 @@ name: Reusable V-App Integration Tests
 on:
   workflow_call:
     inputs:
-      app_name:
-        description: "Human readable app name (e.g. vnd-test)"
+      vapp_name:
+        description: "Human readable V-App name (e.g. vnd-test)"
         required: true
         type: string
       client_dir:
@@ -40,7 +40,7 @@ on:
 
 jobs:
   integration-tests:
-    name: Integration tests (${{ inputs.app_name }}) on Speculos (${{ matrix.model }})
+    name: Integration tests (${{ inputs.vapp_name }}) on Speculos (${{ matrix.model }})
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -107,7 +107,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ inputs.app_name }}_logs_${{ matrix.model }}
+          name: ${{ inputs.vapp_name }}_logs_${{ matrix.model }}
           path: |
             ${{ inputs.client_dir }}/test.log
             ${{ inputs.client_dir }}/speculos_stdout.log

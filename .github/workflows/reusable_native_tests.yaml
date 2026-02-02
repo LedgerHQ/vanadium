@@ -3,8 +3,8 @@ name: Reusable V-App Unit Tests
 on:
   workflow_call:
     inputs:
-      app_name:
-        description: "Human readable app name (e.g. vnd-bitcoin)"
+      vapp_name:
+        description: "Human readable V-App name (e.g. vnd-bitcoin)"
         required: true
         type: string
       test_dirs_json:
@@ -29,7 +29,7 @@ on:
 
 jobs:
   unit-tests:
-    name: Unit tests (${{ inputs.app_name }})
+    name: Unit tests (${{ inputs.vapp_name }})
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false

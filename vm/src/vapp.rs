@@ -15,10 +15,10 @@ pub const MAX_REGISTERED_VAPPS: usize = 32;
 pub struct VAppEntry {
     /// SHA-256 hash of the V-App manifest. All zeros indicates an empty slot.
     pub vapp_hash: [u8; 32],
-    /// App name, null-padded to 32 bytes.
-    pub app_name: [u8; APP_NAME_MAX_LEN],
-    /// App version, null-padded to 32 bytes.
-    pub app_version: [u8; APP_VERSION_MAX_LEN],
+    /// V-App name, null-padded to 32 bytes.
+    pub vapp_name: [u8; APP_NAME_MAX_LEN],
+    /// V-App version, null-padded to 32 bytes.
+    pub vapp_version: [u8; APP_VERSION_MAX_LEN],
 }
 
 impl VAppEntry {
@@ -26,8 +26,8 @@ impl VAppEntry {
     pub const fn empty() -> Self {
         Self {
             vapp_hash: [0u8; 32],
-            app_name: [0u8; APP_NAME_MAX_LEN],
-            app_version: [0u8; APP_VERSION_MAX_LEN],
+            vapp_name: [0u8; APP_NAME_MAX_LEN],
+            vapp_version: [0u8; APP_VERSION_MAX_LEN],
         }
     }
 
@@ -35,11 +35,11 @@ impl VAppEntry {
     /// of APP_NAME_MAX_LEN).
     pub fn get_app_name(&self) -> &str {
         let len = self
-            .app_name
+            .vapp_name
             .iter()
             .position(|&b| b == 0)
             .unwrap_or(APP_NAME_MAX_LEN);
-        core::str::from_utf8(&self.app_name[..len]).unwrap_or("")
+        core::str::from_utf8(&self.vapp_name[..len]).unwrap_or("")
     }
 
     /// Gets the app version as a string slice (up to first null byte, or the maximum length
@@ -47,11 +47,11 @@ impl VAppEntry {
     #[allow(dead_code)] // Will be used by device UI for app management
     pub fn get_app_version(&self) -> &str {
         let len = self
-            .app_version
+            .vapp_version
             .iter()
             .position(|&b| b == 0)
             .unwrap_or(APP_VERSION_MAX_LEN);
-        core::str::from_utf8(&self.app_version[..len]).unwrap_or("")
+        core::str::from_utf8(&self.vapp_version[..len]).unwrap_or("")
     }
 }
 
@@ -114,12 +114,12 @@ impl VAppStore {
     /// Finds an entry by app name. Returns the index if found.
     /// We don't use a constant time comparison, as knowledge about which apps are registered is not
     /// considered sensitive information.
-    pub fn find_by_name(app_name: &str) -> Option<usize> {
+    pub fn find_by_name(vapp_name: &str) -> Option<usize> {
         let storage = Self::get_storage_ref();
         for i in 0..MAX_REGISTERED_VAPPS {
             if storage[i].is_initialized() {
                 let entry = storage[i].get_ref();
-                if entry.get_app_name() == app_name {
+                if entry.get_app_name() == vapp_name {
                     return Some(i);
                 }
             }
@@ -130,13 +130,13 @@ impl VAppStore {
     /// Registers a V-App. If an app with the same name exists, it will be overwritten.
     /// Returns Ok(()) on success, or an error if the store is full or parameters are invalid.
     pub fn register(manifest: &Manifest) -> Result<(), VAppStoreError> {
-        let app_name = manifest.get_app_name();
-        let app_version = manifest.get_app_version();
+        let vapp_name = manifest.get_app_name();
+        let vapp_version = manifest.get_app_version();
 
-        if app_name.len() > APP_NAME_MAX_LEN {
+        if vapp_name.len() > APP_NAME_MAX_LEN {
             return Err(VAppStoreError::NameTooLong);
         }
-        if app_version.len() > APP_VERSION_MAX_LEN {
+        if vapp_version.len() > APP_VERSION_MAX_LEN {
             return Err(VAppStoreError::VersionTooLong);
         }
 
@@ -146,13 +146,13 @@ impl VAppStore {
         // Create the new entry
         let mut entry = VAppEntry::empty();
         entry.vapp_hash.copy_from_slice(&vapp_hash);
-        entry.app_name[..app_name.len()].copy_from_slice(app_name.as_bytes());
-        entry.app_version[..app_version.len()].copy_from_slice(app_version.as_bytes());
+        entry.vapp_name[..vapp_name.len()].copy_from_slice(vapp_name.as_bytes());
+        entry.vapp_version[..vapp_version.len()].copy_from_slice(vapp_version.as_bytes());
 
         let storage = Self::get_storage_mut();
 
         // Check if an app with the same name already exists (for update/overwrite)
-        if let Some(existing_index) = Self::find_by_name(app_name) {
+        if let Some(existing_index) = Self::find_by_name(vapp_name) {
             // Update the existing entry
             storage[existing_index].update(&entry);
             Ok(())

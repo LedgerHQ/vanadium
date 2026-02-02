@@ -41,12 +41,12 @@ impl std::error::Error for SadikClientError {
 }
 
 pub struct SadikClient {
-    app_transport: Box<dyn VAppTransport + Send>,
+    vapp_transport: Box<dyn VAppTransport + Send>,
 }
 
 impl SadikClient {
-    pub fn new(app_transport: Box<dyn VAppTransport + Send>) -> Self {
-        Self { app_transport }
+    pub fn new(vapp_transport: Box<dyn VAppTransport + Send>) -> Self {
+        Self { vapp_transport }
     }
 
     pub async fn hash(
@@ -60,7 +60,7 @@ impl SadikClient {
         };
 
         let msg = postcard::to_allocvec(&cmd).expect("Serialization failed");
-        Ok(send_message(&mut self.app_transport, &msg)
+        Ok(send_message(&mut self.vapp_transport, &msg)
             .await
             .expect("Error sending message"))
     }
@@ -80,7 +80,7 @@ impl SadikClient {
         };
 
         let msg = postcard::to_allocvec(&cmd).expect("Serialization failed");
-        Ok(send_message(&mut self.app_transport, &msg)
+        Ok(send_message(&mut self.vapp_transport, &msg)
             .await
             .expect("Error sending message"))
     }
@@ -93,7 +93,7 @@ impl SadikClient {
         let cmd = Command::DeriveHdNode { curve, path };
 
         let msg = postcard::to_allocvec(&cmd).expect("Serialization failed");
-        Ok(send_message(&mut self.app_transport, &msg)
+        Ok(send_message(&mut self.vapp_transport, &msg)
             .await
             .expect("Error sending message"))
     }
@@ -105,7 +105,7 @@ impl SadikClient {
         let cmd = Command::GetMasterFingerprint { curve };
 
         let msg = postcard::to_allocvec(&cmd).expect("Serialization failed");
-        Ok(send_message(&mut self.app_transport, &msg)
+        Ok(send_message(&mut self.vapp_transport, &msg)
             .await
             .expect("Error sending message"))
     }
@@ -115,7 +115,7 @@ impl SadikClient {
         };
 
         let msg = postcard::to_allocvec(&cmd).expect("Serialization failed");
-        Ok(send_message(&mut self.app_transport, &msg)
+        Ok(send_message(&mut self.vapp_transport, &msg)
             .await
             .expect("Error sending message"))
     }
@@ -132,7 +132,7 @@ impl SadikClient {
         };
 
         let msg = postcard::to_allocvec(&cmd).expect("Serialization failed");
-        Ok(send_message(&mut self.app_transport, &msg)
+        Ok(send_message(&mut self.vapp_transport, &msg)
             .await
             .expect("Error sending message"))
     }
@@ -149,7 +149,7 @@ impl SadikClient {
         };
 
         let msg = postcard::to_allocvec(&cmd).expect("Serialization failed");
-        Ok(send_message(&mut self.app_transport, &msg)
+        Ok(send_message(&mut self.vapp_transport, &msg)
             .await
             .expect("Error sending message"))
     }
@@ -167,7 +167,7 @@ impl SadikClient {
         };
 
         let msg = postcard::to_allocvec(&cmd).expect("Serialization failed");
-        Ok(send_message(&mut self.app_transport, &msg)
+        Ok(send_message(&mut self.vapp_transport, &msg)
             .await
             .expect("Error sending message"))
     }
@@ -187,7 +187,7 @@ impl SadikClient {
         };
 
         let msg = postcard::to_allocvec(&cmd).expect("Serialization failed");
-        Ok(send_message(&mut self.app_transport, &msg)
+        Ok(send_message(&mut self.vapp_transport, &msg)
             .await
             .expect("Error sending message"))
     }
@@ -205,7 +205,7 @@ impl SadikClient {
         };
 
         let msg = postcard::to_allocvec(&cmd).expect("Serialization failed");
-        Ok(send_message(&mut self.app_transport, &msg)
+        Ok(send_message(&mut self.vapp_transport, &msg)
             .await
             .expect("Error sending message"))
     }
@@ -225,7 +225,7 @@ impl SadikClient {
         };
 
         let msg = postcard::to_allocvec(&cmd).expect("Serialization failed");
-        Ok(send_message(&mut self.app_transport, &msg)
+        Ok(send_message(&mut self.vapp_transport, &msg)
             .await
             .expect("Error sending message"))
     }
@@ -233,13 +233,13 @@ impl SadikClient {
     pub async fn sleep(&mut self, n_ticks: u32) -> Result<Vec<u8>, SadikClientError> {
         let cmd = Command::Sleep { n_ticks };
         let msg = postcard::to_allocvec(&cmd).expect("Serialization failed");
-        Ok(send_message(&mut self.app_transport, &msg)
+        Ok(send_message(&mut self.vapp_transport, &msg)
             .await
             .expect("Error sending message"))
     }
 
     pub async fn exit(&mut self) -> Result<i32, &'static str> {
-        match send_message(&mut self.app_transport, &[]).await {
+        match send_message(&mut self.vapp_transport, &[]).await {
             Ok(_) => Err("Exit message shouldn't return!"),
             Err(SendMessageError::VAppExecutionError(VAppExecutionError::AppExited(code))) => {
                 Ok(code)

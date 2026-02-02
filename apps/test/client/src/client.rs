@@ -38,12 +38,12 @@ impl std::error::Error for TestClientError {
 }
 
 pub struct TestClient {
-    app_transport: Box<dyn VAppTransport + Send>,
+    vapp_transport: Box<dyn VAppTransport + Send>,
 }
 
 impl TestClient {
-    pub fn new(app_transport: Box<dyn VAppTransport + Send>) -> Self {
-        Self { app_transport }
+    pub fn new(vapp_transport: Box<dyn VAppTransport + Send>) -> Self {
+        Self { vapp_transport }
     }
 
     pub async fn reverse(&mut self, data: &[u8]) -> Result<Vec<u8>, TestClientError> {
@@ -51,7 +51,7 @@ impl TestClient {
         msg.extend_from_slice(&[Command::Reverse as u8]);
         msg.extend_from_slice(data);
 
-        Ok(self.app_transport.send_message(&msg).await?)
+        Ok(self.vapp_transport.send_message(&msg).await?)
     }
 
     pub async fn add_numbers(&mut self, n: u32) -> Result<u64, TestClientError> {
@@ -59,7 +59,7 @@ impl TestClient {
         msg.extend_from_slice(&[Command::AddNumbers as u8]);
         msg.extend_from_slice(&n.to_be_bytes());
 
-        let result_raw = self.app_transport.send_message(&msg).await?;
+        let result_raw = self.vapp_transport.send_message(&msg).await?;
 
         if result_raw.len() != 8 {
             return Err("Invalid response length".into());
@@ -72,7 +72,7 @@ impl TestClient {
         msg.extend_from_slice(&[Command::Sha256 as u8]);
         msg.extend_from_slice(data);
 
-        Ok(self.app_transport.send_message(&msg).await?)
+        Ok(self.vapp_transport.send_message(&msg).await?)
     }
 
     pub async fn b58enc(&mut self, data: &[u8]) -> Result<Vec<u8>, TestClientError> {
@@ -80,7 +80,7 @@ impl TestClient {
         msg.extend_from_slice(&[Command::Base58Encode as u8]);
         msg.extend_from_slice(data);
 
-        Ok(self.app_transport.send_message(&msg).await?)
+        Ok(self.vapp_transport.send_message(&msg).await?)
     }
 
     pub async fn nprimes(&mut self, n: u32) -> Result<u32, TestClientError> {
@@ -88,7 +88,7 @@ impl TestClient {
         msg.extend_from_slice(&[Command::CountPrimes as u8]);
         msg.extend_from_slice(&n.to_be_bytes());
 
-        let result_raw = self.app_transport.send_message(&msg).await?;
+        let result_raw = self.vapp_transport.send_message(&msg).await?;
 
         if result_raw.len() != 4 {
             return Err("Invalid response length".into());
@@ -101,7 +101,7 @@ impl TestClient {
         msg.extend_from_slice(&[Command::ShowUxScreen as u8]);
         msg.extend_from_slice(&n.to_be_bytes());
 
-        let result_raw = self.app_transport.send_message(&msg).await?;
+        let result_raw = self.vapp_transport.send_message(&msg).await?;
 
         if result_raw.len() != 0 {
             return Err("Invalid response length".into());
@@ -114,7 +114,7 @@ impl TestClient {
         msg.extend_from_slice(&[Command::DeviceProp as u8]);
         msg.extend_from_slice(&property_id.to_be_bytes());
 
-        let result_raw = self.app_transport.send_message(&msg).await?;
+        let result_raw = self.vapp_transport.send_message(&msg).await?;
 
         if result_raw.len() != 4 {
             return Err("Invalid response length".into());
@@ -127,7 +127,7 @@ impl TestClient {
         msg.extend_from_slice(&[Command::Print as u8]);
         msg.extend_from_slice(print_msg.as_bytes());
 
-        self.app_transport.send_message(&msg).await?;
+        self.vapp_transport.send_message(&msg).await?;
         Ok(())
     }
 
@@ -136,14 +136,14 @@ impl TestClient {
         msg.extend_from_slice(&[Command::Panic as u8]);
         msg.extend_from_slice(panic_msg.as_bytes());
 
-        self.app_transport.send_message(&msg).await?;
+        self.vapp_transport.send_message(&msg).await?;
 
         Err("The app should have panicked!".into())
     }
 
     pub async fn exit(&mut self) -> Result<i32, &'static str> {
         match self
-            .app_transport
+            .vapp_transport
             .send_message(&[Command::Exit as u8])
             .await
         {
