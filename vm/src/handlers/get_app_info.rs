@@ -56,5 +56,8 @@ fn get_device_model() -> &'static str {
         target_os = "stax",
         target_os = "apex_p"
     )))]
-    compile_error!("Unsupported target OS");
+    {
+        compile_error!("Unsupported target OS");
+        unreachable!()
+    }
 }
