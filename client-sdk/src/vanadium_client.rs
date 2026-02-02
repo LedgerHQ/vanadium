@@ -22,7 +22,9 @@ use common::client_commands::{
 use common::constants::{DEFAULT_STACK_START, PAGE_SIZE};
 use common::manifest::Manifest;
 
-use crate::apdu::{apdu_continue, apdu_register_vapp, apdu_run_vapp, APDUCommand, StatusWord};
+use crate::apdu::{
+    apdu_continue, apdu_get_app_info, apdu_register_vapp, apdu_run_vapp, APDUCommand, StatusWord,
+};
 use crate::memory::{MemorySegment, MemorySegmentError};
 use crate::transport::Transport;
 use crate::{
@@ -638,9 +640,23 @@ struct GenericVanadiumClient<E: std::fmt::Debug + Send + Sync + 'static> {
     engine: Option<VAppEngine<E>>,
 }
 
+/// Information about the Vanadium app running on the device.
+#[derive(Debug, Clone)]
+pub struct AppInfo {
+    /// The name of the app.
+    pub name: String,
+    /// The version of the app.
+    pub version: String,
+    /// The device model.
+    pub device_model: String,
+}
+
 #[derive(Debug)]
-enum VanadiumClientError {
+pub enum VanadiumClientError {
     GenericError(String),
+    TransportError(String),
+    AppInfoParsingError(String),
+    InvalidAppName(String),
 }
 
 impl From<&str> for VanadiumClientError {
@@ -652,7 +668,12 @@ impl From<&str> for VanadiumClientError {
 impl std::fmt::Display for VanadiumClientError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            VanadiumClientError::GenericError(msg) => write!(f, "Generic error: {}", msg),
+            VanadiumClientError::GenericError(msg) => write!(f, "{}", msg),
+            VanadiumClientError::TransportError(msg) => write!(f, "Transport error: {}", msg),
+            VanadiumClientError::AppInfoParsingError(msg) => {
+                write!(f, "Failed to parse app info: {}", msg)
+            }
+            VanadiumClientError::InvalidAppName(msg) => write!(f, "Invalid app name: {}", msg),
         }
     }
 }
@@ -666,6 +687,89 @@ impl std::error::Error for VanadiumClientError {
 impl<E: std::fmt::Debug + Send + Sync + 'static> GenericVanadiumClient<E> {
     pub fn new() -> Self {
         Self { engine: None }
+    }
+
+    /// Retrieves the app name, version, and device model from the Vanadium app.
+    pub async fn get_app_info(
+        &self,
+        transport: Arc<dyn Transport<Error = E>>,
+    ) -> Result<AppInfo, VanadiumClientError> {
+        let (status, result) = transport
+            .exchange(&apdu_get_app_info())
+            .await
+            .map_err(|_| VanadiumClientError::TransportError("exchange failed".to_string()))?;
+
+        if status != StatusWord::OK {
+            return Err(VanadiumClientError::AppInfoParsingError(
+                "Failed to get app info".to_string(),
+            ));
+        }
+
+        // Parse the response: three length-prefixed strings
+        let mut offset = 0;
+
+        // Parse app name
+        if offset >= result.len() {
+            return Err(VanadiumClientError::AppInfoParsingError(
+                "Response too short".to_string(),
+            ));
+        }
+        let name_len = result[offset] as usize;
+        offset += 1;
+        if offset + name_len > result.len() {
+            return Err(VanadiumClientError::AppInfoParsingError(
+                "Response too short".to_string(),
+            ));
+        }
+        let name = String::from_utf8(result[offset..offset + name_len].to_vec()).map_err(|_| {
+            VanadiumClientError::AppInfoParsingError("Invalid UTF-8 in app name".to_string())
+        })?;
+        offset += name_len;
+
+        // Parse version
+        if offset >= result.len() {
+            return Err(VanadiumClientError::AppInfoParsingError(
+                "Response too short".to_string(),
+            ));
+        }
+        let version_len = result[offset] as usize;
+        offset += 1;
+        if offset + version_len > result.len() {
+            return Err(VanadiumClientError::AppInfoParsingError(
+                "Response too short".to_string(),
+            ));
+        }
+        let version =
+            String::from_utf8(result[offset..offset + version_len].to_vec()).map_err(|_| {
+                VanadiumClientError::AppInfoParsingError("Invalid UTF-8 in version".to_string())
+            })?;
+        offset += version_len;
+
+        // Parse device model
+        if offset >= result.len() {
+            return Err(VanadiumClientError::AppInfoParsingError(
+                "Response too short".to_string(),
+            ));
+        }
+        let device_model_len = result[offset] as usize;
+        offset += 1;
+        if offset + device_model_len > result.len() {
+            return Err(VanadiumClientError::AppInfoParsingError(
+                "Response too short".to_string(),
+            ));
+        }
+        let device_model = String::from_utf8(result[offset..offset + device_model_len].to_vec())
+            .map_err(|_| {
+                VanadiumClientError::AppInfoParsingError(
+                    "Invalid UTF-8 in device model".to_string(),
+                )
+            })?;
+
+        Ok(AppInfo {
+            name,
+            version,
+            device_model,
+        })
     }
 
     pub async fn register_vapp(
@@ -796,39 +900,6 @@ pub struct SyncVanadiumAppClient<E: std::fmt::Debug + Send + Sync + 'static> {
     client: GenericVanadiumClient<E>,
 }
 
-#[derive(Debug)]
-pub enum SyncVanadiumAppClientError<E: std::fmt::Debug + Send + Sync + 'static> {
-    VAppEngineError(VAppEngineError<E>),
-}
-
-impl<E: std::fmt::Debug + Send + Sync + 'static> std::fmt::Display
-    for SyncVanadiumAppClientError<E>
-{
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            SyncVanadiumAppClientError::VAppEngineError(e) => write!(f, "VAppEngine error: {}", e),
-        }
-    }
-}
-
-impl<E: std::fmt::Debug + Send + Sync + 'static> std::error::Error
-    for SyncVanadiumAppClientError<E>
-{
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            SyncVanadiumAppClientError::VAppEngineError(e) => Some(e),
-        }
-    }
-}
-
-impl<E: std::fmt::Debug + Send + Sync + 'static> From<VAppEngineError<E>>
-    for SyncVanadiumAppClientError<E>
-{
-    fn from(error: VAppEngineError<E>) -> Self {
-        SyncVanadiumAppClientError::VAppEngineError(error)
-    }
-}
-
 // Helper to find the path of the Cargo.toml file based on the path of the its binary,
 // assuming standard Rust project structure for the V-App.
 fn get_cargo_toml_path(elf_path: &str) -> Option<PathBuf> {
@@ -929,6 +1000,17 @@ impl<E: std::fmt::Debug + Send + Sync + 'static> SyncVanadiumAppClient<E> {
             }
         };
 
+        // Verify we're actually connecting to the Ledger Vanadium app
+        let client_temp = GenericVanadiumClient::new();
+        let app_info = client_temp.get_app_info(transport.clone()).await?;
+        if app_info.name != "Vanadium" {
+            return Err(VanadiumClientError::InvalidAppName(format!(
+                "Expected app name 'Vanadium', got '{}'",
+                app_info.name
+            ))
+            .into());
+        }
+
         let mut client = GenericVanadiumClient::new();
 
         // Try to run the V-App first (in case it's already registered)
@@ -958,6 +1040,14 @@ impl<E: std::fmt::Debug + Send + Sync + 'static> SyncVanadiumAppClient<E> {
             Err(e) => Err(e.into()),
         }
     }
+
+    /// Retrieves the app name, version, and device model.
+    pub async fn get_app_info(
+        &mut self,
+        transport: Arc<dyn Transport<Error = E>>,
+    ) -> Result<AppInfo, VanadiumClientError> {
+        self.client.get_app_info(transport).await
+    }
 }
 
 #[async_trait]
@@ -970,13 +1060,22 @@ impl<E: std::fmt::Debug + Send + Sync + 'static> VAppTransport for SyncVanadiumA
     }
 }
 
+enum WorkerMessage<E: std::fmt::Debug + Send + Sync + 'static> {
+    SendMessage(
+        Vec<u8>,
+        tokio::sync::oneshot::Sender<Result<Vec<u8>, VAppExecutionError>>,
+    ),
+    GetAppInfo(
+        Arc<dyn Transport<Error = E>>,
+        tokio::sync::oneshot::Sender<Result<AppInfo, VanadiumClientError>>,
+    ),
+}
+
 /// This client runs a background task that continuously steps the V-App engine,
 /// preventing the device from appearing frozen when waiting for messages from the host.
 pub struct VanadiumAppClient<E: std::fmt::Debug + Send + Sync + 'static> {
-    message_tx: tokio::sync::mpsc::UnboundedSender<(
-        Vec<u8>,
-        tokio::sync::oneshot::Sender<Result<Vec<u8>, VAppExecutionError>>,
-    )>,
+    transport: Arc<dyn Transport<Error = E>>,
+    message_tx: tokio::sync::mpsc::UnboundedSender<WorkerMessage<E>>,
     shutdown_tx: Option<tokio::sync::oneshot::Sender<()>>,
     worker_handle: Option<tokio::task::JoinHandle<()>>,
     _phantom: std::marker::PhantomData<E>,
@@ -1001,10 +1100,15 @@ impl<E: std::fmt::Debug + Send + Sync + 'static> VanadiumAppClient<E> {
     /// The provided client will be moved into a background task that
     /// continuously steps the engine to keep the device responsive.
     fn from_sync(client: SyncVanadiumAppClient<E>) -> Self {
-        let (message_tx, message_rx) = tokio::sync::mpsc::unbounded_channel::<(
-            Vec<u8>,
-            tokio::sync::oneshot::Sender<Result<Vec<u8>, VAppExecutionError>>,
-        )>();
+        // Extract transport from the running engine before moving client
+        let transport = if let Some(engine) = &client.client.engine {
+            engine.transport.clone()
+        } else {
+            // This shouldn't happen, but provide a fallback
+            unreachable!("Engine should be running when creating VanadiumAppClient")
+        };
+
+        let (message_tx, message_rx) = tokio::sync::mpsc::unbounded_channel::<WorkerMessage<E>>();
 
         // Create shutdown channel
         let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
@@ -1013,6 +1117,7 @@ impl<E: std::fmt::Debug + Send + Sync + 'static> VanadiumAppClient<E> {
         let worker_handle = tokio::spawn(Self::worker_loop(client, message_rx, shutdown_rx));
 
         Self {
+            transport,
             message_tx,
             shutdown_tx: Some(shutdown_tx),
             worker_handle: Some(worker_handle),
@@ -1023,10 +1128,7 @@ impl<E: std::fmt::Debug + Send + Sync + 'static> VanadiumAppClient<E> {
     /// Background worker loop that continuously steps the V-App engine.
     async fn worker_loop(
         mut client: SyncVanadiumAppClient<E>,
-        mut message_rx: tokio::sync::mpsc::UnboundedReceiver<(
-            Vec<u8>,
-            tokio::sync::oneshot::Sender<Result<Vec<u8>, VAppExecutionError>>,
-        )>,
+        mut message_rx: tokio::sync::mpsc::UnboundedReceiver<WorkerMessage<E>>,
         mut shutdown_rx: tokio::sync::oneshot::Receiver<()>,
     ) {
         let mut pending_response: Option<
@@ -1042,22 +1144,34 @@ impl<E: std::fmt::Debug + Send + Sync + 'static> VanadiumAppClient<E> {
             // Only accept new messages when there's no pending response
             // This enforces strict message-response pattern and prevents race conditions
             if pending_response.is_none() {
-                if let Ok((msg, resp_tx)) = message_rx.try_recv() {
-                    // Set the pending message on the engine
-                    if let Some(engine) = client.client.engine.as_mut() {
-                        // Check if there's already a pending message that hasn't been consumed by the device
-                        if engine.pending_receive_buffer.is_some() {
-                            #[cfg(feature = "debug")]
-                            log::warn!("Message sent before device called xrecv - previous queued message will be lost");
+                if let Ok(msg) = message_rx.try_recv() {
+                    match msg {
+                        WorkerMessage::SendMessage(data, resp_tx) => {
+                            // Set the pending message on the engine
+                            if let Some(engine) = client.client.engine.as_mut() {
+                                // Check if there's already a pending message that hasn't been consumed by the device
+                                if engine.pending_receive_buffer.is_some() {
+                                    #[cfg(feature = "debug")]
+                                    log::warn!("Message sent before device called xrecv - previous queued message will be lost");
+                                }
+                                engine.pending_receive_buffer = Some(data);
+                                pending_response = Some(resp_tx);
+                            } else if resp_tx
+                                .send(Err(VAppExecutionError::Other("Engine not running".into())))
+                                .is_err()
+                            {
+                                #[cfg(feature = "debug")]
+                                log::debug!("Failed to send error response: receiver dropped");
+                            }
                         }
-                        engine.pending_receive_buffer = Some(msg);
-                        pending_response = Some(resp_tx);
-                    } else if resp_tx
-                        .send(Err(VAppExecutionError::Other("Engine not running".into())))
-                        .is_err()
-                    {
-                        #[cfg(feature = "debug")]
-                        log::debug!("Failed to send error response: receiver dropped");
+                        WorkerMessage::GetAppInfo(transport, resp_tx) => {
+                            // Handle GetAppInfo request
+                            let result = client.client.get_app_info(transport).await;
+                            if resp_tx.send(result).is_err() {
+                                #[cfg(feature = "debug")]
+                                log::debug!("Failed to send app info response: receiver dropped");
+                            }
+                        }
                     }
                 }
             }
@@ -1149,12 +1263,25 @@ impl<E: std::fmt::Debug + Send + Sync + 'static> Drop for VanadiumAppClient<E> {
     }
 }
 
+impl<E: std::fmt::Debug + Send + Sync + 'static> VanadiumAppClient<E> {
+    /// Retrieves the app name, version, and device model.
+    pub async fn get_app_info(&mut self) -> Result<AppInfo, VanadiumClientError> {
+        let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
+        self.message_tx
+            .send(WorkerMessage::GetAppInfo(self.transport.clone(), resp_tx))
+            .map_err(|_| VanadiumClientError::GenericError("Worker task died".to_string()))?;
+        resp_rx
+            .await
+            .map_err(|_| VanadiumClientError::GenericError("Worker task died".to_string()))?
+    }
+}
+
 #[async_trait]
 impl<E: std::fmt::Debug + Send + Sync + 'static> VAppTransport for VanadiumAppClient<E> {
     async fn send_message(&mut self, msg: &[u8]) -> Result<Vec<u8>, VAppExecutionError> {
         let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
         self.message_tx
-            .send((msg.to_vec(), resp_tx))
+            .send(WorkerMessage::SendMessage(msg.to_vec(), resp_tx))
             .map_err(|_| VAppExecutionError::Other("Worker task died".into()))?;
         resp_rx
             .await
