@@ -85,6 +85,16 @@ impl APDUCommand {
     }
 }
 
+pub fn apdu_get_app_info() -> APDUCommand {
+    APDUCommand {
+        cla: 0xE0,
+        ins: 0,
+        p1: 0,
+        p2: 0,
+        data: Vec::new(),
+    }
+}
+
 pub fn apdu_continue(data: Vec<u8>) -> APDUCommand {
     APDUCommand {
         cla: 0xE0,
