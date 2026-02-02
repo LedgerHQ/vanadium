@@ -1,6 +1,6 @@
 use client::BenchClient;
 use hidapi::HidApi;
-use sdk::transport::{Transport, TransportHID, TransportWrapper};
+use sdk::transport::{TransportHID, TransportWrapper};
 use sdk::transport_native_hid::TransportNativeHID;
 use sdk::vanadium_client::VanadiumAppClient;
 use std::env;
@@ -22,70 +22,56 @@ const TEST_CASES: &[(&str, u64)] = &[
 async fn run_bench_case(
     case: &str,
     repetitions: u64,
-    transport: Arc<TransportWrapper>,
-) -> Result<f64, Box<dyn std::error::Error>> {
+    vanadium_client: &mut VanadiumAppClient<Box<dyn std::error::Error + Send + Sync>>,
+) -> Result<f64, Box<dyn std::error::Error + Send + Sync>> {
     let crate_name = format!("vndbench-{}", case);
     let app_path_str = format!(
         "cases/{}/target/riscv32imc-unknown-none-elf/release/{}",
         case, crate_name
     );
-    let client_raw =
-        VanadiumAppClient::with_vapp(&app_path_str, transport, Box::new(std::io::sink()))
-            .await
-            .map_err(|_| "Failed to create client")?;
-    let mut client = BenchClient::new(Box::new(client_raw));
+
+    // Best-effort cleanup in case a prior run didn't stop cleanly.
+    let _ = vanadium_client.stop_vapp().await;
+
+    vanadium_client
+        .start_vapp(&app_path_str, Box::new(std::io::sink()))
+        .await?;
+
+    let mut client = BenchClient::new(vanadium_client);
     let start = Instant::now();
-    client.run_and_exit(repetitions).await?;
+    let bench_result = client.run_and_exit(repetitions).await;
     let duration = start.elapsed();
     let total_ms = duration.as_secs_f64() * 1000.0;
+
+    // Always stop the V-App (even if the benchmark errored).
+    let _ = vanadium_client.stop_vapp().await;
+
+    bench_result?;
     Ok(total_ms)
 }
 
-async fn get_running_app_name(
-    transport: &Arc<TransportHID>,
-) -> Result<String, Box<dyn std::error::Error>> {
-    let (sw, resp) = transport
-        .exchange(&sdk::transport::APDUCommand {
-            cla: 0xB0,
-            ins: 0x01,
-            p1: 0,
-            p2: 0,
-            data: vec![],
-        })
-        .await
-        .map_err(|e| format!("Failed to get app name: {:?}", e))?;
-
-    if sw != sdk::transport::StatusWord::OK {
-        return Err(format!("Failed to get app name: SW={:04X}", sw as u16).into());
-    }
-
-    // the second byte is the length of the app, followed by the app name
-    let app_name_len = *resp.get(1).ok_or("Response too short")?;
-    let app_name_bytes = resp
-        .get(2..(2 + app_name_len as usize))
-        .ok_or("Invalid app name length")?;
-    let app_name =
-        String::from_utf8(app_name_bytes.to_vec()).map_err(|_| "Invalid UTF-8 in app name")?;
-    Ok(app_name)
-}
-
 #[tokio::main(flavor = "multi_thread")]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let args: Vec<String> = env::args().skip(1).collect();
     let transport_raw = Arc::new(TransportHID::new(
         TransportNativeHID::new(&HidApi::new().expect("Unable to get connect to the device"))
             .unwrap(),
     ));
 
-    let running_app_name = get_running_app_name(&transport_raw)
-        .await
-        .unwrap_or("".to_string());
-    if running_app_name != "Vanadium" {
-        println!("Please make sure the device is unlocked and the Vanadium app is open.");
-        return Ok(());
-    }
-
     let transport = Arc::new(TransportWrapper::new(transport_raw.clone()));
+
+    // Create the Vanadium client once (without running any V-App).
+    let mut vanadium_client = match VanadiumAppClient::new(transport.clone()).await {
+        Ok(c) => c,
+        Err(_) => {
+            println!("Please make sure the device is unlocked and the Vanadium app is open.");
+            return Ok(());
+        }
+    };
+
+    // Print the name/model of the connected device(s) before running benchmarks.
+    let app_info = vanadium_client.get_app_info().await?;
+    println!("Device: {}", app_info.device_model);
 
     let testcases: Vec<_> = if args.is_empty() {
         TEST_CASES.iter().collect()
@@ -111,7 +97,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // Run the _baseline app first, to measure baseline time
-    let baseline_total_ms = run_bench_case("_baseline", 1, transport.clone()).await?;
+    let baseline_total_ms = run_bench_case("_baseline", 1, &mut vanadium_client).await?;
     // Print baseline time
     println!("Baseline time: {:.3} ms", baseline_total_ms);
 
@@ -128,7 +114,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "cases/{}/target/riscv32imc-unknown-none-elf/release/vndbench-{}",
             case, case
         );
-        let total_ms = run_bench_case(case, *repetitions, transport.clone()).await?;
+        let total_ms = run_bench_case(case, *repetitions, &mut vanadium_client).await?;
         // Subtract baseline time
         let adj_total_ms = (total_ms - baseline_total_ms).max(0.0);
         let adj_avg_ms = adj_total_ms / *repetitions as f64;
