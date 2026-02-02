@@ -32,7 +32,7 @@ mod app_tests;
 use alloc::{string::ToString, vec::Vec};
 use app_ui::menu::show_home;
 use handlers::{
-    get_version::handler_get_version, register_vapp::handler_register_vapp,
+    get_app_info::handler_get_app_info, register_vapp::handler_register_vapp,
     start_vapp::handler_start_vapp,
 };
 use ledger_device_sdk::{
@@ -167,8 +167,7 @@ impl From<AppSW> for u16 {
 /// Possible input commands received through APDUs.
 #[derive(Debug, Copy, Clone)]
 pub enum Instruction {
-    GetVersion,
-    GetAppName,
+    GetAppInfo,
     RegisterVApp,
     StartVApp,
     Continue(u8, u8), // client response to a request from the VM
@@ -190,11 +189,10 @@ impl TryFrom<ApduHeader> for Instruction {
     /// [`sample_main`] to have this verification automatically performed by the SDK.
     fn try_from(value: ApduHeader) -> Result<Self, Self::Error> {
         match (value.ins, value.p1, value.p2) {
-            (0, 0, 0) => Ok(Instruction::GetVersion),
-            (1, 0, 0) => Ok(Instruction::GetAppName),
+            (0, 0, 0) => Ok(Instruction::GetAppInfo),
             (2, 0, 0) => Ok(Instruction::RegisterVApp),
             (3, 0, 0) => Ok(Instruction::StartVApp),
-            (0..=3, _, _) => Err(AppSW::WrongP1P2.into()),
+            (0 | 2 | 3, _, _) => Err(AppSW::WrongP1P2.into()),
             (0xff, p1, p2) => Ok(Instruction::Continue(p1, p2)),
             (_, _, _) => Err(AppSW::InsNotSupported.into()),
         }
@@ -238,8 +236,7 @@ fn handle_apdu(command: Command<COMM_BUFFER_SIZE>) -> Result<Vec<u8>, AppSW> {
         .decode::<Instruction>()
         .map_err(|_| AppSW::DecodingFailed)?;
     match ins {
-        Instruction::GetAppName => Ok(env!("CARGO_PKG_NAME").as_bytes().to_vec()),
-        Instruction::GetVersion => handler_get_version(command),
+        Instruction::GetAppInfo => handler_get_app_info(command),
         Instruction::RegisterVApp => handler_register_vapp(command),
         Instruction::StartVApp => handler_start_vapp(command),
         Instruction::Continue(_, _) => Err(AppSW::InsNotSupported), // 'Continue' command is only allowed when requested by the VM

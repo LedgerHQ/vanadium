@@ -1,4 +1,4 @@
-pub mod get_version;
+pub mod get_app_info;
 pub mod register_vapp;
 pub mod start_vapp;
 
