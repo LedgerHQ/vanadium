@@ -46,6 +46,7 @@ pub fn handler_register_vapp(
 
         #[cfg(not(feature = "blind_registration"))]
         {
+            let comm = command.into_comm();
             NbglReview::new()
                 .glyph(&VANADIUM_ICON)
                 .light()
@@ -54,20 +55,23 @@ pub fn handler_register_vapp(
                     "Authorize the execution of this V-App",
                     "Confirm registration",
                 )
-                .show(&[
-                    Field {
-                        name: "App name",
-                        value: manifest.get_app_name(),
-                    },
-                    Field {
-                        name: "App version",
-                        value: manifest.get_app_version(),
-                    },
-                    Field {
-                        name: "Hash",
-                        value: vapp_hash_hex_str,
-                    },
-                ])
+                .show(
+                    comm,
+                    &[
+                        Field {
+                            name: "App name",
+                            value: manifest.get_app_name(),
+                        },
+                        Field {
+                            name: "App version",
+                            value: manifest.get_app_version(),
+                        },
+                        Field {
+                            name: "Hash",
+                            value: vapp_hash_hex_str,
+                        },
+                    ],
+                )
         }
     };
 
