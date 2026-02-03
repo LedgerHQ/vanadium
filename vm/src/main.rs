@@ -49,6 +49,8 @@ include!(concat!(env!("OUT_DIR"), "/heap_size.rs"));
 
 pub const COMM_BUFFER_SIZE: usize = 600;
 
+ledger_device_sdk::define_comm!(COMM, COMM_BUFFER_SIZE);
+
 // define print! and println! macros using debug_printf (only for running on Speculos)
 #[macro_export]
 macro_rules! print {
@@ -220,10 +222,9 @@ extern "C" fn sample_main() {
     // Create the communication manager, and configure it to accept only APDU from the 0xe0 class.
     // If any APDU with a wrong class value is received, comm will respond automatically with
     // BadCla status word.
-    let mut comm = Comm::<COMM_BUFFER_SIZE>::new();
-    init_comm(&mut comm);
+    let comm = init_comm(&COMM);
 
-    show_home(&mut comm);
+    show_home(comm);
 
     loop {
         let command = comm.next_command();
@@ -235,7 +236,7 @@ extern "C" fn sample_main() {
                 let _ = comm.send(&[], sw);
             }
         };
-        show_home(&mut comm);
+        show_home(comm);
     }
 }
 
