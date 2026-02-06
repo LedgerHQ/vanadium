@@ -22,9 +22,13 @@ delegate_ecall!(xrecv, usize, (buffer: *mut u8), (size: usize));
 delegate_ecall!(print, (buffer: *const u8), (size: usize));
 
 delegate_ecall!(get_event, u32, (data: *mut EventData));
+delegate_ecall!(get_device_property, u32, (property: u32));
+
+delegate_ecall!(storage_read, u32, (slot_index: u32), (buffer: *mut u8), (buffer_size: usize));
+delegate_ecall!(storage_write, u32, (slot_index: u32), (buffer: *const u8), (buffer_size: usize));
+
 delegate_ecall!(show_page, u32, (page_desc: *const u8), (page_desc_len: usize));
 delegate_ecall!(show_step, u32, (step_desc: *const u8), (step_desc_len: usize));
-delegate_ecall!(get_device_property, u32, (property: u32));
 
 delegate_ecall!(bn_modm, u32, (r: *mut u8), (n: *const u8), (len: usize), (m: *const u8), (len_m: usize));
 delegate_ecall!(bn_addm, u32, (r: *mut u8), (a: *const u8), (b: *const u8), (m: *const u8), (len: usize));

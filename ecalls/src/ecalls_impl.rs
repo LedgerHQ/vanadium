@@ -342,6 +342,9 @@ ecall2!(show_page, ECALL_SHOW_PAGE, (page_desc: *const u8), (page_desc_len: usiz
 ecall2!(show_step, ECALL_SHOW_STEP, (step_desc: *const u8), (step_desc_len: usize), u32);
 ecall1!(get_device_property, ECALL_GET_DEVICE_PROPERTY, (property: u32), u32);
 
+ecall3!(storage_read, ECALL_STORAGE_READ, (slot_index: u32), (buffer: *mut u8), (buffer_size: usize), u32);
+ecall3!(storage_write, ECALL_STORAGE_WRITE, (slot_index: u32), (buffer: *const u8), (buffer_size: usize), u32);
+
 ecall5!(bn_modm, ECALL_MODM, (r: *mut u8), (n: *const u8), (len: usize), (m: *const u8), (len_m: usize), u32);
 ecall5!(bn_addm, ECALL_ADDM, (r: *mut u8), (a: *const u8), (b: *const u8), (m: *const u8), (len: usize), u32);
 ecall5!(bn_subm, ECALL_SUBM, (r: *mut u8), (a: *const u8), (b: *const u8), (m: *const u8), (len: usize), u32);

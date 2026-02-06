@@ -1,6 +1,7 @@
 use lazy_static::lazy_static;
 use rand::TryRngCore;
 use std::{
+    collections::HashMap,
     io::{self, Write},
     net::{TcpListener, TcpStream},
     sync::Mutex,
@@ -145,6 +146,7 @@ lazy_static! {
     static ref LAST_EVENT: Mutex<Option<(common::ux::EventCode, common::ux::EventData)>> =
         Mutex::new(None);
     static ref TCP_CONN: Mutex<TcpStream> = Mutex::new(wait_for_client());
+    static ref STORAGE: Mutex<HashMap<u32, [u8; 32]>> = Mutex::new(HashMap::new());
 }
 
 fn get_last_event() -> Option<(common::ux::EventCode, common::ux::EventData)> {
@@ -1041,6 +1043,48 @@ fn slip21_derive_child_node(cur_node: &[u8; 64], label: &[u8]) -> [u8; 64] {
     mac.update(&[0u8]);
     mac.update(label);
     mac.finalize().into_bytes().into()
+}
+
+pub fn storage_read(slot_index: u32, buffer: *mut u8, buffer_size: usize) -> u32 {
+    if buffer_size != common::constants::STORAGE_SLOT_SIZE {
+        eprintln!(
+            "storage_read: buffer_size must be {}, got {}",
+            common::constants::STORAGE_SLOT_SIZE,
+            buffer_size
+        );
+        return 0;
+    }
+
+    let storage = STORAGE.lock().expect("Storage mutex poisoned");
+
+    let data = storage.get(&slot_index).copied().unwrap_or([0u8; 32]);
+
+    unsafe {
+        std::ptr::copy_nonoverlapping(data.as_ptr(), buffer, 32);
+    }
+
+    1
+}
+
+pub fn storage_write(slot_index: u32, buffer: *const u8, buffer_size: usize) -> u32 {
+    if buffer_size != common::constants::STORAGE_SLOT_SIZE {
+        eprintln!(
+            "storage_write: buffer_size must be {}, got {}",
+            common::constants::STORAGE_SLOT_SIZE,
+            buffer_size
+        );
+        return 0;
+    }
+
+    let mut data = [0u8; 32];
+    unsafe {
+        std::ptr::copy_nonoverlapping(buffer, data.as_mut_ptr(), 32);
+    }
+
+    let mut storage = STORAGE.lock().expect("Storage mutex poisoned");
+    storage.insert(slot_index, data);
+
+    1
 }
 
 #[cfg(test)]

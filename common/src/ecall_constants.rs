@@ -18,6 +18,10 @@ pub const DEVICE_PROPERTY_SCREEN_SIZE: u32 = 0x02;
 // bitmask of device features (to be defined)
 pub const DEVICE_PROPERTY_FEATURES: u32 = 0x03;
 
+// Persistent storage
+pub const ECALL_STORAGE_READ: u32 = 20;
+pub const ECALL_STORAGE_WRITE: u32 = 21;
+
 // Big numbers
 pub const ECALL_MODM: u32 = 110;
 pub const ECALL_ADDM: u32 = 111;

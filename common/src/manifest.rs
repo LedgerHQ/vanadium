@@ -26,6 +26,7 @@ pub struct Manifest {
     pub stack_start: u32,
     pub stack_end: u32,
     pub stack_merkle_root: [u8; 32],
+    pub n_storage_slots: u32,
 }
 
 impl Manifest {
@@ -44,6 +45,7 @@ impl Manifest {
         stack_start: u32,
         stack_end: u32,
         stack_merkle_root: [u8; 32],
+        n_storage_slots: u32,
     ) -> Result<Self, &'static str> {
         if vapp_name.len() > APP_NAME_MAX_LEN {
             return Err("vapp_name is too long");
@@ -72,6 +74,9 @@ impl Manifest {
         if vapp_version.starts_with(' ') || vapp_version.ends_with(' ') {
             return Err("vapp_version must not start or end with a space");
         }
+        if n_storage_slots > crate::constants::MAX_STORAGE_SLOTS {
+            return Err("n_storage_slots exceeds maximum allowed");
+        }
 
         Ok(Self {
             manifest_version,
@@ -87,6 +92,7 @@ impl Manifest {
             stack_start,
             stack_end,
             stack_merkle_root,
+            n_storage_slots,
         })
     }
 
@@ -170,6 +176,9 @@ impl Manifest {
         hasher.update(&self.stack_start.to_be_bytes());
         hasher.update(&self.stack_end.to_be_bytes());
         hasher.update(&self.stack_merkle_root);
+
+        // Hash storage configuration
+        hasher.update(&self.n_storage_slots.to_be_bytes());
 
         hasher.finalize()
     }

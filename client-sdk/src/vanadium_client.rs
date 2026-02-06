@@ -981,6 +981,13 @@ fn load_elf_and_manifest(
                 .ok_or("Stack size is not a number")?;
             let stack_size = stack_size as u32;
 
+            let n_storage_slots = vapp_metadata
+                .get("n_storage_slots")
+                .ok_or("n_storage_slots missing in metadata")?
+                .as_integer()
+                .ok_or("n_storage_slots is not a number")?;
+            let n_storage_slots = n_storage_slots as u32;
+
             let stack_start = DEFAULT_STACK_START;
             let stack_end = stack_start + stack_size;
 
@@ -1014,6 +1021,7 @@ fn load_elf_and_manifest(
                 stack_start,
                 stack_end,
                 stack_merkle_root,
+                n_storage_slots,
             )?
         }
     };
