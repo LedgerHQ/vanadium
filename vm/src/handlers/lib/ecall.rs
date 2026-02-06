@@ -524,6 +524,34 @@ impl<'a, const N: usize> CommEcallHandler<'a, N> {
         self.handle_send_buffer::<E>(cpu, buffer, size, BufferType::Print)
     }
 
+    fn handle_storage_read<E: fmt::Debug>(
+        &self,
+        _cpu: &mut Cpu<OutsourcedMemory<'_, N>>,
+        _slot_index: u32,
+        _buffer: GuestPointer,
+        _buffer_size: usize,
+    ) -> Result<u32, CommEcallError> {
+        // TODO: Implement NVRAM reading
+        // For now, return error to indicate unimplemented
+        Err(CommEcallError::GenericError(
+            "storage_read not yet implemented",
+        ))
+    }
+
+    fn handle_storage_write<E: fmt::Debug>(
+        &self,
+        _cpu: &mut Cpu<OutsourcedMemory<'_, N>>,
+        _slot_index: u32,
+        _buffer: GuestPointer,
+        _buffer_size: usize,
+    ) -> Result<u32, CommEcallError> {
+        // TODO: Implement NVRAM writing
+        // For now, return error to indicate unimplemented
+        Err(CommEcallError::GenericError(
+            "storage_write not yet implemented",
+        ))
+    }
+
     fn handle_bn_modm<E: fmt::Debug>(
         &self,
         cpu: &mut Cpu<OutsourcedMemory<'_, N>>,
@@ -1607,6 +1635,8 @@ fn get_ecall_name(ecall_code: u32) -> String {
         ECALL_ECFP_ADD_POINT => "ecfp_add_point".into(),
         ECALL_ECFP_SCALAR_MULT => "ecfp_scalar_mult".into(),
         ECALL_GET_RANDOM_BYTES => "get_random_bytes".into(),
+        ECALL_STORAGE_READ => "storage_read".into(),
+        ECALL_STORAGE_WRITE => "storage_write".into(),
         ECALL_ECDSA_SIGN => "ecdsa_sign".into(),
         ECALL_ECDSA_VERIFY => "ecdsa_verify".into(),
         ECALL_SCHNORR_SIGN => "schnorr_sign".into(),
@@ -1669,6 +1699,24 @@ impl<'a, const N: usize> EcallHandler for CommEcallHandler<'a, N> {
             ECALL_GET_EVENT => {
                 reg!(A0) = self.handle_get_event::<CommEcallError>(cpu, GPreg!(A0))?;
             }
+
+            ECALL_STORAGE_READ => {
+                reg!(A0) = self.handle_storage_read::<CommEcallError>(
+                    cpu,
+                    reg!(A0),
+                    GPreg!(A1),
+                    reg!(A2) as usize,
+                )?;
+            }
+            ECALL_STORAGE_WRITE => {
+                reg!(A0) = self.handle_storage_write::<CommEcallError>(
+                    cpu,
+                    reg!(A0),
+                    GPreg!(A1),
+                    reg!(A2) as usize,
+                )?;
+            }
+
             ECALL_SHOW_PAGE => {
                 self.handle_show_page::<CommEcallError>(cpu, GPreg!(A0), reg!(A1) as usize)?;
 

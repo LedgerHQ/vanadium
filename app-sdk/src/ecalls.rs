@@ -77,6 +77,28 @@ forward_to_ecall! {
     /// The event code.
     pub fn get_event(data: *mut EventData) -> u32;
 
+    /// Reads a 32-byte value from the specified storage slot.
+    ///
+    /// # Parameters
+    /// - `slot_index`: The index of the storage slot to read (0 to n_storage_slots-1).
+    /// - `buffer`: Pointer to a 32-byte buffer to store the read value.
+    /// - `buffer_size`: Size of the buffer (must be 32).
+    ///
+    /// # Returns
+    /// 1 on success, 0 on error.
+    pub fn storage_read(slot_index: u32, buffer: *mut u8, buffer_size: usize) -> u32;
+
+    /// Writes a 32-byte value to the specified storage slot.
+    ///
+    /// # Parameters
+    /// - `slot_index`: The index of the storage slot to write (0 to n_storage_slots-1).
+    /// - `buffer`: Pointer to the 32-byte buffer containing the value to write.
+    /// - `buffer_size`: Size of the buffer (must be 32).
+    ///
+    /// # Returns
+    /// 1 on success, 0 on error.
+    pub fn storage_write(slot_index: u32, buffer: *const u8, buffer_size: usize) -> u32;
+
     /// Shows a page.
     ///
     /// # Parameters

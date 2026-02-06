@@ -218,6 +218,19 @@ fn create_vapp_package(
     }
     let stack_size = stack_size as u32;
 
+    let n_storage_slots = vapp_metadata
+        .get("n_storage_slots")
+        .and_then(|v| v.as_integer())
+        .unwrap_or(0);
+
+    if n_storage_slots < 0 || n_storage_slots > constants::MAX_STORAGE_SLOTS as i64 {
+        return Err(anyhow::anyhow!(
+            "n_storage_slots must be between 0 and {}",
+            constants::MAX_STORAGE_SLOTS
+        ));
+    }
+    let n_storage_slots = n_storage_slots as u32;
+
     // we might make it configurable in the future; for now, use a fixed value
     let stack_start = constants::DEFAULT_STACK_START;
     let stack_end = stack_start + stack_size;
@@ -265,6 +278,7 @@ fn create_vapp_package(
         stack_start,
         stack_end,
         stack_merkle_root,
+        n_storage_slots,
     )
     .map_err(|e| anyhow::anyhow!(e))
     .context("Failed to create VApp manifest")?;
