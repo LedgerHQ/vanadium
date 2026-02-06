@@ -21,6 +21,7 @@ pub mod curve;
 pub mod hash;
 pub mod rand;
 pub mod slip21;
+pub mod storage;
 pub mod ux;
 
 pub use app::{App, AppBuilder};
