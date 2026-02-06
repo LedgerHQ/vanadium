@@ -1,7 +1,6 @@
 use lazy_static::lazy_static;
 use rand::TryRngCore;
 use std::{
-    collections::HashMap,
     io::{self, Write},
     net::{TcpListener, TcpStream},
     sync::Mutex,
@@ -146,7 +145,6 @@ lazy_static! {
     static ref LAST_EVENT: Mutex<Option<(common::ux::EventCode, common::ux::EventData)>> =
         Mutex::new(None);
     static ref TCP_CONN: Mutex<TcpStream> = Mutex::new(wait_for_client());
-    static ref STORAGE: Mutex<HashMap<u32, [u8; 32]>> = Mutex::new(HashMap::new());
 }
 
 fn get_last_event() -> Option<(common::ux::EventCode, common::ux::EventData)> {
@@ -1055,9 +1053,40 @@ pub fn storage_read(slot_index: u32, buffer: *mut u8, buffer_size: usize) -> u32
         return 0;
     }
 
-    let storage = STORAGE.lock().expect("Storage mutex poisoned");
+    if slot_index >= common::constants::MAX_STORAGE_SLOTS {
+        eprintln!(
+            "storage_read: slot_index {} exceeds maximum {}",
+            slot_index,
+            common::constants::MAX_STORAGE_SLOTS
+        );
+        return 0;
+    }
 
-    let data = storage.get(&slot_index).copied().unwrap_or([0u8; 32]);
+    let storage_file = format!("{}.dat", env!("CARGO_PKG_NAME"));
+    let offset = (slot_index as u64) * (common::constants::STORAGE_SLOT_SIZE as u64);
+
+    let data = match std::fs::File::open(&storage_file) {
+        Ok(mut file) => {
+            use std::io::{Read, Seek, SeekFrom};
+
+            // Seek to the slot position
+            if file.seek(SeekFrom::Start(offset)).is_err() {
+                // If seek fails, return zeros
+                [0u8; 32]
+            } else {
+                let mut data = [0u8; 32];
+                // Read the slot data, or return zeros if read fails or is incomplete
+                match file.read_exact(&mut data) {
+                    Ok(_) => data,
+                    Err(_) => [0u8; 32],
+                }
+            }
+        }
+        Err(_) => {
+            // File doesn't exist, return zeros
+            [0u8; 32]
+        }
+    };
 
     unsafe {
         std::ptr::copy_nonoverlapping(data.as_ptr(), buffer, 32);
@@ -1076,13 +1105,79 @@ pub fn storage_write(slot_index: u32, buffer: *const u8, buffer_size: usize) -> 
         return 0;
     }
 
+    if slot_index >= common::constants::MAX_STORAGE_SLOTS {
+        eprintln!(
+            "storage_write: slot_index {} exceeds maximum {}",
+            slot_index,
+            common::constants::MAX_STORAGE_SLOTS
+        );
+        return 0;
+    }
+
     let mut data = [0u8; 32];
     unsafe {
         std::ptr::copy_nonoverlapping(buffer, data.as_mut_ptr(), 32);
     }
 
-    let mut storage = STORAGE.lock().expect("Storage mutex poisoned");
-    storage.insert(slot_index, data);
+    let storage_file = format!("{}.dat", env!("CARGO_PKG_NAME"));
+    let offset = (slot_index as u64) * (common::constants::STORAGE_SLOT_SIZE as u64);
+
+    use std::io::{Seek, SeekFrom, Write};
+
+    // Open file for reading and writing, create if doesn't exist
+    let mut file = match std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .open(&storage_file)
+    {
+        Ok(f) => f,
+        Err(e) => {
+            eprintln!("storage_write: failed to open file {}: {}", storage_file, e);
+            return 0;
+        }
+    };
+
+    // Get file size
+    let file_size = match file.metadata() {
+        Ok(metadata) => metadata.len(),
+        Err(e) => {
+            eprintln!("storage_write: failed to get file metadata: {}", e);
+            return 0;
+        }
+    };
+
+    // If file is smaller than the required offset + slot size, extend it with zeros
+    let required_size = offset + (common::constants::STORAGE_SLOT_SIZE as u64);
+    if file_size < required_size {
+        if file.seek(SeekFrom::End(0)).is_err() {
+            eprintln!("storage_write: failed to seek to end of file");
+            return 0;
+        }
+        let padding = vec![0u8; (required_size - file_size) as usize];
+        if file.write_all(&padding).is_err() {
+            eprintln!("storage_write: failed to extend file with zeros");
+            return 0;
+        }
+    }
+
+    // Seek to the slot position
+    if file.seek(SeekFrom::Start(offset)).is_err() {
+        eprintln!("storage_write: failed to seek to slot offset");
+        return 0;
+    }
+
+    // Write the slot data
+    if file.write_all(&data).is_err() {
+        eprintln!("storage_write: failed to write slot data");
+        return 0;
+    }
+
+    // Ensure data is written to disk
+    if file.flush().is_err() {
+        eprintln!("storage_write: failed to flush file");
+        return 0;
+    }
 
     1
 }
