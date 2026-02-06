@@ -10,6 +10,7 @@ use common::{
         BufferType, Message, MessageDeserializationError, ReceiveBufferMessage,
         ReceiveBufferResponse, SendBufferContinuedMessage, SendBufferMessage,
     },
+    constants::STORAGE_SLOT_SIZE,
     ecall_constants::{self, *},
     ux::Deserializable,
     vm::{Cpu, CpuError, EcallHandler, MemoryError},
@@ -362,13 +363,21 @@ impl core::error::Error for CommEcallError {
 pub struct CommEcallHandler<'a, const N: usize> {
     comm: Rc<RefCell<&'a mut ledger_device_sdk::io::Comm<N>>>,
     ux_handler: &'static mut UxHandler,
+    vapp_hash: [u8; 32],
+    n_storage_slots: u32,
 }
 
 impl<'a, const N: usize> CommEcallHandler<'a, N> {
-    pub fn new(comm: Rc<RefCell<&'a mut ledger_device_sdk::io::Comm<N>>>) -> Self {
+    pub fn new(
+        comm: Rc<RefCell<&'a mut ledger_device_sdk::io::Comm<N>>>,
+        vapp_hash: [u8; 32],
+        n_storage_slots: u32,
+    ) -> Self {
         Self {
             comm,
             ux_handler: init_ux_handler(),
+            vapp_hash,
+            n_storage_slots,
         }
     }
 
@@ -526,30 +535,77 @@ impl<'a, const N: usize> CommEcallHandler<'a, N> {
 
     fn handle_storage_read<E: fmt::Debug>(
         &self,
-        _cpu: &mut Cpu<OutsourcedMemory<'_, N>>,
-        _slot_index: u32,
-        _buffer: GuestPointer,
-        _buffer_size: usize,
+        cpu: &mut Cpu<OutsourcedMemory<'_, N>>,
+        slot_index: u32,
+        buffer: GuestPointer,
+        buffer_size: usize,
     ) -> Result<u32, CommEcallError> {
-        // TODO: Implement NVRAM reading
-        // For now, return error to indicate unimplemented
-        Err(CommEcallError::GenericError(
-            "storage_read not yet implemented",
-        ))
+        // Validate buffer size
+        if buffer_size != STORAGE_SLOT_SIZE {
+            return Ok(0); // Invalid buffer size
+        }
+
+        // Validate slot index
+        if slot_index >= self.n_storage_slots {
+            return Ok(0); // Invalid slot index
+        }
+
+        // Find the VApp in storage
+        let vapp_index = match crate::vapp::VAppStore::find_by_hash(&self.vapp_hash) {
+            Some(index) => index,
+            None => return Ok(0), // VApp not found
+        };
+
+        // Get the storage slot data
+        let entry = crate::vapp::VAppStore::get_entry(vapp_index)
+            .ok_or(CommEcallError::GenericError("VApp entry not found"))?;
+        let slot_data = &entry.storage_slots[slot_index as usize];
+
+        // Write slot data to guest memory
+        cpu.get_segment::<E>(buffer.0)?
+            .write_buffer(buffer.0, slot_data)?;
+
+        Ok(1) // Success
     }
 
     fn handle_storage_write<E: fmt::Debug>(
         &self,
-        _cpu: &mut Cpu<OutsourcedMemory<'_, N>>,
-        _slot_index: u32,
-        _buffer: GuestPointer,
-        _buffer_size: usize,
+        cpu: &mut Cpu<OutsourcedMemory<'_, N>>,
+        slot_index: u32,
+        buffer: GuestPointer,
+        buffer_size: usize,
     ) -> Result<u32, CommEcallError> {
-        // TODO: Implement NVRAM writing
-        // For now, return error to indicate unimplemented
-        Err(CommEcallError::GenericError(
-            "storage_write not yet implemented",
-        ))
+        // Validate buffer size
+        if buffer_size != STORAGE_SLOT_SIZE {
+            return Ok(0); // Invalid buffer size
+        }
+
+        // Validate slot index
+        if slot_index >= self.n_storage_slots {
+            return Ok(0); // Invalid slot index
+        }
+
+        // Find the VApp in storage
+        let vapp_index = match crate::vapp::VAppStore::find_by_hash(&self.vapp_hash) {
+            Some(index) => index,
+            None => return Ok(0), // VApp not found
+        };
+
+        // Read data from guest memory
+        let mut slot_data: [u8; STORAGE_SLOT_SIZE] = [0; STORAGE_SLOT_SIZE];
+        cpu.get_segment::<E>(buffer.0)?
+            .read_buffer(buffer.0, &mut slot_data)?;
+
+        // Get current entry and update it
+        let mut entry = *crate::vapp::VAppStore::get_entry(vapp_index)
+            .ok_or(CommEcallError::GenericError("VApp entry not found"))?;
+        entry.storage_slots[slot_index as usize] = slot_data;
+
+        // Write back to NVRAM atomically
+        let storage = crate::vapp::VAppStore::get_storage_mut();
+        storage[vapp_index].update(&entry);
+
+        Ok(1) // Success
     }
 
     fn handle_bn_modm<E: fmt::Debug>(
