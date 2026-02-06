@@ -1,4 +1,7 @@
-use common::manifest::{Manifest, APP_NAME_MAX_LEN, APP_VERSION_MAX_LEN};
+use common::{
+    constants::MAX_STORAGE_SLOTS,
+    manifest::{Manifest, APP_NAME_MAX_LEN, APP_VERSION_MAX_LEN},
+};
 use ledger_device_sdk::NVMData;
 
 use crate::nvm::LazyStorage;
@@ -19,6 +22,8 @@ pub struct VAppEntry {
     pub vapp_name: [u8; APP_NAME_MAX_LEN],
     /// V-App version, null-padded to 32 bytes.
     pub vapp_version: [u8; APP_VERSION_MAX_LEN],
+    /// Storage slots for persistent data (4 slots of 32 bytes each).
+    pub storage_slots: [[u8; 32]; MAX_STORAGE_SLOTS as usize],
 }
 
 impl VAppEntry {
@@ -28,6 +33,7 @@ impl VAppEntry {
             vapp_hash: [0u8; 32],
             vapp_name: [0u8; APP_NAME_MAX_LEN],
             vapp_version: [0u8; APP_VERSION_MAX_LEN],
+            storage_slots: [[0u8; 32]; MAX_STORAGE_SLOTS as usize],
         }
     }
 
@@ -78,7 +84,7 @@ pub struct VAppStore;
 impl VAppStore {
     /// Gets a mutable reference to the storage array.
     #[inline(never)]
-    fn get_storage_mut() -> &'static mut [LazyStorage<VAppEntry>; MAX_REGISTERED_VAPPS] {
+    pub fn get_storage_mut() -> &'static mut [LazyStorage<VAppEntry>; MAX_REGISTERED_VAPPS] {
         let data = &raw mut VAPP_STORE;
         unsafe { (*data).get_mut() }
     }

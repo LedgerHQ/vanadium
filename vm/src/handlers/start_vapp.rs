@@ -135,7 +135,8 @@ pub fn handler_start_vapp(
     cpu.regs[2] = (manifest.stack_end - 4) & !3;
     assert!(cpu.pc % 2 == 0, "Unaligned entrypoint");
 
-    let mut ecall_handler = CommEcallHandler::new(comm.clone());
+    let mut ecall_handler =
+        CommEcallHandler::new(comm.clone(), vapp_hash, manifest.n_storage_slots);
 
     #[cfg(feature = "metrics")]
     let mut instr_count = 0;
