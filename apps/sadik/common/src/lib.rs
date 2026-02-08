@@ -76,6 +76,13 @@ pub enum Command {
     Sleep {
         n_ticks: u32,
     },
+    WriteStorage {
+        slot: u32,
+        data: Vec<u8>,
+    },
+    ReadStorage {
+        slot: u32,
+    },
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]

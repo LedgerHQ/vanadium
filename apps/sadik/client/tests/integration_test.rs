@@ -565,3 +565,53 @@ async fn test_ticker() {
     let result = setup.client.sleep(10).await.expect("Should not fail");
     assert_eq!(result, Vec::<u8>::new());
 }
+
+#[tokio::test]
+async fn test_storage_read_uninitialized() {
+    // Reading an uninitialized storage slot should return zeros
+    let mut setup = setup().await;
+    
+    for slot in 0..4 {
+        let result = setup.client.read_storage(slot).await.unwrap();
+        // Storage slots should be initialized to all zeros
+        assert_eq!(result, vec![0u8; 32], "Uninitialized slot {} should contain zeros", slot);
+    }
+}
+
+#[tokio::test]
+async fn test_storage_write_and_read() {
+    // Writing to a storage slot and then reading it should return the same value
+    let mut setup = setup().await;
+    
+    let test_data = hex!("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef");
+    
+    // Write to slot 0
+    setup.client.write_storage(0, &test_data).await.unwrap();
+    
+    // Read back from slot 0
+    let result = setup.client.read_storage(0).await.unwrap();
+    assert_eq!(result, test_data.to_vec(), "Read data should match written data");
+}
+
+#[tokio::test]
+async fn test_storage_multiple_slots() {
+    // Test writing to multiple different slots
+    let mut setup = setup().await;
+    
+    let data0 = hex!("1111111111111111111111111111111111111111111111111111111111111111");
+    let data1 = hex!("2222222222222222222222222222222222222222222222222222222222222222");
+    let data2 = hex!("3333333333333333333333333333333333333333333333333333333333333333");
+    let data3 = hex!("4444444444444444444444444444444444444444444444444444444444444444");
+    
+    // Write to all 4 slots
+    setup.client.write_storage(0, &data0).await.unwrap();
+    setup.client.write_storage(1, &data1).await.unwrap();
+    setup.client.write_storage(2, &data2).await.unwrap();
+    setup.client.write_storage(3, &data3).await.unwrap();
+    
+    // Read back and verify all slots
+    assert_eq!(setup.client.read_storage(0).await.unwrap(), data0.to_vec());
+    assert_eq!(setup.client.read_storage(1).await.unwrap(), data1.to_vec());
+    assert_eq!(setup.client.read_storage(2).await.unwrap(), data2.to_vec());
+    assert_eq!(setup.client.read_storage(3).await.unwrap(), data3.to_vec());
+}
