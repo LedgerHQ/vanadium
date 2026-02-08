@@ -238,6 +238,29 @@ impl SadikClient {
             .expect("Error sending message"))
     }
 
+    pub async fn write_storage(
+        &mut self,
+        slot: u32,
+        data: &[u8],
+    ) -> Result<Vec<u8>, SadikClientError> {
+        let cmd = Command::WriteStorage {
+            slot,
+            data: data.to_vec(),
+        };
+        let msg = postcard::to_allocvec(&cmd).expect("Serialization failed");
+        Ok(send_message(&mut self.vapp_transport, &msg)
+            .await
+            .expect("Error sending message"))
+    }
+
+    pub async fn read_storage(&mut self, slot: u32) -> Result<Vec<u8>, SadikClientError> {
+        let cmd = Command::ReadStorage { slot };
+        let msg = postcard::to_allocvec(&cmd).expect("Serialization failed");
+        Ok(send_message(&mut self.vapp_transport, &msg)
+            .await
+            .expect("Error sending message"))
+    }
+
     pub async fn exit(&mut self) -> Result<i32, &'static str> {
         match send_message(&mut self.vapp_transport, &[]).await {
             Ok(_) => Err("Exit message shouldn't return!"),

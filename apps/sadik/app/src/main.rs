@@ -267,6 +267,16 @@ fn process_message(_app: &mut App, msg: &[u8]) -> Vec<u8> {
 
             vec![]
         }
+        Command::WriteStorage { slot, data } => {
+            let mut storage_data = [0u8; 32];
+            let len = core::cmp::min(data.len(), 32);
+            storage_data[..len].copy_from_slice(&data[..len]);
+            sdk::storage::write_slot(slot, &storage_data).expect("Failed to write storage");
+            vec![]
+        }
+        Command::ReadStorage { slot } => sdk::storage::read_slot(slot)
+            .expect("Failed to read storage")
+            .to_vec(),
     };
 
     response
