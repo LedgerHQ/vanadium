@@ -4,7 +4,6 @@ use alloc::vec::Vec;
 use alloc::{boxed::Box, rc::Rc};
 
 use common::client_commands::SectionKind;
-use common::constants::MAX_STORAGE_SLOTS;
 use common::manifest::Manifest;
 use common::vm::{Cpu, MemorySegment};
 
@@ -33,9 +32,7 @@ pub fn handler_start_vapp(
         return Err(AppSW::IncorrectData); // extra data
     }
 
-    if manifest.n_storage_slots > MAX_STORAGE_SLOTS {
-        return Err(AppSW::IncorrectData); // too many storage slots in manifest
-    }
+    manifest.validate().map_err(|_| AppSW::IncorrectData)?; // ensure manifest is valid
 
     // Compute the vapp_hash and verify the app is registered
     let vapp_hash = manifest.get_vapp_hash::<Sha256Hasher, 32>();
