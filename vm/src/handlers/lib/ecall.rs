@@ -10,7 +10,7 @@ use common::{
         BufferType, Message, MessageDeserializationError, ReceiveBufferMessage,
         ReceiveBufferResponse, SendBufferContinuedMessage, SendBufferMessage,
     },
-    constants::STORAGE_SLOT_SIZE,
+    constants::{MAX_STORAGE_SLOTS, STORAGE_SLOT_SIZE},
     ecall_constants::{self, *},
     ux::Deserializable,
     vm::{Cpu, CpuError, EcallHandler, MemoryError},
@@ -373,6 +373,8 @@ impl<'a, const N: usize> CommEcallHandler<'a, N> {
         vapp_hash: [u8; 32],
         n_storage_slots: u32,
     ) -> Self {
+        assert!(n_storage_slots <= MAX_STORAGE_SLOTS);
+
         Self {
             comm,
             ux_handler: init_ux_handler(),
@@ -546,7 +548,7 @@ impl<'a, const N: usize> CommEcallHandler<'a, N> {
         }
 
         // Validate slot index
-        if slot_index >= self.n_storage_slots {
+        if slot_index >= self.n_storage_slots || slot_index >= MAX_STORAGE_SLOTS {
             return Ok(0); // Invalid slot index
         }
 
@@ -581,7 +583,7 @@ impl<'a, const N: usize> CommEcallHandler<'a, N> {
         }
 
         // Validate slot index
-        if slot_index >= self.n_storage_slots {
+        if slot_index >= self.n_storage_slots || slot_index >= MAX_STORAGE_SLOTS {
             return Ok(0); // Invalid slot index
         }
 

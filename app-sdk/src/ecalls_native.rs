@@ -14,10 +14,13 @@ use std::io::Read;
 use hmac::{Hmac, Mac};
 use sha2::Sha512;
 
-use common::ux::{Deserializable, EventCode, EventData};
 use common::{
     client_commands::BufferType,
     ecall_constants::{CurveKind, MAX_BIGNUMBER_SIZE},
+};
+use common::{
+    constants::STORAGE_SLOT_SIZE,
+    ux::{Deserializable, EventCode, EventData},
 };
 
 use bip32::{ChildNumber, XPrv};
@@ -1043,6 +1046,15 @@ fn slip21_derive_child_node(cur_node: &[u8; 64], label: &[u8]) -> [u8; 64] {
     mac.finalize().into_bytes().into()
 }
 
+fn get_storage_file() -> String {
+    let file_name = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.file_stem().map(|s| s.to_string_lossy().into_owned()))
+        .expect("Failed to compute name of storage file");
+
+    format!("{}.dat", file_name)
+}
+
 pub fn storage_read(slot_index: u32, buffer: *mut u8, buffer_size: usize) -> u32 {
     if buffer_size != common::constants::STORAGE_SLOT_SIZE {
         eprintln!(
@@ -1062,7 +1074,7 @@ pub fn storage_read(slot_index: u32, buffer: *mut u8, buffer_size: usize) -> u32
         return 0;
     }
 
-    let storage_file = format!("{}.dat", env!("CARGO_PKG_NAME"));
+    let storage_file = get_storage_file();
     let offset = (slot_index as u64) * (common::constants::STORAGE_SLOT_SIZE as u64);
 
     let data = match std::fs::File::open(&storage_file) {
@@ -1072,24 +1084,24 @@ pub fn storage_read(slot_index: u32, buffer: *mut u8, buffer_size: usize) -> u32
             // Seek to the slot position
             if file.seek(SeekFrom::Start(offset)).is_err() {
                 // If seek fails, return zeros
-                [0u8; 32]
+                [0u8; STORAGE_SLOT_SIZE]
             } else {
-                let mut data = [0u8; 32];
+                let mut data = [0u8; STORAGE_SLOT_SIZE];
                 // Read the slot data, or return zeros if read fails or is incomplete
                 match file.read_exact(&mut data) {
                     Ok(_) => data,
-                    Err(_) => [0u8; 32],
+                    Err(_) => [0u8; STORAGE_SLOT_SIZE],
                 }
             }
         }
         Err(_) => {
             // File doesn't exist, return zeros
-            [0u8; 32]
+            [0u8; STORAGE_SLOT_SIZE]
         }
     };
 
     unsafe {
-        std::ptr::copy_nonoverlapping(data.as_ptr(), buffer, 32);
+        std::ptr::copy_nonoverlapping(data.as_ptr(), buffer, STORAGE_SLOT_SIZE);
     }
 
     1
@@ -1114,12 +1126,12 @@ pub fn storage_write(slot_index: u32, buffer: *const u8, buffer_size: usize) -> 
         return 0;
     }
 
-    let mut data = [0u8; 32];
+    let mut data = [0u8; STORAGE_SLOT_SIZE];
     unsafe {
-        std::ptr::copy_nonoverlapping(buffer, data.as_mut_ptr(), 32);
+        std::ptr::copy_nonoverlapping(buffer, data.as_mut_ptr(), STORAGE_SLOT_SIZE);
     }
 
-    let storage_file = format!("{}.dat", env!("CARGO_PKG_NAME"));
+    let storage_file = get_storage_file();
     let offset = (slot_index as u64) * (common::constants::STORAGE_SLOT_SIZE as u64);
 
     use std::io::{Seek, SeekFrom, Write};

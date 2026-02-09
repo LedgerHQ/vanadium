@@ -1,5 +1,5 @@
 use common::{
-    constants::MAX_STORAGE_SLOTS,
+    constants::{MAX_STORAGE_SLOTS, STORAGE_SLOT_SIZE},
     manifest::{Manifest, APP_NAME_MAX_LEN, APP_VERSION_MAX_LEN},
 };
 use ledger_device_sdk::NVMData;
@@ -22,8 +22,8 @@ pub struct VAppEntry {
     pub vapp_name: [u8; APP_NAME_MAX_LEN],
     /// V-App version, null-padded to 32 bytes.
     pub vapp_version: [u8; APP_VERSION_MAX_LEN],
-    /// Storage slots for persistent data (4 slots of 32 bytes each).
-    pub storage_slots: [[u8; 32]; MAX_STORAGE_SLOTS as usize],
+    /// Storage slots for persistent data (4 slots of STORAGE_SLOT_SIZE bytes each).
+    pub storage_slots: [[u8; STORAGE_SLOT_SIZE]; MAX_STORAGE_SLOTS as usize],
 }
 
 impl VAppEntry {
@@ -33,7 +33,7 @@ impl VAppEntry {
             vapp_hash: [0u8; 32],
             vapp_name: [0u8; APP_NAME_MAX_LEN],
             vapp_version: [0u8; APP_VERSION_MAX_LEN],
-            storage_slots: [[0u8; 32]; MAX_STORAGE_SLOTS as usize],
+            storage_slots: [[0u8; STORAGE_SLOT_SIZE]; MAX_STORAGE_SLOTS as usize],
         }
     }
 
