@@ -1440,7 +1440,7 @@ impl<'a, const N: usize> CommEcallHandler<'a, N> {
 
         let mut msg_local = vec![0; 128];
         cpu.get_segment::<E>(msg.0)?
-            .read_buffer(msg.0, &mut msg_local)?;
+            .read_buffer(msg.0, &mut msg_local[..msg_len])?;
 
         // Schnorr signatures are at most 64 bytes long.
         let mut signature_local: [u8; 64] = [0; 64];
