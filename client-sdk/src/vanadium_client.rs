@@ -981,11 +981,15 @@ fn load_elf_and_manifest(
                 .ok_or("Stack size is not a number")?;
             let stack_size = stack_size as u32;
 
-            let n_storage_slots = vapp_metadata
-                .get("n_storage_slots")
-                .ok_or("n_storage_slots missing in metadata")?
-                .as_integer()
-                .ok_or("n_storage_slots is not a number")?;
+            let n_storage_slots = match vapp_metadata.get("n_storage_slots") {
+                None => 0,
+                Some(value) => value
+                    .as_integer()
+                    .ok_or("n_storage_slots is not a number")?,
+            };
+            if n_storage_slots < 0 || n_storage_slots > u32::MAX as i64 {
+                return Err("n_storage_slots is out of range".into());
+            }
             let n_storage_slots = n_storage_slots as u32;
 
             let stack_start = DEFAULT_STACK_START;

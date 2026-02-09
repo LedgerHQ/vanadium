@@ -218,10 +218,12 @@ fn create_vapp_package(
     }
     let stack_size = stack_size as u32;
 
-    let n_storage_slots = vapp_metadata
-        .get("n_storage_slots")
-        .and_then(|v| v.as_integer())
-        .unwrap_or(0);
+    let n_storage_slots = match vapp_metadata.get("n_storage_slots") {
+        None => 0,
+        Some(value) => value
+            .as_integer()
+            .context("n_storage_slots is not a number")?,
+    };
 
     if n_storage_slots < 0 || n_storage_slots > constants::MAX_STORAGE_SLOTS as i64 {
         return Err(anyhow::anyhow!(

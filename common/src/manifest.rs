@@ -26,6 +26,7 @@ pub struct Manifest {
     pub stack_start: u32,
     pub stack_end: u32,
     pub stack_merkle_root: [u8; 32],
+    #[serde(default)]
     pub n_storage_slots: u32,
 }
 
