@@ -8,6 +8,7 @@ While the exact specifications of the Manifest are (at this stage) are still lik
 - The V-App's name and version
 - The V-App's entry point
 - the start, end and the initial Merkle root of the code, data and stack segments of the binary.
+- the number of persistent storage slots, if needed.
 
 The [cargo-vnd](../cargo-vnd) tool computes most of those fields from the compiled binary, producing a packaged binary that contains the Manifest added to it.
 
@@ -23,6 +24,10 @@ The name is shown when the V-App is registered onto the device.
 [package.metadata.vapp]
 name = "My App"
 stack_size = 131072
+n_storage_slots = 2
 ```
 
-If omitted, the stack size defaults to 65536 bytes.
+If omitted:
+- `stack_size` defaults to 65536 bytes.
+- `n_storage_slots` defaults to 0.
+
