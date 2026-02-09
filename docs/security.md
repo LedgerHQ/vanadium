@@ -40,3 +40,9 @@ Once the user approves, the V-App is stored in a persistent registry on the devi
 When launching a V-App, the Vanadium VM verifies that the V-App hash matches one of the registered entries before allowing execution.
 
 Note: The V-App registry is cleared if the Vanadium app is deleted or reinstalled.
+
+# Persistent storage
+
+For apps that store any data in persistent storage, Vanadium guarantees isolation between V-Apps, preventing one app to access the store of other apps.
+
+The stored data has the same physical tamper-resistance as the Vanadium app binary itself.
