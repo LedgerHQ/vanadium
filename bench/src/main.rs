@@ -1,6 +1,12 @@
 use client::BenchClient;
+#[cfg(not(feature = "speculos"))]
 use hidapi::HidApi;
-use sdk::transport::{TransportHID, TransportWrapper};
+#[cfg(not(feature = "speculos"))]
+use sdk::transport::TransportHID;
+#[cfg(feature = "speculos")]
+use sdk::transport::TransportTcp;
+use sdk::transport::TransportWrapper;
+
 use sdk::transport_native_hid::TransportNativeHID;
 use sdk::vanadium_client::VanadiumAppClient;
 use std::env;
@@ -33,8 +39,17 @@ async fn run_bench_case(
     // Best-effort cleanup in case a prior run didn't stop cleanly.
     let _ = vanadium_client.stop_vapp().await;
 
+    #[cfg(feature = "debug")]
+    let print_writer = Box::new(sdk::linewriter::FileLineWriter::new(
+        "print.log",
+        true,
+        true,
+    ));
+    #[cfg(not(feature = "debug"))]
+    let print_writer = Box::new(std::io::sink());
+
     vanadium_client
-        .start_vapp(&app_path_str, Box::new(std::io::sink()))
+        .start_vapp(&app_path_str, Box::new(print_writer))
         .await?;
 
     let mut client = BenchClient::new(vanadium_client);
@@ -52,13 +67,36 @@ async fn run_bench_case(
 
 #[tokio::main(flavor = "multi_thread")]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let args: Vec<String> = env::args().skip(1).collect();
-    let transport_raw = Arc::new(TransportHID::new(
-        TransportNativeHID::new(&HidApi::new().expect("Unable to get connect to the device"))
-            .unwrap(),
-    ));
+    #[cfg(feature = "debug")]
+    {
+        let log_file = std::fs::File::create("debug.log")?;
+        env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("debug"))
+            .target(env_logger::Target::Pipe(Box::new(log_file)))
+            .init();
+    }
 
-    let transport = Arc::new(TransportWrapper::new(transport_raw.clone()));
+    let args: Vec<String> = env::args().skip(1).collect();
+
+    #[cfg(not(feature = "speculos"))]
+    let transport = {
+        let transport_raw = Arc::new(TransportHID::new(
+            TransportNativeHID::new(&HidApi::new().expect("Unable to get connect to the device"))
+                .unwrap(),
+        ));
+
+        Arc::new(TransportWrapper::new(transport_raw.clone()))
+    };
+
+    #[cfg(feature = "speculos")]
+    let transport = {
+        let transport_raw = Arc::new(
+            TransportTcp::new_default()
+                .await
+                .expect("Unable to connect to Speculos"),
+        );
+
+        Arc::new(TransportWrapper::new(transport_raw.clone()))
+    };
 
     // Create the Vanadium client once (without running any V-App).
     let mut vanadium_client = match VanadiumAppClient::new(transport.clone()).await {
