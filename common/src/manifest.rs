@@ -48,38 +48,7 @@ impl Manifest {
         stack_merkle_root: [u8; 32],
         n_storage_slots: u32,
     ) -> Result<Self, &'static str> {
-        if vapp_name.len() > APP_NAME_MAX_LEN {
-            return Err("vapp_name is too long");
-        }
-        if vapp_version.len() > APP_VERSION_MAX_LEN {
-            return Err("vapp_version is too long");
-        }
-        if entrypoint < code_start || entrypoint >= code_end {
-            return Err("entrypoint must be within the code section");
-        }
-        if entrypoint % 2 != 0 {
-            return Err("entrypoint must be 2-byte aligned");
-        }
-        if !vapp_name.chars().all(|c| c.is_ascii_graphic() || c == ' ') {
-            return Err("vapp_name contains non-printable ASCII characters");
-        }
-        if !vapp_version
-            .chars()
-            .all(|c| c.is_ascii_graphic() || c == ' ')
-        {
-            return Err("vapp_version contains non-printable ASCII characters");
-        }
-        if vapp_name.starts_with(' ') || vapp_name.ends_with(' ') {
-            return Err("vapp_name must not start or end with a space");
-        }
-        if vapp_version.starts_with(' ') || vapp_version.ends_with(' ') {
-            return Err("vapp_version must not start or end with a space");
-        }
-        if n_storage_slots > crate::constants::MAX_STORAGE_SLOTS {
-            return Err("n_storage_slots exceeds maximum allowed");
-        }
-
-        Ok(Self {
+        let manifest = Self {
             manifest_version,
             vapp_name: vapp_name.to_string(),
             vapp_version: vapp_version.to_string(),
@@ -94,7 +63,53 @@ impl Manifest {
             stack_end,
             stack_merkle_root,
             n_storage_slots,
-        })
+        };
+
+        manifest.validate()?;
+
+        Ok(manifest)
+    }
+
+    /// Validates the manifest fields. Returns `Ok(())` if the manifest is valid,
+    /// or an `Err(&'static str)` describing the first validation failure.
+    pub fn validate(&self) -> Result<(), &'static str> {
+        if self.vapp_name.len() > APP_NAME_MAX_LEN {
+            return Err("vapp_name is too long");
+        }
+        if self.vapp_version.len() > APP_VERSION_MAX_LEN {
+            return Err("vapp_version is too long");
+        }
+        if self.entrypoint < self.code_start || self.entrypoint >= self.code_end {
+            return Err("entrypoint must be within the code section");
+        }
+        if self.entrypoint % 2 != 0 {
+            return Err("entrypoint must be 2-byte aligned");
+        }
+        if !self
+            .vapp_name
+            .chars()
+            .all(|c| c.is_ascii_graphic() || c == ' ')
+        {
+            return Err("vapp_name contains non-printable ASCII characters");
+        }
+        if !self
+            .vapp_version
+            .chars()
+            .all(|c| c.is_ascii_graphic() || c == ' ')
+        {
+            return Err("vapp_version contains non-printable ASCII characters");
+        }
+        if self.vapp_name.starts_with(' ') || self.vapp_name.ends_with(' ') {
+            return Err("vapp_name must not start or end with a space");
+        }
+        if self.vapp_version.starts_with(' ') || self.vapp_version.ends_with(' ') {
+            return Err("vapp_version must not start or end with a space");
+        }
+        if self.n_storage_slots > crate::constants::MAX_STORAGE_SLOTS {
+            return Err("n_storage_slots exceeds maximum allowed");
+        }
+
+        Ok(())
     }
 
     pub fn get_app_name(&self) -> &str {

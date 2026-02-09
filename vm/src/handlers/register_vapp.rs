@@ -22,6 +22,8 @@ pub fn handler_register_vapp(
         return Err(AppSW::IncorrectData); // extra data
     }
 
+    manifest.validate().map_err(|_| AppSW::IncorrectData)?; // ensure manifest is valid
+
     #[cfg(any(target_os = "stax", target_os = "flex"))]
     const VANADIUM_ICON: NbglGlyph =
         NbglGlyph::from_include(include_gif!("icons/vanadium_64x64.gif", NBGL));
