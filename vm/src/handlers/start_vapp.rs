@@ -20,6 +20,11 @@ use crate::{
     AppSW, COMM_BUFFER_SIZE,
 };
 
+#[cfg(feature = "metrics")]
+use super::get_metrics::set_last_metrics;
+#[cfg(feature = "metrics")]
+use common::metrics::VAppMetrics;
+
 pub fn handler_start_vapp(
     command: ledger_device_sdk::io::Command<COMM_BUFFER_SIZE>,
 ) -> Result<Vec<u8>, AppSW> {
@@ -191,6 +196,20 @@ pub fn handler_start_vapp(
                         println!("Vanadium ran {} instructions", instr_count);
                         println!("Number of page loads:   {}", n_loads);
                         println!("Number of page commits: {}", n_commits);
+
+                        // Store metrics for retrieval via GetMetrics command
+                        let mut vapp_name = [0u8; common::manifest::APP_NAME_MAX_LEN];
+                        let name_bytes = manifest.get_app_name().as_bytes();
+                        let copy_len = name_bytes.len().min(common::manifest::APP_NAME_MAX_LEN);
+                        vapp_name[..copy_len].copy_from_slice(&name_bytes[..copy_len]);
+
+                        set_last_metrics(VAppMetrics {
+                            vapp_name,
+                            vapp_hash,
+                            instruction_count: instr_count,
+                            page_loads: n_loads as u32,
+                            page_commits: n_commits as u32,
+                        });
                     }
                     println!("Exiting with status {}", status);
                     return Ok(status.to_be_bytes().to_vec());

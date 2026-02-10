@@ -10,11 +10,14 @@ default = ["cargo_toml", "transport", "target_all"]
 # Note: These features do NOT propagate to app-sdk since client-sdk is always native.
 # They only control which transport protocols/methods are available in the client.
 target_native = []
-target_vanadium_ledger = []
+target_vanadium_ledger = ["common/target_vanadium_ledger"]
 target_all = ["target_native", "target_vanadium_ledger"]
 
 transport = ["hidapi", "ledger-apdu"]
 debug = ["dep:log", "dep:env_logger"]
+
+# Enable metrics collection - requires the Vanadium app to be built with the "metrics" feature
+metrics = []
 
 # utilities for integration tests
 test-utils = ["transport"]
