@@ -1,0 +1,18 @@
+[package]
+name = "vndbench-schnorr_sign"
+version = "0.1.0"
+edition = "2021"
+
+[package.metadata.vapp]
+name = "Bench Schnorr-Sign"
+stack_size = 65536
+
+[features]
+default = ["target_native"]
+target_native = ["sdk/target_native"]
+target_vanadium_ledger = ["sdk/target_vanadium_ledger"]
+
+[dependencies]
+sdk = { package = "vanadium-app-sdk", path = "../../../app-sdk", default-features = false }
+
+[workspace]
