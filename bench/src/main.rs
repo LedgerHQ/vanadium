@@ -21,14 +21,12 @@ use std::time::Instant;
 mod client;
 
 const DEFAULT_REPETITIONS: u64 = 10;
-const BASELINE_CASE_DIR: &str = "_baseline";
 
 #[derive(Debug, Clone)]
 struct BenchCase {
     case_name: String,
     crate_name: String,
     repetitions: u64,
-    is_baseline: bool,
 }
 
 impl BenchCase {
@@ -42,8 +40,7 @@ impl BenchCase {
 
 fn discover_bench_cases(
     cases_dir: &Path,
-) -> Result<(BenchCase, Vec<BenchCase>), Box<dyn std::error::Error + Send + Sync>> {
-    let mut baseline: Option<BenchCase> = None;
+) -> Result<Vec<BenchCase>, Box<dyn std::error::Error + Send + Sync>> {
     let mut cases = Vec::new();
 
     for entry in fs::read_dir(cases_dir)? {
@@ -103,40 +100,17 @@ fn discover_bench_cases(
             .into());
         }
 
-        let is_baseline = package
-            .get("metadata")
-            .and_then(|v| v.get("benchmark"))
-            .and_then(|v| v.get("baseline"))
-            .and_then(toml::Value::as_bool)
-            .unwrap_or(false)
-            || case_name == BASELINE_CASE_DIR;
-
         let case = BenchCase {
             case_name,
             crate_name,
             repetitions,
-            is_baseline,
         };
 
-        if case.is_baseline {
-            if baseline.is_some() {
-                return Err("Multiple baseline benchmark cases detected".into());
-            }
-            baseline = Some(case);
-        } else {
-            cases.push(case);
-        }
+        cases.push(case);
     }
 
-    let baseline = baseline.ok_or_else(|| {
-        format!(
-            "No baseline case found. Add one in cases/{} or set package.metadata.benchmark.baseline = true",
-            BASELINE_CASE_DIR
-        )
-    })?;
-
     cases.sort_unstable_by(|a, b| a.case_name.cmp(&b.case_name));
-    Ok((baseline, cases))
+    Ok(cases)
 }
 
 #[cfg(feature = "metrics")]
@@ -156,9 +130,10 @@ fn save_metrics(
     Ok(())
 }
 
-// Helper function to run a benchmark case and return (total_ms, avg_ms)
+// Helper function to run a benchmark case and return total time in ms
 async fn run_bench_case(
     case: &BenchCase,
+    repetitions: u64,
     vanadium_client: &mut VanadiumAppClient<Box<dyn std::error::Error + Send + Sync>>,
 ) -> Result<f64, Box<dyn std::error::Error + Send + Sync>> {
     // Best-effort cleanup in case a prior run didn't stop cleanly.
@@ -179,7 +154,7 @@ async fn run_bench_case(
 
     let mut client = BenchClient::new(vanadium_client);
     let start = Instant::now();
-    let bench_result = client.run_and_exit(case.repetitions).await;
+    let bench_result = client.run_and_exit(repetitions).await;
     let duration = start.elapsed();
     let total_ms = duration.as_secs_f64() * 1000.0;
 
@@ -191,20 +166,23 @@ async fn run_bench_case(
     // Save metrics if the feature is enabled
     #[cfg(feature = "metrics")]
     {
-        match vanadium_client.get_metrics().await {
-            Ok(metrics) => {
-                if let Err(e) = save_metrics(case, &metrics) {
+        // do not save metrics on the baseline run with 0 repetitions
+        if repetitions > 0 {
+            match vanadium_client.get_metrics().await {
+                Ok(metrics) => {
+                    if let Err(e) = save_metrics(case, &metrics) {
+                        eprintln!(
+                            "Warning: Failed to save metrics for {}: {}",
+                            case.case_name, e
+                        );
+                    }
+                }
+                Err(e) => {
                     eprintln!(
-                        "Warning: Failed to save metrics for {}: {}",
+                        "Warning: Failed to get metrics for {}: {}",
                         case.case_name, e
                     );
                 }
-            }
-            Err(e) => {
-                eprintln!(
-                    "Warning: Failed to get metrics for {}: {}",
-                    case.case_name, e
-                );
             }
         }
     }
@@ -226,7 +204,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let list_only = args.iter().any(|arg| arg == "--list");
     let filters: Vec<_> = args.iter().filter(|arg| arg.as_str() != "--list").collect();
 
-    let (baseline_case, all_cases) = discover_bench_cases(Path::new("cases"))?;
+    let all_cases = discover_bench_cases(Path::new("cases"))?;
     let testcases: Vec<_> = if filters.is_empty() {
         all_cases.iter().collect()
     } else {
@@ -241,10 +219,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     };
 
     if list_only {
-        println!(
-            "Baseline: {} (runs={})",
-            baseline_case.case_name, baseline_case.repetitions
-        );
         for case in &testcases {
             println!("{} (runs={})", case.case_name, case.repetitions);
         }
@@ -299,29 +273,31 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         println!();
     }
 
-    // Run the baseline app first, to measure baseline time.
-    let baseline_total_ms = run_bench_case(&baseline_case, &mut vanadium_client).await?;
-    // Print baseline time
-    println!("Baseline time: {:.3} ms", baseline_total_ms);
-
     // Print summary table header before running benchmarks
     println!("\n================ Benchmark Results ================");
     println!(
-        "{:<15} {:>10} {:>18} {:>18}",
-        "Test", "Runs", "Total (ms)", "Avg/Run (ms)",
+        "{:<15} {:>10} {:>18} {:>18} {:>18}",
+        "Test", "Runs", "Init (ms)", "Total (ms)", "Avg/Run (ms)",
     );
-    println!("{:-<65}", "");
+    println!("{:-<83}", "");
 
     for case in testcases {
         print!("{:<15} {:>10} ", case.case_name, case.repetitions);
         std::io::stdout().flush().unwrap(); // show test name and repetitions before running it
 
-        let total_ms = run_bench_case(case, &mut vanadium_client).await?;
-        // Subtract baseline time
-        let adj_total_ms = (total_ms - baseline_total_ms).max(0.0);
-        let adj_avg_ms = adj_total_ms / case.repetitions as f64;
-        println!("{:>18.3} {:>18.3}", adj_total_ms, adj_avg_ms);
+        // Run with 0 repetitions to measure initialization time
+        let init_ms = run_bench_case(case, 0, &mut vanadium_client).await?;
+
+        // Run with actual repetitions
+        let total_with_init_ms =
+            run_bench_case(case, case.repetitions, &mut vanadium_client).await?;
+
+        // Subtract initialization time from total
+        let total_ms = (total_with_init_ms - init_ms).max(0.0);
+        let avg_ms = total_ms / case.repetitions as f64;
+
+        println!("{:>18.3} {:>18.3} {:>18.3}", init_ms, total_ms, avg_ms);
     }
-    println!("{:=<65}", "");
+    println!("{:=<83}", "");
     Ok(())
 }

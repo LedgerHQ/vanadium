@@ -8,7 +8,7 @@ name = "Bench Base58"
 stack_size = 65536
 
 [package.metadata.benchmark]
-repetitions = 10
+repetitions = 100
 
 [features]
 default = ["target_native"]
