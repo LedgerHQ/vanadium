@@ -19,9 +19,13 @@ mod client;
 // The name must be the same as the folder name in cases/ directory,
 // and the crate must be named "vndbench-<name>".
 const TEST_CASES: &[(&str, u64)] = &[
-    ("nprimes", 1),    // counts the number of primes up to a given number
-    ("base58enc", 10), // computes the base58 encoding of a 32-byte message using the bs58 crate
-    ("sha256", 10),    // computes the SHA256 hash of a 32-byte message (without using ECALLs)
+    ("nprimes", 1),       // counts the number of primes up to a given number
+    ("base58enc", 10),    // computes the base58 encoding of a 32-byte message using the bs58 crate
+    ("sha256", 10),       // computes the SHA256 hash of a 32-byte message (without using ECALLs)
+    ("ecdsa_sign", 25),   // computes ECDSA signatures (using ECALLs)
+    ("schnorr_sign", 25), // computes Schnorr signatures (using ECALLs)
+    ("alloc_small", 25),  // allocates and deallocates many small vectors to stress the allocator
+    ("alloc_large", 12), // allocates and deallocates many large vectors to allocate and swap to/from external memory
 ];
 
 // Helper function to run a benchmark case and return (total_ms, avg_ms)
