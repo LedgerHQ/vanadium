@@ -7,6 +7,10 @@ edition = "2021"
 name = "Bench baseline"
 stack_size = 65536
 
+[package.metadata.benchmark]
+baseline = true
+repetitions = 1
+
 [features]
 default = ["target_native"]
 target_native = ["sdk/target_native"]

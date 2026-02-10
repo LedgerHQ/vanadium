@@ -10,36 +10,138 @@ use sdk::transport::TransportWrapper;
 use sdk::transport_native_hid::TransportNativeHID;
 use sdk::vanadium_client::VanadiumAppClient;
 use std::env;
+use std::fs;
+use std::io::Write;
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Instant;
 
 mod client;
 
-// Each testcase is a tuple of (name, repetitions)
-// The name must be the same as the folder name in cases/ directory,
-// and the crate must be named "vndbench-<name>".
-const TEST_CASES: &[(&str, u64)] = &[
-    ("nprimes", 1),       // counts the number of primes up to a given number
-    ("base58enc", 10),    // computes the base58 encoding of a 32-byte message using the bs58 crate
-    ("sha256", 10),       // computes the SHA256 hash of a 32-byte message (without using ECALLs)
-    ("ecdsa_sign", 25),   // computes ECDSA signatures (using ECALLs)
-    ("schnorr_sign", 25), // computes Schnorr signatures (using ECALLs)
-    ("alloc_small", 25),  // allocates and deallocates many small vectors to stress the allocator
-    ("alloc_large", 12), // allocates and deallocates many large vectors to allocate and swap to/from external memory
-];
+const DEFAULT_REPETITIONS: u64 = 10;
+const BASELINE_CASE_DIR: &str = "_baseline";
+
+#[derive(Debug, Clone)]
+struct BenchCase {
+    case_name: String,
+    crate_name: String,
+    repetitions: u64,
+    is_baseline: bool,
+}
+
+impl BenchCase {
+    fn app_path(&self) -> String {
+        format!(
+            "cases/{}/target/riscv32imc-unknown-none-elf/release/{}",
+            self.case_name, self.crate_name
+        )
+    }
+}
+
+fn discover_bench_cases(
+    cases_dir: &Path,
+) -> Result<(BenchCase, Vec<BenchCase>), Box<dyn std::error::Error + Send + Sync>> {
+    let mut baseline: Option<BenchCase> = None;
+    let mut cases = Vec::new();
+
+    for entry in fs::read_dir(cases_dir)? {
+        let entry = entry?;
+        let entry_type = entry.file_type()?;
+        if !entry_type.is_dir() {
+            continue;
+        }
+
+        let case_name = entry.file_name().to_string_lossy().to_string();
+        if case_name.starts_with('.') {
+            continue;
+        }
+
+        let manifest_path = entry.path().join("Cargo.toml");
+        if !manifest_path.is_file() {
+            continue;
+        }
+
+        let manifest_contents = fs::read_to_string(&manifest_path)?;
+        let manifest = manifest_contents.parse::<toml::Value>()?;
+
+        let package = manifest
+            .get("package")
+            .and_then(toml::Value::as_table)
+            .ok_or_else(|| {
+                format!(
+                    "Missing [package] table in manifest: {}",
+                    manifest_path.display()
+                )
+            })?;
+
+        let crate_name = package
+            .get("name")
+            .and_then(toml::Value::as_str)
+            .ok_or_else(|| {
+                format!(
+                    "Missing package.name in manifest: {}",
+                    manifest_path.display()
+                )
+            })?
+            .to_string();
+
+        let repetitions = package
+            .get("metadata")
+            .and_then(|v| v.get("benchmark"))
+            .and_then(|v| v.get("repetitions"))
+            .and_then(toml::Value::as_integer)
+            .map(u64::try_from)
+            .transpose()?
+            .unwrap_or(DEFAULT_REPETITIONS);
+        if repetitions == 0 {
+            return Err(format!(
+                "benchmark.repetitions must be > 0 in {}",
+                manifest_path.display()
+            )
+            .into());
+        }
+
+        let is_baseline = package
+            .get("metadata")
+            .and_then(|v| v.get("benchmark"))
+            .and_then(|v| v.get("baseline"))
+            .and_then(toml::Value::as_bool)
+            .unwrap_or(false)
+            || case_name == BASELINE_CASE_DIR;
+
+        let case = BenchCase {
+            case_name,
+            crate_name,
+            repetitions,
+            is_baseline,
+        };
+
+        if case.is_baseline {
+            if baseline.is_some() {
+                return Err("Multiple baseline benchmark cases detected".into());
+            }
+            baseline = Some(case);
+        } else {
+            cases.push(case);
+        }
+    }
+
+    let baseline = baseline.ok_or_else(|| {
+        format!(
+            "No baseline case found. Add one in cases/{} or set package.metadata.benchmark.baseline = true",
+            BASELINE_CASE_DIR
+        )
+    })?;
+
+    cases.sort_unstable_by(|a, b| a.case_name.cmp(&b.case_name));
+    Ok((baseline, cases))
+}
 
 // Helper function to run a benchmark case and return (total_ms, avg_ms)
 async fn run_bench_case(
-    case: &str,
-    repetitions: u64,
+    case: &BenchCase,
     vanadium_client: &mut VanadiumAppClient<Box<dyn std::error::Error + Send + Sync>>,
 ) -> Result<f64, Box<dyn std::error::Error + Send + Sync>> {
-    let crate_name = format!("vndbench-{}", case);
-    let app_path_str = format!(
-        "cases/{}/target/riscv32imc-unknown-none-elf/release/{}",
-        case, crate_name
-    );
-
     // Best-effort cleanup in case a prior run didn't stop cleanly.
     let _ = vanadium_client.stop_vapp().await;
 
@@ -53,12 +155,12 @@ async fn run_bench_case(
     let print_writer = Box::new(std::io::sink());
 
     vanadium_client
-        .start_vapp(&app_path_str, Box::new(print_writer))
+        .start_vapp(&case.app_path(), Box::new(print_writer))
         .await?;
 
     let mut client = BenchClient::new(vanadium_client);
     let start = Instant::now();
-    let bench_result = client.run_and_exit(repetitions).await;
+    let bench_result = client.run_and_exit(case.repetitions).await;
     let duration = start.elapsed();
     let total_ms = duration.as_secs_f64() * 1000.0;
 
@@ -80,6 +182,33 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     }
 
     let args: Vec<String> = env::args().skip(1).collect();
+    let list_only = args.iter().any(|arg| arg == "--list");
+    let filters: Vec<_> = args.iter().filter(|arg| arg.as_str() != "--list").collect();
+
+    let (baseline_case, all_cases) = discover_bench_cases(Path::new("cases"))?;
+    let testcases: Vec<_> = if filters.is_empty() {
+        all_cases.iter().collect()
+    } else {
+        all_cases
+            .iter()
+            .filter(|case| {
+                filters
+                    .iter()
+                    .any(|arg| case.case_name.contains(arg.as_str()))
+            })
+            .collect()
+    };
+
+    if list_only {
+        println!(
+            "Baseline: {} (runs={})",
+            baseline_case.case_name, baseline_case.repetitions
+        );
+        for case in &testcases {
+            println!("{} (runs={})", case.case_name, case.repetitions);
+        }
+        return Ok(());
+    }
 
     #[cfg(not(feature = "speculos"))]
     let transport = {
@@ -115,31 +244,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let app_info = vanadium_client.get_app_info().await?;
     println!("Device: {}", app_info.device_model);
 
-    let testcases: Vec<_> = if args.is_empty() {
-        TEST_CASES.iter().collect()
-    } else {
-        TEST_CASES
-            .iter()
-            .filter(|(case, _)| args.iter().any(|arg| case.contains(arg)))
-            .collect()
-    };
-
     if testcases.len() == 0 {
         println!("No test cases found matching the provided arguments.");
         return Ok(());
-    } else if testcases.len() < TEST_CASES.len() {
+    } else if testcases.len() < all_cases.len() {
         print!("Selected test cases: ");
-        for (i, (case, _)) in testcases.iter().enumerate() {
+        for (i, case) in testcases.iter().enumerate() {
             if i > 0 {
                 print!(", ");
             }
-            print!("{}", case);
+            print!("{}", case.case_name);
         }
         println!();
     }
 
-    // Run the _baseline app first, to measure baseline time
-    let baseline_total_ms = run_bench_case("_baseline", 1, &mut vanadium_client).await?;
+    // Run the baseline app first, to measure baseline time.
+    let baseline_total_ms = run_bench_case(&baseline_case, &mut vanadium_client).await?;
     // Print baseline time
     println!("Baseline time: {:.3} ms", baseline_total_ms);
 
@@ -151,19 +271,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     );
     println!("{:-<65}", "");
 
-    for (case, repetitions) in testcases {
-        println!(
-            "cases/{}/target/riscv32imc-unknown-none-elf/release/vndbench-{}",
-            case, case
-        );
-        let total_ms = run_bench_case(case, *repetitions, &mut vanadium_client).await?;
+    for case in testcases {
+        print!("{:<15} {:>10} ", case.case_name, case.repetitions);
+        std::io::stdout().flush().unwrap(); // show test name and repetitions before running it
+
+        let total_ms = run_bench_case(case, &mut vanadium_client).await?;
         // Subtract baseline time
         let adj_total_ms = (total_ms - baseline_total_ms).max(0.0);
-        let adj_avg_ms = adj_total_ms / *repetitions as f64;
-        println!(
-            "{:<15} {:>10} {:>18.3} {:>18.3}",
-            case, repetitions, adj_total_ms, adj_avg_ms
-        );
+        let adj_avg_ms = adj_total_ms / case.repetitions as f64;
+        println!("{:>18.3} {:>18.3}", adj_total_ms, adj_avg_ms);
     }
     println!("{:=<65}", "");
     Ok(())
