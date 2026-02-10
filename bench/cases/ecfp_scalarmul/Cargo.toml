@@ -1,0 +1,22 @@
+[package]
+name = "vndbench-ecfp_scalarmul"
+version = "0.1.0"
+edition = "2021"
+
+[package.metadata.vapp]
+name = "Bench ECFP-Point multiplication"
+stack_size = 65536
+
+[package.metadata.benchmark]
+repetitions = 10
+
+[features]
+default = ["target_native"]
+target_native = ["sdk/target_native"]
+target_vanadium_ledger = ["sdk/target_vanadium_ledger"]
+
+[dependencies]
+hex-literal = "0.4.1"
+sdk = { package = "vanadium-app-sdk", path = "../../../app-sdk", default-features = false }
+
+[workspace]
