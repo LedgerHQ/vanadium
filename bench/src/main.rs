@@ -6,6 +6,8 @@ use sdk::transport::TransportHID;
 #[cfg(feature = "speculos")]
 use sdk::transport::TransportTcp;
 use sdk::transport::TransportWrapper;
+#[cfg(feature = "metrics")]
+use std::fs::File;
 
 use sdk::transport_native_hid::TransportNativeHID;
 use sdk::vanadium_client::VanadiumAppClient;
@@ -137,6 +139,23 @@ fn discover_bench_cases(
     Ok((baseline, cases))
 }
 
+#[cfg(feature = "metrics")]
+fn save_metrics(
+    case: &BenchCase,
+    metrics: &common::metrics::VAppMetrics,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let filename = format!("{}.metrics", case.case_name);
+    let mut file = File::create(&filename)?;
+
+    writeln!(file, "V-App Name: {}", metrics.get_vapp_name())?;
+    writeln!(file, "V-App Hash: {}", hex::encode(metrics.vapp_hash))?;
+    writeln!(file, "Instruction Count: {}", metrics.instruction_count)?;
+    writeln!(file, "Page Loads: {}", metrics.page_loads)?;
+    writeln!(file, "Page Commits: {}", metrics.page_commits)?;
+
+    Ok(())
+}
+
 // Helper function to run a benchmark case and return (total_ms, avg_ms)
 async fn run_bench_case(
     case: &BenchCase,
@@ -168,6 +187,28 @@ async fn run_bench_case(
     let _ = vanadium_client.stop_vapp().await;
 
     bench_result?;
+
+    // Save metrics if the feature is enabled
+    #[cfg(feature = "metrics")]
+    {
+        match vanadium_client.get_metrics().await {
+            Ok(metrics) => {
+                if let Err(e) = save_metrics(case, &metrics) {
+                    eprintln!(
+                        "Warning: Failed to save metrics for {}: {}",
+                        case.case_name, e
+                    );
+                }
+            }
+            Err(e) => {
+                eprintln!(
+                    "Warning: Failed to get metrics for {}: {}",
+                    case.case_name, e
+                );
+            }
+        }
+    }
+
     Ok(total_ms)
 }
 

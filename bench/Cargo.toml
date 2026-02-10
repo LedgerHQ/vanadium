@@ -6,10 +6,16 @@ edition = "2024"
 [features]
 default = ["debug"]
 speculos = []  # runs against an existing speculos instance instead of the real device
-debug = ["dep:env_logger", "sdk/debug"]  # allows showing prints from benchmark V-Apps 
+debug = ["dep:env_logger", "sdk/debug"]  # allows showing prints from benchmark V-Apps
+
+# collects and saves metrics for each benchmark run
+# requires the Vanadium app to also be compiled with the "metrics" feature
+metrics = ["sdk/metrics"]
 
 [dependencies]
+common = { path = "../common" }
 hidapi = "2.6.3"
+hex = "0.4.3"
 sdk = { package = "vanadium-client-sdk", path = "../client-sdk"}
 tokio = { version = "1.38.1", features = ["io-util", "macros", "net", "rt", "rt-multi-thread", "sync"] }
 env_logger = { version = "0.11.8", optional = true }
