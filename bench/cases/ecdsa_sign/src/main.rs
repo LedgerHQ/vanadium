@@ -1,4 +1,4 @@
-// This test computes computes an ECDSA signature using the app-sdk (therefore, with the appropriate ECALLs).
+// This test computes an ECDSA signature using the app-sdk (therefore, with the appropriate ECALLs).
 
 #![cfg_attr(feature = "target_vanadium_ledger", no_std, no_main)]
 

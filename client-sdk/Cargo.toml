@@ -17,7 +17,7 @@ transport = ["hidapi", "ledger-apdu"]
 debug = ["dep:log", "dep:env_logger"]
 
 # Enable metrics collection - requires the Vanadium app to be built with the "metrics" feature
-metrics = []
+metrics = ["target_vanadium_ledger"]
 
 # utilities for integration tests
 test-utils = ["transport"]

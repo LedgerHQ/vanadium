@@ -52,7 +52,7 @@ jobs:
       cargo_ledger_build_args: "--features run_tests"
 
   # build a custom binary for the Vanadium VM with metrics and blind_registration enabled
-  # this allows to collact useful metrics during benchmarks
+  # this allows to collect useful metrics during benchmarks
   build_vanadium_app_for_benchmarks:
     name: Build application using the reusable workflow
     uses: LedgerHQ/ledger-app-workflows/.github/workflows/reusable_build.yml@v1
@@ -63,7 +63,7 @@ jobs:
 
 
   # Build and run benchmark testcases on speculos
-  # This also collect execution metrics and uploads them as artifacts
+  # This also collects execution metrics and uploads them as artifacts
   build_benchmark_test_cases:
     name: Build and run benchmark V-Apps on Speculos, collect metrics
     runs-on: ubuntu-latest

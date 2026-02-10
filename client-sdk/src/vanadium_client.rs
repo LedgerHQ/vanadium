@@ -882,29 +882,28 @@ impl<E: std::fmt::Debug + Send + Sync + 'static> GenericVanadiumClient<E> {
             ));
         }
 
-        // Parse the response: 80 bytes
-        // - 32 bytes: V-App name (null-padded)
-        // - 32 bytes: V-App hash
-        // - 8 bytes: instruction count (big-endian)
-        // - 4 bytes: page loads (big-endian)
-        // - 4 bytes: page commits (big-endian)
-        if result.len() != 80 {
-            return Err(VanadiumClientError::GenericError(format!(
-                "Invalid metrics response length: expected 80, got {}",
-                result.len()
-            )));
-        }
-
-        // Parse directly into VAppMetrics and convert to VAppMetricsInfo
-        let mut metrics = VAppMetrics::new();
-        metrics.vapp_name.copy_from_slice(&result[0..32]);
-        metrics.vapp_hash.copy_from_slice(&result[32..64]);
-        metrics.instruction_count = u64::from_be_bytes(result[64..72].try_into().unwrap());
-        metrics.page_loads = u32::from_be_bytes(result[72..76].try_into().unwrap());
-        metrics.page_commits = u32::from_be_bytes(result[76..80].try_into().unwrap());
-
-        Ok(metrics)
+        parse_metrics_response(&result)
     }
+}
+
+/// Helper function to parse metrics response data.
+#[cfg(feature = "metrics")]
+fn parse_metrics_response(result: &[u8]) -> Result<VAppMetrics, VanadiumClientError> {
+    if result.len() != 80 {
+        return Err(VanadiumClientError::GenericError(format!(
+            "Invalid metrics response length: expected 80, got {}",
+            result.len()
+        )));
+    }
+
+    let mut metrics = VAppMetrics::new();
+    metrics.vapp_name.copy_from_slice(&result[0..32]);
+    metrics.vapp_hash.copy_from_slice(&result[32..64]);
+    metrics.instruction_count = u64::from_be_bytes(result[64..72].try_into().unwrap());
+    metrics.page_loads = u32::from_be_bytes(result[72..76].try_into().unwrap());
+    metrics.page_commits = u32::from_be_bytes(result[76..80].try_into().unwrap());
+
+    Ok(metrics)
 }
 
 /// Represents errors that can occur during the execution of a V-App.
@@ -1354,23 +1353,7 @@ impl<E: std::fmt::Debug + Send + Sync + 'static> VanadiumAppClient<E> {
             ));
         }
 
-        // Parse the response (same format as GenericVanadiumClient::get_metrics)
-        if result.len() != 80 {
-            return Err(VanadiumClientError::GenericError(format!(
-                "Invalid metrics response length: expected 80, got {}",
-                result.len()
-            )));
-        }
-
-        // Parse directly into VAppMetrics and convert to VAppMetricsInfo
-        let mut metrics = VAppMetrics::new();
-        metrics.vapp_name.copy_from_slice(&result[0..32]);
-        metrics.vapp_hash.copy_from_slice(&result[32..64]);
-        metrics.instruction_count = u64::from_be_bytes(result[64..72].try_into().unwrap());
-        metrics.page_loads = u32::from_be_bytes(result[72..76].try_into().unwrap());
-        metrics.page_commits = u32::from_be_bytes(result[76..80].try_into().unwrap());
-
-        Ok(metrics)
+        parse_metrics_response(&result)
     }
 
     /// Background worker loop that continuously steps the V-App engine.
