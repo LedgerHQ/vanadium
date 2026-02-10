@@ -7,6 +7,9 @@ edition = "2021"
 name = "Bench Sha256"
 stack_size = 65536
 
+[package.metadata.benchmark]
+repetitions = 10
+
 [features]
 default = ["target_native"]
 target_native = ["sdk/target_native"]

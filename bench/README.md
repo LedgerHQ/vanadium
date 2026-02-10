@@ -6,7 +6,19 @@ This directory contains several benchmarks Vanadium VM. Each benchmark measures 
 
 - Each benchmark case is located in the `cases/` directory, and it's a full V-App as its own crate.
 - The main runner is in `src/main.rs`.
-- Testcases are defined in the `TEST_CASES` array in `main.rs`.
+- Benchmark cases are auto-discovered from `cases/*/Cargo.toml`.
+
+## Case metadata
+
+Each case can set benchmark-specific metadata in its `Cargo.toml`:
+
+```toml
+[package.metadata.benchmark]
+repetitions = 10
+```
+
+- `repetitions` is optional (defaults to `10` if omitted).
+- The baseline case is selected with `baseline = true`, or by using the `_baseline` directory name. This should be a test for an app that does nothing, in order to subtract its running time from each other test, for a more precise estimate.
 
 ## Build the testcases
 
@@ -26,7 +38,13 @@ To run all benchmark testcases:
 cargo run
 ```
 
-To run only specific testcases, pass one or more substrings of the testcase names as command line arguments. Only testcases whose names include at least one of the arguments will be run. For example:
+To list all discovered cases and their configured run counts:
+
+```sh
+cargo run -- --list
+```
+
+To run only specific testcases, pass one or more substrings of the testcase names as command line arguments. Only testcases whose name includes at least one of the arguments will be run. For example:
 
 ```sh
 cargo run -- sha256 base58

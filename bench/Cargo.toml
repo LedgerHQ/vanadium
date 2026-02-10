@@ -13,3 +13,4 @@ hidapi = "2.6.3"
 sdk = { package = "vanadium-client-sdk", path = "../client-sdk"}
 tokio = { version = "1.38.1", features = ["io-util", "macros", "net", "rt", "rt-multi-thread", "sync"] }
 env_logger = { version = "0.11.8", optional = true }
+toml = "0.8.23"
