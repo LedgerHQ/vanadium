@@ -51,37 +51,23 @@ jobs:
       builder: ledger-app-builder
       cargo_ledger_build_args: "--features run_tests"
 
-  # Build benchmark runner crate for native target
-  build_benchmark_runner:
-    name: benchmark runner, Build on native target
-    runs-on: ubuntu-latest
-    steps:
-      - name: Set up Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-      - name: Cache cargo dirs
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-          key: ${{ runner.os }}-cargo-bench-runner-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-bench-runner-
-      - name: Install dependencies
-        run: |
-          sudo apt-get update && \
-          sudo apt-get install -y libudev-dev pkg-config
-      - name: Clone
-        uses: actions/checkout@v4
-      - name: Build benchmark runner
-        working-directory: bench
-        run: cargo build
+  # build a custom binary for the Vanadium VM with metrics and blind_registration enabled
+  # this allows to collact useful metrics during benchmarks
+  build_vanadium_app_for_benchmarks:
+    name: Build application using the reusable workflow
+    uses: LedgerHQ/ledger-app-workflows/.github/workflows/reusable_build.yml@v1
+    with:
+      upload_app_binaries_artifact: "vanadium_binaries_for_benchmarks"
+      builder: ledger-app-builder
+      cargo_ledger_build_args: "--features metrics,blind_registration"
 
-  # Build benchmark testcases
-  # Even if we don't run them in the CI, it's good to ensure they can at least compile
+
+  # Build and run benchmark testcases on speculos
+  # This also collect execution metrics and uploads them as artifacts
   build_benchmark_test_cases:
-    name: benchmark test cases, Build on Risc-V target
+    name: Build and run benchmark V-Apps on Speculos, collect metrics
     runs-on: ubuntu-latest
+    needs: [build_vanadium_app_for_benchmarks]
     steps:
       - name: Set up Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -97,14 +83,39 @@ jobs:
           key: ${{ runner.os }}-cargo-bench-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
             ${{ runner.os }}-cargo-bench-
+      - name: Install Speculos
+        run: |
+          pip install speculos
+      - name: Install dependencies
+        run: |
+          sudo apt-get update && \
+          sudo apt-get install -y libudev-dev pkg-config && \
+          sudo apt-get install -y qemu-user-static libvncserver-dev
       - name: Clone
         uses: actions/checkout@v4
+      - name: Download Vanadium binaries for benchmarks
+        uses: actions/download-artifact@v4
+        with:
+          name: vanadium_binaries_for_benchmarks
+          path: ./vanadium_binaries_for_benchmarks
       - name: Build app
         working-directory: bench
         run: |
           for case_dir in ./cases/*; do
             (cd "$case_dir" && cargo +stable build --release --target=riscv32imc-unknown-none-elf --no-default-features --features target_vanadium_ledger) || exit 1
           done
+      - name: Run Speculos with Vanadium binary
+        run: |
+          speculos --display headless vanadium_binaries_for_benchmarks/flex/release/app-vanadium &
+          sleep 2
+      - name: Run benchmarks on Speculos with metrics
+        working-directory: bench
+        run: cargo run --features speculos,metrics
+      - name: Upload benchmark metrics
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark_metrics
+          path: bench/*.metrics
 
   # VM app tests in speculos
   
