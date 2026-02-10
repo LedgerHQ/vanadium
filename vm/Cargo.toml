@@ -5,7 +5,7 @@ authors = ["Salvatore Ingala"]
 edition = "2021"
 
 [dependencies]
-common = { path = "../common" }
+common = { path = "../common", features=["target_vanadium_ledger"]}
 serde = {version="1.0.192", default-features = false, features = ["derive"]}
 hex = { version = "0.4.3", default-features = false }
 numtoa = "0.2.4"

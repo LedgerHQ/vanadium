@@ -22,6 +22,8 @@ use common::client_commands::{
 use common::constants::{DEFAULT_STACK_START, PAGE_SIZE};
 use common::manifest::Manifest;
 
+#[cfg(feature = "metrics")]
+use crate::apdu::apdu_get_metrics;
 use crate::apdu::{
     apdu_continue, apdu_get_app_info, apdu_register_vapp, apdu_run_vapp, APDUCommand, StatusWord,
 };
@@ -31,6 +33,8 @@ use crate::{
     elf::{self, VAppElfFile},
     linewriter::Sink,
 };
+#[cfg(feature = "metrics")]
+use common::metrics::VAppMetrics;
 
 enum VAppResponse {
     Message(Vec<u8>),
@@ -858,6 +862,49 @@ impl<E: std::fmt::Debug + Send + Sync + 'static> GenericVanadiumClient<E> {
             engine.print_writer = print_writer;
         }
     }
+
+    /// Retrieves the metrics for the last V-App that exited.
+    /// Only available when the "metrics" feature is enabled on both the client and the Vanadium app.
+    ///
+    /// Returns an error if no V-App has run yet or if the Vanadium app was not built with metrics support.
+    #[cfg(feature = "metrics")]
+    pub async fn get_metrics(&self) -> Result<VAppMetrics, VanadiumClientError> {
+        let (status, result) = self
+            .transport
+            .exchange(&apdu_get_metrics())
+            .await
+            .map_err(|_| VanadiumClientError::TransportError("exchange failed".to_string()))?;
+
+        if status != StatusWord::OK {
+            return Err(VanadiumClientError::GenericError(
+                "Failed to get metrics (no V-App has run or metrics feature not enabled on device)"
+                    .to_string(),
+            ));
+        }
+
+        // Parse the response: 80 bytes
+        // - 32 bytes: V-App name (null-padded)
+        // - 32 bytes: V-App hash
+        // - 8 bytes: instruction count (big-endian)
+        // - 4 bytes: page loads (big-endian)
+        // - 4 bytes: page commits (big-endian)
+        if result.len() != 80 {
+            return Err(VanadiumClientError::GenericError(format!(
+                "Invalid metrics response length: expected 80, got {}",
+                result.len()
+            )));
+        }
+
+        // Parse directly into VAppMetrics and convert to VAppMetricsInfo
+        let mut metrics = VAppMetrics::new();
+        metrics.vapp_name.copy_from_slice(&result[0..32]);
+        metrics.vapp_hash.copy_from_slice(&result[32..64]);
+        metrics.instruction_count = u64::from_be_bytes(result[64..72].try_into().unwrap());
+        metrics.page_loads = u32::from_be_bytes(result[72..76].try_into().unwrap());
+        metrics.page_commits = u32::from_be_bytes(result[76..80].try_into().unwrap());
+
+        Ok(metrics)
+    }
 }
 
 /// Represents errors that can occur during the execution of a V-App.
@@ -1133,6 +1180,13 @@ impl<E: std::fmt::Debug + Send + Sync + 'static> SyncVanadiumAppClient<E> {
     pub async fn get_app_info(&self) -> Result<AppInfo, VanadiumClientError> {
         self.client.get_app_info().await
     }
+
+    /// Retrieves the metrics for the last V-App that exited.
+    /// Only available when the "metrics" feature is enabled on both the client and the Vanadium app.
+    #[cfg(feature = "metrics")]
+    pub async fn get_metrics(&self) -> Result<VAppMetrics, VanadiumClientError> {
+        self.client.get_metrics().await
+    }
 }
 
 #[async_trait]
@@ -1281,6 +1335,42 @@ impl<E: std::fmt::Debug + Send + Sync + 'static> VanadiumAppClient<E> {
         resp_rx
             .await
             .map_err(|_| VanadiumClientError::GenericError("Worker task died".to_string()))?
+    }
+
+    /// Retrieves the metrics for the last V-App that exited.
+    /// Only available when the "metrics" feature is enabled on both the client and the Vanadium app.
+    #[cfg(feature = "metrics")]
+    pub async fn get_metrics(&self) -> Result<VAppMetrics, VanadiumClientError> {
+        // We can call this directly on the transport since it doesn't require V-App interaction
+        let (status, result) = self
+            .transport
+            .exchange(&apdu_get_metrics())
+            .await
+            .map_err(|_| VanadiumClientError::TransportError("exchange failed".to_string()))?;
+
+        if status != StatusWord::OK {
+            return Err(VanadiumClientError::GenericError(
+                "Failed to get metrics (no V-App has run or metrics feature not enabled on the Vanadium app)".to_string(),
+            ));
+        }
+
+        // Parse the response (same format as GenericVanadiumClient::get_metrics)
+        if result.len() != 80 {
+            return Err(VanadiumClientError::GenericError(format!(
+                "Invalid metrics response length: expected 80, got {}",
+                result.len()
+            )));
+        }
+
+        // Parse directly into VAppMetrics and convert to VAppMetricsInfo
+        let mut metrics = VAppMetrics::new();
+        metrics.vapp_name.copy_from_slice(&result[0..32]);
+        metrics.vapp_hash.copy_from_slice(&result[32..64]);
+        metrics.instruction_count = u64::from_be_bytes(result[64..72].try_into().unwrap());
+        metrics.page_loads = u32::from_be_bytes(result[72..76].try_into().unwrap());
+        metrics.page_commits = u32::from_be_bytes(result[76..80].try_into().unwrap());
+
+        Ok(metrics)
     }
 
     /// Background worker loop that continuously steps the V-App engine.

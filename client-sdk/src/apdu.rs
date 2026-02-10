@@ -124,3 +124,16 @@ pub fn apdu_run_vapp(serialized_manifest: Vec<u8>) -> APDUCommand {
         data: serialized_manifest,
     }
 }
+
+/// APDU command to get metrics for the last executed V-App.
+/// Only available when the "metrics" feature is enabled on the Vanadium app.
+#[cfg(feature = "metrics")]
+pub fn apdu_get_metrics() -> APDUCommand {
+    APDUCommand {
+        cla: 0xE0,
+        ins: 0xF0,
+        p1: 0,
+        p2: 0,
+        data: Vec::new(),
+    }
+}
