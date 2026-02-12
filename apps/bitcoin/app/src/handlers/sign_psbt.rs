@@ -267,15 +267,24 @@ pub fn handle_sign_psbt(app: &mut sdk::App, psbt: &[u8]) -> Result<Response, Err
         }
     }
 
+    /***** extract account coordinates for all inputs and outputs *****/
+
+    // Pre-compute account coordinates for all inputs (must be internal)
+    let input_coordinates: Vec<(u32, PsbtAccountCoordinates)> = psbt
+        .inputs
+        .iter()
+        .map(|input| {
+            input
+                .get_account_coordinates()
+                .map_err(|_| Error::FailedToGetAccounts)?
+                .ok_or(Error::ExternalInputsNotSupported)
+        })
+        .collect::<Result<Vec<_>, Error>>()?;
+
     /***** input checks *****/
 
-    for input in psbt.inputs.iter() {
-        let Some((account_id, coords)) = input
-            .get_account_coordinates()
-            .map_err(|_| Error::FailedToGetAccounts)?
-        else {
-            return Err(Error::ExternalInputsNotSupported);
-        };
+    for (input_index, input) in psbt.inputs.iter().enumerate() {
+        let (account_id, ref coords) = input_coordinates[input_index];
 
         if account_id as usize >= accounts.len() {
             return Err(Error::InvalidAccountId);
@@ -379,13 +388,21 @@ pub fn handle_sign_psbt(app: &mut sdk::App, psbt: &[u8]) -> Result<Response, Err
         inputs_total_amount += tx_out.value.to_sat();
     }
 
+    // Pre-compute account coordinates for all outputs (None means external)
+    let output_coordinates: Vec<Option<(u32, PsbtAccountCoordinates)>> = psbt
+        .outputs
+        .iter()
+        .map(|output| {
+            output
+                .get_account_coordinates()
+                .map_err(|_| Error::FailedToGetAccounts)
+        })
+        .collect::<Result<Vec<_>, Error>>()?;
+
     /***** output checks *****/
     for (output_index, output) in psbt.outputs.iter().enumerate() {
         let amount = output.amount.ok_or(Error::OutputAmountMissing)?;
-        if let Some((account_id, coords)) = output
-            .get_account_coordinates()
-            .map_err(|_| Error::FailedToGetAccounts)?
-        {
+        if let Some((account_id, ref coords)) = output_coordinates[output_index] {
             // output internal to an account (change, or receiving to an account). Check if it's true
             if account_id as usize >= accounts.len() {
                 return Err(Error::InvalidAccountId);
@@ -544,15 +561,7 @@ pub fn handle_sign_psbt(app: &mut sdk::App, psbt: &[u8]) -> Result<Response, Err
     let mut partial_signatures = Vec::with_capacity(psbt.inputs.len());
 
     for (input_index, input) in psbt.inputs.iter().enumerate() {
-        let Some((account_id, coords)) = input
-            .get_account_coordinates()
-            .map_err(|_| Error::FailedToGetAccounts)?
-        else {
-            return Err(Error::ExternalInputsNotSupported);
-        };
-        if account_id as usize >= accounts.len() {
-            return Err(Error::InvalidAccountId);
-        }
+        let (account_id, ref coords) = input_coordinates[input_index];
 
         let PsbtAccountCoordinates::WalletPolicy(coords) = coords;
 
