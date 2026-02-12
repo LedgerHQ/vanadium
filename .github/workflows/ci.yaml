@@ -108,9 +108,12 @@ jobs:
         run: |
           speculos --display headless vanadium_binaries_for_benchmarks/flex/release/app-vanadium &
           sleep 2
+      - name: Install vnd-bench
+        working-directory: tools/bench
+        run: cargo install --path .
       - name: Run benchmarks on Speculos with metrics
         working-directory: bench
-        run: cargo run --features speculos,metrics
+        run: vnd-bench --speculos --metrics --path cases
       - name: Upload benchmark metrics
         uses: actions/upload-artifact@v4
         with:
