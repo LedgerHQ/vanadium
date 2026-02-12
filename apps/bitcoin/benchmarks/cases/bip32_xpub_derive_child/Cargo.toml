@@ -1,0 +1,34 @@
+[package]
+name = "bench-xpub_derive_child"
+version = "0.1.0"
+edition = "2021"
+
+[package.metadata.vapp]
+name = "Derive child Xpub"
+stack_size = 65536
+
+[package.metadata.benchmark]
+repetitions = 10
+
+[features]
+default = ["target_native"]
+target_native = ["sdk/target_native"]
+target_vanadium_ledger = ["sdk/target_vanadium_ledger"]
+
+[dependencies]
+bitcoin = { version = "0.32.0", features = ["serde"], default-features = false }
+hex-literal = "0.4.1"
+sdk = { package = "vanadium-app-sdk", path = "../../../../../app-sdk", default-features = false }
+
+[workspace]
+
+[patch.crates-io.bitcoin]
+path = "../../../../../libs/bitcoin"
+[patch.crates-io.bitcoin_hashes]
+path = "../../../../../libs/bitcoin_hashes"
+[patch.crates-io.secp256k1]
+path = "../../../../../libs/secp256k1"
+[patch.crates-io.base58ck]
+path = "../../../../../libs/base58"
+[patch.crates-io.getrandom]
+path = "../../../../../libs/getrandom"
