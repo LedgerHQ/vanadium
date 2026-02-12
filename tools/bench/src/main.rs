@@ -1,13 +1,9 @@
 use clap::Parser;
 use client::BenchClient;
-#[cfg(not(feature = "speculos"))]
 use hidapi::HidApi;
-#[cfg(not(feature = "speculos"))]
 use sdk::transport::TransportHID;
-#[cfg(feature = "speculos")]
 use sdk::transport::TransportTcp;
 use sdk::transport::TransportWrapper;
-#[cfg(feature = "metrics")]
 use std::fs::File;
 
 use sdk::transport_native_hid::TransportNativeHID;
@@ -36,6 +32,15 @@ struct Args {
 
     /// Filter test cases by name (can specify multiple)
     filters: Vec<String>,
+
+    /// Run against an existing Speculos instance instead of the real device
+    #[arg(long)]
+    speculos: bool,
+
+    /// Collect and save metrics for each benchmark run.
+    /// Requires the Vanadium app to also be compiled with the "metrics" feature.
+    #[arg(long)]
+    metrics: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -129,7 +134,6 @@ fn discover_bench_cases(
     Ok(cases)
 }
 
-#[cfg(feature = "metrics")]
 fn save_metrics(
     case: &BenchCase,
     metrics: &common::metrics::VAppMetrics,
@@ -150,6 +154,7 @@ fn save_metrics(
 async fn run_bench_case(
     case: &BenchCase,
     repetitions: u64,
+    collect_metrics: bool,
     vanadium_client: &mut VanadiumAppClient<Box<dyn std::error::Error + Send + Sync>>,
 ) -> Result<f64, Box<dyn std::error::Error + Send + Sync>> {
     // Best-effort cleanup in case a prior run didn't stop cleanly.
@@ -179,26 +184,22 @@ async fn run_bench_case(
 
     bench_result?;
 
-    // Save metrics if the feature is enabled
-    #[cfg(feature = "metrics")]
-    {
-        // do not save metrics on the baseline run with 0 repetitions
-        if repetitions > 0 {
-            match vanadium_client.get_metrics().await {
-                Ok(metrics) => {
-                    if let Err(e) = save_metrics(case, &metrics) {
-                        eprintln!(
-                            "Warning: Failed to save metrics for {}: {}",
-                            case.case_name, e
-                        );
-                    }
-                }
-                Err(e) => {
+    // Save metrics if requested
+    if collect_metrics && repetitions > 0 {
+        match vanadium_client.get_metrics().await {
+            Ok(metrics) => {
+                if let Err(e) = save_metrics(case, &metrics) {
                     eprintln!(
-                        "Warning: Failed to get metrics for {}: {}",
+                        "Warning: Failed to save metrics for {}: {}",
                         case.case_name, e
                     );
                 }
+            }
+            Err(e) => {
+                eprintln!(
+                    "Warning: Failed to get metrics for {}: {}",
+                    case.case_name, e
+                );
             }
         }
     }
@@ -239,23 +240,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         return Ok(());
     }
 
-    #[cfg(not(feature = "speculos"))]
-    let transport = {
-        let transport_raw = Arc::new(TransportHID::new(
-            TransportNativeHID::new(&HidApi::new().expect("Unable to get connect to the device"))
-                .unwrap(),
-        ));
-
-        Arc::new(TransportWrapper::new(transport_raw.clone()))
-    };
-
-    #[cfg(feature = "speculos")]
-    let transport = {
+    let transport = if args.speculos {
         let transport_raw = Arc::new(
             TransportTcp::new_default()
                 .await
                 .expect("Unable to connect to Speculos"),
         );
+
+        Arc::new(TransportWrapper::new(transport_raw.clone()))
+    } else {
+        let transport_raw = Arc::new(TransportHID::new(
+            TransportNativeHID::new(&HidApi::new().expect("Unable to get connect to the device"))
+                .unwrap(),
+        ));
 
         Arc::new(TransportWrapper::new(transport_raw.clone()))
     };
@@ -300,11 +297,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         std::io::stdout().flush().unwrap(); // show test name and repetitions before running it
 
         // Run with 0 repetitions to measure initialization time
-        let init_ms = run_bench_case(case, 0, &mut vanadium_client).await?;
+        let init_ms = run_bench_case(case, 0, args.metrics, &mut vanadium_client).await?;
 
         // Run with actual repetitions
         let total_with_init_ms =
-            run_bench_case(case, case.repetitions, &mut vanadium_client).await?;
+            run_bench_case(case, case.repetitions, args.metrics, &mut vanadium_client).await?;
 
         // Subtract initialization time from total
         let total_ms = (total_with_init_ms - init_ms).max(0.0);
