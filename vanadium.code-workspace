@@ -19,7 +19,8 @@
       "path": "macros"
     },
     {
-      "path": "docs"
+      "path": "docs",
+      "name": "📚 docs"
     },
     {
       "path": "libs/bitcoin_hashes",
@@ -52,6 +53,10 @@
     {
       "path": "apps/bitcoin/client",
       "name": "₿ vnd-bitcoin-client"
+    },
+    {
+      "path": "apps/bitcoin/benchmarks",
+      "name": "₿ benchmarks"
     },
     {
       "path": "apps/template/app",
