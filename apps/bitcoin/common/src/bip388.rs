@@ -3,13 +3,10 @@
 // - add malleability checks
 // - add stack limits and other safety checks
 
-use alloc::{
-    boxed::Box,
-    format,
-    string::{String, ToString},
-    vec,
-    vec::Vec,
-};
+use alloc::{boxed::Box, string::String, vec, vec::Vec};
+
+#[cfg(test)]
+use alloc::{format, string::ToString};
 
 use core::str::FromStr;
 
@@ -236,7 +233,7 @@ impl DescriptorTemplate {
             _ => false,
         }
     }
-    pub fn placeholders(&self) -> DescriptorTemplateIter {
+    pub fn placeholders(&self) -> DescriptorTemplateIter<'_> {
         DescriptorTemplateIter::from(self)
     }
 }
@@ -248,7 +245,7 @@ pub enum TapTree {
 }
 
 impl TapTree {
-    pub fn tapleaves(&self) -> TapleavesIter {
+    pub fn tapleaves(&self) -> TapleavesIter<'_> {
         TapleavesIter::new(self)
     }
 }
@@ -282,13 +279,11 @@ impl<'a> Iterator for TapleavesIter<'a> {
 
 impl core::fmt::Display for KeyOrigin {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        let path = self
-            .derivation_path
-            .iter()
-            .map(|x| x.to_string())
-            .collect::<Vec<String>>()
-            .join("/");
-        write!(f, "{:08x}/{}", self.fingerprint, path)
+        write!(f, "{:08x}", self.fingerprint)?;
+        for step in &self.derivation_path {
+            write!(f, "/{}", step)?;
+        }
+        Ok(())
     }
 }
 
@@ -497,10 +492,8 @@ fn parse_fragment_with_placeholder(
     template_constructor: impl Fn(KeyPlaceholder) -> DescriptorTemplate,
 ) -> impl Fn(&str) -> IResult<&str, DescriptorTemplate> {
     move |input: &str| {
-        let tag_with_parenthesis = format!("{}(", tag_str);
-
         let (input, key_placeholder) = delimited(
-            tag(tag_with_parenthesis.as_str()),
+            pair(tag(tag_str), char('(')),
             parse_key_placeholder,
             char(')'),
         )(input)?;
@@ -515,11 +508,9 @@ fn parse_fragment_with_n_scripts(
     template_constructor: impl Fn(&mut Vec<DescriptorTemplate>) -> DescriptorTemplate,
 ) -> impl Fn(&str) -> IResult<&str, DescriptorTemplate> {
     move |input: &str| {
-        let tag_with_parenthesis = format!("{}(", tag_str);
-
         let (input, mut scripts) = verify(
             delimited(
-                tag(tag_with_parenthesis.as_str()),
+                pair(tag(tag_str), char('(')),
                 separated_list1(char(','), parse_descriptor),
                 char(')'),
             ),
@@ -535,12 +526,11 @@ fn parse_fragment_with_threshold_and_placeholders(
     template_constructor: fn(u32, Vec<KeyPlaceholder>) -> DescriptorTemplate,
 ) -> impl Fn(&str) -> IResult<&str, DescriptorTemplate> {
     move |input: &str| {
-        let tag_with_parenthesis = format!("{}(", tag_str);
         let parse_threshold = map_res(digit1, str::parse::<u32>);
         let parse_key_placeholders = many_m_n(2, 20, preceded(char(','), parse_key_placeholder));
 
         let (input, (threshold, key_placeholders)) = delimited(
-            tag(tag_with_parenthesis.as_str()),
+            pair(tag(tag_str), char('(')),
             pair(parse_threshold, parse_key_placeholders),
             char(')'),
         )(input)?;
@@ -555,10 +545,8 @@ fn parse_fragment_with_number(
     template_constructor: impl Fn(u32) -> DescriptorTemplate,
 ) -> impl Fn(&str) -> IResult<&str, DescriptorTemplate> {
     move |input: &str| {
-        let tag_with_parenthesis = format!("{}(", tag_str);
-
         let (input, number) = delimited(
-            tag(tag_with_parenthesis.as_str()),
+            pair(tag(tag_str), char('(')),
             parse_number_up_to(max_n),
             char(')'),
         )(input)?;
@@ -572,13 +560,8 @@ fn parse_fragment_with_hex20(
     template_constructor: impl Fn([u8; 20]) -> DescriptorTemplate,
 ) -> impl Fn(&str) -> IResult<&str, DescriptorTemplate> {
     move |input: &str| {
-        let tag_with_parenthesis = format!("{}(", tag_str);
-
-        let (input, hex_string) = delimited(
-            tag(tag_with_parenthesis.as_str()),
-            take(2 * 20usize),
-            char(')'),
-        )(input)?;
+        let (input, hex_string) =
+            delimited(pair(tag(tag_str), char('(')), take(2 * 20usize), char(')'))(input)?;
 
         let decoded = <[u8; 20]>::from_hex(hex_string).map_err(|_| {
             nom::Err::Failure(nom::error::Error::new(input, nom::error::ErrorKind::MapRes))
@@ -593,13 +576,8 @@ fn parse_fragment_with_hex32(
     template_constructor: impl Fn([u8; 32]) -> DescriptorTemplate,
 ) -> impl Fn(&str) -> IResult<&str, DescriptorTemplate> {
     move |input: &str| {
-        let tag_with_parenthesis = format!("{}(", tag_str);
-
-        let (input, hex_string) = delimited(
-            tag(tag_with_parenthesis.as_str()),
-            take(2 * 32usize),
-            char(')'),
-        )(input)?;
+        let (input, hex_string) =
+            delimited(pair(tag(tag_str), char('(')), take(2 * 32usize), char(')'))(input)?;
 
         let decoded = <[u8; 32]>::from_hex(hex_string).map_err(|_| {
             nom::Err::Failure(nom::error::Error::new(input, nom::error::ErrorKind::MapRes))
@@ -1020,6 +998,282 @@ impl WalletPolicy {
     //     }
 }
 
+fn write_key_placeholder(
+    w: &mut String,
+    key_information: &[KeyInformation],
+    kp: &KeyPlaceholder,
+    is_change: bool,
+    address_index: u32,
+) -> Result<(), &'static str> {
+    use core::fmt::Write;
+    let key_info = key_information
+        .get(kp.key_index as usize)
+        .ok_or("Invalid key index")?;
+    let change_step = if is_change { kp.num1 } else { kp.num2 };
+    write!(w, "{}/{}/{}", key_info, change_step, address_index).map_err(|_| "Format error")
+}
+
+// Writes a comma-separated list of key placeholders to a buffer.
+fn write_key_placeholders(
+    w: &mut String,
+    key_information: &[KeyInformation],
+    kps: &[KeyPlaceholder],
+    is_change: bool,
+    address_index: u32,
+) -> Result<(), &'static str> {
+    for (i, kp) in kps.iter().enumerate() {
+        if i > 0 {
+            w.push(',');
+        }
+        write_key_placeholder(w, key_information, kp, is_change, address_index)?;
+    }
+    Ok(())
+}
+
+// Writes a wrapper fragment to a buffer.
+fn write_wrapper(
+    w: &mut String,
+    name: &str,
+    inner: &DescriptorTemplate,
+    key_information: &[KeyInformation],
+    is_change: bool,
+    address_index: u32,
+) -> Result<(), &'static str> {
+    w.push_str(name);
+    if !inner.is_wrapper() {
+        w.push(':');
+    }
+    inner.write_to(w, key_information, is_change, address_index)
+}
+
+impl TapTree {
+    fn write_to(
+        &self,
+        w: &mut String,
+        key_information: &[KeyInformation],
+        is_change: bool,
+        address_index: u32,
+    ) -> Result<(), &'static str> {
+        match self {
+            TapTree::Script(desc) => desc.write_to(w, key_information, is_change, address_index),
+            TapTree::Branch(left, right) => {
+                w.push('{');
+                left.write_to(w, key_information, is_change, address_index)?;
+                w.push(',');
+                right.write_to(w, key_information, is_change, address_index)?;
+                w.push('}');
+                Ok(())
+            }
+        }
+    }
+}
+
+impl DescriptorTemplate {
+    fn write_to(
+        &self,
+        w: &mut String,
+        key_information: &[KeyInformation],
+        is_change: bool,
+        address_index: u32,
+    ) -> Result<(), &'static str> {
+        use core::fmt::Write;
+
+        match self {
+            DescriptorTemplate::Sh(inner) => {
+                w.push_str("sh(");
+                inner.write_to(w, key_information, is_change, address_index)?;
+                w.push(')');
+            }
+            DescriptorTemplate::Wsh(inner) => {
+                w.push_str("wsh(");
+                inner.write_to(w, key_information, is_change, address_index)?;
+                w.push(')');
+            }
+            DescriptorTemplate::Pkh(kp) => {
+                w.push_str("pkh(");
+                write_key_placeholder(w, key_information, kp, is_change, address_index)?;
+                w.push(')');
+            }
+            DescriptorTemplate::Wpkh(kp) => {
+                w.push_str("wpkh(");
+                write_key_placeholder(w, key_information, kp, is_change, address_index)?;
+                w.push(')');
+            }
+            DescriptorTemplate::Sortedmulti(threshold, kps) => {
+                write!(w, "sortedmulti({}, ", threshold).map_err(|_| "Format error")?;
+                write_key_placeholders(w, key_information, kps, is_change, address_index)?;
+                w.push(')');
+            }
+            DescriptorTemplate::Sortedmulti_a(threshold, kps) => {
+                write!(w, "sortedmulti_a({}, ", threshold).map_err(|_| "Format error")?;
+                write_key_placeholders(w, key_information, kps, is_change, address_index)?;
+                w.push(')');
+            }
+            DescriptorTemplate::Tr(kp, tap_tree) => {
+                w.push_str("tr(");
+                write_key_placeholder(w, key_information, kp, is_change, address_index)?;
+                if let Some(tree) = tap_tree {
+                    w.push_str(", ");
+                    tree.write_to(w, key_information, is_change, address_index)?;
+                }
+                w.push(')');
+            }
+            DescriptorTemplate::Zero => w.push('0'),
+            DescriptorTemplate::One => w.push('1'),
+            DescriptorTemplate::Pk(kp) => {
+                w.push_str("pk(");
+                write_key_placeholder(w, key_information, kp, is_change, address_index)?;
+                w.push(')');
+            }
+            DescriptorTemplate::Pk_k(kp) => {
+                w.push_str("pk_k(");
+                write_key_placeholder(w, key_information, kp, is_change, address_index)?;
+                w.push(')');
+            }
+            DescriptorTemplate::Pk_h(kp) => {
+                w.push_str("pk_h(");
+                write_key_placeholder(w, key_information, kp, is_change, address_index)?;
+                w.push(')');
+            }
+            DescriptorTemplate::Older(n) => {
+                write!(w, "older({})", n).map_err(|_| "Format error")?;
+            }
+            DescriptorTemplate::After(n) => {
+                write!(w, "after({})", n).map_err(|_| "Format error")?;
+            }
+            DescriptorTemplate::Sha256(hash) => {
+                w.push_str("sha256(");
+                w.push_str(&hex::encode(hash));
+                w.push(')');
+            }
+            DescriptorTemplate::Ripemd160(hash) => {
+                w.push_str("ripemd160(");
+                w.push_str(&hex::encode(hash));
+                w.push(')');
+            }
+            DescriptorTemplate::Hash256(hash) => {
+                w.push_str("hash256(");
+                w.push_str(&hex::encode(hash));
+                w.push(')');
+            }
+            DescriptorTemplate::Hash160(hash) => {
+                w.push_str("hash160(");
+                w.push_str(&hex::encode(hash));
+                w.push(')');
+            }
+            DescriptorTemplate::Andor(x, y, z) => {
+                w.push_str("andor(");
+                x.write_to(w, key_information, is_change, address_index)?;
+                w.push(',');
+                y.write_to(w, key_information, is_change, address_index)?;
+                w.push(',');
+                z.write_to(w, key_information, is_change, address_index)?;
+                w.push(')');
+            }
+            DescriptorTemplate::And_v(x, y) => {
+                w.push_str("and_v(");
+                x.write_to(w, key_information, is_change, address_index)?;
+                w.push(',');
+                y.write_to(w, key_information, is_change, address_index)?;
+                w.push(')');
+            }
+            DescriptorTemplate::And_b(x, y) => {
+                w.push_str("and_b(");
+                x.write_to(w, key_information, is_change, address_index)?;
+                w.push(',');
+                y.write_to(w, key_information, is_change, address_index)?;
+                w.push(')');
+            }
+            DescriptorTemplate::And_n(x, y) => {
+                w.push_str("and_n(");
+                x.write_to(w, key_information, is_change, address_index)?;
+                w.push(',');
+                y.write_to(w, key_information, is_change, address_index)?;
+                w.push(')');
+            }
+            DescriptorTemplate::Or_b(x, z) => {
+                w.push_str("or_b(");
+                x.write_to(w, key_information, is_change, address_index)?;
+                w.push(',');
+                z.write_to(w, key_information, is_change, address_index)?;
+                w.push(')');
+            }
+            DescriptorTemplate::Or_c(x, z) => {
+                w.push_str("or_c(");
+                x.write_to(w, key_information, is_change, address_index)?;
+                w.push(',');
+                z.write_to(w, key_information, is_change, address_index)?;
+                w.push(')');
+            }
+            DescriptorTemplate::Or_d(x, z) => {
+                w.push_str("or_d(");
+                x.write_to(w, key_information, is_change, address_index)?;
+                w.push(',');
+                z.write_to(w, key_information, is_change, address_index)?;
+                w.push(')');
+            }
+            DescriptorTemplate::Or_i(x, z) => {
+                w.push_str("or_i(");
+                x.write_to(w, key_information, is_change, address_index)?;
+                w.push(',');
+                z.write_to(w, key_information, is_change, address_index)?;
+                w.push(')');
+            }
+            DescriptorTemplate::Thresh(k, sub_templates) => {
+                write!(w, "thresh({},[", k).map_err(|_| "Format error")?;
+                for (i, template) in sub_templates.iter().enumerate() {
+                    if i > 0 {
+                        w.push(',');
+                    }
+                    template.write_to(w, key_information, is_change, address_index)?;
+                }
+                w.push_str("])");
+            }
+            DescriptorTemplate::Multi(threshold, kps) => {
+                write!(w, "multi({}, ", threshold).map_err(|_| "Format error")?;
+                write_key_placeholders(w, key_information, kps, is_change, address_index)?;
+                w.push(')');
+            }
+            DescriptorTemplate::Multi_a(threshold, kps) => {
+                write!(w, "multi_a({}, ", threshold).map_err(|_| "Format error")?;
+                write_key_placeholders(w, key_information, kps, is_change, address_index)?;
+                w.push(')');
+            }
+            DescriptorTemplate::A(inner) => {
+                write_wrapper(w, "a", inner, key_information, is_change, address_index)?;
+            }
+            DescriptorTemplate::S(inner) => {
+                write_wrapper(w, "s", inner, key_information, is_change, address_index)?;
+            }
+            DescriptorTemplate::C(inner) => {
+                write_wrapper(w, "c", inner, key_information, is_change, address_index)?;
+            }
+            DescriptorTemplate::T(inner) => {
+                write_wrapper(w, "t", inner, key_information, is_change, address_index)?;
+            }
+            DescriptorTemplate::D(inner) => {
+                write_wrapper(w, "d", inner, key_information, is_change, address_index)?;
+            }
+            DescriptorTemplate::V(inner) => {
+                write_wrapper(w, "v", inner, key_information, is_change, address_index)?;
+            }
+            DescriptorTemplate::J(inner) => {
+                write_wrapper(w, "j", inner, key_information, is_change, address_index)?;
+            }
+            DescriptorTemplate::N(inner) => {
+                write_wrapper(w, "n", inner, key_information, is_change, address_index)?;
+            }
+            DescriptorTemplate::L(inner) => {
+                write_wrapper(w, "l", inner, key_information, is_change, address_index)?;
+            }
+            DescriptorTemplate::U(inner) => {
+                write_wrapper(w, "u", inner, key_information, is_change, address_index)?;
+            }
+        }
+        Ok(())
+    }
+}
+
 impl ToDescriptor for TapTree {
     fn to_descriptor(
         &self,
@@ -1027,19 +1281,9 @@ impl ToDescriptor for TapTree {
         is_change: bool,
         address_index: u32,
     ) -> Result<String, &'static str> {
-        match self {
-            TapTree::Script(descriptor_template) => {
-                descriptor_template.to_descriptor(key_information, is_change, address_index)
-            }
-            TapTree::Branch(left, right) => {
-                let left_descriptor =
-                    left.to_descriptor(key_information, is_change, address_index)?;
-                let right_descriptor =
-                    right.to_descriptor(key_information, is_change, address_index)?;
-
-                Ok(format!("{{{},{}}}", left_descriptor, right_descriptor))
-            }
-        }
+        let mut result = String::new();
+        self.write_to(&mut result, key_information, is_change, address_index)?;
+        Ok(result)
     }
 }
 
@@ -1050,178 +1294,9 @@ impl ToDescriptor for DescriptorTemplate {
         is_change: bool,
         address_index: u32,
     ) -> Result<String, &'static str> {
-        // converts a single placeholder to its string expression in a descriptor
-        let fmt_kp = |key_placeholder: &KeyPlaceholder,
-                      is_change: bool,
-                      address_index: u32|
-         -> Result<String, &'static str> {
-            let key_info = key_information
-                .get(key_placeholder.key_index as usize)
-                .ok_or("Invalid key index")
-                .map(|key_info| key_info.to_string());
-
-            let key_info = key_info?;
-
-            let change_step = if is_change {
-                key_placeholder.num1
-            } else {
-                key_placeholder.num2
-            };
-            Ok(format!("{}/{}/{}", key_info, change_step, address_index))
-        };
-
-        // converts a slice of placeholder to its string expression in a descriptor
-        let fmt_kps = |key_placeholders: &[KeyPlaceholder],
-                       is_change: bool,
-                       address_index: u32|
-         -> Result<String, &'static str> {
-            Ok(key_placeholders
-                .iter()
-                .map(|key_placeholder| fmt_kp(key_placeholder, is_change, address_index))
-                .collect::<Result<Vec<_>, _>>()?
-                .join(","))
-        };
-
-        // formats a wrapper
-        let fmt_wrapper =
-            |wrapper_name: &str, inner: &DescriptorTemplate| -> Result<String, &'static str> {
-                let inner_desc = inner.to_descriptor(key_information, is_change, address_index)?;
-                if inner.is_wrapper() {
-                    Ok(format!("{}{}", wrapper_name, inner_desc))
-                } else {
-                    Ok(format!("{}:{}", wrapper_name, inner_desc))
-                }
-            };
-
-        match self {
-            DescriptorTemplate::Sh(inner) => {
-                let inner_desc = inner.to_descriptor(key_information, is_change, address_index)?;
-                Ok(format!("sh({})", inner_desc))
-            }
-            DescriptorTemplate::Wsh(inner) => {
-                let inner_desc = inner.to_descriptor(key_information, is_change, address_index)?;
-                Ok(format!("wsh({})", inner_desc))
-            }
-            DescriptorTemplate::Pkh(kp) => {
-                Ok(format!("pkh({})", fmt_kp(kp, is_change, address_index)?))
-            }
-            DescriptorTemplate::Wpkh(kp) => {
-                Ok(format!("wpkh({})", fmt_kp(kp, is_change, address_index)?))
-            }
-            DescriptorTemplate::Sortedmulti(threshold, kps) => Ok(format!(
-                "sortedmulti({}, {})",
-                threshold,
-                fmt_kps(kps, is_change, address_index)?
-            )),
-            DescriptorTemplate::Sortedmulti_a(threshold, kps) => Ok(format!(
-                "sortedmulti_a({}, {})",
-                threshold,
-                fmt_kps(kps, is_change, address_index)?
-            )),
-            DescriptorTemplate::Tr(kp, tap_tree) => match tap_tree {
-                Some(tree) => {
-                    let tap_tree_str =
-                        tree.to_descriptor(key_information, is_change, address_index)?;
-                    Ok(format!(
-                        "tr({}, {})",
-                        fmt_kp(kp, is_change, address_index)?,
-                        tap_tree_str
-                    ))
-                }
-                None => Ok(format!("tr({})", fmt_kp(kp, is_change, address_index)?)),
-            },
-            DescriptorTemplate::Zero => Ok("0".to_string()),
-            DescriptorTemplate::One => Ok("1".to_string()),
-            DescriptorTemplate::Pk(kp) => {
-                Ok(format!("pk({})", fmt_kp(kp, is_change, address_index)?))
-            }
-            DescriptorTemplate::Pk_k(kp) => {
-                Ok(format!("pk_k({})", fmt_kp(kp, is_change, address_index)?))
-            }
-            DescriptorTemplate::Pk_h(kp) => {
-                Ok(format!("pk_h({})", fmt_kp(kp, is_change, address_index)?))
-            }
-            DescriptorTemplate::Older(n) => Ok(format!("older({})", n)),
-            DescriptorTemplate::After(n) => Ok(format!("after({})", n)),
-            DescriptorTemplate::Sha256(hash) => Ok(format!("sha256({})", hex::encode(hash))),
-            DescriptorTemplate::Ripemd160(hash) => Ok(format!("ripemd160({})", hex::encode(hash))),
-            DescriptorTemplate::Hash256(hash) => Ok(format!("hash256({})", hex::encode(hash))),
-            DescriptorTemplate::Hash160(hash) => Ok(format!("hash160({})", hex::encode(hash))),
-            DescriptorTemplate::Andor(x, y, z) => {
-                let x_descriptor = x.to_descriptor(key_information, is_change, address_index)?;
-                let y_descriptor = y.to_descriptor(key_information, is_change, address_index)?;
-                let z_descriptor = z.to_descriptor(key_information, is_change, address_index)?;
-                Ok(format!(
-                    "andor({},{},{})",
-                    x_descriptor, y_descriptor, z_descriptor
-                ))
-            }
-            DescriptorTemplate::And_v(x, y) => {
-                let x_descriptor = x.to_descriptor(key_information, is_change, address_index)?;
-                let y_descriptor = y.to_descriptor(key_information, is_change, address_index)?;
-                Ok(format!("and_v({},{})", x_descriptor, y_descriptor))
-            }
-            DescriptorTemplate::And_b(x, y) => {
-                let x_descriptor = x.to_descriptor(key_information, is_change, address_index)?;
-                let y_descriptor = y.to_descriptor(key_information, is_change, address_index)?;
-                Ok(format!("and_b({},{})", x_descriptor, y_descriptor))
-            }
-            DescriptorTemplate::And_n(x, y) => {
-                let x_descriptor = x.to_descriptor(key_information, is_change, address_index)?;
-                let y_descriptor = y.to_descriptor(key_information, is_change, address_index)?;
-                Ok(format!("and_n({},{})", x_descriptor, y_descriptor))
-            }
-            DescriptorTemplate::Or_b(x, z) => {
-                let x_descriptor = x.to_descriptor(key_information, is_change, address_index)?;
-                let z_descriptor = z.to_descriptor(key_information, is_change, address_index)?;
-                Ok(format!("or_b({},{})", x_descriptor, z_descriptor))
-            }
-            DescriptorTemplate::Or_c(x, z) => {
-                let x_descriptor = x.to_descriptor(key_information, is_change, address_index)?;
-                let z_descriptor = z.to_descriptor(key_information, is_change, address_index)?;
-                Ok(format!("or_c({},{})", x_descriptor, z_descriptor))
-            }
-            DescriptorTemplate::Or_d(x, z) => {
-                let x_descriptor = x.to_descriptor(key_information, is_change, address_index)?;
-                let z_descriptor = z.to_descriptor(key_information, is_change, address_index)?;
-                Ok(format!("or_d({},{})", x_descriptor, z_descriptor))
-            }
-            DescriptorTemplate::Or_i(x, z) => {
-                let x_descriptor = x.to_descriptor(key_information, is_change, address_index)?;
-                let z_descriptor = z.to_descriptor(key_information, is_change, address_index)?;
-                Ok(format!("or_i({},{})", x_descriptor, z_descriptor))
-            }
-            DescriptorTemplate::Thresh(k, sub_templates) => {
-                let sub_descriptors: Result<Vec<String>, _> = sub_templates
-                    .iter()
-                    .map(|template| {
-                        template.to_descriptor(key_information, is_change, address_index)
-                    })
-                    .collect();
-                let sub_descriptors = sub_descriptors?;
-                Ok(format!("thresh({},[{}])", k, sub_descriptors.join(",")))
-            }
-            DescriptorTemplate::Multi(threshold, kps) => Ok(format!(
-                "multi({}, {})",
-                threshold,
-                fmt_kps(kps, is_change, address_index)?
-            )),
-            DescriptorTemplate::Multi_a(threshold, kps) => Ok(format!(
-                "multi_a({}, {})",
-                threshold,
-                fmt_kps(kps, is_change, address_index)?
-            )),
-            DescriptorTemplate::A(inner) => fmt_wrapper("a", inner),
-            DescriptorTemplate::S(inner) => fmt_wrapper("s", inner),
-            DescriptorTemplate::C(inner) => fmt_wrapper("c", inner),
-            DescriptorTemplate::T(inner) => fmt_wrapper("t", inner),
-            DescriptorTemplate::D(inner) => fmt_wrapper("d", inner),
-            DescriptorTemplate::V(inner) => fmt_wrapper("v", inner),
-            DescriptorTemplate::J(inner) => fmt_wrapper("j", inner),
-            DescriptorTemplate::N(inner) => fmt_wrapper("n", inner),
-            DescriptorTemplate::L(inner) => fmt_wrapper("l", inner),
-            DescriptorTemplate::U(inner) => fmt_wrapper("u", inner),
-        }
+        let mut result = String::new();
+        self.write_to(&mut result, key_information, is_change, address_index)?;
+        Ok(result)
     }
 }
 
