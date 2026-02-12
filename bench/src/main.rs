@@ -1,3 +1,4 @@
+use clap::Parser;
 use client::BenchClient;
 #[cfg(not(feature = "speculos"))]
 use hidapi::HidApi;
@@ -11,16 +12,31 @@ use std::fs::File;
 
 use sdk::transport_native_hid::TransportNativeHID;
 use sdk::vanadium_client::VanadiumAppClient;
-use std::env;
 use std::fs;
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 
 mod client;
 
 const DEFAULT_REPETITIONS: u64 = 10;
+
+#[derive(Parser, Debug)]
+#[command(name = "vanadium-benchmarks")]
+#[command(about = "Run Vanadium benchmarks", long_about = None)]
+struct Args {
+    /// Path to the directory containing benchmark test cases
+    #[arg(short, long, default_value = "cases")]
+    path: PathBuf,
+
+    /// List available test cases without running them
+    #[arg(long)]
+    list: bool,
+
+    /// Filter test cases by name (can specify multiple)
+    filters: Vec<String>,
+}
 
 #[derive(Debug, Clone)]
 struct BenchCase {
@@ -200,25 +216,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             .init();
     }
 
-    let args: Vec<String> = env::args().skip(1).collect();
-    let list_only = args.iter().any(|arg| arg == "--list");
-    let filters: Vec<_> = args.iter().filter(|arg| arg.as_str() != "--list").collect();
+    let args = Args::parse();
 
-    let all_cases = discover_bench_cases(Path::new("cases"))?;
-    let testcases: Vec<_> = if filters.is_empty() {
+    let all_cases = discover_bench_cases(&args.path)?;
+    let testcases: Vec<_> = if args.filters.is_empty() {
         all_cases.iter().collect()
     } else {
         all_cases
             .iter()
             .filter(|case| {
-                filters
+                args.filters
                     .iter()
-                    .any(|arg| case.case_name.contains(arg.as_str()))
+                    .any(|filter| case.case_name.contains(filter.as_str()))
             })
             .collect()
     };
 
-    if list_only {
+    if args.list {
         for case in &testcases {
             println!("{} (runs={})", case.case_name, case.repetitions);
         }
