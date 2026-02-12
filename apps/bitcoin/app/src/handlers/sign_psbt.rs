@@ -138,18 +138,10 @@ fn sign_input_ecdsa(
     })
 }
 
-fn sign_input_schnorr(
-    psbt: &fastpsbt::Psbt,
-    input_index: usize,
-    sighash_cache: &mut SighashCache<Transaction>,
-    path: &[ChildNumber],
-    taptree_hash: Option<[u8; 32]>,
-    leaf_hash: Option<TapLeafHash>,
-) -> Result<PartialSignature, Error> {
-    let sighash_type = TapSighashType::Default; // TODO: only DEFAULT is supported for now
-
-    let prevouts = psbt
-        .inputs
+/// Parse all witness UTXOs from the PSBT inputs into a vector of `TxOut`.
+/// This should be called once and the result reused across all schnorr signing calls.
+fn collect_prevouts(psbt: &fastpsbt::Psbt) -> Result<Vec<TxOut>, Error> {
+    psbt.inputs
         .iter()
         .map(|input| {
             let Some(wutxo) = input.witness_utxo else {
@@ -166,13 +158,24 @@ fn sign_input_schnorr(
                 script_pubkey,
             })
         })
-        .collect::<Result<Vec<TxOut>, Error>>()?;
+        .collect()
+}
+
+fn sign_input_schnorr(
+    input_index: usize,
+    sighash_cache: &mut SighashCache<Transaction>,
+    prevouts: &[TxOut],
+    path: &[ChildNumber],
+    taptree_hash: Option<[u8; 32]>,
+    leaf_hash: Option<TapLeafHash>,
+) -> Result<PartialSignature, Error> {
+    let sighash_type = TapSighashType::Default; // TODO: only DEFAULT is supported for now
 
     let sighash = if let Some(leaf_hash) = leaf_hash {
         sighash_cache
             .taproot_script_spend_signature_hash(
                 input_index,
-                &bitcoin::sighash::Prevouts::All(&prevouts),
+                &bitcoin::sighash::Prevouts::All(prevouts),
                 leaf_hash,
                 sighash_type,
             )
@@ -181,7 +184,7 @@ fn sign_input_schnorr(
         sighash_cache
             .taproot_key_spend_signature_hash(
                 input_index,
-                &bitcoin::sighash::Prevouts::All(&prevouts),
+                &bitcoin::sighash::Prevouts::All(prevouts),
                 sighash_type,
             )
             .map_err(|_| Error::ErrorComputingSighash)?
@@ -556,6 +559,10 @@ pub fn handle_sign_psbt(app: &mut sdk::App, psbt: &[u8]) -> Result<Response, Err
         .map_err(|_| Error::FailedUnsignedTransaction)?;
     let mut sighash_cache = SighashCache::new(unsigned_tx.clone());
 
+    // Pre-compute prevouts once for all taproot (schnorr) signing calls.
+    // This is lazily initialized on the first taproot input encountered.
+    let mut prevouts: Option<Vec<TxOut>> = None;
+
     let master_fingerprint = sdk::curve::Secp256k1::get_master_fingerprint();
 
     let mut partial_signatures = Vec::with_capacity(psbt.inputs.len());
@@ -624,10 +631,13 @@ pub fn handle_sign_psbt(app: &mut sdk::App, psbt: &[u8]) -> Result<Response, Err
                             .transpose()
                             .map_err(|_| Error::InvalidWalletPolicy)?;
 
+                        let prevouts = prevouts.get_or_insert_with(|| {
+                            collect_prevouts(&psbt).expect("Failed to collect prevouts")
+                        });
                         let partial_signature = sign_input_schnorr(
-                            &psbt,
                             input_index,
                             &mut sighash_cache,
+                            prevouts,
                             &path,
                             taptree_hash,
                             leaf_hash,
