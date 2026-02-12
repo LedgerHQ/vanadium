@@ -1,5 +1,5 @@
 run:
-  cargo run
+  vnd-bench
 
 # build all the testcases for riscv target (Ledger Vanadium)
 build-cases:

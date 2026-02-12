@@ -1,5 +1,5 @@
 [package]
-name = "vanadium-benchmarks"
+name = "vnd-bench"
 version = "0.1.0"
 edition = "2024"
 
@@ -14,10 +14,12 @@ metrics = ["sdk/metrics"]
 
 [dependencies]
 clap = { version = "4.5", features = ["derive"] }
-common = { path = "../common" }
+common = { path = "../../common" }
 hidapi = "2.6.3"
 hex = "0.4.3"
-sdk = { package = "vanadium-client-sdk", path = "../client-sdk"}
+sdk = { package = "vanadium-client-sdk", path = "../../client-sdk"}
 tokio = { version = "1.38.1", features = ["io-util", "macros", "net", "rt", "rt-multi-thread", "sync"] }
 env_logger = { version = "0.11.8", optional = true }
 toml = "0.8.23"
+
+[workspace]
