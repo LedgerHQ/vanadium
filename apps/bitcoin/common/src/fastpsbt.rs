@@ -20,9 +20,9 @@
 
 use alloc::vec::Vec;
 use bitcoin::{
-    consensus::deserialize, hashes::Hash, psbt::OutputType, script::ScriptBuf, secp256k1::Message,
-    sighash::SighashCache, transaction::Version, Amount, EcdsaSighashType, OutPoint, Sequence,
-    Transaction, TxIn, TxOut, Txid, Witness,
+    consensus::deserialize, hashes::Hash, psbt::OutputType, script::Script, script::ScriptBuf,
+    secp256k1::Message, sighash::SighashCache, transaction::Version, Amount, EcdsaSighashType,
+    OutPoint, Sequence, Transaction, TxIn, TxOut, Txid, Witness,
 };
 
 use core::{borrow::Borrow, cell::OnceCell, cmp::Ordering};
@@ -520,42 +520,17 @@ impl<'a> Psbt<'a> {
         }
 
         let input = &self.inputs[input_index];
-        if let Some(witness_utxo) = input.witness_utxo {
-            if witness_utxo.len() < 8 + 1 {
-                return Err(PsbtError::BadValue);
-            }
-            let script_len = witness_utxo[8] as usize;
-            if script_len > 0xfc {
-                return Err(PsbtError::BadValue);
-            }
-            if witness_utxo.len() != 8 + 1 + script_len {
-                return Err(PsbtError::BadValue);
-            }
-            let script_pubkey = ScriptBuf::from_bytes(witness_utxo[9..9 + script_len].to_vec());
-            let amount = Amount::from_sat(u64::from_le_bytes([
-                witness_utxo[0],
-                witness_utxo[1],
-                witness_utxo[2],
-                witness_utxo[3],
-                witness_utxo[4],
-                witness_utxo[5],
-                witness_utxo[6],
-                witness_utxo[7],
-            ]));
-            Ok(TxOut {
-                value: amount,
-                script_pubkey,
-            })
-        } else if let Some(non_witness_utxo) = input.non_witness_utxo {
-            let non_witness_utxo: Transaction =
-                deserialize(non_witness_utxo).map_err(|_| PsbtError::BadValue)?;
+        if let Some(wutxo) = input.get_witness_utxo()? {
+            return Ok(wutxo.clone());
+        }
+        if let Some(nwutxo) = input.get_non_witness_utxo()? {
             let vout = input.output_index.ok_or(PsbtError::MissingOutputIndex)? as usize;
-            if vout >= non_witness_utxo.output.len() {
+            if vout >= nwutxo.output.len() {
                 return Err(PsbtError::OutOfRange);
             }
             Ok(TxOut {
-                value: non_witness_utxo.output[vout].value,
-                script_pubkey: non_witness_utxo.output[vout].script_pubkey.clone(),
+                value: nwutxo.output[vout].value,
+                script_pubkey: nwutxo.output[vout].script_pubkey.clone(),
             })
         } else {
             Err(PsbtError::BadValue)
@@ -586,20 +561,14 @@ impl<'a> Psbt<'a> {
             if input
                 .redeem_script
                 .as_ref()
-                .map(|s| {
-                    let s = ScriptBuf::from_bytes(s.to_vec());
-                    s.is_p2wpkh()
-                })
+                .map(|s| Script::from_bytes(s).is_p2wpkh())
                 .unwrap_or(false)
             {
                 OutputType::ShWpkh
             } else if input
                 .redeem_script
                 .as_ref()
-                .map(|s| {
-                    let s = ScriptBuf::from_bytes(s.to_vec());
-                    s.is_p2wsh()
-                })
+                .map(|s| Script::from_bytes(s).is_p2wsh())
                 .unwrap_or(false)
             {
                 OutputType::ShWsh
@@ -624,9 +593,9 @@ impl<'a> Psbt<'a> {
                     .redeem_script
                     .as_ref()
                     .ok_or(PsbtError::MissingRedeemScript)?;
-                let script_code = ScriptBuf::from_bytes(script_code.to_vec());
+                let script_code = Script::from_bytes(script_code);
                 let sighash = cache
-                    .legacy_signature_hash(input_index, &script_code, hash_ty.to_u32())
+                    .legacy_signature_hash(input_index, script_code, hash_ty.to_u32())
                     .expect("input checked above");
                 Ok((Message::from(sighash), hash_ty))
             }
@@ -638,9 +607,9 @@ impl<'a> Psbt<'a> {
             }
             OutputType::ShWpkh => {
                 let redeem_script = input.redeem_script.as_ref().expect("checked above");
-                let redeem_script = ScriptBuf::from_bytes(redeem_script.to_vec());
+                let redeem_script = Script::from_bytes(redeem_script);
                 let sighash = cache
-                    .p2wpkh_signature_hash(input_index, &redeem_script, utxo.value, hash_ty)
+                    .p2wpkh_signature_hash(input_index, redeem_script, utxo.value, hash_ty)
                     .map_err(|_| PsbtError::BadValue)?;
                 Ok((Message::from(sighash), hash_ty))
             }
@@ -649,9 +618,9 @@ impl<'a> Psbt<'a> {
                     .witness_script
                     .as_ref()
                     .ok_or(PsbtError::MissingWitnessScript)?;
-                let witness_script = ScriptBuf::from_bytes(witness_script.to_vec());
+                let witness_script = Script::from_bytes(witness_script);
                 let sighash = cache
-                    .p2wsh_signature_hash(input_index, &witness_script, utxo.value, hash_ty)
+                    .p2wsh_signature_hash(input_index, witness_script, utxo.value, hash_ty)
                     .map_err(|_| PsbtError::BadValue)?;
                 Ok((Message::from(sighash), hash_ty))
             }
