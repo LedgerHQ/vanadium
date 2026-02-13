@@ -1009,7 +1009,7 @@ fn write_key_placeholder(
     let key_info = key_information
         .get(kp.key_index as usize)
         .ok_or("Invalid key index")?;
-    let change_step = if is_change { kp.num1 } else { kp.num2 };
+    let change_step = if is_change { kp.num2 } else { kp.num1 };
     write!(w, "{}/{}/{}", key_info, change_step, address_index).map_err(|_| "Format error")
 }
 
