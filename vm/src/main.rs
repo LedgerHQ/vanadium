@@ -20,6 +20,7 @@
 
 mod aes;
 mod app_ui;
+mod auth;
 mod handlers;
 mod hash;
 mod io;
@@ -211,6 +212,9 @@ impl TryFrom<ApduHeader> for Instruction {
 #[cfg(not(feature = "run_tests"))]
 #[no_mangle]
 extern "C" fn sample_main() {
+    // initialize the auth_key, if not already initialized
+    let _ = crate::auth::VMAuthKey::get();
+
     // Create the communication manager, and configure it to accept only APDU from the 0xe0 class.
     // If any APDU with a wrong class value is received, comm will respond automatically with
     // BadCla status word.
