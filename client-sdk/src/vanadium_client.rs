@@ -654,6 +654,8 @@ pub struct AppInfo {
     pub version: String,
     /// The device model.
     pub device_model: String,
+    /// The Vanadium app ID, a unique identifier for this instance of the app derived from the auth key.
+    pub vanadium_app_id: [u8; 32],
 }
 
 #[derive(Debug)]
@@ -789,11 +791,34 @@ impl<E: std::fmt::Debug + Send + Sync + 'static> GenericVanadiumClient<E> {
                     "Invalid UTF-8 in device model".to_string(),
                 )
             })?;
+        offset += device_model_len;
+
+        if offset >= result.len() {
+            return Err(VanadiumClientError::AppInfoParsingError(
+                "Response too short".to_string(),
+            ));
+        }
+
+        let vanadium_app_id_len = result[offset] as usize;
+        offset += 1;
+        if vanadium_app_id_len != 32 {
+            return Err(VanadiumClientError::AppInfoParsingError(
+                "Invalid Vanadium app ID length".to_string(),
+            ));
+        }
+        if offset + vanadium_app_id_len > result.len() {
+            return Err(VanadiumClientError::AppInfoParsingError(
+                "Response too short".to_string(),
+            ));
+        }
+        let mut vanadium_app_id = [0u8; 32];
+        vanadium_app_id.copy_from_slice(&result[offset..offset + vanadium_app_id_len]);
 
         Ok(AppInfo {
             name,
             version,
             device_model,
+            vanadium_app_id,
         })
     }
 

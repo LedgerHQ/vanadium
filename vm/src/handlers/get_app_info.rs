@@ -24,6 +24,10 @@ pub fn handler_get_app_info(
     response.push(device_model.len() as u8);
     response.extend_from_slice(device_model);
 
+    // Vanadium app ID
+    response.push(32u8);
+    response.extend_from_slice(&crate::auth::get_vanadium_app_id());
+
     Ok(response)
 }
 
