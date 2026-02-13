@@ -80,3 +80,11 @@ impl VMAuthKey {
         result
     }
 }
+
+/// Returns a public identifier that uniquely identifies this instance of the Vanadium app.
+/// This is derived from the auth key, so it is stable across app restarts but changes if the app is reinstalled or upgraded.
+pub fn get_vanadium_app_id() -> [u8; 32] {
+    let tag = b"VND_APP_ID";
+    let auth_key = VMAuthKey::get();
+    auth_key.tagged_hash(tag, b"")
+}
