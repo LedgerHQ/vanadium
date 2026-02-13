@@ -23,7 +23,7 @@ use bitcoin::{
     hashes::Hash,
     key::{Keypair, TapTweak},
     sighash::SighashCache,
-    Address, Amount, ScriptBuf, TapLeafHash, TapNodeHash, TapSighashType, Transaction, TxOut,
+    Address, ScriptBuf, TapLeafHash, TapNodeHash, TapSighashType, Transaction, TxOut,
 };
 use common::fastpsbt;
 use sdk::{
@@ -136,29 +136,6 @@ fn sign_input_ecdsa(
         pubkey: pubkey_compressed,
         leaf_hash: None,
     })
-}
-
-/// Parse all witness UTXOs from the PSBT inputs into a vector of `TxOut`.
-/// This should be called once and the result reused across all schnorr signing calls.
-fn collect_prevouts(psbt: &fastpsbt::Psbt) -> Result<Vec<TxOut>, Error> {
-    psbt.inputs
-        .iter()
-        .map(|input| {
-            let Some(wutxo) = input.witness_utxo else {
-                return Err(Error::MissingInputUtxo);
-            };
-            if wutxo.len() < 8 + 1 || wutxo[8] > 0xfc || wutxo.len() != 8 + 1 + wutxo[8] as usize {
-                return Err(Error::InvalidWitnessUtxo);
-            }
-            let script_len = wutxo[8] as usize;
-            let script_pubkey = ScriptBuf::from_bytes(wutxo[8 + 1..8 + 1 + script_len].to_vec());
-            let value = Amount::from_sat(u64::from_le_bytes(wutxo[0..8].try_into().unwrap()));
-            Ok(TxOut {
-                value,
-                script_pubkey,
-            })
-        })
-        .collect()
 }
 
 fn sign_input_schnorr(
@@ -339,12 +316,11 @@ pub fn handle_sign_psbt(app: &mut sdk::App, psbt: &[u8]) -> Result<Response, Err
             .map_err(|_| Error::InvalidWitnessUtxo)?
         {
             let script = if let Some(redeem_script) = input.redeem_script {
-                if witness_utxo.script_pubkey
-                    != ScriptBuf::from_bytes(redeem_script.to_vec()).to_p2sh()
-                {
+                let redeem_script = ScriptBuf::from_bytes(redeem_script.to_vec());
+                if witness_utxo.script_pubkey != redeem_script.to_p2sh() {
                     return Err(Error::RedeemScriptMismatchWitness);
                 }
-                ScriptBuf::from_bytes(redeem_script.to_vec())
+                redeem_script
             } else {
                 witness_utxo.script_pubkey.clone()
             };
@@ -631,8 +607,19 @@ pub fn handle_sign_psbt(app: &mut sdk::App, psbt: &[u8]) -> Result<Response, Err
                             .transpose()
                             .map_err(|_| Error::InvalidWalletPolicy)?;
 
+                        // Pre-compute prevouts once for all taproot signing calls
                         let prevouts = prevouts.get_or_insert_with(|| {
-                            collect_prevouts(&psbt).expect("Failed to collect prevouts")
+                            psbt.inputs
+                                .iter()
+                                .map(|input| {
+                                    input
+                                        .get_witness_utxo()
+                                        .ok()
+                                        .flatten()
+                                        .cloned()
+                                        .expect("Missing witness UTXO")
+                                })
+                                .collect()
                         });
                         let partial_signature = sign_input_schnorr(
                             input_index,
