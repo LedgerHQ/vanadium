@@ -11,6 +11,7 @@ use anyhow::{Context, Result};
 use cargo_generate::{GenerateArgs, TemplatePath};
 use clap::{Parser, Subcommand};
 use client_sdk::elf::{VAppElfFile, get_vapp_metadata};
+use client_sdk::hash::Sha256;
 use client_sdk::memory::MemorySegment;
 use common::constants;
 use common::manifest::Manifest;
@@ -318,6 +319,21 @@ fn create_vapp_package(
     }
 
     println!("Saved packaged V-App in {}", output.display());
+
+    let app_hash = manifest.get_vapp_hash::<Sha256, 32>();
+    let app_hash_hex: String = app_hash.iter().map(|b| format!("{:02x}", b)).collect();
+
+    println!("V-App info:");
+    println!("  app name: {}", manifest.get_app_name());
+    println!("  app version: {}", manifest.get_app_version());
+    println!("  app hash: {}", app_hash_hex);
+    println!(
+        "  pages (code/data/stack): {}/{}/{}",
+        manifest.n_code_pages(),
+        manifest.n_data_pages(),
+        manifest.n_stack_pages()
+    );
+    println!("  storage slots: {}", manifest.n_storage_slots);
 
     Ok(())
 }
