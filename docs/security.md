@@ -41,6 +41,31 @@ When launching a V-App, the Vanadium VM verifies that the V-App hash matches one
 
 Note: The V-App registry is cleared if the Vanadium app is deleted or reinstalled.
 
+## HMAC-based proofs for the V-App code
+
+Merkle proofs are not for free, and increase the communication cost between the Vanadium VM and the host, which negatively affects performance. In fact, for binaries larger than 64kb, the size of the Merkle proofs is larger than the size of pages themselves.
+
+Since the code section is immutable, an alternative approach can be used for code. The core idea is that the Vanadium app can use an HMAC to re-authenticate a page hash that it has previously validated. Therefore, by just sending once all the code page hashes, the Vanadium app can verify that those hashes are correct, and send an hmac for each page that the host can store persistently. Later, whenever the Vanadium VM asks the host to provide a page and its proof, the host can respond with the stored HMAC, instead of the Merkle proof.
+
+The Vanadium app securely generates a random 32-byte secret key `auth_key` the first time it is executed.
+
+For a V-App with Manifest hash `vapp_hash`, the `app_auth_key` is computed as `SHA256(SHA256("VND_APP_AUTH_KEY") ‖ auth_key ‖ vapp_hash)`.
+
+In the following, the page index `i` is a 32-bit number, and `be32(i)` is the 4-byte big-endian encoding.
+
+Here are the details of the protocol to produce the valid HMACs for the host to store on the client side:
+- The Vanadium app generates a random 32-byte secret `ephemeral_sk`.
+- For each page index `i` in increasing order:
+  - the host sends the leaf hash `page_hash_i` of page `i`.
+  - the Vanadium app:
+    - computes the encryption key for the `i`-th page: `page_sk_i = SHA256("VND_HMAC_MASK" ‖ ephemeral_sk ‖ be32(i))`.
+    - computes the `hmac_i = HMAC-SHA256(key = app_auth_key, msg = "VND_PAGE_TAG" ‖ vapp_hash ‖ be32(i) ‖ page_hash_i)`.
+    - sends to the host `encrypted_hmac_i = hmac_i ⊕ page_sk_i`.
+- Once all the page hashes are sent, the Vanadium app validates whether the Merkle root for the code section computed from the provided page hashes matches the one in the Manifest. 
+- If the Merkle root computed from the page hashes provided by the client matches the one in the V-App Manifest, the Vanadium app sends `ephemeral_sk` to the host. Otherwise, the VM aborts.
+
+Once the protocol completes successfully, the host can independently recompute `page_sk_i` and therefore `hmac_i` for each `i`.
+
 # Persistent storage
 
 For apps that store any data in persistent storage, Vanadium guarantees isolation between V-Apps, preventing one app to access the store of other apps.
