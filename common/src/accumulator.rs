@@ -433,6 +433,12 @@ impl<H: ResettableHasher<OUTPUT_SIZE>, const OUTPUT_SIZE: usize> UpdateProofVeri
 }
 
 /// A Merkle tree-based implementation of the `VectorAccumulator` trait.
+/// The accumulator maintains a vector of data elements and a corresponding Merkle tree, allowing for efficient proofs
+/// of inclusion and updates.
+///
+/// The size of the MerkleAccumulator must be a power of two, and the constructor (implemented in the `new` function of
+/// the `VectorAccumulator` trait) will panic if this condition is not met. Therefore, the resulting Merkle tree is
+/// complete and perfectly balanced.
 pub struct MerkleAccumulator<
     H: Hasher<OUTPUT_SIZE>,
     T: AsRef<[u8]> + Clone + Serialize + DeserializeOwned,
@@ -506,6 +512,11 @@ impl<
     ///
     /// * `data` - A vector of elements to be included in the Merkle tree.
     fn new(data: Vec<T>) -> Self {
+        assert!(
+            Self::has_valid_leaf_count(data.len()),
+            "MerkleAccumulator requires a non-zero power-of-two number of leaves, got {}",
+            data.len()
+        );
         let mut ma = MerkleAccumulator {
             data,
             tree: Vec::new(),
@@ -604,9 +615,15 @@ impl<
         const OUTPUT_SIZE: usize,
     > MerkleAccumulator<H, T, OUTPUT_SIZE>
 {
+    #[inline]
+    fn has_valid_leaf_count(size: usize) -> bool {
+        size > 0 && size.is_power_of_two()
+    }
+
     /// Constructs the Merkle tree from the provided data.
     fn build_tree(&mut self) {
         let n = self.data.len();
+        debug_assert!(Self::has_valid_leaf_count(n));
         let leaves = self
             .data
             .iter()
@@ -694,20 +711,27 @@ mod tests {
 
     #[test]
     fn test_out_of_bounds_proof_generation() {
-        let data = generate_test_data(3);
+        let data = generate_test_data(4);
         let ma = MerkleAccumulator::<Sha256Hasher, Vec<u8>, 32>::new(data.clone());
 
         // Trying to prove an element at an out-of-bounds index should return an error
-        assert!(ma.prove(3).is_err());
+        assert!(ma.prove(4).is_err());
     }
 
     #[test]
     fn test_out_of_bounds_update() {
-        let data = generate_test_data(3);
+        let data = generate_test_data(4);
         let mut ma = MerkleAccumulator::<Sha256Hasher, Vec<u8>, 32>::new(data.clone());
 
         // Trying to update an element at an out-of-bounds index should return an error
-        assert!(ma.update(3, b"new_data".to_vec()).is_err());
+        assert!(ma.update(4, b"new_data".to_vec()).is_err());
+    }
+
+    #[test]
+    #[should_panic(expected = "power-of-two number of leaves")]
+    fn test_new_requires_power_of_two_size() {
+        let data = generate_test_data(3);
+        let _ = MerkleAccumulator::<Sha256Hasher, Vec<u8>, 32>::new(data);
     }
 
     #[test]

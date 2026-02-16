@@ -103,6 +103,16 @@ impl MemorySegment {
             pages.push(serialized_page);
         }
 
+        // ensure that the number of pages is a power of two, which is required for the MerkleAccumulator
+        // we pad with empty pages, which are valid pages with all-zero content.
+        let target_len = pages
+            .len()
+            .checked_next_power_of_two()
+            .expect("Too many pages");
+        while pages.len() < target_len {
+            pages.push(get_serialized_page(&[0; PAGE_SIZE], None));
+        }
+
         Self {
             content: MerkleAccumulator::<Sha256, Vec<u8>, 32>::new(pages),
         }
