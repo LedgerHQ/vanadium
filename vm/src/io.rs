@@ -1,5 +1,6 @@
 use core::fmt;
 
+use common::client_commands::Message;
 use ledger_device_sdk::io;
 
 use crate::{AppSW, Instruction};
@@ -53,4 +54,16 @@ pub fn interrupt<'a, const N: usize>(
     }
 
     Ok(command)
+}
+
+pub trait SerializeToComm<const N: usize> {
+    fn serialize_to_comm(&self, response: &mut ledger_device_sdk::io::CommandResponse<'_, N>);
+}
+
+impl<'a, T: Message<'a>, const N: usize> SerializeToComm<N> for T {
+    fn serialize_to_comm(&self, response: &mut ledger_device_sdk::io::CommandResponse<'_, N>) {
+        self.serialize_with(|data| {
+            response.append(data).unwrap();
+        });
+    }
 }

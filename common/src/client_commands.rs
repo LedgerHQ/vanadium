@@ -62,6 +62,7 @@ pub enum ClientCommandCode {
     SendBuffer = 4,
     SendBufferContinued = 5,
     ReceiveBuffer = 6,
+    GetCodePageHashes = 7,
 }
 
 impl TryFrom<u8> for ClientCommandCode {
@@ -76,6 +77,7 @@ impl TryFrom<u8> for ClientCommandCode {
             4 => Ok(ClientCommandCode::SendBuffer),
             5 => Ok(ClientCommandCode::SendBufferContinued),
             6 => Ok(ClientCommandCode::ReceiveBuffer),
+            7 => Ok(ClientCommandCode::GetCodePageHashes),
             _ => Err("Invalid value for ClientCommandCode"),
         }
     }
@@ -753,6 +755,120 @@ impl<'a> Message<'a> for ReceiveBufferResponse<'a> {
         Ok(ReceiveBufferResponse {
             remaining_length,
             content: &data[4..],
+        })
+    }
+}
+
+/// Message sent by the Vanadium App to request the rest of the proof, if it didn't fit
+/// in GetPageResponse
+#[derive(Debug, Clone)]
+pub struct GetCodePageHashes<'a> {
+    pub command_code: ClientCommandCode,
+    pub n_prev_batch_pages: u32, // number of code pages for which the host already sent the hashes in the previous batch
+    pub prev_batch_enc_hmacs: &'a [[u8; 32]],
+}
+
+impl<'a> GetCodePageHashes<'a> {
+    #[inline]
+    pub fn new(n_prev_batch_pages: u32, prev_batch_enc_hmacs: &'a [[u8; 32]]) -> Self {
+        GetCodePageHashes {
+            command_code: ClientCommandCode::GetCodePageHashes,
+            n_prev_batch_pages,
+            prev_batch_enc_hmacs,
+        }
+    }
+
+    pub const fn max_hashes() -> usize {
+        (MAX_APDU_DATA_SIZE - 4 - 1) / 32
+    }
+}
+
+impl<'a> Message<'a> for GetCodePageHashes<'a> {
+    #[inline]
+    fn serialize_with<F: FnMut(&[u8])>(&self, mut f: F) {
+        f(&[self.command_code as u8]);
+        f(&self.n_prev_batch_pages.to_be_bytes());
+        for h in self.prev_batch_enc_hmacs {
+            f(h);
+        }
+    }
+
+    fn deserialize(data: &[u8]) -> Result<Self, MessageDeserializationError> {
+        if data.len() < 1 + 4 {
+            return Err(MessageDeserializationError::InvalidDataLength);
+        }
+        let command_code = ClientCommandCode::try_from(data[0])
+            .map_err(|_| MessageDeserializationError::InvalidClientCommandCode)?;
+        if !matches!(command_code, ClientCommandCode::GetCodePageHashes) {
+            return Err(MessageDeserializationError::MismatchingClientCommandCode);
+        }
+        let n_prev_batch_pages = u32::from_be_bytes([data[1], data[2], data[3], data[4]]);
+        let hmacs_len = data.len() - 5;
+        if hmacs_len % 32 != 0 {
+            return Err(MessageDeserializationError::InvalidDataLength);
+        }
+        let slice_len = hmacs_len / 32;
+        let prev_batch_enc_hmacs = unsafe {
+            let ptr = data.as_ptr().add(5) as *const [u8; 32];
+            core::slice::from_raw_parts(ptr, slice_len)
+        };
+
+        Ok(GetCodePageHashes {
+            command_code,
+            n_prev_batch_pages,
+            prev_batch_enc_hmacs,
+        })
+    }
+}
+
+/// The host's response to a GetCodePageHashes message.
+#[derive(Debug, Clone)]
+pub struct GetCodePageHashesResponse<'a> {
+    pub n_code_pages: u32,
+    pub code_page_hashes: &'a [[u8; 32]],
+}
+
+impl<'a> GetCodePageHashesResponse<'a> {
+    #[inline]
+    pub fn new(n_code_pages: u32, code_page_hashes: &'a [[u8; 32]]) -> Self {
+        GetCodePageHashesResponse {
+            n_code_pages,
+            code_page_hashes,
+        }
+    }
+
+    pub const fn max_hashes() -> usize {
+        GetCodePageHashes::max_hashes()
+    }
+}
+
+impl<'a> Message<'a> for GetCodePageHashesResponse<'a> {
+    #[inline]
+    fn serialize_with<F: FnMut(&[u8])>(&self, mut f: F) {
+        f(&self.n_code_pages.to_be_bytes());
+        for h in self.code_page_hashes {
+            f(h);
+        }
+    }
+
+    fn deserialize(data: &'a [u8]) -> Result<Self, MessageDeserializationError> {
+        if data.len() < 4 {
+            return Err(MessageDeserializationError::InvalidDataLength);
+        }
+        let n_code_pages = u32::from_be_bytes([data[0], data[1], data[2], data[3]]);
+        let hashes_len = data.len() - 4;
+        if hashes_len % 32 != 0 {
+            return Err(MessageDeserializationError::InvalidDataLength);
+        }
+        let slice_len = hashes_len / 32;
+        let code_page_hashes = unsafe {
+            let ptr = data.as_ptr().add(4) as *const [u8; 32];
+            core::slice::from_raw_parts(ptr, slice_len)
+        };
+
+        Ok(GetCodePageHashesResponse {
+            n_code_pages,
+            code_page_hashes,
         })
     }
 }

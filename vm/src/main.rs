@@ -35,8 +35,8 @@ use app_ui::menu::show_home;
 #[cfg(feature = "metrics")]
 use handlers::get_metrics::handler_get_metrics;
 use handlers::{
-    get_app_info::handler_get_app_info, register_vapp::handler_register_vapp,
-    start_vapp::handler_start_vapp,
+    get_app_info::handler_get_app_info, preload_vapp::handler_preload_vapp,
+    register_vapp::handler_register_vapp, start_vapp::handler_start_vapp,
 };
 use ledger_device_sdk::{
     io::{ApduHeader, Comm, Command, Reply, StatusWords},
@@ -175,6 +175,7 @@ pub enum Instruction {
     StartVApp,
     #[cfg(feature = "metrics")]
     GetMetrics,
+    PreloadVApp,
     Continue(u8, u8), // client response to a request from the VM
 }
 
@@ -197,12 +198,13 @@ impl TryFrom<ApduHeader> for Instruction {
             (0, 0, 0) => Ok(Instruction::GetAppInfo),
             (2, 0, 0) => Ok(Instruction::RegisterVApp),
             (3, 0, 0) => Ok(Instruction::StartVApp),
+            (4, 0, 0) => Ok(Instruction::PreloadVApp),
             #[cfg(feature = "metrics")]
             (0xf0, 0, 0) => Ok(Instruction::GetMetrics),
             #[cfg(feature = "metrics")]
-            (0 | 2 | 3 | 0xf0, _, _) => Err(AppSW::WrongP1P2.into()),
+            (0 | 2 | 3 | 4 | 0xf0, _, _) => Err(AppSW::WrongP1P2.into()),
             #[cfg(not(feature = "metrics"))]
-            (0 | 2 | 3, _, _) => Err(AppSW::WrongP1P2.into()),
+            (0 | 2 | 3 | 4, _, _) => Err(AppSW::WrongP1P2.into()),
             (0xff, p1, p2) => Ok(Instruction::Continue(p1, p2)),
             (_, _, _) => Err(AppSW::InsNotSupported.into()),
         }
@@ -252,6 +254,7 @@ fn handle_apdu(command: Command<COMM_BUFFER_SIZE>) -> Result<Vec<u8>, AppSW> {
         Instruction::GetAppInfo => handler_get_app_info(command),
         Instruction::RegisterVApp => handler_register_vapp(command),
         Instruction::StartVApp => handler_start_vapp(command),
+        Instruction::PreloadVApp => handler_preload_vapp(command),
         #[cfg(feature = "metrics")]
         Instruction::GetMetrics => handler_get_metrics(command),
         Instruction::Continue(_, _) => Err(AppSW::InsNotSupported), // 'Continue' command is only allowed when requested by the VM

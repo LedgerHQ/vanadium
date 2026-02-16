@@ -18,9 +18,8 @@ use common::constants::PAGE_SIZE;
 use crate::aes::AesCtr;
 use crate::hash::Sha256Hasher;
 
-use super::SerializeToComm;
 use crate::handlers::lib::evict::PageEvictionStrategy;
-use crate::io::interrupt;
+use crate::io::{interrupt, SerializeToComm};
 
 #[derive(Clone, Debug)]
 struct CachedPage {
@@ -128,6 +127,14 @@ impl<'c, const N: usize> OutsourcedMemory<'c, N> {
         core::mem::size_of::<CachedPage>()
     }
 
+    #[inline]
+    /// Computes the number of pages to use for a given number of pages, after taking padding into account.
+    pub fn n_pages_adjusted(n_pages: usize) -> usize {
+        n_pages
+            .checked_next_power_of_two()
+            .expect("Number of pages exceeds the maximum allowed")
+    }
+
     fn commit_page_at(&mut self, index: usize) -> Result<(), common::vm::MemoryError> {
         #[cfg(feature = "trace_pages")]
         crate::trace!(
@@ -203,9 +210,7 @@ impl<'c, const N: usize> OutsourcedMemory<'c, N> {
             page_hash_old,
             &new_page_hash,
             cached_page.idx as usize,
-            (self.n_pages as usize)
-                .checked_next_power_of_two()
-                .expect("Too many pages"),
+            Self::n_pages_adjusted(self.n_pages as usize),
         );
 
         for el in proof_response.proof.iter() {

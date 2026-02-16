@@ -20,9 +20,9 @@ use ledger_device_sdk::sys::{
 };
 use ledger_device_sdk::{hash::HashInit, io::DecodedEventType};
 
-use crate::io::{interrupt, InterruptError};
+use crate::io::{interrupt, InterruptError, SerializeToComm};
 
-use super::{outsourced_mem::OutsourcedMemory, SerializeToComm};
+use super::outsourced_mem::OutsourcedMemory;
 
 use zeroize::Zeroizing;
 
