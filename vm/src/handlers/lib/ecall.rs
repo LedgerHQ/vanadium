@@ -20,7 +20,7 @@ use ledger_device_sdk::sys::{
 };
 use ledger_device_sdk::{hash::HashInit, io::DecodedEventType};
 
-use crate::io::interrupt;
+use crate::io::{interrupt, InterruptError};
 
 use super::{outsourced_mem::OutsourcedMemory, SerializeToComm};
 
@@ -285,6 +285,7 @@ pub enum CommEcallError {
     InvalidResponse(&'static str),
     CpuError(String),
     MemoryError(MemoryError),
+    InterruptError(InterruptError),
     UnhandledEcall,
 }
 
@@ -307,6 +308,7 @@ impl core::fmt::Display for CommEcallError {
             }
             CommEcallError::CpuError(e) => write!(f, "Cpu error: {:?}", e),
             CommEcallError::MemoryError(e) => write!(f, "Memory error: {:?}", e),
+            CommEcallError::InterruptError(e) => write!(f, "Interrupt error: {}", e),
             CommEcallError::UnhandledEcall => write!(f, "Unhandled ecall"),
         }
     }
@@ -333,6 +335,12 @@ impl From<LedgerHashContextError> for CommEcallError {
 impl From<MemoryError> for CommEcallError {
     fn from(error: MemoryError) -> Self {
         CommEcallError::MemoryError(error)
+    }
+}
+
+impl From<InterruptError> for CommEcallError {
+    fn from(error: InterruptError) -> Self {
+        CommEcallError::InterruptError(error)
     }
 }
 

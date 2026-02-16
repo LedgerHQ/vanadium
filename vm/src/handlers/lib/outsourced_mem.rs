@@ -173,7 +173,8 @@ impl<'c, const N: usize> OutsourcedMemory<'c, N> {
         )
         .serialize_to_comm(&mut resp);
 
-        let command = interrupt(resp)?;
+        let command =
+            interrupt(resp).map_err(|e| common::vm::MemoryError::GenericError(e.as_str()))?;
 
         // Decode the proof
         let proof_data = command.get_data();
@@ -217,7 +218,8 @@ impl<'c, const N: usize> OutsourcedMemory<'c, N> {
             let mut resp = comm.begin_response();
             CommitPageProofContinuedMessage::new().serialize_to_comm(&mut resp);
 
-            let command = interrupt(resp)?;
+            let command =
+                interrupt(resp).map_err(|e| common::vm::MemoryError::GenericError(e.as_str()))?;
 
             let continued_response = CommitPageProofContinuedResponse::deserialize(
                 &command.get_data(),
@@ -269,7 +271,8 @@ impl<'c, const N: usize> OutsourcedMemory<'c, N> {
         let mut resp = comm.begin_response();
         GetPageMessage::new(self.section_kind, page_index).serialize_to_comm(&mut resp);
 
-        let command = interrupt(resp)?;
+        let command =
+            interrupt(resp).map_err(|e| common::vm::MemoryError::GenericError(e.as_str()))?;
 
         let page_response = GetPageResponse::deserialize(command.get_data())
             .map_err(|_| common::vm::MemoryError::GenericError("Invalid page data"))?;
@@ -316,7 +319,8 @@ impl<'c, const N: usize> OutsourcedMemory<'c, N> {
             let mut resp = comm.begin_response();
             GetPageProofContinuedMessage::new().serialize_to_comm(&mut resp);
 
-            let command = interrupt(resp)?;
+            let command =
+                interrupt(resp).map_err(|e| common::vm::MemoryError::GenericError(e.as_str()))?;
 
             let continued_response =
                 GetPageProofContinuedResponse::deserialize(&command.get_data()).map_err(|_| {
