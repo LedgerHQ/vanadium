@@ -660,6 +660,88 @@ impl<
     }
 }
 
+/// Computes the Merkle root hash from a stream of leaf hashes, without needing to store the entire tree in memory.
+///
+/// Leaf hashes are fed in order from left to right. Once all leaves have been
+/// provided, the computed root can be retrieved.
+///
+/// The memory occupation is guaranteed to be O(log n) in the number of leaves during the entire lifetime of the object.
+pub struct MerkleAccumulatorRootComputer<const OUTPUT_SIZE: usize, H: ResettableHasher<OUTPUT_SIZE>>
+{
+    n: usize,                             // number of leaves
+    cur_size: usize,                      // number of leaves already added
+    hashes: Vec<HashOutput<OUTPUT_SIZE>>, // stack of intermediate hashes
+    _marker: PhantomData<H>,
+}
+
+impl<const OUTPUT_SIZE: usize, H: ResettableHasher<OUTPUT_SIZE>>
+    MerkleAccumulatorRootComputer<OUTPUT_SIZE, H>
+{
+    /// Creates a new `MerkleAccumulatorRootComputer` instance.
+    pub fn new(n: usize) -> Self {
+        assert!(
+            n > 0 && n.is_power_of_two(),
+            "MerkleAccumulatorRootComputer requires a non-zero power-of-two number of leaves, got {}",
+            n
+        );
+        MerkleAccumulatorRootComputer::<OUTPUT_SIZE, H> {
+            n,
+            cur_size: 0,
+            hashes: Vec::with_capacity(n.trailing_zeros() as usize),
+            _marker: PhantomData,
+        }
+    }
+
+    /// Feeds a leaf hash into the accumulator. The leaf hashes must be fed in order from left to right.
+    ///
+    /// This is guaranteed to run in O(log n) time for a single update, while it is guaranteed that the
+    /// total number of hashes performed after feeding all leaves is less than 2n.
+    ///
+    /// # Panics
+    ///
+    /// Panics if more leaf hashes are fed than the specified number of leaves.
+    pub fn feed(&mut self, leaf_hash: &HashOutput<OUTPUT_SIZE>) {
+        if self.cur_size >= self.n {
+            panic!(
+                "Cannot feed more leaf hashes than the specified number of leaves: {}/{}",
+                self.cur_size, self.n
+            );
+        }
+
+        self.hashes.push(leaf_hash.clone());
+        self.cur_size += 1;
+
+        // Combine the last d hashes, where d is the number of trailing zeros in the binary representation of cur_size
+        let d = self.cur_size.trailing_zeros() as usize;
+        debug_assert!(
+            d <= self.hashes.len(),
+            "Invariant violation: number of trailing zeros cannot exceed the number of hashes in the stack"
+        );
+        for _ in 0..d {
+            let right = self.hashes.pop().unwrap();
+            let left = self.hashes.pop().unwrap();
+            let combined =
+                MerkleAccumulator::<H, Vec<u8>, OUTPUT_SIZE>::hash_internal_node(&left, &right);
+            self.hashes.push(combined);
+        }
+    }
+
+    /// Returns the computed Merkle root hash after all leaf hashes have been fed.
+    ///
+    /// # Panics
+    ///
+    /// Panics if called before all leaf hashes have been fed.
+    pub fn root(&self) -> HashOutput<OUTPUT_SIZE> {
+        if self.cur_size != self.n {
+            panic!(
+                "Cannot retrieve root before all leaf hashes have been fed: {}/{}",
+                self.cur_size, self.n
+            );
+        }
+        self.hashes[0].clone()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -930,5 +1012,69 @@ mod tests {
                 1
             )
         );
+    }
+
+    #[test]
+    fn test_root_computer_matches_merkle_root() {
+        let data = generate_test_data(8);
+        let ma = MerkleAccumulator::<Sha256Hasher, Vec<u8>, 32>::new(data.clone());
+        let expected_root = ma.root().clone();
+
+        let mut root_computer = MerkleAccumulatorRootComputer::<32, Sha256Hasher>::new(data.len());
+        for element in data.iter() {
+            let leaf_hash = MerkleAccumulator::<Sha256Hasher, Vec<u8>, 32>::hash_leaf(element);
+            root_computer.feed(&leaf_hash);
+        }
+
+        let computed_root = root_computer.root();
+        assert_eq!(expected_root, computed_root);
+    }
+
+    #[test]
+    fn test_root_computer_single_leaf() {
+        let data = generate_test_data(1);
+        let leaf_hash = MerkleAccumulator::<Sha256Hasher, Vec<u8>, 32>::hash_leaf(&data[0]);
+
+        let mut root_computer = MerkleAccumulatorRootComputer::<32, Sha256Hasher>::new(1);
+        root_computer.feed(&leaf_hash);
+        let computed_root = root_computer.root();
+
+        assert_eq!(leaf_hash, computed_root);
+    }
+
+    #[test]
+    #[should_panic(expected = "power-of-two number of leaves")]
+    fn test_root_computer_requires_power_of_two() {
+        let _ = MerkleAccumulatorRootComputer::<32, Sha256Hasher>::new(3);
+    }
+
+    #[test]
+    #[should_panic(expected = "non-zero power-of-two number of leaves")]
+    fn test_root_computer_requires_non_zero() {
+        let _ = MerkleAccumulatorRootComputer::<32, Sha256Hasher>::new(0);
+    }
+
+    #[test]
+    #[should_panic(expected = "Cannot retrieve root before all leaf hashes have been fed")]
+    fn test_root_computer_root_before_complete() {
+        let data = generate_test_data(4);
+        let mut root_computer = MerkleAccumulatorRootComputer::<32, Sha256Hasher>::new(data.len());
+        let leaf_hash = MerkleAccumulator::<Sha256Hasher, Vec<u8>, 32>::hash_leaf(&data[0]);
+        root_computer.feed(&leaf_hash);
+
+        let _ = root_computer.root();
+    }
+
+    #[test]
+    #[should_panic(expected = "Cannot feed more leaf hashes than the specified number of leaves")]
+    fn test_root_computer_overfeed() {
+        let data = generate_test_data(2);
+        let mut root_computer = MerkleAccumulatorRootComputer::<32, Sha256Hasher>::new(data.len());
+        let leaf_hash_0 = MerkleAccumulator::<Sha256Hasher, Vec<u8>, 32>::hash_leaf(&data[0]);
+        let leaf_hash_1 = MerkleAccumulator::<Sha256Hasher, Vec<u8>, 32>::hash_leaf(&data[1]);
+
+        root_computer.feed(&leaf_hash_0);
+        root_computer.feed(&leaf_hash_1);
+        root_computer.feed(&leaf_hash_0);
     }
 }
