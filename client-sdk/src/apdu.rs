@@ -115,6 +115,16 @@ pub fn apdu_register_vapp(serialized_manifest: Vec<u8>) -> APDUCommand {
     }
 }
 
+pub fn apdu_preload_vapp(serialized_manifest: Vec<u8>) -> APDUCommand {
+    APDUCommand {
+        cla: 0xE0,
+        ins: 4,
+        p1: 0,
+        p2: 0,
+        data: serialized_manifest,
+    }
+}
+
 pub fn apdu_run_vapp(serialized_manifest: Vec<u8>) -> APDUCommand {
     APDUCommand {
         cla: 0xE0,

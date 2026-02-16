@@ -861,6 +861,11 @@ impl<'a> Message<'a> for GetCodePageHashesResponse<'a> {
             return Err(MessageDeserializationError::InvalidDataLength);
         }
         let slice_len = hashes_len / 32;
+
+        if slice_len != n_code_pages as usize {
+            return Err(MessageDeserializationError::InvalidDataLength);
+        }
+
         let code_page_hashes = unsafe {
             let ptr = data.as_ptr().add(4) as *const [u8; 32];
             core::slice::from_raw_parts(ptr, slice_len)
