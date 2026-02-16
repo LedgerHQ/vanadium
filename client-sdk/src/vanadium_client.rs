@@ -14,10 +14,11 @@ use tokio::{
 
 use common::client_commands::{
     BufferType, ClientCommandCode, CommitPageMessage, CommitPageProofContinuedMessage,
-    CommitPageProofContinuedResponse, CommitPageProofResponse, GetPageMessage,
-    GetPageProofContinuedMessage, GetPageProofContinuedResponse, GetPageResponse, Message,
-    MessageDeserializationError, ReceiveBufferMessage, ReceiveBufferResponse, SectionKind,
-    SendBufferContinuedMessage, SendBufferMessage,
+    CommitPageProofContinuedResponse, CommitPageProofResponse, GetCodePageHashes,
+    GetCodePageHashesResponse, GetPageMessage, GetPageProofContinuedMessage,
+    GetPageProofContinuedResponse, GetPageResponse, Message, MessageDeserializationError,
+    ReceiveBufferMessage, ReceiveBufferResponse, SectionKind, SendBufferContinuedMessage,
+    SendBufferMessage,
 };
 use common::constants::{DEFAULT_STACK_START, PAGE_SIZE};
 use common::manifest::Manifest;
@@ -25,7 +26,8 @@ use common::manifest::Manifest;
 #[cfg(feature = "metrics")]
 use crate::apdu::apdu_get_metrics;
 use crate::apdu::{
-    apdu_continue, apdu_get_app_info, apdu_register_vapp, apdu_run_vapp, APDUCommand, StatusWord,
+    apdu_continue, apdu_get_app_info, apdu_preload_vapp, apdu_register_vapp, apdu_run_vapp,
+    APDUCommand, StatusWord,
 };
 use crate::memory::{MemorySegment, MemorySegmentError};
 use crate::transport::Transport;
@@ -839,6 +841,133 @@ impl<E: std::fmt::Debug + Send + Sync + 'static> GenericVanadiumClient<E> {
             StatusWord::Deny => Err("User denied registration"),
             _ => Err("Failed to register vapp"),
         }
+    }
+
+    pub async fn preload_vapp(
+        &self,
+        manifest: &Manifest,
+        elf: &VAppElfFile,
+    ) -> Result<Vec<[u8; 32]>, &'static str> {
+        let serialized_manifest =
+            postcard::to_allocvec(manifest).map_err(|_| "manifest serialization failed")?;
+
+        // Create code segment to compute page leaf hashes
+        let code_seg = MemorySegment::new(elf.code_segment.start, &elf.code_segment.data);
+
+        let n_code_pages = manifest.n_code_pages() as usize;
+        let n_code_pages_rounded = n_code_pages
+            .checked_next_power_of_two()
+            .ok_or("too many code pages")?;
+
+        // Compute leaf hashes for all code pages: leaf_hash = SHA256(0x00 || serialized_page)
+        let mut leaf_hashes: Vec<[u8; 32]> = Vec::with_capacity(n_code_pages_rounded);
+        for i in 0..n_code_pages_rounded {
+            let (serialized_page, _proof) = code_seg
+                .get_page(i as u32)
+                .map_err(|_| "failed to get code page")?;
+            use crate::hash::{Hasher, Sha256};
+            let mut hasher = Sha256::new();
+            hasher.update(&[0x00]);
+            hasher.update(&serialized_page);
+            leaf_hashes.push(hasher.finalize());
+        }
+
+        // Send preload APDU with the serialized manifest
+        let (status, result) = self
+            .transport
+            .exchange(&apdu_preload_vapp(serialized_manifest))
+            .await
+            .map_err(|_| "exchange failed")?;
+
+        if status != StatusWord::InterruptedExecution {
+            return Err("expected InterruptedExecution from preload APDU");
+        }
+
+        // Parse the first GetCodePageHashes request from the VM (no encrypted HMACs yet)
+        let _msg = GetCodePageHashes::deserialize(&result)
+            .map_err(|_| "failed to parse initial GetCodePageHashes")?;
+
+        let mut all_encrypted_hmacs: Vec<[u8; 32]> = Vec::with_capacity(n_code_pages_rounded);
+        let mut offset = 0usize;
+
+        let ephemeral_sk = loop {
+            // Compute the batch size
+            let batch_size = min(
+                GetCodePageHashesResponse::max_hashes(),
+                n_code_pages_rounded - offset,
+            );
+
+            // Send batch of page hashes
+            let response = GetCodePageHashesResponse::new(
+                batch_size as u32,
+                &leaf_hashes[offset..offset + batch_size],
+            )
+            .serialize();
+
+            let (status, result) = self
+                .transport
+                .exchange(&apdu_continue(response))
+                .await
+                .map_err(|_| "exchange failed")?;
+
+            offset += batch_size;
+
+            if status == StatusWord::OK {
+                if result.len() != 32 {
+                    return Err("expected a 32-byte decryption key in response");
+                }
+                let mut ephemeral_sk = [0u8; 32];
+                ephemeral_sk.copy_from_slice(&result[0..32]);
+                break ephemeral_sk;
+            }
+
+            if status != StatusWord::InterruptedExecution {
+                return Err("unexpected status word during preload");
+            }
+
+            if result.is_empty() {
+                return Err("empty response from VM");
+            }
+
+            let command_code =
+                ClientCommandCode::try_from(result[0]).map_err(|_| "invalid command code")?;
+
+            match command_code {
+                ClientCommandCode::GetCodePageHashes => {
+                    // VM requests more page hashes and provides encrypted HMACs for the previous batch
+                    let msg = GetCodePageHashes::deserialize(&result)
+                        .map_err(|_| "failed to parse GetCodePageHashes")?;
+                    for hmac in msg.prev_batch_enc_hmacs {
+                        all_encrypted_hmacs.push(*hmac);
+                    }
+                }
+                _ => return Err("unexpected command code during preload"),
+            }
+        };
+
+        if all_encrypted_hmacs.len() != n_code_pages_rounded {
+            return Err("number of encrypted HMACs does not match number of code pages");
+        }
+
+        // Decrypt all encrypted HMACs: hmac_i = encrypted_hmac_i XOR page_sk_i
+        // where page_sk_i = SHA256("VND_HMAC_MASK" || ephemeral_sk || be32(i))
+        use crate::hash::{Hasher, Sha256};
+        let mut decrypted_hmacs: Vec<[u8; 32]> = Vec::with_capacity(all_encrypted_hmacs.len());
+        for (i, encrypted_hmac) in all_encrypted_hmacs.iter().enumerate() {
+            let mut hasher = Sha256::new();
+            hasher.update(b"VND_HMAC_MASK");
+            hasher.update(&ephemeral_sk);
+            hasher.update(&(i as u32).to_be_bytes());
+            let page_sk_i = hasher.finalize();
+
+            let mut hmac = [0u8; 32];
+            for j in 0..32 {
+                hmac[j] = encrypted_hmac[j] ^ page_sk_i[j];
+            }
+            decrypted_hmacs.push(hmac);
+        }
+
+        return Ok(decrypted_hmacs);
     }
 
     pub async fn run_vapp(
