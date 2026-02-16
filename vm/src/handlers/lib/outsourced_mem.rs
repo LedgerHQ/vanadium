@@ -202,7 +202,9 @@ impl<'c, const N: usize> OutsourcedMemory<'c, N> {
             page_hash_old,
             &new_page_hash,
             cached_page.idx as usize,
-            self.n_pages as usize,
+            (self.n_pages as usize)
+                .checked_next_power_of_two()
+                .expect("Too many pages"),
         );
 
         for el in proof_response.proof.iter() {
@@ -294,7 +296,9 @@ impl<'c, const N: usize> OutsourcedMemory<'c, N> {
             &self.merkle_root,
             &page_hash,
             page_index as usize,
-            self.n_pages as usize,
+            (self.n_pages as usize)
+                .checked_next_power_of_two()
+                .expect("Too many pages"),
         );
 
         for el in page_response.proof.iter() {
@@ -346,7 +350,9 @@ impl<'c, const N: usize> OutsourcedMemory<'c, N> {
 
             // validate decrypted size matches expected page size
             if decrypted_data.len() != PAGE_SIZE {
-                return Err(common::vm::MemoryError::GenericError("Decrypted page size mismatch"));
+                return Err(common::vm::MemoryError::GenericError(
+                    "Decrypted page size mismatch",
+                ));
             }
 
             // safe conversion since we just validated the length
