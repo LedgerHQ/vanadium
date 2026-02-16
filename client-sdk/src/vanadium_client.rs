@@ -224,7 +224,8 @@ impl<E: std::fmt::Debug + Send + Sync + 'static> VAppEngine<E> {
             }
             ClientCommandCode::SendBufferContinued
             | ClientCommandCode::GetPageProofContinued
-            | ClientCommandCode::CommitPageProofContinued => {
+            | ClientCommandCode::CommitPageProofContinued
+            | ClientCommandCode::GetCodePageHashes => {
                 return Err(VAppEngineError::ResponseError("Unexpected command"));
             }
         };
