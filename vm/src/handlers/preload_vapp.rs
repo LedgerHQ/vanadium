@@ -59,7 +59,7 @@ pub fn handler_preload_vapp(
 
     let mut hasher = Sha256Hasher::new();
 
-    let mut response_data = [[0u8; 32]; GetCodePageHashesResponse::max_hashes()];
+    let mut response_data = Vec::with_capacity(GetCodePageHashesResponse::max_hashes());
 
     // the host will send page hashes in batches; for each batch, we respond with encrypted HMACs
     loop {
@@ -77,7 +77,9 @@ pub fn handler_preload_vapp(
             return Err(AppSW::IncorrectData); // received too many page hashes
         }
 
-        for (i_batch, page_hash_i) in batch.code_page_hashes.into_iter().enumerate() {
+        response_data.clear();
+
+        for page_hash_i in batch.code_page_hashes.into_iter() {
             let i = n_page_hashes_received as u32;
             // Compute page_sk_i = SHA256("VND_HMAC_MASK" ‖ ephemeral_sk ‖ be32(i))
             hasher.reset();
@@ -103,7 +105,7 @@ pub fn handler_preload_vapp(
                 encrypted_hmac_i[j] = hmac[j] ^ page_sk_i[j];
             }
 
-            response_data[i_batch] = encrypted_hmac_i;
+            response_data.push(encrypted_hmac_i);
 
             // Feed the page hash into the Merkle root computer
             root_computer.feed(&HashOutput(*page_hash_i));
@@ -115,7 +117,7 @@ pub fn handler_preload_vapp(
         // Send encrypted HMACs, and request the next batch
         GetCodePageHashes::new(
             n_page_hashes_received as u32,
-            &response_data[0..(n_pages_in_batch as usize)],
+            response_data.as_slice(),
         )
         .serialize_to_comm(&mut resp);
         command = interrupt(resp).map_err(|_| AppSW::IncorrectData)?;
