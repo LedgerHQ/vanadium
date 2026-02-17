@@ -380,7 +380,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     let print_writer = Box::new(FileLineWriter::new("print.log", true, true));
     let mut bitcoin_client = BitcoinClient::new(
-        create_default_client("vnd-bitcoin", client_type, Some(print_writer)).await?,
+        create_default_client("vnd-bitcoin", client_type, Some(print_writer), true).await?,
     );
 
     let mut rl = Editor::<CommandCompleter, rustyline::history::DefaultHistory>::new()?;

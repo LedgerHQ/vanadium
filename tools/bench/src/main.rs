@@ -170,7 +170,7 @@ async fn run_bench_case(
     let print_writer = Box::new(std::io::sink());
 
     vanadium_client
-        .start_vapp(&case.app_path(), Box::new(print_writer))
+        .start_vapp(&case.app_path(), Box::new(print_writer), false)
         .await?;
 
     let mut client = BenchClient::new(vanadium_client);
