@@ -93,6 +93,7 @@ pub fn handler_start_vapp(
             n_code_cache_pages / 4,
             n_code_cache_pages / 2,
         )),
+        &vapp_hash,
     );
     let code_seg = MemorySegment::<OutsourcedMemory<'_, COMM_BUFFER_SIZE>>::new(
         manifest.code_start,
@@ -110,6 +111,7 @@ pub fn handler_start_vapp(
         manifest.data_merkle_root.into(),
         aes_ctr.clone(),
         Box::new(LruEvictionStrategy::new(n_data_cache_pages)),
+        &vapp_hash,
     );
     let data_seg = MemorySegment::<OutsourcedMemory<'_, COMM_BUFFER_SIZE>>::new(
         manifest.data_start,
@@ -127,6 +129,7 @@ pub fn handler_start_vapp(
         manifest.stack_merkle_root.into(),
         aes_ctr.clone(),
         Box::new(LruEvictionStrategy::new(n_stack_cache_pages)),
+        &vapp_hash,
     );
     let stack_seg = MemorySegment::<OutsourcedMemory<'_, COMM_BUFFER_SIZE>>::new(
         manifest.stack_start,
