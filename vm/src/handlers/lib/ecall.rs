@@ -7,13 +7,14 @@ use core::{
 use alloc::{format, rc::Rc, string::String, vec, vec::Vec};
 use common::{
     client_commands::{
-        BufferType, Message, MessageDeserializationError, ReceiveBufferMessage,
-        ReceiveBufferResponse, SendBufferContinuedMessage, SendBufferMessage,
+        Message, MessageDeserializationError, ReceiveBufferMessage, ReceiveBufferResponse,
+        SendBufferContinuedMessage, SendBufferMessage,
     },
     constants::{MAX_STORAGE_SLOTS, STORAGE_SLOT_SIZE},
     ecall_constants::{self, *},
     ux::Deserializable,
     vm::{Cpu, CpuError, EcallHandler, MemoryError},
+    BufferType,
 };
 use ledger_device_sdk::sys::{
     self, cx_ripemd160_t, cx_sha256_t, cx_sha512_t, CX_OK, CX_RIPEMD160, CX_SHA256, CX_SHA512,

@@ -15,12 +15,10 @@ use hmac::{Hmac, Mac};
 use sha2::Sha512;
 
 use common::{
-    client_commands::BufferType,
-    ecall_constants::{CurveKind, MAX_BIGNUMBER_SIZE},
-};
-use common::{
     constants::STORAGE_SLOT_SIZE,
+    ecall_constants::{CurveKind, MAX_BIGNUMBER_SIZE},
     ux::{Deserializable, EventCode, EventData},
+    BufferType,
 };
 
 use bip32::{ChildNumber, XPrv};

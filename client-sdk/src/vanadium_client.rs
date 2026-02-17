@@ -13,7 +13,7 @@ use tokio::{
 };
 
 use common::client_commands::{
-    BufferType, ClientCommandCode, CommitPageMessage, CommitPageProofContinuedMessage,
+    ClientCommandCode, CommitPageMessage, CommitPageProofContinuedMessage,
     CommitPageProofContinuedResponse, CommitPageProofResponse, GetCodePageHashes,
     GetCodePageHashesResponse, GetPageMessage, GetPageProofContinuedMessage,
     GetPageProofContinuedResponse, GetPageResponse, Message, MessageDeserializationError,
@@ -22,6 +22,7 @@ use common::client_commands::{
 };
 use common::constants::{DEFAULT_STACK_START, PAGE_SIZE};
 use common::manifest::Manifest;
+use common::BufferType;
 
 #[cfg(feature = "metrics")]
 use crate::apdu::apdu_get_metrics;

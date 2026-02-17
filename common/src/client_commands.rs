@@ -1,6 +1,8 @@
 // Vanadium VM client commands (responses to InterruptedExecution status word), and other related types
 
 use crate::constants::PAGE_SIZE;
+use crate::BufferType;
+
 use alloc::vec::Vec;
 use core::fmt;
 
@@ -590,27 +592,6 @@ impl<'a> Message<'a> for CommitPageProofContinuedResponse<'a> {
         };
 
         Ok(CommitPageProofContinuedResponse { t, proof })
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[repr(u8)]
-pub enum BufferType {
-    VAppMessage = 0, // data buffer sent from the VApp to the host
-    Panic = 1,       // the VApp panicked
-    Print = 2,       // the VApp printed a message
-}
-
-impl TryFrom<u8> for BufferType {
-    type Error = &'static str;
-
-    fn try_from(value: u8) -> Result<Self, Self::Error> {
-        match value {
-            0 => Ok(BufferType::VAppMessage),
-            1 => Ok(BufferType::Panic),
-            2 => Ok(BufferType::Print),
-            _ => Err("Invalid buffer type"),
-        }
     }
 }
 
