@@ -2,6 +2,7 @@
 /// and is used for anything that needs a permanent bind to the identity of the instance of the app. Therefore, it
 /// doesn't persist if the Vanadium app is reinstalled or upgraded.
 use common::accumulator::Hasher;
+use ledger_device_sdk::hmac::{sha2::Sha2_256 as HmacSha256, HMACInit};
 use ledger_device_sdk::NVMData;
 
 use crate::hash::Sha256Hasher;
@@ -12,6 +13,11 @@ use crate::nvm::LazyStorage;
 static mut VM_AUTH_KEY: NVMData<LazyStorage<[u8; 32]>> = NVMData::new(LazyStorage::new());
 
 pub struct VMAuthKey;
+
+const TAG_APP_ID: &[u8] = b"VND_APP_ID";
+const TAG_APP_AUTH_KEY: &[u8] = b"VND_APP_AUTH_KEY";
+const TAG_PAGE_HMAC: &[u8] = b"VND_PAGE_TAG";
+const TAG_PAGE_HMAC_MASK: &[u8] = b"VND_HMAC_MASK";
 
 impl VMAuthKey {
     /// Gets a mutable reference to the auth key storage.
@@ -81,10 +87,46 @@ impl VMAuthKey {
     }
 }
 
+/// Computes the app auth key bound to a specific V-App.
+#[inline]
+pub fn get_vapp_auth_key(vapp_hash: &[u8; 32]) -> [u8; 32] {
+    let auth_key = VMAuthKey::get();
+    auth_key.tagged_hash(TAG_APP_AUTH_KEY, vapp_hash)
+}
+
+/// Computes the page HMAC for one code page.
+pub fn compute_code_page_hmac(
+    app_auth_key: &[u8; 32],
+    vapp_hash: &[u8; 32],
+    page_index: u32,
+    page_hash: &[u8; 32],
+) -> Result<[u8; 32], ()> {
+    let mut mac = HmacSha256::new(app_auth_key);
+    mac.update(TAG_PAGE_HMAC).map_err(|_| ())?;
+    mac.update(vapp_hash).map_err(|_| ())?;
+    mac.update(&page_index.to_be_bytes()).map_err(|_| ())?;
+    mac.update(page_hash).map_err(|_| ())?;
+
+    let mut out = [0u8; 32];
+    mac.finalize(&mut out).map_err(|_| ())?;
+    Ok(out)
+}
+
+/// Computes SHA256("VND_HMAC_MASK" || ephemeral_sk || be32(page_index)).
+pub fn compute_page_hmac_mask(ephemeral_sk: &[u8; 32], page_index: u32) -> [u8; 32] {
+    let mut hasher = Sha256Hasher::new();
+    hasher.update(TAG_PAGE_HMAC_MASK);
+    hasher.update(ephemeral_sk);
+    hasher.update(&page_index.to_be_bytes());
+
+    let mut out = [0u8; 32];
+    hasher.digest(&mut out);
+    out
+}
+
 /// Returns a public identifier that uniquely identifies this instance of the Vanadium app.
 /// This is derived from the auth key, so it is stable across app restarts but changes if the app is reinstalled or upgraded.
 pub fn get_vanadium_app_id() -> [u8; 32] {
-    let tag = b"VND_APP_ID";
     let auth_key = VMAuthKey::get();
-    auth_key.tagged_hash(tag, b"")
+    auth_key.tagged_hash(TAG_APP_ID, b"")
 }
