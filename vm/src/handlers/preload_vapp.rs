@@ -11,7 +11,7 @@ use common::{
     client_commands::{GetCodePageHashes, GetCodePageHashesResponse, Message},
     manifest::Manifest,
 };
-use ledger_device_sdk::sys;
+use ledger_device_sdk::{nbgl::NbglSpinner, sys};
 
 pub fn handler_preload_vapp(
     command: ledger_device_sdk::io::Command<COMM_BUFFER_SIZE>,
@@ -43,6 +43,8 @@ pub fn handler_preload_vapp(
     let mut resp = command.into_response();
     GetCodePageHashes::new(0, &[]).serialize_to_comm(&mut resp);
     let mut command = interrupt(resp).map_err(|_| AppSW::IncorrectData)?;
+
+    NbglSpinner::new().show("Preloading V-App...");
 
     let n_code_pages_rounded = OutsourcedMemory::<'_, COMM_BUFFER_SIZE>::n_pages_adjusted(
         manifest.n_code_pages() as usize,
