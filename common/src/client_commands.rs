@@ -11,6 +11,7 @@ pub enum MessageDeserializationError {
     InvalidClientCommandCode,
     MismatchingClientCommandCode,
     InvalidSectionKind,
+    InvalidPageProofKind,
     InvalidDataLength,
     UnexpectedCommandCode,
     InvalidBufferType,
@@ -27,6 +28,9 @@ impl fmt::Display for MessageDeserializationError {
             }
             MessageDeserializationError::InvalidSectionKind => write!(f, "Invalid section kind"),
             MessageDeserializationError::InvalidDataLength => write!(f, "Invalid data length"),
+            MessageDeserializationError::InvalidPageProofKind => {
+                write!(f, "Invalid page proof kind")
+            }
             MessageDeserializationError::UnexpectedCommandCode => {
                 write!(f, "Unexpected command code")
             }
@@ -246,12 +250,17 @@ impl<'a> Message<'a> for GetPageResponse<'a> {
         };
         let pk_byte = data[PAGE_SIZE + 15];
         let proof_kind = PageProofKind::try_from(pk_byte)
-            .map_err(|_| MessageDeserializationError::InvalidDataLength)?;
+            .map_err(|_| MessageDeserializationError::InvalidPageProofKind)?;
         let proof_len = data.len() - (PAGE_SIZE + 1 + 1 + 1 + 12 + 1);
         if proof_len % 32 != 0 {
             return Err(MessageDeserializationError::InvalidDataLength);
         }
         let slice_len = proof_len / 32;
+
+        if t as usize != slice_len {
+            return Err(MessageDeserializationError::InvalidDataLength);
+        }
+
         let proof = unsafe {
             let ptr = data.as_ptr().add(PAGE_SIZE + 1 + 1 + 1 + 12 + 1) as *const [u8; 32];
             core::slice::from_raw_parts(ptr, slice_len)
