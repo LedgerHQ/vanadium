@@ -6,16 +6,20 @@ use common::accumulator::{
     StreamingVectorAccumulator, UpdateProofVerifier,
 };
 use common::vm::{Page, PagedMemory};
-use ledger_device_sdk::io;
+use ledger_device_sdk::{
+    hmac::{sha2::Sha2_256 as HmacSha256, HMACInit},
+    io,
+};
 
 use common::client_commands::{
     CommitPageMessage, CommitPageProofContinuedMessage, CommitPageProofContinuedResponse,
     CommitPageProofResponse, GetPageMessage, GetPageProofContinuedMessage,
-    GetPageProofContinuedResponse, GetPageResponse, Message, SectionKind,
+    GetPageProofContinuedResponse, GetPageResponse, Message, PageProofKind, SectionKind,
 };
 use common::constants::PAGE_SIZE;
 
 use crate::aes::AesCtr;
+use crate::auth::VMAuthKey;
 use crate::hash::Sha256Hasher;
 
 use crate::handlers::lib::evict::PageEvictionStrategy;
@@ -55,6 +59,7 @@ pub struct OutsourcedMemory<'c, const N: usize> {
     section_kind: SectionKind,
     eviction_strategy: Box<dyn PageEvictionStrategy + 'c>,
     last_accessed_page: Option<(u32, usize)>,
+    vapp_hash: &'c [u8; 32],
     #[cfg(feature = "metrics")]
     pub n_page_loads: usize,
     #[cfg(feature = "metrics")]
@@ -103,6 +108,7 @@ impl<'c, const N: usize> OutsourcedMemory<'c, N> {
         merkle_root: HashOutput<32>,
         aes_ctr: Rc<RefCell<AesCtr>>,
         eviction_strategy: Box<dyn PageEvictionStrategy + 'c>,
+        vapp_hash: &'c [u8; 32],
     ) -> Self {
         Self {
             comm,
@@ -115,6 +121,7 @@ impl<'c, const N: usize> OutsourcedMemory<'c, N> {
             eviction_strategy,
             hasher: Sha256Hasher::new(),
             last_accessed_page: None,
+            vapp_hash,
             #[cfg(feature = "metrics")]
             n_page_loads: 0,
             #[cfg(feature = "metrics")]
@@ -292,84 +299,142 @@ impl<'c, const N: usize> OutsourcedMemory<'c, N> {
             get_page_hash(&mut self.hasher, page_response.page_data, None)
         };
 
-        let n = page_response.n; // Total number of elements in the proof
-        if page_response.t as usize != page_response.proof.len() {
-            return Err(common::vm::MemoryError::GenericError(
-                "Proof fragment size does not match the expected number of elements",
-            ));
-        }
+        match page_response.proof_kind {
+            PageProofKind::Merkle => {
+                let n = page_response.n; // Total number of elements in the proof
+                if page_response.t as usize != page_response.proof.len() {
+                    return Err(common::vm::MemoryError::GenericError(
+                        "Proof fragment size does not match the expected number of elements",
+                    ));
+                }
 
-        // Verify the Merkle inclusion proof using streaming verification
-        let mut verifier = MerkleAccumulator::<Sha256Hasher, Vec<u8>, 32>::begin_inclusion_proof(
-            &self.merkle_root,
-            &page_hash,
-            page_index as usize,
-            (self.n_pages as usize)
-                .checked_next_power_of_two()
-                .expect("Too many pages"),
-        );
+                // Verify the Merkle inclusion proof using streaming verification
+                let mut verifier =
+                    MerkleAccumulator::<Sha256Hasher, Vec<u8>, 32>::begin_inclusion_proof(
+                        &self.merkle_root,
+                        &page_hash,
+                        page_index as usize,
+                        (self.n_pages as usize)
+                            .checked_next_power_of_two()
+                            .expect("Too many pages"),
+                    );
 
-        for el in page_response.proof.iter() {
-            verifier.feed(&mut self.hasher, HashOutput::<32>::as_hash_output(el));
-        }
+                for el in page_response.proof.iter() {
+                    verifier.feed(&mut self.hasher, HashOutput::<32>::as_hash_output(el));
+                }
 
-        let nonce = page_response.nonce.clone();
-        let is_page_encrypted = page_response.is_encrypted;
+                let nonce = page_response.nonce.clone();
+                let is_page_encrypted = page_response.is_encrypted;
 
-        let mut n_processed_elements = page_response.t as usize;
-        let data = *page_response.page_data;
+                let mut n_processed_elements = page_response.t as usize;
+                let data = *page_response.page_data;
 
-        // If we need more elements, request them
-        while n_processed_elements < n as usize {
-            let mut resp = comm.begin_response();
-            GetPageProofContinuedMessage::new().serialize_to_comm(&mut resp);
+                // If we need more elements, request them
+                while n_processed_elements < n as usize {
+                    let mut resp = comm.begin_response();
+                    GetPageProofContinuedMessage::new().serialize_to_comm(&mut resp);
 
-            let command =
-                interrupt(resp).map_err(|e| common::vm::MemoryError::GenericError(e.as_str()))?;
+                    let command = interrupt(resp)
+                        .map_err(|e| common::vm::MemoryError::GenericError(e.as_str()))?;
 
-            let continued_response =
-                GetPageProofContinuedResponse::deserialize(&command.get_data()).map_err(|_| {
-                    common::vm::MemoryError::GenericError("Invalid continued proof data")
-                })?;
+                    let continued_response = GetPageProofContinuedResponse::deserialize(
+                        &command.get_data(),
+                    )
+                    .map_err(|_| {
+                        common::vm::MemoryError::GenericError("Invalid continued proof data")
+                    })?;
 
-            if continued_response.t as usize != continued_response.proof.len() {
-                return Err(common::vm::MemoryError::GenericError(
-                    "Continued proof size does not match the expected number of elements",
-                ));
+                    if continued_response.t as usize != continued_response.proof.len() {
+                        return Err(common::vm::MemoryError::GenericError(
+                            "Continued proof size does not match the expected number of elements",
+                        ));
+                    }
+
+                    for el in continued_response.proof.iter() {
+                        verifier.feed(&mut self.hasher, HashOutput::<32>::as_hash_output(el));
+                    }
+                    n_processed_elements += continued_response.t as usize;
+                }
+
+                if !verifier.verified() {
+                    return Err(common::vm::MemoryError::GenericError(
+                        "Merkle inclusion verification failed",
+                    ));
+                }
+
+                if is_page_encrypted {
+                    // Decrypt the page data
+                    let aes_ctr = self.aes_ctr.borrow();
+                    let decrypted_data = aes_ctr.decrypt(&nonce, &data).map_err(|_| {
+                        common::vm::MemoryError::GenericError("AES decryption failed")
+                    })?;
+
+                    // validate decrypted size matches expected page size
+                    if decrypted_data.len() != PAGE_SIZE {
+                        return Err(common::vm::MemoryError::GenericError(
+                            "Decrypted page size mismatch",
+                        ));
+                    }
+
+                    // safe conversion since we just validated the length
+                    let page_data: [u8; PAGE_SIZE] = decrypted_data.try_into().unwrap();
+
+                    Ok((Page { data: page_data }, page_hash))
+                } else {
+                    Ok((Page { data }, page_hash))
+                }
             }
+            PageProofKind::Hmac => {
+                // Expect exactly one 32-byte element
+                if page_response.proof.len() != 1 {
+                    return Err(common::vm::MemoryError::GenericError(
+                        "HMAC proof must contain exactly one element",
+                    ));
+                }
+                let hmac = page_response.proof[0];
+                // HMAC verification can only be used for code pages
+                if self.section_kind != SectionKind::Code {
+                    return Err(common::vm::MemoryError::GenericError(
+                        "HMAC proof not allowed for non-code section",
+                    ));
+                }
 
-            for el in continued_response.proof.iter() {
-                verifier.feed(&mut self.hasher, HashOutput::<32>::as_hash_output(el));
+                let auth_key = VMAuthKey::get();
+                let app_auth_key = auth_key.tagged_hash(b"VND_APP_AUTH_KEY", self.vapp_hash);
+
+                // Compute expected_hmac = HMAC-SHA256(key = app_auth_key, msg = "VND_PAGE_TAG" ‖ vapp_hash ‖ be32(i) ‖ page_hash)
+                let mut mac = HmacSha256::new(&app_auth_key);
+                mac.update(b"VND_PAGE_TAG")
+                    .map_err(|_| common::vm::MemoryError::GenericError("HMAC update failed"))?;
+                mac.update(self.vapp_hash)
+                    .map_err(|_| common::vm::MemoryError::GenericError("HMAC update failed"))?;
+                mac.update(&page_index.to_be_bytes())
+                    .map_err(|_| common::vm::MemoryError::GenericError("HMAC update failed"))?;
+                mac.update(page_hash.0.as_ref())
+                    .map_err(|_| common::vm::MemoryError::GenericError("HMAC update failed"))?;
+                let mut expected_hmac = [0u8; 32];
+                mac.finalize(&mut expected_hmac)
+                    .map_err(|_| common::vm::MemoryError::GenericError("HMAC finalize failed"))?;
+
+                let mut acc_byte = 0u8;
+
+                // SECURITY: HMAC comparison must run in constant-time
+                for (hmac_byte, expected_byte) in hmac.iter().zip(expected_hmac.iter()) {
+                    acc_byte |= hmac_byte ^ expected_byte;
+                }
+                if acc_byte != 0 {
+                    return Err(common::vm::MemoryError::GenericError(
+                        "HMAC verification failed",
+                    ));
+                }
+
+                Ok((
+                    Page {
+                        data: *page_response.page_data,
+                    },
+                    page_hash,
+                ))
             }
-            n_processed_elements += continued_response.t as usize;
-        }
-
-        if !verifier.verified() {
-            return Err(common::vm::MemoryError::GenericError(
-                "Merkle inclusion verification failed",
-            ));
-        }
-
-        if is_page_encrypted {
-            // Decrypt the page data
-            let aes_ctr = self.aes_ctr.borrow();
-            let decrypted_data = aes_ctr
-                .decrypt(&nonce, &data)
-                .map_err(|_| common::vm::MemoryError::GenericError("AES decryption failed"))?;
-
-            // validate decrypted size matches expected page size
-            if decrypted_data.len() != PAGE_SIZE {
-                return Err(common::vm::MemoryError::GenericError(
-                    "Decrypted page size mismatch",
-                ));
-            }
-
-            // safe conversion since we just validated the length
-            let page_data: [u8; PAGE_SIZE] = decrypted_data.try_into().unwrap();
-
-            Ok((Page { data: page_data }, page_hash))
-        } else {
-            Ok((Page { data }, page_hash))
         }
     }
 }

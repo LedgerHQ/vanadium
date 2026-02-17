@@ -17,8 +17,8 @@ use common::client_commands::{
     CommitPageProofContinuedResponse, CommitPageProofResponse, GetCodePageHashes,
     GetCodePageHashesResponse, GetPageMessage, GetPageProofContinuedMessage,
     GetPageProofContinuedResponse, GetPageResponse, Message, MessageDeserializationError,
-    ReceiveBufferMessage, ReceiveBufferResponse, SectionKind, SendBufferContinuedMessage,
-    SendBufferMessage,
+    PageProofKind, ReceiveBufferMessage, ReceiveBufferResponse, SectionKind,
+    SendBufferContinuedMessage, SendBufferMessage,
 };
 use common::constants::{DEFAULT_STACK_START, PAGE_SIZE};
 use common::manifest::Manifest;
@@ -301,76 +301,113 @@ impl<E: std::fmt::Debug + Send + Sync + 'static> VAppEngine<E> {
         // Convert HashOutput<32> to [u8; 32]
         let proof: Vec<[u8; 32]> = proof.into_iter().map(|h| h.0).collect();
 
-        // Calculate how many proof elements we can send in one message
-        let t = min(proof.len(), GetPageResponse::max_proof_size()) as u8;
-
-        // Create the page response
-        let response = GetPageResponse::new(
-            (*data).try_into().unwrap(),
-            is_encrypted,
-            nonce,
-            proof.len() as u8,
-            t,
-            &proof[0..t as usize],
-        )
-        .serialize();
-
-        let (status, result) = self
-            .transport
-            .exchange(&apdu_continue(response))
-            .await
-            .map_err(VAppEngineError::TransportError)?;
-
-        #[cfg(feature = "debug")]
-        debug!("Proof length: {}", proof.len());
-
-        // If there are more proof elements to send and VM requests them
-        if t < proof.len() as u8 {
-            if status != StatusWord::InterruptedExecution || result.is_empty() {
-                return Err(VAppEngineError::InterruptedExecutionExpected);
+        if let (SectionKind::Code, Some(code_hmacs)) = (section_kind, &self.code_hmacs) {
+            if is_encrypted {
+                return Err(VAppEngineError::ResponseError(
+                    "Code pages should not be encrypted",
+                ));
+            }
+            if nonce != [0u8; 12] {
+                return Err(VAppEngineError::ResponseError(
+                    "Code pages should have a null nonce",
+                ));
             }
 
-            GetPageProofContinuedMessage::deserialize(&result)?;
+            // For the code section, if we have the hmacs, we can just pass that as the proof
+            let hmac = code_hmacs
+                .as_slice()
+                .get(page_index as usize)
+                .ok_or(VAppEngineError::ResponseError("Missing code-page HMAC"))?;
+            let proof = [*hmac];
+
+            let response = GetPageResponse::new(
+                (*data).try_into().unwrap(),
+                is_encrypted,
+                nonce,
+                1,
+                1,
+                PageProofKind::Hmac,
+                &proof,
+            )
+            .serialize();
+
+            self.transport
+                .exchange(&apdu_continue(response))
+                .await
+                .map_err(VAppEngineError::TransportError)
+        } else {
+            // Calculate how many proof elements we can send in one message
+            let t = min(proof.len(), GetPageResponse::max_proof_size()) as u8;
+
+            // Create the page response
+            let response = GetPageResponse::new(
+                (*data).try_into().unwrap(),
+                is_encrypted,
+                nonce,
+                proof.len() as u8,
+                t,
+                PageProofKind::Merkle,
+                &proof[0..t as usize],
+            )
+            .serialize();
+
+            let (status, result) = self
+                .transport
+                .exchange(&apdu_continue(response))
+                .await
+                .map_err(VAppEngineError::TransportError)?;
 
             #[cfg(feature = "debug")]
-            debug!("<- GetPageProofContinuedMessage()");
+            debug!("Proof length: {}", proof.len());
 
-            let mut offset = t as usize;
-
-            // Send remaining proof elements, potentially in multiple messages
-            while offset < proof.len() {
-                let remaining = proof.len() - offset;
-                let t = min(remaining, GetPageProofContinuedResponse::max_proof_size()) as u8;
-
-                let response =
-                    GetPageProofContinuedResponse::new(t, &proof[offset..offset + t as usize])
-                        .serialize();
-
-                let (new_status, new_result) = self
-                    .transport
-                    .exchange(&apdu_continue(response))
-                    .await
-                    .map_err(VAppEngineError::TransportError)?;
-
-                offset += t as usize;
-
-                // If we've sent all proof elements, return the status and result
-                if offset >= proof.len() {
-                    return Ok((new_status, new_result));
-                }
-
-                // Otherwise, expect another GetPageProofContinuedMessage
-                if new_status != StatusWord::InterruptedExecution {
+            // If there are more proof elements to send and VM requests them
+            if t < proof.len() as u8 {
+                if status != StatusWord::InterruptedExecution || result.is_empty() {
                     return Err(VAppEngineError::InterruptedExecutionExpected);
                 }
 
-                GetPageProofContinuedMessage::deserialize(&new_result)?;
+                GetPageProofContinuedMessage::deserialize(&result)?;
 
                 #[cfg(feature = "debug")]
                 debug!("<- GetPageProofContinuedMessage()");
+
+                let mut offset = t as usize;
+
+                // Send remaining proof elements, potentially in multiple messages
+                while offset < proof.len() {
+                    let remaining = proof.len() - offset;
+                    let t = min(remaining, GetPageProofContinuedResponse::max_proof_size()) as u8;
+
+                    let response =
+                        GetPageProofContinuedResponse::new(t, &proof[offset..offset + t as usize])
+                            .serialize();
+
+                    let (new_status, new_result) = self
+                        .transport
+                        .exchange(&apdu_continue(response))
+                        .await
+                        .map_err(VAppEngineError::TransportError)?;
+
+                    offset += t as usize;
+
+                    // If we've sent all proof elements, return the status and result
+                    if offset >= proof.len() {
+                        return Ok((new_status, new_result));
+                    }
+
+                    // Otherwise, expect another GetPageProofContinuedMessage
+                    if new_status != StatusWord::InterruptedExecution {
+                        return Err(VAppEngineError::InterruptedExecutionExpected);
+                    }
+
+                    GetPageProofContinuedMessage::deserialize(&new_result)?;
+
+                    #[cfg(feature = "debug")]
+                    debug!("<- GetPageProofContinuedMessage()");
+                }
             }
+            Ok((status, result))
         }
-        Ok((status, result))
     }
 
     async fn process_commit_page(

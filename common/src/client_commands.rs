@@ -83,7 +83,7 @@ impl TryFrom<u8> for ClientCommandCode {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum SectionKind {
     Code = 0,
@@ -154,16 +154,37 @@ impl<'a> Message<'a> for GetPageMessage {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum PageProofKind {
+    Merkle = 0,
+    Hmac = 1,
+}
+
+impl TryFrom<u8> for PageProofKind {
+    type Error = &'static str;
+    fn try_from(value: u8) -> Result<Self, Self::Error> {
+        match value {
+            0 => Ok(PageProofKind::Merkle),
+            1 => Ok(PageProofKind::Hmac),
+            _ => Err("Invalid page proof kind"),
+        }
+    }
+}
+
 /// Message sent by client in response to the VM's GetPageProofMessage
-/// It contains the page's metadata, and the merkle proof of the page (or part of it)
+/// It contains the page's metadata, and either
+/// - the Merkle proof of the page (or part of it), if using Merkle proofs
+/// - the HMAC of the page, if using HMAC-based integrity verification
 #[derive(Debug, Clone)]
 pub struct GetPageResponse<'a> {
     pub page_data: &'a [u8; PAGE_SIZE],
-    pub is_encrypted: bool,    // whether the page is encrypted
-    pub nonce: [u8; 12],       // nonce of the page encryption (all zeros if not encrypted)
-    pub n: u8,                 // number of element in the proof
-    pub t: u8,                 // number of proof elements in this message
-    pub proof: &'a [[u8; 32]], // hashes of the proof
+    pub is_encrypted: bool, // whether the page is encrypted
+    pub nonce: [u8; 12],    // nonce of the page encryption (all zeros if not encrypted)
+    pub n: u8,              // number of element in the proof
+    pub t: u8,              // number of proof elements in this message
+    pub proof_kind: PageProofKind,
+    pub proof: &'a [[u8; 32]], // Merkle proof elements OR single HMAC (length is 1 if HMAC)
 }
 
 impl<'a> GetPageResponse<'a> {
@@ -174,6 +195,7 @@ impl<'a> GetPageResponse<'a> {
         nonce: [u8; 12],
         n: u8,
         t: u8,
+        proof_kind: PageProofKind,
         proof: &'a [[u8; 32]],
     ) -> Self {
         GetPageResponse {
@@ -182,12 +204,14 @@ impl<'a> GetPageResponse<'a> {
             nonce,
             n,
             t,
+            proof_kind,
             proof,
         }
     }
 
     pub const fn max_proof_size() -> usize {
-        (MAX_APDU_DATA_SIZE - PAGE_SIZE - 1 - 12 - 1 - 1) / 32
+        // page_data | n | t | is_encrypted | nonce(12) | proof_kind | proof elements
+        (MAX_APDU_DATA_SIZE - PAGE_SIZE - 1 - 1 - 1 - 12 - 1) / 32
     }
 }
 
@@ -199,13 +223,14 @@ impl<'a> Message<'a> for GetPageResponse<'a> {
         f(&[self.t]);
         f(&[self.is_encrypted as u8]);
         f(&self.nonce);
+        f(&[self.proof_kind as u8]);
         for p in self.proof {
             f(p);
         }
     }
 
     fn deserialize(data: &'a [u8]) -> Result<Self, MessageDeserializationError> {
-        if data.len() < PAGE_SIZE + 1 + 1 + 1 + 12 {
+        if data.len() < PAGE_SIZE + 1 + 1 + 1 + 12 + 1 {
             return Err(MessageDeserializationError::InvalidDataLength);
         }
         let page_data = data[0..PAGE_SIZE].try_into().unwrap();
@@ -219,13 +244,16 @@ impl<'a> Message<'a> for GetPageResponse<'a> {
         } else {
             [0; 12]
         };
-        let proof_len = data.len() - (PAGE_SIZE + 1 + 1 + 1 + 12);
+        let pk_byte = data[PAGE_SIZE + 15];
+        let proof_kind = PageProofKind::try_from(pk_byte)
+            .map_err(|_| MessageDeserializationError::InvalidDataLength)?;
+        let proof_len = data.len() - (PAGE_SIZE + 1 + 1 + 1 + 12 + 1);
         if proof_len % 32 != 0 {
             return Err(MessageDeserializationError::InvalidDataLength);
         }
         let slice_len = proof_len / 32;
         let proof = unsafe {
-            let ptr = data.as_ptr().add(PAGE_SIZE + 1 + 1 + 1 + 12) as *const [u8; 32];
+            let ptr = data.as_ptr().add(PAGE_SIZE + 1 + 1 + 1 + 12 + 1) as *const [u8; 32];
             core::slice::from_raw_parts(ptr, slice_len)
         };
 
@@ -235,12 +263,13 @@ impl<'a> Message<'a> for GetPageResponse<'a> {
             nonce,
             n,
             t,
+            proof_kind,
             proof,
         })
     }
 }
 
-/// Message sent by the VM to request the rest of the proof, if it didn't fit
+/// Message sent by the VM to request the rest of the Merkle proof, if it didn't fit
 /// in GetPageResponse
 #[derive(Debug, Clone)]
 pub struct GetPageProofContinuedMessage {
