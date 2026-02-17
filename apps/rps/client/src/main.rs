@@ -79,7 +79,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ClientType::Any
     };
     let mut demo_client =
-        RPSClient::new(create_default_client("vnd-rps", client_type, None).await?);
+        RPSClient::new(create_default_client("vnd-rps", client_type, None, false).await?);
 
     println!("Playing as Alice");
 

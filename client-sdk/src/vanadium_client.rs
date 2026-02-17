@@ -33,6 +33,7 @@ use crate::memory::{MemorySegment, MemorySegmentError};
 use crate::transport::Transport;
 use crate::{
     elf::{self, VAppElfFile},
+    hmac_auth::{compute_vapp_hash, hmac_file_path, CodeHmacs, CodeHmacsLoadError},
     linewriter::Sink,
 };
 #[cfg(feature = "metrics")]
@@ -142,6 +143,7 @@ struct VAppEngine<E: std::fmt::Debug + Send + Sync + 'static> {
     pending_receive_buffer: Option<Vec<u8>>,
     current_status: StatusWord,
     current_result: Vec<u8>,
+    code_hmacs: Option<CodeHmacs>,
 }
 
 impl<E: std::fmt::Debug + Send + Sync + 'static> VAppEngine<E> {
@@ -975,6 +977,7 @@ impl<E: std::fmt::Debug + Send + Sync + 'static> GenericVanadiumClient<E> {
         manifest: &Manifest,
         elf: &VAppElfFile,
         print_writer: Box<dyn std::io::Write + Send + Sync>,
+        code_hmacs: Option<CodeHmacs>,
     ) -> Result<(), VAppEngineError<E>> {
         // Create the memory segments for the code, data, and stack sections
         let code_seg = MemorySegment::new(elf.code_segment.start, &elf.code_segment.data);
@@ -994,6 +997,7 @@ impl<E: std::fmt::Debug + Send + Sync + 'static> GenericVanadiumClient<E> {
             pending_receive_buffer: None,
             current_status: StatusWord::OK,
             current_result: Vec::new(),
+            code_hmacs,
         };
 
         vapp_engine.start().await?;
@@ -1261,13 +1265,17 @@ impl<E: std::fmt::Debug + Send + Sync + 'static> SyncVanadiumAppClient<E> {
     ///
     /// This is a convenience method equivalent to calling `new()` followed by `start_vapp()`.
     /// Provided for backward compatibility.
+    ///
+    /// If `use_hmacs` is true, HMAC-based proofs will be loaded from (or generated and saved to) a
+    /// `.hmac` file next to the ELF binary.
     pub async fn with_vapp(
         elf_path: &str,
         transport: Arc<dyn Transport<Error = E>>,
         print_writer: Box<dyn std::io::Write + Send + Sync>,
+        use_hmacs: bool,
     ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         let mut client = Self::new(transport).await?;
-        client.start_vapp(elf_path, print_writer).await?;
+        client.start_vapp(elf_path, print_writer, use_hmacs).await?;
         Ok(client)
     }
 
@@ -1275,10 +1283,14 @@ impl<E: std::fmt::Debug + Send + Sync + 'static> SyncVanadiumAppClient<E> {
     ///
     /// This will automatically register the V-App if it's not already registered on the device.
     /// Returns an error if a V-App is already running; call `stop_vapp()` first.
+    ///
+    /// If `use_hmacs` is true, HMAC-based proofs will be loaded from (or generated and saved to) a
+    /// `.hmac` file derived from `elf_path`. This avoids expensive Merkle proofs for the code section.
     pub async fn start_vapp(
         &mut self,
         elf_path: &str,
         print_writer: Box<dyn std::io::Write + Send + Sync>,
+        use_hmacs: bool,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         if self.client.is_vapp_running() {
             return Err(VanadiumClientError::VAppAlreadyRunning.into());
@@ -1286,13 +1298,51 @@ impl<E: std::fmt::Debug + Send + Sync + 'static> SyncVanadiumAppClient<E> {
 
         let (elf_file, manifest) = load_elf_and_manifest(elf_path)?;
 
+        // Resolve code HMACs if requested
+        let code_hmacs = if use_hmacs {
+            let vapp_hash = compute_vapp_hash(&manifest);
+            let app_info = self.client.get_app_info().await?;
+            let hmac_path = hmac_file_path(elf_path);
+
+            // Helper to preload and cache HMACs when no valid cache is present.
+            let preload_and_cache_hmacs = || async {
+                // Make sure the app is registered first.
+                // Speculatively try register; if already registered, this is harmless
+                // (register_vapp returns Ok if it succeeds or Err if denied/full).
+                let _ = self.client.register_vapp(&manifest).await;
+                let hmacs = self
+                    .client
+                    .preload_vapp(&manifest, &elf_file)
+                    .await
+                    .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.into() })?;
+                let code_hmacs = CodeHmacs::new(hmacs);
+                // Save for next time (best-effort)
+                let _ = code_hmacs.save(&hmac_path, &vapp_hash, &app_info.vanadium_app_id);
+                Ok::<Option<CodeHmacs>, Box<dyn std::error::Error + Send + Sync>>(Some(code_hmacs))
+            };
+            // Try to load cached HMACs
+            match CodeHmacs::load(&hmac_path, &vapp_hash, &app_info.vanadium_app_id) {
+                Ok(code_hmacs) => Some(code_hmacs),
+                Err(CodeHmacsLoadError::Io(err)) if err.kind() == std::io::ErrorKind::NotFound => {
+                    // No cache file — need to preload.
+                    preload_and_cache_hmacs().await?
+                }
+                Err(_) => {
+                    // No valid cache — need to preload.
+                    preload_and_cache_hmacs().await?
+                }
+            }
+        } else {
+            None
+        };
+
         // Try to run the V-App first (in case it's already registered)
         // Use a dummy Sink writer for this speculative attempt, preserving the real writer for later
         let sink_writer: Box<dyn std::io::Write + Send + Sync> =
             Box::new(crate::linewriter::Sink::default());
         match self
             .client
-            .run_vapp(&manifest, &elf_file, sink_writer)
+            .run_vapp(&manifest, &elf_file, sink_writer, code_hmacs.clone())
             .await
         {
             Ok(()) => {
@@ -1306,13 +1356,42 @@ impl<E: std::fmt::Debug + Send + Sync + 'static> SyncVanadiumAppClient<E> {
 
                 // Now run the V-App
                 self.client
-                    .run_vapp(&manifest, &elf_file, print_writer)
+                    .run_vapp(&manifest, &elf_file, print_writer, code_hmacs)
                     .await?;
 
                 Ok(())
             }
             Err(e) => Err(e.into()),
         }
+    }
+
+    /// Preloads a V-App, generating HMAC-based proofs and saving them to a `.hmac` file
+    /// next to the ELF binary.
+    ///
+    /// This will register the V-App on the device if it is not already registered.
+    /// Returns the decrypted HMACs.
+    pub async fn preload_vapp(
+        &mut self,
+        elf_path: &str,
+    ) -> Result<CodeHmacs, Box<dyn std::error::Error + Send + Sync>> {
+        let (elf_file, manifest) = load_elf_and_manifest(elf_path)?;
+        let vapp_hash = compute_vapp_hash(&manifest);
+        let app_info = self.client.get_app_info().await?;
+
+        // Ensure the app is registered
+        let _ = self.client.register_vapp(&manifest).await;
+
+        let hmacs = self
+            .client
+            .preload_vapp(&manifest, &elf_file)
+            .await
+            .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.into() })?;
+
+        let code_hmacs = CodeHmacs::new(hmacs);
+        let hmac_path = hmac_file_path(elf_path);
+        code_hmacs.save(&hmac_path, &vapp_hash, &app_info.vanadium_app_id)?;
+
+        Ok(code_hmacs)
     }
 
     /// Returns whether a V-App is currently running.
@@ -1365,7 +1444,12 @@ enum WorkerMessage {
     StartVApp(
         String,                                // elf_path
         Box<dyn std::io::Write + Send + Sync>, // print_writer
+        bool,                                  // use_hmacs
         tokio::sync::oneshot::Sender<Result<(), Box<dyn std::error::Error + Send + Sync>>>,
+    ),
+    PreloadVApp(
+        String, // elf_path
+        tokio::sync::oneshot::Sender<Result<CodeHmacs, Box<dyn std::error::Error + Send + Sync>>>,
     ),
     StopVApp(tokio::sync::oneshot::Sender<()>),
     IsVAppRunning(tokio::sync::oneshot::Sender<bool>),
@@ -1396,13 +1480,17 @@ impl<E: std::fmt::Debug + Send + Sync + 'static> VanadiumAppClient<E> {
     /// Creates a new VanadiumAppClient and immediately starts a V-App.
     ///
     /// This is a convenience method equivalent to calling `new()` followed by `start_vapp()`.
+    ///
+    /// If `use_hmacs` is true, HMAC-based proofs will be loaded from (or generated and saved to) a
+    /// `.hmac` file next to the ELF binary.
     pub async fn with_vapp(
         elf_path: &str,
         transport: Arc<dyn Transport<Error = E>>,
         print_writer: Box<dyn std::io::Write + Send + Sync>,
+        use_hmacs: bool,
     ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         let mut client = Self::new(transport).await?;
-        client.start_vapp(elf_path, print_writer).await?;
+        client.start_vapp(elf_path, print_writer, use_hmacs).await?;
         Ok(client)
     }
 
@@ -1435,21 +1523,42 @@ impl<E: std::fmt::Debug + Send + Sync + 'static> VanadiumAppClient<E> {
     ///
     /// This will automatically register the V-App if it's not already registered on the device.
     /// Returns an error if a V-App is already running; call `stop_vapp()` first.
+    ///
+    /// If `use_hmacs` is true, HMAC-based proofs will be loaded from (or generated and saved to) a
+    /// `.hmac` file derived from `elf_path`.
     pub async fn start_vapp(
         &mut self,
         elf_path: &str,
         print_writer: Box<dyn std::io::Write + Send + Sync>,
+        use_hmacs: bool,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
         self.message_tx
             .send(WorkerMessage::StartVApp(
                 elf_path.to_string(),
                 print_writer,
+                use_hmacs,
                 resp_tx,
             ))
             .map_err(|_| "Worker task died")?;
         resp_rx.await.map_err(|_| "Worker task died")??;
         Ok(())
+    }
+
+    /// Preloads a V-App, generating HMAC-based proofs and saving them to a `.hmac` file
+    /// next to the ELF binary.
+    ///
+    /// This will register the V-App on the device if it is not already registered.
+    /// Returns the decrypted HMACs.
+    pub async fn preload_vapp(
+        &mut self,
+        elf_path: &str,
+    ) -> Result<CodeHmacs, Box<dyn std::error::Error + Send + Sync>> {
+        let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
+        self.message_tx
+            .send(WorkerMessage::PreloadVApp(elf_path.to_string(), resp_tx))
+            .map_err(|_| "Worker task died")?;
+        resp_rx.await.map_err(|_| "Worker task died")?
     }
 
     /// Stops the currently running V-App, if any.
@@ -1567,12 +1676,20 @@ impl<E: std::fmt::Debug + Send + Sync + 'static> VanadiumAppClient<E> {
                             log::debug!("Failed to send app info response: receiver dropped");
                         }
                     }
-                    WorkerMessage::StartVApp(elf_path, print_writer, resp_tx) => {
+                    WorkerMessage::StartVApp(elf_path, print_writer, use_hmacs, resp_tx) => {
                         // Start a V-App
-                        let result = client.start_vapp(&elf_path, print_writer).await;
+                        let result = client.start_vapp(&elf_path, print_writer, use_hmacs).await;
                         if resp_tx.send(result).is_err() {
                             #[cfg(feature = "debug")]
                             log::debug!("Failed to send start_vapp response: receiver dropped");
+                        }
+                    }
+                    WorkerMessage::PreloadVApp(elf_path, resp_tx) => {
+                        // Preload a V-App
+                        let result = client.preload_vapp(&elf_path).await;
+                        if resp_tx.send(result).is_err() {
+                            #[cfg(feature = "debug")]
+                            log::debug!("Failed to send preload_vapp response: receiver dropped");
                         }
                     }
                     WorkerMessage::StopVApp(resp_tx) => {
@@ -1851,6 +1968,7 @@ pub mod client_utils {
     pub async fn create_tcp_client(
         vapp_path: &str,
         print_writer: Option<Box<dyn std::io::Write + Send + Sync>>,
+        use_hmacs: bool,
     ) -> Result<Box<dyn VAppTransport + Send>, ClientUtilsError> {
         let transport_raw = Arc::new(TransportTcp::new_default().await.map_err(|e| {
             ClientUtilsError::TcpTransportFailed(format!(
@@ -1862,9 +1980,10 @@ pub mod client_utils {
 
         // if no print_writer is provided, default to Sink
         let print_writer = print_writer.unwrap_or_else(|| Box::new(Sink::default()));
-        let client = VanadiumAppClient::with_vapp(vapp_path, Arc::new(transport), print_writer)
-            .await
-            .map_err(|e| ClientUtilsError::VanadiumClientFailed(e.to_string()))?;
+        let client =
+            VanadiumAppClient::with_vapp(vapp_path, Arc::new(transport), print_writer, use_hmacs)
+                .await
+                .map_err(|e| ClientUtilsError::VanadiumClientFailed(e.to_string()))?;
         Ok(Box::new(client))
     }
 
@@ -1872,6 +1991,7 @@ pub mod client_utils {
     pub async fn create_hid_client(
         vapp_path: &str,
         print_writer: Option<Box<dyn std::io::Write + Send + Sync>>,
+        use_hmacs: bool,
     ) -> Result<Box<dyn VAppTransport + Send>, ClientUtilsError> {
         let hid_api = hidapi::HidApi::new().map_err(|e| {
             ClientUtilsError::HidTransportFailed(format!("Unable to create HID API: {}", e))
@@ -1888,9 +2008,10 @@ pub mod client_utils {
 
         // if no print_writer is provided, default to Sink
         let print_writer = print_writer.unwrap_or_else(|| Box::new(Sink::default()));
-        let client = VanadiumAppClient::with_vapp(vapp_path, Arc::new(transport), print_writer)
-            .await
-            .map_err(|e| ClientUtilsError::VanadiumClientFailed(e.to_string()))?;
+        let client =
+            VanadiumAppClient::with_vapp(vapp_path, Arc::new(transport), print_writer, use_hmacs)
+                .await
+                .map_err(|e| ClientUtilsError::VanadiumClientFailed(e.to_string()))?;
         Ok(Box::new(client))
     }
 
@@ -1921,6 +2042,7 @@ pub mod client_utils {
         vapp_name: &str,
         client_type: ClientType,
         print_writer: Option<Box<dyn std::io::Write + Send + Sync>>,
+        use_hmacs: bool,
     ) -> Result<Box<dyn VAppTransport + Send>, ClientUtilsError> {
         let vapp_path = format!(
             "../app/target/riscv32imc-unknown-none-elf/release/{}",
@@ -1939,11 +2061,11 @@ pub mod client_utils {
 
         match client_type {
             ClientType::Any => {
-                let hid_error = match create_hid_client(&vapp_path, get_writer()).await {
+                let hid_error = match create_hid_client(&vapp_path, get_writer(), use_hmacs).await {
                     Ok(client) => return Ok(client),
                     Err(e) => e,
                 };
-                let tcp_error = match create_tcp_client(&vapp_path, get_writer()).await {
+                let tcp_error = match create_tcp_client(&vapp_path, get_writer(), use_hmacs).await {
                     Ok(client) => return Ok(client),
                     Err(e) => e,
                 };
@@ -1958,8 +2080,8 @@ pub mod client_utils {
                 })
             }
             ClientType::Native => create_native_client(Some(&tcp_addr), get_writer()).await,
-            ClientType::Tcp => create_tcp_client(&vapp_path, get_writer()).await,
-            ClientType::Hid => create_hid_client(&vapp_path, get_writer()).await,
+            ClientType::Tcp => create_tcp_client(&vapp_path, get_writer(), use_hmacs).await,
+            ClientType::Hid => create_hid_client(&vapp_path, get_writer(), use_hmacs).await,
         }
     }
 }
