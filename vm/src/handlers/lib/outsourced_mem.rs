@@ -5,11 +5,9 @@ use common::accumulator::{
     HashOutput, Hasher, InclusionProofVerifier, MerkleAccumulator, ResettableHasher,
     StreamingVectorAccumulator, UpdateProofVerifier,
 };
-use common::vm::{Page, PagedMemory};
-use ledger_device_sdk::{
-    hmac::{sha2::Sha2_256 as HmacSha256, HMACInit},
-    io,
-};
+use ledger_device_sdk::io;
+
+use subtle::ConstantTimeEq;
 
 use common::client_commands::{
     CommitPageMessage, CommitPageProofContinuedMessage, CommitPageProofContinuedResponse,
@@ -17,9 +15,10 @@ use common::client_commands::{
     GetPageProofContinuedResponse, GetPageResponse, Message, PageProofKind, SectionKind,
 };
 use common::constants::PAGE_SIZE;
+use common::vm::{Page, PagedMemory};
 
 use crate::aes::AesCtr;
-use crate::auth::VMAuthKey;
+use crate::auth::{compute_code_page_hmac, get_vapp_auth_key};
 use crate::hash::Sha256Hasher;
 
 use crate::handlers::lib::evict::PageEvictionStrategy;
@@ -399,30 +398,15 @@ impl<'c, const N: usize> OutsourcedMemory<'c, N> {
                     ));
                 }
 
-                let auth_key = VMAuthKey::get();
-                let app_auth_key = auth_key.tagged_hash(b"VND_APP_AUTH_KEY", self.vapp_hash);
+                let app_auth_key = get_vapp_auth_key(self.vapp_hash);
+                let expected_hmac =
+                    compute_code_page_hmac(&app_auth_key, self.vapp_hash, page_index, &page_hash.0)
+                        .map_err(|_| {
+                            common::vm::MemoryError::GenericError("HMAC computation failed")
+                        })?;
 
-                // Compute expected_hmac = HMAC-SHA256(key = app_auth_key, msg = "VND_PAGE_TAG" ‖ vapp_hash ‖ be32(i) ‖ page_hash)
-                let mut mac = HmacSha256::new(&app_auth_key);
-                mac.update(b"VND_PAGE_TAG")
-                    .map_err(|_| common::vm::MemoryError::GenericError("HMAC update failed"))?;
-                mac.update(self.vapp_hash)
-                    .map_err(|_| common::vm::MemoryError::GenericError("HMAC update failed"))?;
-                mac.update(&page_index.to_be_bytes())
-                    .map_err(|_| common::vm::MemoryError::GenericError("HMAC update failed"))?;
-                mac.update(page_hash.0.as_ref())
-                    .map_err(|_| common::vm::MemoryError::GenericError("HMAC update failed"))?;
-                let mut expected_hmac = [0u8; 32];
-                mac.finalize(&mut expected_hmac)
-                    .map_err(|_| common::vm::MemoryError::GenericError("HMAC finalize failed"))?;
-
-                let mut acc_byte = 0u8;
-
-                // SECURITY: HMAC comparison must run in constant-time
-                for (hmac_byte, expected_byte) in hmac.iter().zip(expected_hmac.iter()) {
-                    acc_byte |= hmac_byte ^ expected_byte;
-                }
-                if acc_byte != 0 {
+                // SECURITY: it's important to use a constant-time comparison for HMACs
+                if !bool::from(hmac.ct_eq(&expected_hmac)) {
                     return Err(common::vm::MemoryError::GenericError(
                         "HMAC verification failed",
                     ));

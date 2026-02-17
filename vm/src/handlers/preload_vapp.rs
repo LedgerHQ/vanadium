@@ -1,5 +1,5 @@
 use crate::{
-    auth::VMAuthKey,
+    auth::{compute_code_page_hmac, compute_page_hmac_mask, get_vapp_auth_key},
     handlers::lib::outsourced_mem::OutsourcedMemory,
     hash::Sha256Hasher,
     io::{interrupt, SerializeToComm},
@@ -7,14 +7,11 @@ use crate::{
 };
 use alloc::vec::Vec;
 use common::{
-    accumulator::{HashOutput, Hasher, MerkleAccumulatorRootComputer, ResettableHasher},
+    accumulator::{HashOutput, MerkleAccumulatorRootComputer},
     client_commands::{GetCodePageHashes, GetCodePageHashesResponse, Message},
     manifest::Manifest,
 };
-use ledger_device_sdk::{
-    hmac::{sha2::Sha2_256 as HmacSha256, HMACInit},
-    sys,
-};
+use ledger_device_sdk::sys;
 
 pub fn handler_preload_vapp(
     command: ledger_device_sdk::io::Command<COMM_BUFFER_SIZE>,
@@ -41,8 +38,7 @@ pub fn handler_preload_vapp(
 
     let vapp_hash = manifest.get_vapp_hash::<Sha256Hasher, 32>();
 
-    let auth_key = VMAuthKey::get();
-    let app_auth_key = auth_key.tagged_hash(b"VND_APP_AUTH_KEY", &vapp_hash);
+    let app_auth_key = get_vapp_auth_key(&vapp_hash);
 
     let mut resp = command.into_response();
     GetCodePageHashes::new(0, &[]).serialize_to_comm(&mut resp);
@@ -56,8 +52,6 @@ pub fn handler_preload_vapp(
 
     let mut root_computer =
         MerkleAccumulatorRootComputer::<32, Sha256Hasher>::new(n_code_pages_rounded);
-
-    let mut hasher = Sha256Hasher::new();
 
     let mut response_data = Vec::with_capacity(GetCodePageHashesResponse::max_hashes());
 
@@ -81,25 +75,9 @@ pub fn handler_preload_vapp(
 
         for page_hash_i in batch.code_page_hashes.into_iter() {
             let i = n_page_hashes_received as u32;
-            // Compute page_sk_i = SHA256("VND_HMAC_MASK" ‖ ephemeral_sk ‖ be32(i))
-            hasher.reset();
-            hasher.update(b"VND_HMAC_MASK");
-            hasher.update(&ephemeral_sk);
-            hasher.update(&i.to_be_bytes());
-            let page_sk_i = hasher.finalize_inplace();
-
-            // Compute hmac_i = HMAC-SHA256(key = app_auth_key, msg = "VND_PAGE_TAG" ‖ vapp_hash ‖ be32(i) ‖ page_hash_i)
-            let mut mac = HmacSha256::new(&app_auth_key);
-            mac.update(b"VND_PAGE_TAG")
+            let page_sk_i = compute_page_hmac_mask(&ephemeral_sk, i);
+            let hmac = compute_code_page_hmac(&app_auth_key, &vapp_hash, i, page_hash_i)
                 .map_err(|_| AppSW::IncorrectData)?;
-            mac.update(&vapp_hash).map_err(|_| AppSW::IncorrectData)?;
-            mac.update(&i.to_be_bytes())
-                .map_err(|_| AppSW::IncorrectData)?;
-            mac.update(page_hash_i).map_err(|_| AppSW::IncorrectData)?;
-            let mut hmac = [0u8; 32];
-            mac.finalize(&mut hmac).map_err(|_| AppSW::IncorrectData)?;
-
-            // Compute encrypted_hmac_i = hmac_i ⊕ page_sk_i
             let mut encrypted_hmac_i = [0u8; 32];
             for j in 0..32 {
                 encrypted_hmac_i[j] = hmac[j] ^ page_sk_i[j];
@@ -115,11 +93,8 @@ pub fn handler_preload_vapp(
 
         let mut resp = command.into_response();
         // Send encrypted HMACs, and request the next batch
-        GetCodePageHashes::new(
-            n_page_hashes_received as u32,
-            response_data.as_slice(),
-        )
-        .serialize_to_comm(&mut resp);
+        GetCodePageHashes::new(n_page_hashes_received as u32, response_data.as_slice())
+            .serialize_to_comm(&mut resp);
         command = interrupt(resp).map_err(|_| AppSW::IncorrectData)?;
     }
 
