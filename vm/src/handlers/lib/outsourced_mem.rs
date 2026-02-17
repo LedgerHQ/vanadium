@@ -384,6 +384,17 @@ impl<'c, const N: usize> OutsourcedMemory<'c, N> {
                 }
             }
             PageProofKind::Hmac => {
+                if page_response.is_encrypted {
+                    return Err(common::vm::MemoryError::GenericError(
+                        "HMAC proof not allowed for encrypted pages",
+                    ));
+                }
+                if page_response.n != 1 || page_response.t != 1 {
+                    return Err(common::vm::MemoryError::GenericError(
+                        "HMAC proof must contain exactly one element",
+                    ));
+                }
+
                 // Expect exactly one 32-byte element
                 if page_response.proof.len() != 1 {
                     return Err(common::vm::MemoryError::GenericError(
