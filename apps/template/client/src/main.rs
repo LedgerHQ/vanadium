@@ -36,7 +36,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     } else {
         ClientType::Any
     };
-    let mut client = Client::new(create_default_client("vnd-template", client_type, None).await?);
+    let mut client = Client::new(create_default_client("vnd-template", client_type, None, false).await?);
 
     loop {
         println!("Enter the message to be signed (or empty to exit):");
