@@ -6,7 +6,7 @@ fn main() {
     let raw_heap_size = env::var("HEAP_SIZE").unwrap();
 
     // smallest heap size, tailored for Nano X
-    let base_heap_size = 14336usize;
+    let base_heap_size = 13824usize;
     // heap size for the current target
     let heap_size = parse_heap_size(&raw_heap_size, &target_os);
 
