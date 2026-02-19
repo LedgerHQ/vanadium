@@ -206,6 +206,11 @@ This repository is organized in a monorepo structure.
 * [libs](libs) - General purpose libraries that can be used by V-Apps.
   * [bitcoin](libs/bitcoin) - A custom clone of the [rust-bitcoin](https://github.com/rust-bitcoin/rust-bitcoin) library.
 * [cargo-vnd](cargo-vnd) - A tool to create and package V-Apps.
+* [bench](bench) - A suite of benchmarks for various V-App operations.
+* tools
+  * [bench](tools/bench) - A generic tool to run benchmarks for Vanadium V-Apps
+  
+
 
 ## Vanadium Developers
 
