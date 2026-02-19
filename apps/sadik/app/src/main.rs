@@ -1,7 +1,7 @@
 #![cfg_attr(feature = "target_vanadium_ledger", no_std, no_main)]
 
 use sdk::{
-    bignum::{BigNum, BigNumMod, ModulusProvider},
+    bignum::{BigNum, BigNumMod, ModulusProvider, PrimeModulusProvider},
     curve::{Curve as _, EcfpPrivateKey, EcfpPublicKey, Secp256k1Point},
     hash::Hasher,
     App, AppBuilder,
@@ -24,6 +24,7 @@ impl ModulusProvider<32> for N {
         0x41, 0x41,
     ];
 }
+impl PrimeModulusProvider<32> for N {}
 
 // parses a 65-byte uncompressed pubkey into an EcfpPublicKey
 fn parse_pubkey(pubkey: &[u8]) -> EcfpPublicKey<sdk::curve::Secp256k1, 32> {
@@ -92,6 +93,9 @@ fn process_message(_app: &mut App, msg: &[u8]) -> Vec<u8> {
                             common::BigIntOperator::Pow => {
                                 panic!("Exponentiation is only supported for modular big numbers")
                             }
+                            common::BigIntOperator::Inv => {
+                                panic!("Modular inverse is only supported for modular big numbers")
+                            }
                         }
                     }};
                 }
@@ -133,6 +137,13 @@ fn process_message(_app: &mut App, msg: &[u8]) -> Vec<u8> {
                             panic!("Unsupported length for the exponent in sadik");
                         }
                     }
+                } else if let common::BigIntOperator::Inv = operator {
+                    if a.len() != 32 {
+                        panic!("Only modular big numbers of length 32 are supported in sadik");
+                    }
+                    let a: BigNumMod<32, N> =
+                        BigNumMod::from_be_bytes(a.as_slice().try_into().unwrap());
+                    a.inv().to_be_bytes().to_vec()
                 } else {
                     if a.len() != 32 || b.len() != 32 {
                         panic!("Only modular big numbers of length 32 are supported in sadik");
@@ -147,7 +158,9 @@ fn process_message(_app: &mut App, msg: &[u8]) -> Vec<u8> {
                         common::BigIntOperator::Add => (&a + &b).to_be_bytes().to_vec(),
                         common::BigIntOperator::Sub => (&a - &b).to_be_bytes().to_vec(),
                         common::BigIntOperator::Mul => (&a * &b).to_be_bytes().to_vec(),
-                        common::BigIntOperator::Pow => panic!("Unreachable code"),
+                        common::BigIntOperator::Pow | common::BigIntOperator::Inv => {
+                            panic!("Unreachable code")
+                        }
                     }
                 }
             }
