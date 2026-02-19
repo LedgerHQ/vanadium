@@ -552,6 +552,41 @@ pub fn bn_multm(r: *mut u8, a: *const u8, b: *const u8, m: *const u8, len: usize
     1
 }
 
+/// Computes the modular inverse of `a` modulo `p`, storing the result in `r`.
+/// The modulus `p` must be a prime number.
+/// Uses Fermat's little theorem: a^{-1} = a^{p-2} mod p.
+pub fn bn_modinv_prime(r: *mut u8, a: *const u8, p: *const u8, len: usize) -> u32 {
+    if len > MAX_BIGNUMBER_SIZE {
+        return 0;
+    }
+
+    let a = unsafe { to_bigint(a, len) };
+    let p = unsafe { to_bigint(p, len) };
+
+    if a.is_zero() || p.is_zero() {
+        return 0;
+    }
+
+    if a >= p {
+        return 0;
+    }
+
+    // Fermat's little theorem: a^{-1} = a^{p-2} mod p (valid when p is prime)
+    let exp = &p - BigUint::from(2u32);
+    let result = a.modpow(&exp, &p);
+    let result_bytes = result.to_bytes_be();
+
+    if result_bytes.len() > len {
+        return 0;
+    }
+
+    unsafe {
+        copy_result(r, &result_bytes, len);
+    }
+
+    1
+}
+
 pub fn bn_powm(
     r: *mut u8,
     a: *const u8,

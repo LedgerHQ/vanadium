@@ -201,6 +201,19 @@ forward_to_ecall! {
         len: usize,
     ) -> u32;
 
+    /// Computes the modular inverse of `a` modulo `p`, storing the result in `r`.
+    /// The modulus `p` must be a prime number. The result is undefined if `p` is not prime.
+    ///
+    /// # Parameters
+    /// - `r`: Pointer to the result buffer.
+    /// - `a`: Pointer to the value to invert.
+    /// - `p`: Pointer to the prime modulus buffer.
+    /// - `len`: Length of `r`, `a`, and `p`.
+    ///
+    /// # Returns
+    /// 1 on success, 0 on error.
+    pub fn bn_modinv_prime(r: *mut u8, a: *const u8, p: *const u8, len: usize) -> u32;
+
     /// Derives a hierarchical deterministic (HD) node, made of the private key and the corresponding chain code.
     ///
     /// # Parameters

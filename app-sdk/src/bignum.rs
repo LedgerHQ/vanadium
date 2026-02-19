@@ -4,6 +4,9 @@
 //! This module defines the `BigNum`, `Modulus`, and `BigNumMod` structs, which allow for
 //! arithmetic operations on big numbers of a specified size, including modular addition,
 //! subtraction, multiplication, and exponentiation.
+//!
+//! The `PrimeModulusProvider` marker trait can be implemented for moduli that are known to be an
+//! odd prime, which enables the modular inverse operation (`inv()`) on `BigNumMod` instances.
 
 use core::{
     marker::PhantomData,
@@ -193,6 +196,17 @@ pub trait ModulusProvider<const N: usize>: Sized {
     }
 }
 
+/// Marker trait for moduli that are known to be odd primes.
+///
+/// Implementing this trait for a `ModulusProvider` enables the `inv()` method on `BigNumMod`,
+/// which computes the modular inverse using Fermat's little theorem.
+///
+/// # Safety (logical)
+///
+/// The implementor must guarantee that the modulus `M` is an odd prime number. Using a non-prime
+/// or even modulus will produce incorrect or undefined results.
+pub trait PrimeModulusProvider<const N: usize>: ModulusProvider<N> {}
+
 /// Represents a big number under a given modulus.
 ///
 /// The `BigNumMod` struct provides arithmetic operations for big numbers under a specified modulus.
@@ -308,6 +322,27 @@ impl<const N: usize, M: ModulusProvider<N>> BigNumMod<N, M> {
     /// side channel attacks are not a concern. This avoids the overhead of the constant-time comparison.
     pub fn unsafe_eq(&self, other: &Self) -> bool {
         self.buffer == other.buffer
+    }
+}
+
+/// Modular inverse, only available when the modulus is known to be prime.
+impl<const N: usize, M: PrimeModulusProvider<N>> BigNumMod<N, M> {
+    /// Computes the modular inverse of `self` modulo the modulus.
+    ///
+    /// This method is only available when the modulus implements `PrimeModulusProvider`,
+    /// ensuring at the type level that the modulus is prime.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the inversion fails (e.g., if the value is zero).
+    pub fn inv(&self) -> Self {
+        let mut result = [0u8; N];
+        let res =
+            ecalls::bn_modinv_prime(result.as_mut_ptr(), self.buffer.as_ptr(), M::M.as_ptr(), N);
+        if res != 1 {
+            panic!("Modular inverse failed");
+        }
+        Self::from_be_bytes_noreduce(result)
     }
 }
 
@@ -658,6 +693,7 @@ mod tests {
         const M: [u8; 32] =
             hex!("fffffffffffffffffffffffffffffffffffffffffffffffffffffffefffffc2f");
     }
+    impl PrimeModulusProvider<32> for M {}
 
     #[derive(Debug, Clone, Copy)]
     struct M2;
@@ -904,5 +940,24 @@ mod tests {
         let neg_a = -&a;
         // In modular arithmetic, a + (-a) should equal 0
         assert_eq!(&a + &neg_a, BigNumMod::<32, M>::from_u32(0));
+    }
+
+    #[test]
+    fn test_big_num_mod_inv() {
+        // a * a^{-1} should equal 1
+        let a = BigNumMod::<32, M>::from_u32(7);
+        let a_inv = a.inv();
+        assert_eq!(&a * &a_inv, BigNumMod::<32, M>::from_u32(1));
+
+        // Test with a larger value (M is the secp256k1 field prime)
+        let b = BigNumMod::<32, M>::from_be_bytes(hex!(
+            "a247598432980432940980983408039480095809832048509809580984320985"
+        ));
+        let b_inv = b.inv();
+        assert_eq!(&b * &b_inv, BigNumMod::<32, M>::from_u32(1));
+
+        // inv(1) == 1
+        let one = BigNumMod::<32, M>::from_u32(1);
+        assert_eq!(one.inv(), one);
     }
 }

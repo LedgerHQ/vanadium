@@ -35,6 +35,7 @@ delegate_ecall!(bn_addm, u32, (r: *mut u8), (a: *const u8), (b: *const u8), (m: 
 delegate_ecall!(bn_subm, u32, (r: *mut u8), (a: *const u8), (b: *const u8), (m: *const u8), (len: usize));
 delegate_ecall!(bn_multm, u32, (r: *mut u8), (a: *const u8), (b: *const u8), (m: *const u8), (len: usize));
 delegate_ecall!(bn_powm, u32, (r: *mut u8), (a: *const u8), (e: *const u8), (len_e: usize), (m: *const u8), (len: usize));
+delegate_ecall!(bn_modinv_prime, u32, (r: *mut u8), (a: *const u8), (p: *const u8), (len: usize));
 
 delegate_ecall!(derive_hd_node, u32, (curve: u32), (path: *const u32), (path_len: usize), (privkey: *mut u8), (chain_code: *mut u8));
 delegate_ecall!(get_master_fingerprint, u32, (curve: u32));

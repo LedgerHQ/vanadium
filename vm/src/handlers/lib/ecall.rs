@@ -789,6 +789,46 @@ impl<'a, const N: usize> CommEcallHandler<'a, N> {
         Ok(())
     }
 
+    /// Computes the modular inverse of `a` modulo `p` (a prime), storing the result in `r`.
+    fn handle_bn_modinv_prime<E: fmt::Debug>(
+        &self,
+        cpu: &mut Cpu<OutsourcedMemory<'_, N>>,
+        r: GuestPointer,
+        a: GuestPointer,
+        p: GuestPointer,
+        len: usize,
+    ) -> Result<(), CommEcallError> {
+        if len > MAX_BIGNUMBER_SIZE {
+            return Err(CommEcallError::InvalidParameters("len is too large"));
+        }
+
+        // copy inputs to local memory
+        let mut a_local: [u8; MAX_BIGNUMBER_SIZE] = [0; MAX_BIGNUMBER_SIZE];
+        cpu.get_segment::<E>(a.0)?
+            .read_buffer(a.0, &mut a_local[0..len])?;
+        let mut p_local: [u8; MAX_BIGNUMBER_SIZE] = [0; MAX_BIGNUMBER_SIZE];
+        cpu.get_segment::<E>(p.0)?
+            .read_buffer(p.0, &mut p_local[0..len])?;
+
+        let mut r_local: [u8; MAX_BIGNUMBER_SIZE] = [0; MAX_BIGNUMBER_SIZE];
+        unsafe {
+            let res = sys::cx_math_invprimem_no_throw(
+                r_local.as_mut_ptr(),
+                a_local.as_ptr(),
+                p_local.as_ptr(),
+                len,
+            );
+            if res != CX_OK {
+                return Err(CommEcallError::GenericError("modinv failed"));
+            }
+        }
+
+        // copy r_local to r
+        let segment = cpu.get_segment::<E>(r.0)?;
+        segment.write_buffer(r.0, &r_local[0..len])?;
+        Ok(())
+    }
+
     fn handle_bn_powm<E: fmt::Debug>(
         &self,
         cpu: &mut Cpu<OutsourcedMemory<'_, N>>,
@@ -1693,6 +1733,7 @@ fn get_ecall_name(ecall_code: u32) -> String {
         ECALL_SUBM => "subm".into(),
         ECALL_MULTM => "multm".into(),
         ECALL_POWM => "powm".into(),
+        ECALL_MODINV_PRIME => "modinv_prime".into(),
         ECALL_HASH_INIT => "hash_init".into(),
         ECALL_HASH_UPDATE => "hash_update".into(),
         ECALL_HASH_DIGEST => "hash_digest".into(),
@@ -1844,6 +1885,17 @@ impl<'a, const N: usize> EcallHandler for CommEcallHandler<'a, N> {
                     GPreg!(A2),
                     GPreg!(A3),
                     reg!(A4) as usize,
+                )?;
+
+                reg!(A0) = 1;
+            }
+            ECALL_MODINV_PRIME => {
+                self.handle_bn_modinv_prime::<CommEcallError>(
+                    cpu,
+                    GPreg!(A0),
+                    GPreg!(A1),
+                    GPreg!(A2),
+                    reg!(A3) as usize,
                 )?;
 
                 reg!(A0) = 1;
