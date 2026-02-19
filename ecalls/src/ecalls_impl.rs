@@ -350,6 +350,7 @@ ecall5!(bn_addm, ECALL_ADDM, (r: *mut u8), (a: *const u8), (b: *const u8), (m: *
 ecall5!(bn_subm, ECALL_SUBM, (r: *mut u8), (a: *const u8), (b: *const u8), (m: *const u8), (len: usize), u32);
 ecall5!(bn_multm, ECALL_MULTM, (r: *mut u8), (a: *const u8), (b: *const u8), (m: *const u8), (len: usize), u32);
 ecall6!(bn_powm, ECALL_POWM, (r: *mut u8), (a: *const u8), (e: *const u8), (len_e: usize), (m: *const u8), (len: usize), u32);
+ecall4!(bn_modinv_prime, ECALL_MODINV_PRIME, (r: *mut u8), (a: *const u8), (p: *const u8), (len: usize), u32);
 
 ecall5!(derive_hd_node, ECALL_DERIVE_HD_NODE, (curve: u32), (path: *const u32), (path_len: usize), (privkey: *mut u8), (chain_code: *mut u8), u32);
 ecall1!(get_master_fingerprint, ECALL_GET_MASTER_FINGERPRINT, (curve: u32), u32);

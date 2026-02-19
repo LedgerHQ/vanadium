@@ -28,6 +28,7 @@ pub const ECALL_ADDM: u32 = 111;
 pub const ECALL_SUBM: u32 = 112;
 pub const ECALL_MULTM: u32 = 113;
 pub const ECALL_POWM: u32 = 114;
+pub const ECALL_MODINV_PRIME: u32 = 115;
 
 pub const MAX_BIGNUMBER_SIZE: usize = 64;
 
