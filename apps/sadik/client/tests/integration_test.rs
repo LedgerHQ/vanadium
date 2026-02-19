@@ -156,6 +156,34 @@ async fn test_big_num_mod() {
 }
 
 #[tokio::test]
+async fn test_big_num_mod_inv() {
+    let mut setup = setup().await;
+
+    // all operations are modulo 0xfffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141
+    // (curve order of Secp256k1)
+
+    let one: Vec<u8> = hex!("0000000000000000000000000000000000000000000000000000000000000001").to_vec();
+
+    // inv(1) == 1
+    assert_eq!(
+        setup.client.bignum_modinv(&one).await.unwrap(),
+        one
+    );
+
+    // a * inv(a) == 1 (for a small value)
+    let a = hex!("0000000000000000000000000000000000000000000000000000000000000007");
+    let a_inv = setup.client.bignum_modinv(&a).await.unwrap();
+    let product = setup.client.bignum_operation(BigIntOperator::Mul, &a, &a_inv, true).await.unwrap();
+    assert_eq!(product, one);
+
+    // a * inv(a) == 1 (for a larger value)
+    let b = hex!("a247598432980432940980983408039480095809832048509809580984320985");
+    let b_inv = setup.client.bignum_modinv(&b).await.unwrap();
+    let product = setup.client.bignum_operation(BigIntOperator::Mul, &b, &b_inv, true).await.unwrap();
+    assert_eq!(product, one);
+}
+
+#[tokio::test]
 async fn test_ripemd160() {
     let mut setup = setup().await;
 

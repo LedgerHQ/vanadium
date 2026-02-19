@@ -12,6 +12,7 @@ pub enum BigIntOperator {
     Sub,
     Mul,
     Pow,
+    Inv,
 }
 
 #[derive(Serialize, Deserialize, Debug, PartialEq)]

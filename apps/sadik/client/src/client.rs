@@ -85,6 +85,20 @@ impl SadikClient {
             .expect("Error sending message"))
     }
 
+    pub async fn bignum_modinv(&mut self, a: &[u8]) -> Result<Vec<u8>, SadikClientError> {
+        let cmd = Command::BigIntOperation {
+            operator: BigIntOperator::Inv,
+            a: a.to_vec(),
+            b: Vec::new(),
+            modular: true,
+        };
+
+        let msg = postcard::to_allocvec(&cmd).expect("Serialization failed");
+        Ok(send_message(&mut self.vapp_transport, &msg)
+            .await
+            .expect("Error sending message"))
+    }
+
     pub async fn derive_hd_node(
         &mut self,
         curve: Curve,
