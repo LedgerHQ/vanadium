@@ -405,12 +405,46 @@ forward_to_ecall! {
         signature: *const u8,
         signature_len: usize,
     ) -> u32;
-}
 
-#[cfg(feature = "target_vanadium_ledger")]
-forward_to_ecall! {
+    /// Initializes a hash context for the specified hash algorithm.
+    ///
+    /// # Parameters
+    /// - `hash_id`: The hash algorithm identifier (see [`common::ecall_constants::HashId`]).
+    /// - `ctx`: Pointer to the opaque context buffer to initialize. The buffer must be at
+    ///   least as large as the corresponding `CTX_*_SIZE` constant defined in
+    ///   [`common::ecall_constants`] for the given `hash_id`.
     pub fn hash_init(hash_id: u32, ctx: *mut u8);
+
+    /// Updates a hash context with additional input data.
+    ///
+    /// # Parameters
+    /// - `hash_id`: The hash algorithm identifier (see [`common::ecall_constants::HashId`]).
+    /// - `ctx`: Pointer to the opaque context buffer previously initialized by [`hash_init`].
+    ///   The buffer must be at least as large as the corresponding `CTX_*_SIZE` constant
+    ///   defined in [`common::ecall_constants`] for the given `hash_id`.
+    /// - `data`: Pointer to the input data buffer.
+    /// - `len`: Length of the input data.
+    ///
+    /// # Returns
+    /// 1 on success, 0 on error.
     pub fn hash_update(hash_id: u32, ctx: *mut u8, data: *const u8, len: usize) -> u32;
+
+    /// Finalizes a hash computation and writes the digest to the output buffer.
+    ///
+    /// After calling this function the context is consumed and must not be reused
+    /// without a new call to [`hash_init`].
+    ///
+    /// # Parameters
+    /// - `hash_id`: The hash algorithm identifier (see [`common::ecall_constants::HashId`]).
+    /// - `ctx`: Pointer to the opaque context buffer previously initialized by [`hash_init`].
+    ///   The buffer must be at least as large as the corresponding `CTX_*_SIZE` constant
+    ///   defined in [`common::ecall_constants`] for the given `hash_id`.
+    /// - `digest`: Pointer to the output buffer where the digest will be written. The buffer
+    ///   must be large enough to hold the digest for the given `hash_id` (e.g. 32 bytes for
+    ///   SHA-256, 64 bytes for SHA-512, 20 bytes for RIPEMD-160).
+    ///
+    /// # Returns
+    /// 1 on success, 0 on error.
     pub fn hash_final(hash_id: u32, ctx: *mut u8, digest: *const u8) -> u32;
 }
 
