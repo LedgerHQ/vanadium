@@ -69,6 +69,17 @@ pub const ECALL_HASH_INIT: u32 = 150;
 pub const ECALL_HASH_UPDATE: u32 = 151;
 pub const ECALL_HASH_DIGEST: u32 = 152;
 
+/// Size in bytes of the hash context structs used by the hash ecalls.
+///
+/// These are the sizes of the opaque context buffers passed to `hash_init`,
+/// `hash_update`, and `hash_final`. Each context must be at least this large.
+/// The sizes are at least 16 bytes larger than what the Ledger OS uses, in
+/// order to have some leeway for different targets where the struct might
+/// be larger.
+pub const CTX_SHA256_SIZE: usize = 128;
+pub const CTX_SHA512_SIZE: usize = 224;
+pub const CTX_RIPEMD160_SIZE: usize = 120;
+
 // Operations for public keys over elliptic curves
 pub const ECALL_ECFP_ADD_POINT: u32 = 160;
 pub const ECALL_ECFP_SCALAR_MULT: u32 = 161;

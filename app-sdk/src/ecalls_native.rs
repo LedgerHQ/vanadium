@@ -14,9 +14,13 @@ use std::io::Read;
 use hmac::{Hmac, Mac};
 use sha2::Sha512;
 
+use sha2::Digest as _;
+
 use common::{
     constants::STORAGE_SLOT_SIZE,
-    ecall_constants::{CurveKind, MAX_BIGNUMBER_SIZE},
+    ecall_constants::{
+        CurveKind, HashId, CTX_RIPEMD160_SIZE, CTX_SHA256_SIZE, CTX_SHA512_SIZE, MAX_BIGNUMBER_SIZE,
+    },
     ux::{Deserializable, EventCode, EventData},
     BufferType,
 };
@@ -1227,6 +1231,89 @@ pub fn storage_write(slot_index: u32, buffer: *const u8, buffer_size: usize) -> 
     1
 }
 
+// Compile-time size and alignment checks: native hashers must fit in the context structs
+const _: () = assert!(
+    std::mem::size_of::<sha2::Sha256>() <= CTX_SHA256_SIZE,
+    "sha2::Sha256 does not fit in CtxSha256",
+);
+const _: () = assert!(
+    std::mem::size_of::<sha2::Sha512>() <= CTX_SHA512_SIZE,
+    "sha2::Sha512 does not fit in CtxSha512",
+);
+const _: () = assert!(
+    std::mem::size_of::<ripemd::Ripemd160>() <= CTX_RIPEMD160_SIZE,
+    "ripemd::Ripemd160 does not fit in CtxRipemd160",
+);
+
+pub fn hash_init(hash_id: u32, ctx: *mut u8) {
+    match hash_id {
+        id if id == HashId::Sha256 as u32 => {
+            let hasher = sha2::Sha256::new();
+            unsafe { std::ptr::write_unaligned(ctx as *mut sha2::Sha256, hasher) };
+        }
+        id if id == HashId::Sha512 as u32 => {
+            let hasher = sha2::Sha512::new();
+            unsafe { std::ptr::write_unaligned(ctx as *mut sha2::Sha512, hasher) };
+        }
+        id if id == HashId::Ripemd160 as u32 => {
+            let hasher = ripemd::Ripemd160::new();
+            unsafe { std::ptr::write_unaligned(ctx as *mut ripemd::Ripemd160, hasher) };
+        }
+        _ => panic!("hash_init: unsupported hash_id {}", hash_id),
+    }
+}
+
+pub fn hash_update(hash_id: u32, ctx: *mut u8, data: *const u8, len: usize) -> u32 {
+    let data_slice = unsafe { std::slice::from_raw_parts(data, len) };
+    match hash_id {
+        id if id == HashId::Sha256 as u32 => {
+            let mut hasher = unsafe { std::ptr::read_unaligned(ctx as *const sha2::Sha256) };
+            hasher.update(data_slice);
+            unsafe { std::ptr::write_unaligned(ctx as *mut sha2::Sha256, hasher) };
+        }
+        id if id == HashId::Sha512 as u32 => {
+            let mut hasher = unsafe { std::ptr::read_unaligned(ctx as *const sha2::Sha512) };
+            hasher.update(data_slice);
+            unsafe { std::ptr::write_unaligned(ctx as *mut sha2::Sha512, hasher) };
+        }
+        id if id == HashId::Ripemd160 as u32 => {
+            let mut hasher = unsafe { std::ptr::read_unaligned(ctx as *const ripemd::Ripemd160) };
+            hasher.update(data_slice);
+            unsafe { std::ptr::write_unaligned(ctx as *mut ripemd::Ripemd160, hasher) };
+        }
+        _ => panic!("hash_update: unsupported hash_id {}", hash_id),
+    }
+    1
+}
+
+pub fn hash_final(hash_id: u32, ctx: *mut u8, digest: *const u8) -> u32 {
+    match hash_id {
+        id if id == HashId::Sha256 as u32 => {
+            let hasher = unsafe { std::ptr::read_unaligned(ctx as *const sha2::Sha256) };
+            let result = hasher.finalize();
+            unsafe {
+                std::ptr::copy_nonoverlapping(result.as_ptr(), digest as *mut u8, 32);
+            }
+        }
+        id if id == HashId::Sha512 as u32 => {
+            let hasher = unsafe { std::ptr::read_unaligned(ctx as *const sha2::Sha512) };
+            let result = hasher.finalize();
+            unsafe {
+                std::ptr::copy_nonoverlapping(result.as_ptr(), digest as *mut u8, 64);
+            }
+        }
+        id if id == HashId::Ripemd160 as u32 => {
+            let hasher = unsafe { std::ptr::read_unaligned(ctx as *const ripemd::Ripemd160) };
+            let result = hasher.finalize();
+            unsafe {
+                std::ptr::copy_nonoverlapping(result.as_ptr(), digest as *mut u8, 20);
+            }
+        }
+        _ => panic!("hash_final: unsupported hash_id {}", hash_id),
+    }
+    1
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1255,5 +1342,48 @@ mod tests {
             slip21_derive_child_node(&c, b"Authentication key")[32..],
             hex!("47194e938ab24cc82bfa25f6486ed54bebe79c40ae2a5a32ea6db294d81861a6")
         );
+    }
+
+    #[test]
+    fn test_hash_sha256() {
+        use crate::hash::{Hasher, Sha256};
+
+        // SHA-256("abc") = ba7816bf...
+        let result = Sha256::hash(b"abc");
+        assert_eq!(
+            result,
+            hex!("ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad")
+        );
+
+        // Test incremental hashing
+        let mut hasher = Sha256::new();
+        hasher.update(b"a");
+        hasher.update(b"bc");
+        let result = hasher.finalize();
+        assert_eq!(
+            result,
+            hex!("ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad")
+        );
+    }
+
+    #[test]
+    fn test_hash_sha512() {
+        use crate::hash::{Hasher, Sha512 as Sha512Hash};
+
+        // SHA-512("abc")
+        let result = Sha512Hash::hash(b"abc");
+        assert_eq!(
+            result,
+            hex!("ddaf35a193617abacc417349ae20413112e6fa4e89a97ea20a9eeee64b55d39a2192992a274fc1a836ba3c23a3feebbd454d4423643ce80e2a9ac94fa54ca49f")
+        );
+    }
+
+    #[test]
+    fn test_hash_ripemd160() {
+        use crate::hash::{Hasher, Ripemd160};
+
+        // RIPEMD-160("abc")
+        let result = Ripemd160::hash(b"abc");
+        assert_eq!(result, hex!("8eb208f7e05d987a9b044a8e98c6b087f15a0bfc"));
     }
 }
