@@ -39,7 +39,7 @@ delegate_ecall!(bn_modinv_prime, u32, (r: *mut u8), (a: *const u8), (p: *const u
 
 delegate_ecall!(derive_hd_node, u32, (curve: u32), (path: *const u32), (path_len: usize), (privkey: *mut u8), (chain_code: *mut u8));
 delegate_ecall!(get_master_fingerprint, u32, (curve: u32));
-delegate_ecall!(derive_slip21_node, u32, (label: *const u8), (label_len: usize), (out: *mut u8));
+delegate_ecall!(derive_slip21_node, u32, (labels: *const u8), (labels_len: usize), (out: *mut u8));
 
 delegate_ecall!(ecfp_add_point, u32, (curve: u32), (r: *mut u8), (p: *const u8), (q: *const u8));
 delegate_ecall!(ecfp_scalar_mult, u32, (curve: u32), (r: *mut u8), (p: *const u8), (k: *const u8), (k_len: usize));

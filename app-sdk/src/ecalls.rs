@@ -335,17 +335,17 @@ forward_to_ecall! {
     /// - Each label must not contain a '/' character.
     ///
     /// # Parameters
-    /// - `labels`: Pointer to the label used for SLIP-21 derivation.
-    /// - `labels_len`: Length of the label.
+    /// - `labels`: Pointer to the concatenated, length-prefixed labels used for SLIP-21 derivation.
+    /// - `labels_len`: Length of the labels buffer.
     /// - `out`: Pointer to the buffer where the result will be written. It must be at least 64 bytes long.
     ///
     /// # Returns
     /// 1 on success, 0 on error.
     ///
     /// # Safety
-    /// - `label` must be a valid pointer to at least `label_len` bytes of readable memory.
+    /// - `labels` must be a valid pointer to at least `labels_len` bytes of readable memory.
     /// - `out` must be a valid pointer to at least 64 bytes of writable memory.
-    pub unsafe fn derive_slip21_node(label: *const u8, label_len: usize, out: *mut u8) -> u32;
+    pub unsafe fn derive_slip21_node(labels: *const u8, labels_len: usize, out: *mut u8) -> u32;
 
     /// Adds two elliptic curve points `p` and `q`, storing the result in `r`.
     ///
