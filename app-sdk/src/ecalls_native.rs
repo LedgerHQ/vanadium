@@ -1246,17 +1246,31 @@ const _: () = assert!(
     "ripemd::Ripemd160 does not fit in CtxRipemd160",
 );
 
-pub fn hash_init(hash_id: u32, ctx: *mut u8) {
+pub fn hash_init(hash_identifier: u32, ctx: *mut u8) {
+    let output_size = (hash_identifier & 0xFFFF) as usize; // requested output size from low 16 bits
+    let hash_id = hash_identifier >> 16; // extract algorithm part from composite ecall_id
     match hash_id {
         id if id == HashId::Sha256 as u32 => {
+            if output_size != 32 {
+                panic!("hash_init: invalid output size {} for SHA-256", output_size);
+            }
             let hasher = sha2::Sha256::new();
             unsafe { std::ptr::write_unaligned(ctx as *mut sha2::Sha256, hasher) };
         }
         id if id == HashId::Sha512 as u32 => {
+            if output_size != 64 {
+                panic!("hash_init: invalid output size {} for SHA-512", output_size);
+            }
             let hasher = sha2::Sha512::new();
             unsafe { std::ptr::write_unaligned(ctx as *mut sha2::Sha512, hasher) };
         }
         id if id == HashId::Ripemd160 as u32 => {
+            if output_size != 20 {
+                panic!(
+                    "hash_init: invalid output size {} for RIPEMD-160",
+                    output_size
+                );
+            }
             let hasher = ripemd::Ripemd160::new();
             unsafe { std::ptr::write_unaligned(ctx as *mut ripemd::Ripemd160, hasher) };
         }
@@ -1264,20 +1278,31 @@ pub fn hash_init(hash_id: u32, ctx: *mut u8) {
     }
 }
 
-pub fn hash_update(hash_id: u32, ctx: *mut u8, data: *const u8, len: usize) -> u32 {
+pub fn hash_update(hash_identifier: u32, ctx: *mut u8, data: *const u8, len: usize) -> u32 {
+    let output_size = (hash_identifier & 0xFFFF) as usize; // requested output size from low 16 bits
+    let hash_id = hash_identifier >> 16; // extract algorithm part from composite ecall_id
     let data_slice = unsafe { std::slice::from_raw_parts(data, len) };
     match hash_id {
         id if id == HashId::Sha256 as u32 => {
+            if output_size != 32 {
+                return 0;
+            }
             let mut hasher = unsafe { std::ptr::read_unaligned(ctx as *const sha2::Sha256) };
             hasher.update(data_slice);
             unsafe { std::ptr::write_unaligned(ctx as *mut sha2::Sha256, hasher) };
         }
         id if id == HashId::Sha512 as u32 => {
+            if output_size != 64 {
+                return 0;
+            }
             let mut hasher = unsafe { std::ptr::read_unaligned(ctx as *const sha2::Sha512) };
             hasher.update(data_slice);
             unsafe { std::ptr::write_unaligned(ctx as *mut sha2::Sha512, hasher) };
         }
         id if id == HashId::Ripemd160 as u32 => {
+            if output_size != 20 {
+                return 0;
+            }
             let mut hasher = unsafe { std::ptr::read_unaligned(ctx as *const ripemd::Ripemd160) };
             hasher.update(data_slice);
             unsafe { std::ptr::write_unaligned(ctx as *mut ripemd::Ripemd160, hasher) };
@@ -1287,9 +1312,14 @@ pub fn hash_update(hash_id: u32, ctx: *mut u8, data: *const u8, len: usize) -> u
     1
 }
 
-pub fn hash_final(hash_id: u32, ctx: *mut u8, digest: *mut u8) -> u32 {
+pub fn hash_final(hash_identifier: u32, ctx: *mut u8, digest: *mut u8) -> u32 {
+    let output_size = (hash_identifier & 0xFFFF) as usize; // requested output size from low 16 bits
+    let hash_id = hash_identifier >> 16; // extract algorithm part from composite ecall_id
     match hash_id {
         id if id == HashId::Sha256 as u32 => {
+            if output_size != 32 {
+                return 0;
+            }
             let hasher = unsafe { std::ptr::read_unaligned(ctx as *const sha2::Sha256) };
             let result = hasher.finalize();
             unsafe {
@@ -1297,6 +1327,9 @@ pub fn hash_final(hash_id: u32, ctx: *mut u8, digest: *mut u8) -> u32 {
             }
         }
         id if id == HashId::Sha512 as u32 => {
+            if output_size != 64 {
+                return 0;
+            }
             let hasher = unsafe { std::ptr::read_unaligned(ctx as *const sha2::Sha512) };
             let result = hasher.finalize();
             unsafe {
@@ -1304,6 +1337,9 @@ pub fn hash_final(hash_id: u32, ctx: *mut u8, digest: *mut u8) -> u32 {
             }
         }
         id if id == HashId::Ripemd160 as u32 => {
+            if output_size != 20 {
+                return 0;
+            }
             let hasher = unsafe { std::ptr::read_unaligned(ctx as *const ripemd::Ripemd160) };
             let result = hasher.finalize();
             unsafe {

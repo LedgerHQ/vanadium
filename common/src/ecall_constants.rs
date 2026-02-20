@@ -46,6 +46,21 @@ pub enum HashId {
     Sha512 = 5,
 }
 
+impl HashId {
+    /// Returns the composite ECALL hash_id passed to hash_init / hash_update / hash_final.
+    ///
+    /// Layout (32 bits):
+    ///   - high 16 bits: algorithm identifier (matches the Ledger SDK hash type constants)
+    ///   - low 16 bits:  output size in bytes, supplied by the caller
+    ///
+    /// The output size is passed explicitly rather than being derived from `self` so that
+    /// one algorithm identifier can support multiple output lengths.
+    /// Note that only certain output sizes might be valid for each algorithm.
+    pub const fn ecall_id(self, output_size: u16) -> u32 {
+        ((self as u32) << 16) | (output_size as u32)
+    }
+}
+
 // TODO: signing modes for now are matching the ones in the ledger SDK
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 #[repr(C)]

@@ -214,37 +214,33 @@ union LedgerHashContext {
 
 impl LedgerHashContext {
     const MAX_HASH_CONTEXT_SIZE: usize = core::mem::size_of::<LedgerHashContext>();
-    const MAX_DIGEST_LEN: usize = 64;
 
     // in-memory size of the hash context struct for the corresponding hash type
-    fn get_size_from_id(hash_id: u32) -> Result<usize, LedgerHashContextError> {
-        if hash_id > 255 {
+    fn get_size_from_id(hash_identifier: u32) -> Result<usize, LedgerHashContextError> {
+        if hash_identifier >> 16 == 0 {
             return Err(LedgerHashContextError::InvalidHashId);
         }
-        let res = match hash_id as u8 {
+        let res = match (hash_identifier >> 16) as u8 {
             CX_RIPEMD160 => core::mem::size_of::<cx_ripemd160_t>(),
             CX_SHA256 => core::mem::size_of::<cx_sha256_t>(),
             CX_SHA512 => core::mem::size_of::<cx_sha512_t>(),
             _ => return Err(LedgerHashContextError::UnsupportedHashId),
         };
 
-        assert!(res <= Self::MAX_HASH_CONTEXT_SIZE);
-
         Ok(res)
     }
 
-    fn get_digest_len_from_id(hash_id: u32) -> Result<usize, LedgerHashContextError> {
-        if hash_id > 255 {
+    fn get_digest_len_from_id(hash_identifier: u32) -> Result<usize, LedgerHashContextError> {
+        if hash_identifier >> 16 == 0 {
             return Err(LedgerHashContextError::InvalidHashId);
         }
-        let res = match hash_id as u8 {
-            CX_RIPEMD160 => 20,
-            CX_SHA256 => 32,
-            CX_SHA512 => 64,
+        // validate that the algorithm in the high 16 bits is supported
+        match (hash_identifier >> 16) as u8 {
+            CX_RIPEMD160 | CX_SHA256 | CX_SHA512 => {}
             _ => return Err(LedgerHashContextError::UnsupportedHashId),
         };
-
-        assert!(res <= Self::MAX_DIGEST_LEN);
+        // the output size is encoded in the low 16 bits by the app
+        let res = (hash_identifier & 0xFFFF) as usize;
 
         Ok(res)
     }
@@ -881,11 +877,11 @@ impl<'a, const N: usize> CommEcallHandler<'a, N> {
     fn handle_hash_init<E: fmt::Debug>(
         &self,
         cpu: &mut Cpu<OutsourcedMemory<'_, N>>,
-        hash_id: u32,
+        hash_identifier: u32,
         ctx: GuestPointer,
     ) -> Result<(), CommEcallError> {
         // in-memory size of the hash context struct
-        let ctx_size = LedgerHashContext::get_size_from_id(hash_id)?;
+        let ctx_size = LedgerHashContext::get_size_from_id(hash_identifier)?;
 
         // copy context to local memory
         let mut ctx_local: [u8; LedgerHashContext::MAX_HASH_CONTEXT_SIZE] =
@@ -897,7 +893,7 @@ impl<'a, const N: usize> CommEcallHandler<'a, N> {
         unsafe {
             sys::cx_hash_init(
                 ctx_local.as_mut_ptr() as *mut sys::cx_hash_header_s,
-                hash_id as u8,
+                (hash_identifier >> 16) as u8,
             );
         }
 
@@ -911,13 +907,13 @@ impl<'a, const N: usize> CommEcallHandler<'a, N> {
     fn handle_hash_update<E: fmt::Debug>(
         &self,
         cpu: &mut Cpu<OutsourcedMemory<'_, N>>,
-        hash_id: u32,
+        hash_identifier: u32,
         ctx: GuestPointer,
         data: GuestPointer,
         data_len: usize,
     ) -> Result<(), CommEcallError> {
         // in-memory size of the hash context struct
-        let ctx_size = LedgerHashContext::get_size_from_id(hash_id)?;
+        let ctx_size = LedgerHashContext::get_size_from_id(hash_identifier)?;
 
         if data_len == 0 {
             return Ok(());
@@ -964,12 +960,12 @@ impl<'a, const N: usize> CommEcallHandler<'a, N> {
     fn handle_hash_digest<E: fmt::Debug>(
         &self,
         cpu: &mut Cpu<OutsourcedMemory<'_, N>>,
-        hash_id: u32,
+        hash_identifier: u32,
         ctx: GuestPointer,
         digest: GuestPointer,
     ) -> Result<(), CommEcallError> {
         // in-memory size of the hash context struct
-        let ctx_size = LedgerHashContext::get_size_from_id(hash_id)?;
+        let ctx_size = LedgerHashContext::get_size_from_id(hash_identifier)?;
 
         // copy context to local memory
         let mut ctx_local: [u8; LedgerHashContext::MAX_HASH_CONTEXT_SIZE] =
@@ -992,7 +988,7 @@ impl<'a, const N: usize> CommEcallHandler<'a, N> {
         }
 
         // actual length of the digest
-        let digest_len = LedgerHashContext::get_digest_len_from_id(hash_id)?;
+        let digest_len = LedgerHashContext::get_digest_len_from_id(hash_identifier)?;
         // copy digest to V-App memory
         let segment = cpu.get_segment::<E>(digest.0)?;
         segment.write_buffer(digest.0, &digest_local[0..digest_len])?;
