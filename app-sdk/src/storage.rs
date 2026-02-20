@@ -20,7 +20,8 @@ pub use common::constants::STORAGE_SLOT_SIZE;
 /// ```
 pub fn read_slot(slot_index: u32) -> Result<[u8; STORAGE_SLOT_SIZE], &'static str> {
     let mut buffer = [0u8; STORAGE_SLOT_SIZE];
-    let result = ecalls::storage_read(slot_index, buffer.as_mut_ptr(), STORAGE_SLOT_SIZE);
+    // SAFETY: buffer is a valid [u8; STORAGE_SLOT_SIZE] on the stack.
+    let result = unsafe { ecalls::storage_read(slot_index, buffer.as_mut_ptr(), STORAGE_SLOT_SIZE) };
 
     if result == 1 {
         Ok(buffer)
@@ -49,7 +50,8 @@ pub fn read_slot(slot_index: u32) -> Result<[u8; STORAGE_SLOT_SIZE], &'static st
 /// }
 /// ```
 pub fn write_slot(slot_index: u32, data: &[u8; STORAGE_SLOT_SIZE]) -> Result<(), &'static str> {
-    let result = ecalls::storage_write(slot_index, data.as_ptr(), STORAGE_SLOT_SIZE);
+    // SAFETY: data is a valid reference to a [u8; STORAGE_SLOT_SIZE] array.
+    let result = unsafe { ecalls::storage_write(slot_index, data.as_ptr(), STORAGE_SLOT_SIZE) };
 
     if result == 1 {
         Ok(())

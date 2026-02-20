@@ -6,35 +6,70 @@ use crate::ecalls_native as ecalls_module;
 
 use common::ux::EventData;
 
-/// Macro to forward function calls to the `ecalls_module`.
+/// Macro to forward unsafe function calls to the `ecalls_module`.
 /// This approach ensures that the actual implementations are consistent across native and riscv targets.
+/// Functions forwarded by this macro involve raw pointers. See the `# Safety` section on each
+/// function for the exact caller requirements.
 macro_rules! forward_to_ecall {
     (
         $(
             $(#[$meta:meta])*
-            pub fn $name:ident ( $($arg:ident : $ty:ty),* $(,)? ) $(-> $ret:ty)? ;
+            pub unsafe fn $name:ident ( $($arg:ident : $ty:ty),* $(,)? ) $(-> $ret:ty)? ;
         )*
     ) => {
         $(
             $(#[$meta])*
             #[inline(always)]
-            pub fn $name($($arg : $ty),*) $(-> $ret)? {
+            pub unsafe fn $name($($arg : $ty),*) $(-> $ret)? {
                 ecalls_module::$name($($arg),*)
             }
         )*
     }
 }
 
-forward_to_ecall! {
-    /// Exits the V-App with the specified status code.
-    ///
-    /// # Parameters
-    /// - `status`: The exit status code.
-    ///
-    /// # Returns
-    /// This function does not return.
-    pub fn exit(status: i32) -> !;
+// The few functions that do not require `unsafe` are defined here without the macro.
 
+/// Exits the V-App with the specified status code.
+///
+/// # Parameters
+/// - `status`: The exit status code.
+///
+/// # Returns
+/// This function does not return.
+#[inline(always)]
+pub fn exit(status: i32) -> ! {
+    ecalls_module::exit(status)
+}
+
+/// Retrieves device information based on the requested property type.
+///
+/// # Parameters
+/// - `property_id`: The property identifier
+///
+/// # Returns
+/// The requested property value. It will panic if the property is not supported.
+#[inline(always)]
+pub fn get_device_property(property_id: u32) -> u32 {
+    ecalls_module::get_device_property(property_id)
+}
+
+/// Retrieves the fingerprint for the master public key for the specified curve.
+///
+/// # Parameters
+/// - `curve`: The elliptic curve identifier. Currently only `Secp256k1` is supported.
+///
+/// # Returns
+/// The master fingerprint as a 32-bit unsigned integer, computed as the first 32 bits of
+/// `ripemd160(sha256(pk))`, where `pk` is the compressed public key.
+///
+/// # Panics
+/// This function panics if the curve is not supported.
+#[inline(always)]
+pub fn get_master_fingerprint(curve: u32) -> u32 {
+    ecalls_module::get_master_fingerprint(curve)
+}
+
+forward_to_ecall! {
     /// Prints a fatal error message and exits the V-App.
     ///
     /// # Parameters
@@ -43,14 +78,21 @@ forward_to_ecall! {
     ///
     /// # Returns
     /// This function does not return.
-    pub fn fatal(msg: *const u8, size: usize) -> !;
+    ///
+    /// # Safety
+    /// - `msg` must be a valid pointer to at least `size` bytes of readable memory.
+    /// - The bytes at `[msg, msg+size)` must be valid UTF-8.
+    pub unsafe fn fatal(msg: *const u8, size: usize) -> !;
 
     /// Sends a buffer to the host.
     ///
     /// # Parameters
     /// - `buffer`: Pointer to the buffer to send.
     /// - `size`: Size of the buffer.
-    pub fn xsend(buffer: *const u8, size: usize);
+    ///
+    /// # Safety
+    /// - `buffer` must be a valid pointer to at least `size` bytes of readable memory.
+    pub unsafe fn xsend(buffer: *const u8, size: usize);
 
     /// Receives a buffer from the host.
     ///
@@ -60,14 +102,21 @@ forward_to_ecall! {
     ///
     /// # Returns
     /// The number of bytes received.
-    pub fn xrecv(buffer: *mut u8, max_size: usize) -> usize;
+    ///
+    /// # Safety
+    /// - `buffer` must be a valid pointer to at least `max_size` bytes of writable memory.
+    pub unsafe fn xrecv(buffer: *mut u8, max_size: usize) -> usize;
 
     /// Sends a buffer to print to the host.
     ///
     /// # Parameters
     /// - `buffer`: Pointer to the buffer to print, that must be a valid UTF-8 string.
     /// - `size`: Size of the buffer.
-    pub fn print(buffer: *const u8, size: usize);
+    ///
+    /// # Safety
+    /// - `buffer` must be a valid pointer to at least `size` bytes of readable memory.
+    /// - The bytes at `[buffer, buffer+size)` must be valid UTF-8.
+    pub unsafe fn print(buffer: *const u8, size: usize);
 
     /// Waits for the next event.
     ///
@@ -75,7 +124,11 @@ forward_to_ecall! {
     /// - `data`: Pointer to a 16-byte buffer to receive the event data (if any).
     /// # Returns
     /// The event code.
-    pub fn get_event(data: *mut EventData) -> u32;
+    ///
+    /// # Safety
+    /// - `data` must be a valid pointer to a writable buffer of at least
+    ///   `size_of::<EventData>()` (16) bytes.
+    pub unsafe fn get_event(data: *mut EventData) -> u32;
 
     /// Reads a 32-byte value from the specified storage slot.
     ///
@@ -86,7 +139,10 @@ forward_to_ecall! {
     ///
     /// # Returns
     /// 1 on success, 0 on error.
-    pub fn storage_read(slot_index: u32, buffer: *mut u8, buffer_size: usize) -> u32;
+    ///
+    /// # Safety
+    /// - `buffer` must be a valid pointer to at least `buffer_size` bytes of writable memory.
+    pub unsafe fn storage_read(slot_index: u32, buffer: *mut u8, buffer_size: usize) -> u32;
 
     /// Writes a 32-byte value to the specified storage slot.
     ///
@@ -97,7 +153,10 @@ forward_to_ecall! {
     ///
     /// # Returns
     /// 1 on success, 0 on error.
-    pub fn storage_write(slot_index: u32, buffer: *const u8, buffer_size: usize) -> u32;
+    ///
+    /// # Safety
+    /// - `buffer` must be a valid pointer to at least `buffer_size` bytes of readable memory.
+    pub unsafe fn storage_write(slot_index: u32, buffer: *const u8, buffer_size: usize) -> u32;
 
     /// Shows a page.
     ///
@@ -107,7 +166,10 @@ forward_to_ecall! {
     ///
     /// # Returns
     /// 1 on success, 0 on error.
-    pub fn show_page(page_desc: *const u8, page_desc_len: usize) -> u32;
+    ///
+    /// # Safety
+    /// - `page_desc` must be a valid pointer to at least `page_desc_len` bytes of readable memory.
+    pub unsafe fn show_page(page_desc: *const u8, page_desc_len: usize) -> u32;
 
     /// Shows a step.
     ///
@@ -117,16 +179,10 @@ forward_to_ecall! {
     ///
     /// # Returns
     /// 1 on success, 0 on error.
-    pub fn show_step(step_desc: *const u8, step_desc_len: usize) -> u32;
-
-    /// Retrieves device information based on the requested property type.
     ///
-    /// # Parameters
-    /// - `property_id`: The property identifier
-    ///
-    /// # Returns
-    /// The requested property value. It will panic if the property is not supported.
-    pub fn get_device_property(property_id: u32) -> u32;
+    /// # Safety
+    /// - `step_desc` must be a valid pointer to at least `step_desc_len` bytes of readable memory.
+    pub unsafe fn show_step(step_desc: *const u8, step_desc_len: usize) -> u32;
 
     /// Computes the remainder of dividing `n` by `m`, storing the result in `r`.
     ///
@@ -139,7 +195,12 @@ forward_to_ecall! {
     ///
     /// # Returns
     /// 1 on success, 0 on error.
-    pub fn bn_modm(r: *mut u8, n: *const u8, len: usize, m: *const u8, len_m: usize) -> u32;
+    ///
+    /// # Safety
+    /// - `r` must be a valid pointer to at least `len` bytes of writable memory.
+    /// - `n` must be a valid pointer to at least `len` bytes of readable memory.
+    /// - `m` must be a valid pointer to at least `len_m` bytes of readable memory.
+    pub unsafe fn bn_modm(r: *mut u8, n: *const u8, len: usize, m: *const u8, len_m: usize) -> u32;
 
     /// Adds two big numbers `a` and `b` modulo `m`, storing the result in `r`.
     ///
@@ -152,7 +213,11 @@ forward_to_ecall! {
     ///
     /// # Returns
     /// 1 on success, 0 on error.
-    pub fn bn_addm(r: *mut u8, a: *const u8, b: *const u8, m: *const u8, len: usize) -> u32;
+    ///
+    /// # Safety
+    /// - `r` must be a valid pointer to at least `len` bytes of writable memory.
+    /// - `a`, `b`, and `m` must each be a valid pointer to at least `len` bytes of readable memory.
+    pub unsafe fn bn_addm(r: *mut u8, a: *const u8, b: *const u8, m: *const u8, len: usize) -> u32;
 
     /// Subtracts two big numbers `a` and `b` modulo `m`, storing the result in `r`.
     ///
@@ -165,7 +230,11 @@ forward_to_ecall! {
     ///
     /// # Returns
     /// 1 on success, 0 on error.
-    pub fn bn_subm(r: *mut u8, a: *const u8, b: *const u8, m: *const u8, len: usize) -> u32;
+    ///
+    /// # Safety
+    /// - `r` must be a valid pointer to at least `len` bytes of writable memory.
+    /// - `a`, `b`, and `m` must each be a valid pointer to at least `len` bytes of readable memory.
+    pub unsafe fn bn_subm(r: *mut u8, a: *const u8, b: *const u8, m: *const u8, len: usize) -> u32;
 
     /// Multiplies two big numbers `a` and `b` modulo `m`, storing the result in `r`.
     ///
@@ -178,7 +247,11 @@ forward_to_ecall! {
     ///
     /// # Returns
     /// 1 on success, 0 on error.
-    pub fn bn_multm(r: *mut u8, a: *const u8, b: *const u8, m: *const u8, len: usize) -> u32;
+    ///
+    /// # Safety
+    /// - `r` must be a valid pointer to at least `len` bytes of writable memory.
+    /// - `a`, `b`, and `m` must each be a valid pointer to at least `len` bytes of readable memory.
+    pub unsafe fn bn_multm(r: *mut u8, a: *const u8, b: *const u8, m: *const u8, len: usize) -> u32;
 
     /// Computes `a` to the power of `e` modulo `m`, storing the result in `r`.
     ///
@@ -192,7 +265,13 @@ forward_to_ecall! {
     ///
     /// # Returns
     /// 1 on success, 0 on error.
-    pub fn bn_powm(
+    ///
+    /// # Safety
+    /// - `r` must be a valid pointer to at least `len` bytes of writable memory.
+    /// - `a` must be a valid pointer to at least `len` bytes of readable memory.
+    /// - `e` must be a valid pointer to at least `len_e` bytes of readable memory.
+    /// - `m` must be a valid pointer to at least `len` bytes of readable memory.
+    pub unsafe fn bn_powm(
         r: *mut u8,
         a: *const u8,
         e: *const u8,
@@ -212,7 +291,11 @@ forward_to_ecall! {
     ///
     /// # Returns
     /// 1 on success, 0 on error.
-    pub fn bn_modinv_prime(r: *mut u8, a: *const u8, p: *const u8, len: usize) -> u32;
+    ///
+    /// # Safety
+    /// - `r` must be a valid pointer to at least `len` bytes of writable memory.
+    /// - `a` and `p` must each be a valid pointer to at least `len` bytes of readable memory.
+    pub unsafe fn bn_modinv_prime(r: *mut u8, a: *const u8, p: *const u8, len: usize) -> u32;
 
     /// Derives a hierarchical deterministic (HD) node, made of the private key and the corresponding chain code.
     ///
@@ -228,26 +311,18 @@ forward_to_ecall! {
     ///
     /// # Panics
     /// This function panics if the curve is not supported.
-    pub fn derive_hd_node(
+    ///
+    /// # Safety
+    /// - `path` must be a valid pointer to at least `path_len` `u32` values of readable memory.
+    /// - `privkey` must be a valid pointer to at least 32 bytes of writable memory.
+    /// - `chain_code` must be a valid pointer to at least 32 bytes of writable memory.
+    pub unsafe fn derive_hd_node(
         curve: u32,
         path: *const u32,
         path_len: usize,
         privkey: *mut u8,
         chain_code: *mut u8,
     ) -> u32;
-
-    /// Retrieves the fingerprint for the master public key for the specified curve.
-    ///
-    /// # Parameters
-    /// - `curve`: The elliptic curve identifier. Currently only `Secp256k1` is supported.
-    ///
-    /// # Returns
-    /// The master fingerprint as a 32-bit unsigned integer, computed as the first 32 bits of `ripemd160(sha256(pk))`,
-    /// where `pk` is the public key in compressed form.
-    ///
-    /// # Panics
-    /// This function panics if the curve is not supported.
-    pub fn get_master_fingerprint(curve: u32) -> u32;
 
     /// Derives the root SLIP-21 node m/<label1>/<label2>/.../<labelN>, saving it to the provided 64-byte buffer.
     /// The last 32 bytes of the node are the SLIP-21 key, while the first 32 bytes are the chain code.
@@ -266,7 +341,11 @@ forward_to_ecall! {
     ///
     /// # Returns
     /// 1 on success, 0 on error.
-    pub fn derive_slip21_node(label: *const u8, label_len: usize, out: *mut u8) -> u32;
+    ///
+    /// # Safety
+    /// - `label` must be a valid pointer to at least `label_len` bytes of readable memory.
+    /// - `out` must be a valid pointer to at least 64 bytes of writable memory.
+    pub unsafe fn derive_slip21_node(label: *const u8, label_len: usize, out: *mut u8) -> u32;
 
     /// Adds two elliptic curve points `p` and `q`, storing the result in `r`.
     ///
@@ -278,7 +357,11 @@ forward_to_ecall! {
     ///
     /// # Returns
     /// 1 on success, 0 on error.
-    pub fn ecfp_add_point(curve: u32, r: *mut u8, p: *const u8, q: *const u8) -> u32;
+    ///
+    /// # Safety
+    /// - `r` must be a valid pointer to at least 65 bytes of writable memory.
+    /// - `p` and `q` must each be a valid pointer to at least 65 bytes of readable memory.
+    pub unsafe fn ecfp_add_point(curve: u32, r: *mut u8, p: *const u8, q: *const u8) -> u32;
 
     /// Multiplies an elliptic curve point `p` by a scalar `k`, storing the result in `r`.
     ///
@@ -291,7 +374,12 @@ forward_to_ecall! {
     ///
     /// # Returns
     /// 1 on success, 0 on error.
-    pub fn ecfp_scalar_mult(curve: u32, r: *mut u8, p: *const u8, k: *const u8, k_len: usize) -> u32;
+    ///
+    /// # Safety
+    /// - `r` must be a valid pointer to at least 65 bytes of writable memory.
+    /// - `p` must be a valid pointer to at least 65 bytes of readable memory.
+    /// - `k` must be a valid pointer to at least `k_len` bytes of readable memory.
+    pub unsafe fn ecfp_scalar_mult(curve: u32, r: *mut u8, p: *const u8, k: *const u8, k_len: usize) -> u32;
 
     /// Generates `size` random bytes using a cryptographically secure random number generator,
     /// and writes them to the provided buffer.
@@ -302,7 +390,10 @@ forward_to_ecall! {
     ///
     /// # Returns
     /// 1 on success, 0 on error.
-    pub fn get_random_bytes(buffer: *mut u8, size: usize) -> u32;
+    ///
+    /// # Safety
+    /// - `buffer` must be a valid pointer to at least `size` bytes of writable memory.
+    pub unsafe fn get_random_bytes(buffer: *mut u8, size: usize) -> u32;
 
     /// Signs a message hash using ECDSA.
     ///
@@ -319,7 +410,13 @@ forward_to_ecall! {
     ///
     /// # Returns
     /// The length of the signature on success, 0 on error.
-    pub fn ecdsa_sign(
+    ///
+    /// # Safety
+    /// - `privkey` must be a valid pointer to at least 32 bytes of readable memory.
+    /// - `msg_hash` must be a valid pointer to at least 32 bytes of readable memory.
+    /// - `signature` must be a valid pointer to at least 72 bytes of writable memory
+    ///   (maximum length of a DER-encoded ECDSA signature for secp256k1).
+    pub unsafe fn ecdsa_sign(
         curve: u32,
         mode: u32,
         hash_id: u32,
@@ -342,7 +439,12 @@ forward_to_ecall! {
     ///
     /// # Returns
     /// 1 on success, 0 on error.
-    pub fn ecdsa_verify(
+    ///
+    /// # Safety
+    /// - `pubkey` must be a valid pointer to at least 65 bytes of readable memory.
+    /// - `msg_hash` must be a valid pointer to at least 32 bytes of readable memory.
+    /// - `signature` must be a valid pointer to at least `signature_len` bytes of readable memory.
+    pub unsafe fn ecdsa_verify(
         curve: u32,
         pubkey: *const u8,
         msg_hash: *const u8,
@@ -367,7 +469,13 @@ forward_to_ecall! {
     ///
     /// # Returns
     /// The length of the signature (always 64) on success, 0 on error.
-    pub fn schnorr_sign(
+    ///
+    /// # Safety
+    /// - `privkey` must be a valid pointer to at least 32 bytes of readable memory.
+    /// - `msg` must be a valid pointer to at least `msg_len` bytes of readable memory.
+    /// - `signature` must be a valid pointer to at least 64 bytes of writable memory.
+    /// - `entropy` must either be null, or a valid pointer to exactly 32 bytes of readable memory.
+    pub unsafe fn schnorr_sign(
         curve: u32,
         mode: u32,
         hash_id: u32,
@@ -395,7 +503,13 @@ forward_to_ecall! {
     ///
     /// # Returns
     /// 1 on success, 0 on error.
-    pub fn schnorr_verify(
+    ///
+    /// # Safety
+    /// - `pubkey` must be a valid pointer to at least 32 bytes of readable memory
+    ///   (x-only BIP-340 public key).
+    /// - `msg` must be a valid pointer to at least `msg_len` bytes of readable memory.
+    /// - `signature` must be a valid pointer to at least `signature_len` bytes of readable memory.
+    pub unsafe fn schnorr_verify(
         curve: u32,
         mode: u32,
         hash_id: u32,
@@ -413,7 +527,13 @@ forward_to_ecall! {
     /// - `ctx`: Pointer to the opaque context buffer to initialize. The buffer must be at
     ///   least as large as the corresponding `CTX_*_SIZE` constant defined in
     ///   [`common::ecall_constants`] for the given `hash_id`.
-    pub fn hash_init(hash_id: u32, ctx: *mut u8);
+    ///
+    /// # Safety
+    /// - `ctx` must be a valid pointer to a writable buffer of at least the required size for
+    ///   the given `hash_id` (see `CTX_*_SIZE` constants in [`common::ecall_constants`]).
+    /// - `hash_id` must be a supported hash algorithm identifier; passing an unsupported value
+    ///   results in undefined behaviour.
+    pub unsafe fn hash_init(hash_id: u32, ctx: *mut u8);
 
     /// Updates a hash context with additional input data.
     ///
@@ -429,10 +549,11 @@ forward_to_ecall! {
     /// 1 on success, 0 on error.
     ///
     /// # Safety
-    /// The caller is responsible for ensuring that `ctx` was previously initialized via
-    /// [`hash_init`] with the same `hash_id`. Passing an uninitialized context or a
-    /// `hash_id` that differs from the one used during initialization is undefined behaviour.
-    pub fn hash_update(hash_id: u32, ctx: *mut u8, data: *const u8, len: usize) -> u32;
+    /// - `ctx` must be a valid pointer to a writable buffer that was previously initialized via
+    ///   [`hash_init`] with the same `hash_id`. Passing an uninitialized context or a
+    ///   `hash_id` that differs from the one used during initialization is undefined behaviour.
+    /// - `data` must be a valid pointer to at least `len` bytes of readable memory.
+    pub unsafe fn hash_update(hash_id: u32, ctx: *mut u8, data: *const u8, len: usize) -> u32;
 
     /// Finalizes a hash computation and writes the digest to the output buffer.
     ///
@@ -452,10 +573,12 @@ forward_to_ecall! {
     /// 1 on success, 0 on error.
     ///
     /// # Safety
-    /// The caller is responsible for ensuring that `ctx` was previously initialized via
-    /// [`hash_init`] with the same `hash_id`. Passing an uninitialized context or a
-    /// `hash_id` that differs from the one used during initialization is undefined behaviour.
-    pub fn hash_final(hash_id: u32, ctx: *mut u8, digest: *mut u8) -> u32;
+    /// - `ctx` must be a valid pointer to a writable buffer that was previously initialized via
+    ///   [`hash_init`] with the same `hash_id`. Passing an uninitialized context or a
+    ///   `hash_id` that differs from the one used during initialization is undefined behaviour.
+    /// - `digest` must be a valid pointer to a writable buffer large enough to hold the digest
+    ///   for the given `hash_id`.
+    pub unsafe fn hash_final(hash_id: u32, ctx: *mut u8, digest: *mut u8) -> u32;
 }
 
 #[cfg(test)]

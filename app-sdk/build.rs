@@ -307,12 +307,14 @@ use core::mem::MaybeUninit;
 
 #[inline(always)]
 fn show_page_raw(page: &[u8]) {{
-    ecalls::show_page(page.as_ptr(), page.len());
+    // SAFETY: page is a valid slice reference.
+    unsafe {{ ecalls::show_page(page.as_ptr(), page.len()); }}
 }}
 
 #[inline(always)]
 fn show_step_raw(page: &[u8]) {{
-    ecalls::show_step(page.as_ptr(), page.len());
+    // SAFETY: page is a valid slice reference.
+    unsafe {{ ecalls::show_step(page.as_ptr(), page.len()); }}
 }}
 "
     )

@@ -33,19 +33,22 @@ pub fn has_page_api() -> bool {
 
 #[inline(always)]
 pub(crate) fn show_page_raw(page: &[u8]) {
-    ecalls::show_page(page.as_ptr(), page.len());
+    // SAFETY: page is a valid slice reference.
+    unsafe { ecalls::show_page(page.as_ptr(), page.len()) };
 }
 
 #[inline(always)]
 pub(crate) fn show_step_raw(step: &[u8]) {
-    ecalls::show_step(step.as_ptr(), step.len());
+    // SAFETY: step is a valid slice reference.
+    unsafe { ecalls::show_step(step.as_ptr(), step.len()) };
 }
 
 /// Blocks until an event is received, then returns it.
 pub fn get_event() -> Event {
     loop {
         let mut event_data = EventData::default();
-        let event_code = EventCode::from(ecalls::get_event(&mut event_data));
+        // SAFETY: event_data is a properly aligned, initialized EventData on the stack.
+        let event_code = EventCode::from(unsafe { ecalls::get_event(&mut event_data) });
         match event_code {
             EventCode::Ticker => {
                 return Event::Ticker;
@@ -67,7 +70,8 @@ pub fn wait(n: u32) {
     let mut n_tickers = 0u32;
     loop {
         let mut event_data = EventData::default();
-        let event_code = EventCode::from(ecalls::get_event(&mut event_data));
+        // SAFETY: event_data is a properly aligned, initialized EventData on the stack.
+        let event_code = EventCode::from(unsafe { ecalls::get_event(&mut event_data) });
         match event_code {
             EventCode::Ticker => {
                 n_tickers += 1;
