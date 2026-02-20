@@ -28,12 +28,16 @@ mod hashers {
                 }
 
                 fn update(&mut self, data: &[u8]) -> &mut Self {
-                    if 0 == ecalls::hash_update(
-                        HashId::$name as u32,
-                        self.ctx.as_mut_ptr(),
-                        data.as_ptr(),
-                        data.len(),
-                    ) {
+                    // SAFETY: ctx was initialized by hash_init in new() with the same HashId;
+                    // data is a valid slice provided by the caller.
+                    if 0 == unsafe {
+                        ecalls::hash_update(
+                            HashId::$name as u32,
+                            self.ctx.as_mut_ptr(),
+                            data.as_ptr(),
+                            data.len(),
+                        )
+                    } {
                         panic!("Failed to update hash");
                     }
 
@@ -41,11 +45,15 @@ mod hashers {
                 }
 
                 fn digest(mut self, digest: &mut [u8; $digest_size]) {
-                    if 0 == ecalls::hash_final(
-                        HashId::$name as u32,
-                        self.ctx.as_mut_ptr(),
-                        digest.as_mut_ptr(),
-                    ) {
+                    // SAFETY: ctx was initialized by hash_init in new() with the same HashId;
+                    // digest is a valid mutable reference of the correct size.
+                    if 0 == unsafe {
+                        ecalls::hash_final(
+                            HashId::$name as u32,
+                            self.ctx.as_mut_ptr(),
+                            digest.as_mut_ptr(),
+                        )
+                    } {
                         panic!("Failed to finalize hash");
                     }
                 }

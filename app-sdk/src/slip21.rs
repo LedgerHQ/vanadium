@@ -108,11 +108,14 @@ pub fn derive_slip21_key(labels: &[&[u8]]) -> Slip21Key {
     }
 
     let mut node = [0u8; 64];
-    if ecalls::derive_slip21_node(
-        encoded_labels.as_ptr(),
-        encoded_labels.len(),
-        node.as_mut_ptr(),
-    ) == 0
+    // SAFETY: encoded_labels is a valid Vec<u8>; node is a 64-byte writable buffer.
+    if unsafe {
+        ecalls::derive_slip21_node(
+            encoded_labels.as_ptr(),
+            encoded_labels.len(),
+            node.as_mut_ptr(),
+        )
+    } == 0
     {
         panic!("Failed to derive SLIP-21 node");
     }

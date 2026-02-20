@@ -10,7 +10,8 @@ pub fn random_bytes(len: usize) -> Vec<u8> {
     let mut offset = 0;
     while offset < len {
         let size = usize::min(max_chunk_size, len - offset);
-        let res = ecalls::get_random_bytes(bytes[offset..].as_mut_ptr(), size);
+        // SAFETY: bytes[offset..] is a valid slice of at least `size` writable bytes.
+        let res = unsafe { ecalls::get_random_bytes(bytes[offset..].as_mut_ptr(), size) };
         if res == 0 {
             panic!("Failed to generate random bytes");
         }

@@ -234,7 +234,11 @@ impl<const N: usize, M: ModulusProvider<N>> BigNumMod<N, M> {
         }
         // reduce the buffer by the modulus
         let mut buffer = buffer;
-        if 1 != ecalls::bn_modm(buffer.as_mut_ptr(), buffer.as_ptr(), N, M::M.as_ptr(), N) {
+        // SAFETY: buffer and M::M are valid fixed-size arrays.
+        // The result reuses the input, but this is allowed by the function's contract.
+        if 1 != unsafe {
+            ecalls::bn_modm(buffer.as_mut_ptr(), buffer.as_ptr(), N, M::M.as_ptr(), N)
+        } {
             panic!("bn_modm failed")
         }
 
@@ -279,7 +283,11 @@ impl<const N: usize, M: ModulusProvider<N>> BigNumMod<N, M> {
         let mut buffer = [0u8; N];
         buffer[N - 4..N].copy_from_slice(&value.to_be_bytes());
 
-        if 1 != ecalls::bn_modm(buffer.as_mut_ptr(), buffer.as_ptr(), N, M::M.as_ptr(), N) {
+        // SAFETY: buffer and M::M are valid fixed-size arrays.
+        // The result reuses the input, but this is allowed by the function's contract.
+        if 1 != unsafe {
+            ecalls::bn_modm(buffer.as_mut_ptr(), buffer.as_ptr(), N, M::M.as_ptr(), N)
+        } {
             panic!("bn_modm failed");
         }
 
@@ -304,14 +312,17 @@ impl<const N: usize, M: ModulusProvider<N>> BigNumMod<N, M> {
     /// Returns a new `BigNumMod` representing `(self ^ exponent) mod modulus`.
     pub fn pow<const N_EXP: usize>(&self, exponent: &BigNum<N_EXP>) -> Self {
         let mut result = [0u8; N];
-        let res = ecalls::bn_powm(
-            result.as_mut_ptr(),
-            self.buffer.as_ptr(),
-            exponent.buffer.as_ptr(),
-            N_EXP,
-            M::M.as_ptr(),
-            N,
-        );
+        // SAFETY: all pointers refer to valid, distinct fixed-size arrays.
+        let res = unsafe {
+            ecalls::bn_powm(
+                result.as_mut_ptr(),
+                self.buffer.as_ptr(),
+                exponent.buffer.as_ptr(),
+                N_EXP,
+                M::M.as_ptr(),
+                N,
+            )
+        };
         if res != 1 {
             panic!("Exponentiation failed");
         }
@@ -337,8 +348,10 @@ impl<const N: usize, M: PrimeModulusProvider<N>> BigNumMod<N, M> {
     /// Panics if the inversion fails (e.g., if the value is zero).
     pub fn inv(&self) -> Self {
         let mut result = [0u8; N];
-        let res =
-            ecalls::bn_modinv_prime(result.as_mut_ptr(), self.buffer.as_ptr(), M::M.as_ptr(), N);
+        // SAFETY: all pointers refer to valid, distinct fixed-size arrays.
+        let res = unsafe {
+            ecalls::bn_modinv_prime(result.as_mut_ptr(), self.buffer.as_ptr(), M::M.as_ptr(), N)
+        };
         if res != 1 {
             panic!("Modular inverse failed");
         }
@@ -362,13 +375,16 @@ impl<const N: usize, M: ModulusProvider<N>> Add for &BigNumMod<N, M> {
 
     fn add(self, other: Self) -> BigNumMod<N, M> {
         let mut result = [0u8; N];
-        let res = ecalls::bn_addm(
-            result.as_mut_ptr(),
-            self.buffer.as_ptr(),
-            other.buffer.as_ptr(),
-            M::M.as_ptr(),
-            N,
-        );
+        // SAFETY: result is distinct from self and other; all arrays are valid for N bytes.
+        let res = unsafe {
+            ecalls::bn_addm(
+                result.as_mut_ptr(),
+                self.buffer.as_ptr(),
+                other.buffer.as_ptr(),
+                M::M.as_ptr(),
+                N,
+            )
+        };
         if res != 1 {
             panic!("Addition failed");
         }
@@ -403,13 +419,17 @@ impl<const N: usize, M: ModulusProvider<N>> Add<BigNumMod<N, M>> for BigNumMod<N
 impl<const N: usize, M: ModulusProvider<N>> AddAssign for BigNumMod<N, M> {
     #[inline]
     fn add_assign(&mut self, other: Self) {
-        let res = ecalls::bn_addm(
-            self.buffer.as_mut_ptr(),
-            self.buffer.as_ptr(),
-            other.buffer.as_ptr(),
-            M::M.as_ptr(),
-            N,
-        );
+        // SAFETY: all arrays are valid for N bytes.
+        // The result reuses self.buffer, which is allowed by the function's contract.
+        let res = unsafe {
+            ecalls::bn_addm(
+                self.buffer.as_mut_ptr(),
+                self.buffer.as_ptr(),
+                other.buffer.as_ptr(),
+                M::M.as_ptr(),
+                N,
+            )
+        };
         if res != 1 {
             panic!("Addition failed");
         }
@@ -419,13 +439,17 @@ impl<const N: usize, M: ModulusProvider<N>> AddAssign for BigNumMod<N, M> {
 impl<const N: usize, M: ModulusProvider<N>> AddAssign<&BigNumMod<N, M>> for BigNumMod<N, M> {
     #[inline]
     fn add_assign(&mut self, other: &BigNumMod<N, M>) {
-        let res = ecalls::bn_addm(
-            self.buffer.as_mut_ptr(),
-            self.buffer.as_ptr(),
-            other.buffer.as_ptr(),
-            M::M.as_ptr(),
-            N,
-        );
+        // SAFETY: all arrays are valid for N bytes.
+        // The result reuses self.buffer, which is allowed by the function's contract.
+        let res = unsafe {
+            ecalls::bn_addm(
+                self.buffer.as_mut_ptr(),
+                self.buffer.as_ptr(),
+                other.buffer.as_ptr(),
+                M::M.as_ptr(),
+                N,
+            )
+        };
         if res != 1 {
             panic!("Addition failed");
         }
@@ -467,13 +491,16 @@ impl<const N: usize, M: ModulusProvider<N>> Sub for &BigNumMod<N, M> {
 
     fn sub(self, other: Self) -> BigNumMod<N, M> {
         let mut result = [0u8; N];
-        let res = ecalls::bn_subm(
-            result.as_mut_ptr(),
-            self.buffer.as_ptr(),
-            other.buffer.as_ptr(),
-            M::M.as_ptr(),
-            N,
-        );
+        // SAFETY: result is distinct from self and other; all arrays are valid for N bytes.
+        let res = unsafe {
+            ecalls::bn_subm(
+                result.as_mut_ptr(),
+                self.buffer.as_ptr(),
+                other.buffer.as_ptr(),
+                M::M.as_ptr(),
+                N,
+            )
+        };
         if res != 1 {
             panic!("Subtraction failed");
         }
@@ -507,13 +534,16 @@ impl<const N: usize, M: ModulusProvider<N>> Sub<BigNumMod<N, M>> for BigNumMod<N
 
 impl<const N: usize, M: ModulusProvider<N>> SubAssign for BigNumMod<N, M> {
     fn sub_assign(&mut self, other: Self) {
-        let res = ecalls::bn_subm(
-            self.buffer.as_mut_ptr(),
-            self.buffer.as_ptr(),
-            other.buffer.as_ptr(),
-            M::M.as_ptr(),
-            N,
-        );
+        // SAFETY: self.buffer does not alias other.buffer; all arrays are valid for N bytes.
+        let res = unsafe {
+            ecalls::bn_subm(
+                self.buffer.as_mut_ptr(),
+                self.buffer.as_ptr(),
+                other.buffer.as_ptr(),
+                M::M.as_ptr(),
+                N,
+            )
+        };
         if res != 1 {
             panic!("Subtraction failed");
         }
@@ -522,13 +552,16 @@ impl<const N: usize, M: ModulusProvider<N>> SubAssign for BigNumMod<N, M> {
 
 impl<const N: usize, M: ModulusProvider<N>> SubAssign<&BigNumMod<N, M>> for BigNumMod<N, M> {
     fn sub_assign(&mut self, other: &BigNumMod<N, M>) {
-        let res = ecalls::bn_subm(
-            self.buffer.as_mut_ptr(),
-            self.buffer.as_ptr(),
-            other.buffer.as_ptr(),
-            M::M.as_ptr(),
-            N,
-        );
+        // SAFETY: self.buffer does not alias other.buffer; all arrays are valid for N bytes.
+        let res = unsafe {
+            ecalls::bn_subm(
+                self.buffer.as_mut_ptr(),
+                self.buffer.as_ptr(),
+                other.buffer.as_ptr(),
+                M::M.as_ptr(),
+                N,
+            )
+        };
         if res != 1 {
             panic!("Subtraction failed");
         }
@@ -578,13 +611,16 @@ impl<const N: usize, M: ModulusProvider<N>> core::ops::Mul for &BigNumMod<N, M> 
 
     fn mul(self, other: Self) -> BigNumMod<N, M> {
         let mut result = [0u8; N];
-        let res = ecalls::bn_multm(
-            result.as_mut_ptr(),
-            self.buffer.as_ptr(),
-            other.buffer.as_ptr(),
-            M::M.as_ptr(),
-            N,
-        );
+        // SAFETY: result is distinct from self and other; all arrays are valid for N bytes.
+        let res = unsafe {
+            ecalls::bn_multm(
+                result.as_mut_ptr(),
+                self.buffer.as_ptr(),
+                other.buffer.as_ptr(),
+                M::M.as_ptr(),
+                N,
+            )
+        };
         if res != 1 {
             panic!("Multiplication failed");
         }
@@ -618,13 +654,16 @@ impl<const N: usize, M: ModulusProvider<N>> core::ops::Mul for BigNumMod<N, M> {
 
 impl<const N: usize, M: ModulusProvider<N>> MulAssign<&Self> for BigNumMod<N, M> {
     fn mul_assign(&mut self, other: &Self) {
-        let res = ecalls::bn_multm(
-            self.buffer.as_mut_ptr(),
-            self.buffer.as_ptr(),
-            other.buffer.as_ptr(),
-            M::M.as_ptr(),
-            N,
-        );
+        // SAFETY: self.buffer does not alias other.buffer; all arrays are valid for N bytes.
+        let res = unsafe {
+            ecalls::bn_multm(
+                self.buffer.as_mut_ptr(),
+                self.buffer.as_ptr(),
+                other.buffer.as_ptr(),
+                M::M.as_ptr(),
+                N,
+            )
+        };
         if res != 1 {
             panic!("Multiplication failed");
         }

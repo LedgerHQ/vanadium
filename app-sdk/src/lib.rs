@@ -80,7 +80,8 @@ pub extern "C" fn rust_init_heap() {
 }
 
 pub fn fatal(msg: &str) -> ! {
-    ecalls::fatal(msg.as_ptr(), msg.len());
+    // SAFETY: msg.as_ptr() is valid for msg.len() bytes and contains valid UTF-8.
+    unsafe { ecalls::fatal(msg.as_ptr(), msg.len()) };
 }
 
 pub fn exit(status: i32) -> ! {
@@ -112,16 +113,20 @@ pub fn xrecv(size: usize) -> Vec<u8> {
         buffer.set_len(size);
     }
 
-    let recv_size = ecalls::xrecv(buffer.as_mut_ptr(), buffer.len());
+    let recv_size =
+        // SAFETY: buffer is a Vec with at least `size` bytes of writable capacity (set_len above).
+        unsafe { ecalls::xrecv(buffer.as_mut_ptr(), buffer.len()) };
     buffer[0..recv_size].to_vec()
 }
 
 pub fn xrecv_to(buf: &mut [u8]) -> usize {
-    ecalls::xrecv(buf.as_mut_ptr(), buf.len())
+    // SAFETY: buf is a valid mutable slice reference.
+    unsafe { ecalls::xrecv(buf.as_mut_ptr(), buf.len()) }
 }
 
 pub fn xsend(buffer: &[u8]) {
-    ecalls::xsend(buffer.as_ptr(), buffer.len() as usize)
+    // SAFETY: buffer is a valid slice reference.
+    unsafe { ecalls::xsend(buffer.as_ptr(), buffer.len() as usize) }
 }
 
 pub fn get_device_property(property_id: u32) -> u32 {
@@ -129,7 +134,9 @@ pub fn get_device_property(property_id: u32) -> u32 {
 }
 
 pub fn print(message: *const u8, size: usize) {
-    ecalls::print(message, size);
+    // SAFETY: the caller is responsible for ensuring message is valid for `size` bytes of
+    // readable memory, which must be valid UTF-8.
+    unsafe { ecalls::print(message, size) };
 }
 
 // define print! and println! macros that can be used by V-Apps

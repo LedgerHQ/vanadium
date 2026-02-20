@@ -344,13 +344,17 @@ impl<C: Curve<32>> Point<C, 32> {
         // Validate point is on curve by attempting scalar multiplication by 1.
         // If the point is not on the curve, the underlying ecall will fail.
         let mut result: Point<C, 32> = Point::default();
-        if 1 != ecalls::ecfp_scalar_mult(
-            C::curve_kind() as u32,
-            result.as_mut_ptr(),
-            point.as_ptr(),
-            Self::SCALAR_ONE.as_ptr(),
-            32,
-        ) {
+        // SAFETY: result is a valid 65-byte output buffer; point is a valid uncompressed SEC1 point;
+        // SCALAR_ONE is a 32-byte scalar.
+        if 1 != unsafe {
+            ecalls::ecfp_scalar_mult(
+                C::curve_kind() as u32,
+                result.as_mut_ptr(),
+                point.as_ptr(),
+                Self::SCALAR_ONE.as_ptr(),
+                32,
+            )
+        } {
             return Err("Point is not on the curve");
         }
 
@@ -366,13 +370,16 @@ where
 
     fn add(self, other: Self) -> Self::Output {
         let mut result = Point::default();
-
-        if 1 != ecalls::ecfp_add_point(
-            C::curve_kind() as u32,
-            result.as_mut_ptr(),
-            self.as_ptr(),
-            other.as_ptr(),
-        ) {
+        // SAFETY: result, self, and other are valid 65-byte uncompressed SEC1 point buffers;
+        // result does not alias input pointers.
+        if 1 != unsafe {
+            ecalls::ecfp_add_point(
+                C::curve_kind() as u32,
+                result.as_mut_ptr(),
+                self.as_ptr(),
+                other.as_ptr(),
+            )
+        } {
             panic!("Failed to add points");
         }
 
@@ -388,14 +395,17 @@ where
 
     fn mul(self, scalar: &[u8; SCALAR_LENGTH]) -> Self::Output {
         let mut result = Point::default();
-
-        if 1 != ecalls::ecfp_scalar_mult(
-            C::curve_kind() as u32,
-            result.as_mut_ptr(),
-            self.as_ptr(),
-            scalar.as_ptr(),
-            SCALAR_LENGTH,
-        ) {
+        // SAFETY: result is a valid 65-byte output buffer; self is a valid uncompressed SEC1 point;
+        // scalar is a valid SCALAR_LENGTH-byte array.
+        if 1 != unsafe {
+            ecalls::ecfp_scalar_mult(
+                C::curve_kind() as u32,
+                result.as_mut_ptr(),
+                self.as_ptr(),
+                scalar.as_ptr(),
+                SCALAR_LENGTH,
+            )
+        } {
             panic!("Failed to multiply point by scalar");
         }
 
@@ -409,14 +419,16 @@ pub struct Secp256k1;
 impl Curve<32> for Secp256k1 {
     fn derive_hd_node(path: &[u32]) -> Result<HDPrivNode<Self, 32>, &'static str> {
         let mut result = HDPrivNode::default();
-
-        if 1 != ecalls::derive_hd_node(
-            Self::curve_kind() as u32,
-            path.as_ptr(),
-            path.len(),
-            result.privkey.as_mut_ptr(),
-            result.chaincode.as_mut_ptr(),
-        ) {
+        // SAFETY: path is a valid slice; privkey and chaincode are valid 32-byte output arrays.
+        if 1 != unsafe {
+            ecalls::derive_hd_node(
+                Self::curve_kind() as u32,
+                path.as_ptr(),
+                path.len(),
+                result.privkey.as_mut_ptr(),
+                result.chaincode.as_mut_ptr(),
+            )
+        } {
             return Err("Failed to derive HD node");
         }
 
@@ -456,18 +468,21 @@ impl EcfpPrivateKey<Secp256k1, 32> {
     /// # Returns
     ///
     /// * `Ok(Vec<u8>)` - A vector containing the ECDSA signature if the signing is successful.
-    /// The signature is DER-encoded as per the bitcoin standard, and up to 71 bytes long.
+    /// The signature is DER-encoded as per the bitcoin standard, and up to 72 bytes long.
     /// * `Err(&'static str)` - An error message if the signing fails.
     pub fn ecdsa_sign_hash(&self, msg_hash: &[u8; 32]) -> Result<Vec<u8>, &'static str> {
-        let mut result = [0u8; 71];
-        let sig_size = ecalls::ecdsa_sign(
-            Secp256k1::curve_kind() as u32,
-            EcdsaSignMode::RFC6979 as u32,
-            HashId::Sha256 as u32,
-            self.private_key.as_ptr(),
-            msg_hash.as_ptr(),
-            result.as_mut_ptr(),
-        );
+        let mut result = [0u8; 72];
+        // SAFETY: privkey is 32 bytes; msg_hash is 32 bytes; result is a 72-byte output buffer.
+        let sig_size = unsafe {
+            ecalls::ecdsa_sign(
+                Secp256k1::curve_kind() as u32,
+                EcdsaSignMode::RFC6979 as u32,
+                HashId::Sha256 as u32,
+                self.private_key.as_ptr(),
+                msg_hash.as_ptr(),
+                result.as_mut_ptr(),
+            )
+        };
         if sig_size == 0 {
             return Err("Failed to sign hash with ecdsa");
         }
@@ -479,6 +494,7 @@ impl EcfpPrivateKey<Secp256k1, 32> {
     /// # Arguments
     ///
     /// * `msg` - A reference to a byte slice containing the message to be signed.
+    /// * `entropy` - An optional reference to a 32-byte array providing additional entropy for signing, or null.
     ///
     /// # Returns
     ///
@@ -492,18 +508,22 @@ impl EcfpPrivateKey<Secp256k1, 32> {
         entropy: Option<&[u8; 32]>,
     ) -> Result<Vec<u8>, &'static str> {
         let mut result = [0u8; 64];
-        let sig_size = ecalls::schnorr_sign(
-            Secp256k1::curve_kind() as u32,
-            SchnorrSignMode::BIP340 as u32,
-            HashId::Sha256 as u32,
-            self.private_key.as_ptr(),
-            msg.as_ptr(),
-            msg.len(),
-            result.as_mut_ptr(),
-            entropy
-                .map(|entropy| entropy as *const _)
-                .unwrap_or(core::ptr::null()),
-        );
+        // SAFETY: privkey is 32 bytes; msg is a valid slice; result is a 64-byte output buffer;
+        // entropy is either null or a valid pointer to 32 bytes.
+        let sig_size = unsafe {
+            ecalls::schnorr_sign(
+                Secp256k1::curve_kind() as u32,
+                SchnorrSignMode::BIP340 as u32,
+                HashId::Sha256 as u32,
+                self.private_key.as_ptr(),
+                msg.as_ptr(),
+                msg.len(),
+                result.as_mut_ptr(),
+                entropy
+                    .map(|entropy| entropy as *const _)
+                    .unwrap_or(core::ptr::null()),
+            )
+        };
         if sig_size != 64 {
             panic!("Schnorr signatures per BIP-340 must be exactly 64 bytes");
         }
@@ -517,29 +537,36 @@ impl EcfpPublicKey<Secp256k1, 32> {
         msg_hash: &[u8; 32],
         signature: &[u8],
     ) -> Result<(), &'static str> {
-        if 1 != ecalls::ecdsa_verify(
-            Secp256k1::curve_kind() as u32,
-            self.public_key.as_ptr(),
-            msg_hash.as_ptr(),
-            signature.as_ptr(),
-            signature.len(),
-        ) {
+        // SAFETY: pubkey is a 65-byte uncompressed SEC1 key; msg_hash is 32 bytes;
+        // signature is a valid slice.
+        if 1 != unsafe {
+            ecalls::ecdsa_verify(
+                Secp256k1::curve_kind() as u32,
+                self.public_key.as_ptr(),
+                msg_hash.as_ptr(),
+                signature.as_ptr(),
+                signature.len(),
+            )
+        } {
             return Err("Failed to verify hash with ecdsa");
         }
         Ok(())
     }
 
     pub fn schnorr_verify(&self, msg: &[u8], signature: &[u8]) -> Result<(), &'static str> {
-        if 1 != ecalls::schnorr_verify(
-            Secp256k1::curve_kind() as u32,
-            SchnorrSignMode::BIP340 as u32,
-            HashId::Sha256 as u32,
-            self.public_key.as_ptr(),
-            msg.as_ptr(),
-            msg.len(),
-            signature.as_ptr(),
-            signature.len(),
-        ) {
+        // SAFETY: pubkey is a 32-byte x-only BIP-340 key; msg and signature are valid slices.
+        if 1 != unsafe {
+            ecalls::schnorr_verify(
+                Secp256k1::curve_kind() as u32,
+                SchnorrSignMode::BIP340 as u32,
+                HashId::Sha256 as u32,
+                self.public_key.as_ptr(),
+                msg.as_ptr(),
+                msg.len(),
+                signature.as_ptr(),
+                signature.len(),
+            )
+        } {
             return Err("Failed to verify schnorr signature");
         }
         Ok(())

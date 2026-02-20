@@ -745,8 +745,9 @@ pub fn ecfp_add_point(curve: u32, r: *mut u8, p: *const u8, q: *const u8) -> u32
         {
             return 0;
         }
+        // Use ptr::copy (memmove semantics) to handle the case where source == r.
         unsafe {
-            std::ptr::copy_nonoverlapping(source, r, 65);
+            std::ptr::copy(source, r, 65);
         }
         1
     };
