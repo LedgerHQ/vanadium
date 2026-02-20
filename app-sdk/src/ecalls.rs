@@ -427,6 +427,11 @@ forward_to_ecall! {
     ///
     /// # Returns
     /// 1 on success, 0 on error.
+    ///
+    /// # Safety
+    /// The caller is responsible for ensuring that `ctx` was previously initialized via
+    /// [`hash_init`] with the same `hash_id`. Passing an uninitialized context or a
+    /// `hash_id` that differs from the one used during initialization is undefined behaviour.
     pub fn hash_update(hash_id: u32, ctx: *mut u8, data: *const u8, len: usize) -> u32;
 
     /// Finalizes a hash computation and writes the digest to the output buffer.
@@ -445,7 +450,12 @@ forward_to_ecall! {
     ///
     /// # Returns
     /// 1 on success, 0 on error.
-    pub fn hash_final(hash_id: u32, ctx: *mut u8, digest: *const u8) -> u32;
+    ///
+    /// # Safety
+    /// The caller is responsible for ensuring that `ctx` was previously initialized via
+    /// [`hash_init`] with the same `hash_id`. Passing an uninitialized context or a
+    /// `hash_id` that differs from the one used during initialization is undefined behaviour.
+    pub fn hash_final(hash_id: u32, ctx: *mut u8, digest: *mut u8) -> u32;
 }
 
 #[cfg(test)]

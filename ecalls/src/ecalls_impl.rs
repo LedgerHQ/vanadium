@@ -369,4 +369,4 @@ ecall8!(schnorr_verify, ECALL_SCHNORR_VERIFY, (curve: u32), (mode: u32), (hash_i
 // The following ecalls are specific to this target
 ecall2v!(hash_init, ECALL_HASH_INIT, (hash_id: u32), (ctx: *mut u8));
 ecall4!(hash_update, ECALL_HASH_UPDATE, (hash_id: u32), (ctx: *mut u8), (data: *const u8), (len: usize), u32);
-ecall3!(hash_final, ECALL_HASH_DIGEST, (hash_id: u32), (ctx: *mut u8), (digest: *const u8), u32);
+ecall3!(hash_final, ECALL_HASH_DIGEST, (hash_id: u32), (ctx: *mut u8), (digest: *mut u8), u32);
