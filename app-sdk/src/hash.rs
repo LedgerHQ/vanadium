@@ -11,7 +11,7 @@ mod hashers {
     /// which can be different for each target.
     macro_rules! impl_hash {
         ($name:ident, $ctx_size:expr, $digest_size:expr) => {
-            #[derive(Clone, PartialEq, Eq, Debug)]
+            #[derive(Clone, Debug)]
             #[repr(C)]
             pub struct $name {
                 ctx: [u8; $ctx_size],
@@ -19,7 +19,7 @@ mod hashers {
 
             impl Hasher<$digest_size> for $name {
                 fn new() -> Self {
-                    let mut res = core::mem::MaybeUninit::<Self>::uninit();
+                    let mut res = core::mem::MaybeUninit::<Self>::zeroed();
 
                     unsafe {
                         ecalls::hash_init(HashId::$name as u32, res.as_mut_ptr() as *mut u8);

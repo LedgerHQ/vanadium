@@ -1231,7 +1231,7 @@ pub fn storage_write(slot_index: u32, buffer: *const u8, buffer_size: usize) -> 
     1
 }
 
-// Compile-time size and alignment checks: native hashers must fit in the context structs
+// Compile-time size checks: hashers must fit in the context structs
 const _: () = assert!(
     std::mem::size_of::<sha2::Sha256>() <= CTX_SHA256_SIZE,
     "sha2::Sha256 does not fit in CtxSha256",
@@ -1281,12 +1281,12 @@ pub fn hash_update(hash_id: u32, ctx: *mut u8, data: *const u8, len: usize) -> u
             hasher.update(data_slice);
             unsafe { std::ptr::write_unaligned(ctx as *mut ripemd::Ripemd160, hasher) };
         }
-        _ => panic!("hash_update: unsupported hash_id {}", hash_id),
+        _ => return 0, // Unsupported hash_id
     }
     1
 }
 
-pub fn hash_final(hash_id: u32, ctx: *mut u8, digest: *const u8) -> u32 {
+pub fn hash_final(hash_id: u32, ctx: *mut u8, digest: *mut u8) -> u32 {
     match hash_id {
         id if id == HashId::Sha256 as u32 => {
             let hasher = unsafe { std::ptr::read_unaligned(ctx as *const sha2::Sha256) };
@@ -1309,7 +1309,7 @@ pub fn hash_final(hash_id: u32, ctx: *mut u8, digest: *const u8) -> u32 {
                 std::ptr::copy_nonoverlapping(result.as_ptr(), digest as *mut u8, 20);
             }
         }
-        _ => panic!("hash_final: unsupported hash_id {}", hash_id),
+        _ => return 0, // Unsupported hash_id
     }
     1
 }
