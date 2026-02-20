@@ -22,7 +22,10 @@ mod hashers {
                     let mut res = core::mem::MaybeUninit::<Self>::zeroed();
 
                     unsafe {
-                        ecalls::hash_init(HashId::$name as u32, res.as_mut_ptr() as *mut u8);
+                        ecalls::hash_init(
+                            HashId::$name.ecall_id($digest_size as u16),
+                            res.as_mut_ptr() as *mut u8,
+                        );
                         res.assume_init()
                     }
                 }
@@ -32,7 +35,7 @@ mod hashers {
                     // data is a valid slice provided by the caller.
                     if 0 == unsafe {
                         ecalls::hash_update(
-                            HashId::$name as u32,
+                            HashId::$name.ecall_id($digest_size as u16),
                             self.ctx.as_mut_ptr(),
                             data.as_ptr(),
                             data.len(),
@@ -49,7 +52,7 @@ mod hashers {
                     // digest is a valid mutable reference of the correct size.
                     if 0 == unsafe {
                         ecalls::hash_final(
-                            HashId::$name as u32,
+                            HashId::$name.ecall_id($digest_size as u16),
                             self.ctx.as_mut_ptr(),
                             digest.as_mut_ptr(),
                         )
