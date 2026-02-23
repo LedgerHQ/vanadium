@@ -349,6 +349,8 @@ pub struct Cpu<'a, M: PagedMemory> {
     pub code_seg: MemorySegment<'a, M>,
     pub data_seg: MemorySegment<'a, M>,
     pub stack_seg: MemorySegment<'a, M>,
+    /// Address reserved by LR.W (Load-Reserved); used by SC.W (Store-Conditional).
+    reservation_addr: Option<u32>,
 }
 
 pub trait EcallHandler {
@@ -435,6 +437,7 @@ impl<'a, M: PagedMemory> Cpu<'a, M> {
             code_seg,
             data_seg,
             stack_seg,
+            reservation_addr: None,
         }
     }
 
@@ -706,6 +709,100 @@ impl<'a, M: PagedMemory> Cpu<'a, M> {
             Op::Srli { rd, rs1, imm } => { self.regs[rd as usize] = self.regs[rs1 as usize] >> (imm & 0x1f); },
             Op::Srai { rd, rs1, imm } => { self.regs[rd as usize] = ((self.regs[rs1 as usize] as i32) >> (imm & 0x1f)) as u32; },
             Op::Xori { rd, rs1, imm } => { self.regs[rd as usize] = self.regs[rs1 as usize] ^ (imm as u32); },
+
+            // RV32A - Atomic instructions
+            // In a single-threaded/single-hart VM, atomics are straightforward:
+            // LR.W loads and sets a reservation; SC.W stores only if reservation is valid.
+            // AMO ops perform atomic read-modify-write.
+            Op::LrW { rd, rs1 } => {
+                let addr = self.regs[rs1 as usize];
+                if addr & 3 != 0 {
+                    return Err("Unaligned LR.W address".into());
+                }
+                let value = self.read_u32(addr)?;
+                self.regs[rd as usize] = value;
+                self.reservation_addr = Some(addr);
+            },
+            Op::ScW { rd, rs1, rs2 } => {
+                let addr = self.regs[rs1 as usize];
+                if addr & 3 != 0 {
+                    return Err("Unaligned SC.W address".into());
+                }
+                if self.reservation_addr == Some(addr) {
+                    self.write_u32(addr, self.regs[rs2 as usize])?;
+                    self.regs[rd as usize] = 0; // success
+                } else {
+                    self.regs[rd as usize] = 1; // failure
+                }
+                self.reservation_addr = None;
+            },
+            Op::AmoswapW { rd, rs1, rs2 } => {
+                let addr = self.regs[rs1 as usize];
+                if addr & 3 != 0 { return Err("Unaligned AMOSWAP.W address".into()); }
+                let old = self.read_u32(addr)?;
+                self.write_u32(addr, self.regs[rs2 as usize])?;
+                self.regs[rd as usize] = old;
+            },
+            Op::AmoaddW { rd, rs1, rs2 } => {
+                let addr = self.regs[rs1 as usize];
+                if addr & 3 != 0 { return Err("Unaligned AMOADD.W address".into()); }
+                let old = self.read_u32(addr)?;
+                self.write_u32(addr, old.wrapping_add(self.regs[rs2 as usize]))?;
+                self.regs[rd as usize] = old;
+            },
+            Op::AmoxorW { rd, rs1, rs2 } => {
+                let addr = self.regs[rs1 as usize];
+                if addr & 3 != 0 { return Err("Unaligned AMOXOR.W address".into()); }
+                let old = self.read_u32(addr)?;
+                self.write_u32(addr, old ^ self.regs[rs2 as usize])?;
+                self.regs[rd as usize] = old;
+            },
+            Op::AmoandW { rd, rs1, rs2 } => {
+                let addr = self.regs[rs1 as usize];
+                if addr & 3 != 0 { return Err("Unaligned AMOAND.W address".into()); }
+                let old = self.read_u32(addr)?;
+                self.write_u32(addr, old & self.regs[rs2 as usize])?;
+                self.regs[rd as usize] = old;
+            },
+            Op::AmoorW { rd, rs1, rs2 } => {
+                let addr = self.regs[rs1 as usize];
+                if addr & 3 != 0 { return Err("Unaligned AMOOR.W address".into()); }
+                let old = self.read_u32(addr)?;
+                self.write_u32(addr, old | self.regs[rs2 as usize])?;
+                self.regs[rd as usize] = old;
+            },
+            Op::AmominW { rd, rs1, rs2 } => {
+                let addr = self.regs[rs1 as usize];
+                if addr & 3 != 0 { return Err("Unaligned AMOMIN.W address".into()); }
+                let old = self.read_u32(addr)?;
+                let new = core::cmp::min(old as i32, self.regs[rs2 as usize] as i32) as u32;
+                self.write_u32(addr, new)?;
+                self.regs[rd as usize] = old;
+            },
+            Op::AmomaxW { rd, rs1, rs2 } => {
+                let addr = self.regs[rs1 as usize];
+                if addr & 3 != 0 { return Err("Unaligned AMOMAX.W address".into()); }
+                let old = self.read_u32(addr)?;
+                let new = core::cmp::max(old as i32, self.regs[rs2 as usize] as i32) as u32;
+                self.write_u32(addr, new)?;
+                self.regs[rd as usize] = old;
+            },
+            Op::AmominuW { rd, rs1, rs2 } => {
+                let addr = self.regs[rs1 as usize];
+                if addr & 3 != 0 { return Err("Unaligned AMOMINU.W address".into()); }
+                let old = self.read_u32(addr)?;
+                let new = core::cmp::min(old, self.regs[rs2 as usize]);
+                self.write_u32(addr, new)?;
+                self.regs[rd as usize] = old;
+            },
+            Op::AmomaxuW { rd, rs1, rs2 } => {
+                let addr = self.regs[rs1 as usize];
+                if addr & 3 != 0 { return Err("Unaligned AMOMAXU.W address".into()); }
+                let old = self.read_u32(addr)?;
+                let new = core::cmp::max(old, self.regs[rs2 as usize]);
+                self.write_u32(addr, new)?;
+                self.regs[rd as usize] = old;
+            },
 
             Op::Ecall => {
                 if let Some(ecall_handler) = ecall_handler {

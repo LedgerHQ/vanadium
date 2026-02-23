@@ -56,6 +56,19 @@ pub enum Op {
 
     Xori { rd: u8, rs1: u8, imm: i32 },
 
+    // RV32A - Atomic instructions
+    LrW { rd: u8, rs1: u8 },
+    ScW { rd: u8, rs1: u8, rs2: u8 },
+    AmoswapW { rd: u8, rs1: u8, rs2: u8 },
+    AmoaddW { rd: u8, rs1: u8, rs2: u8 },
+    AmoxorW { rd: u8, rs1: u8, rs2: u8 },
+    AmoandW { rd: u8, rs1: u8, rs2: u8 },
+    AmoorW { rd: u8, rs1: u8, rs2: u8 },
+    AmominW { rd: u8, rs1: u8, rs2: u8 },
+    AmomaxW { rd: u8, rs1: u8, rs2: u8 },
+    AmominuW { rd: u8, rs1: u8, rs2: u8 },
+    AmomaxuW { rd: u8, rs1: u8, rs2: u8 },
+
     Ecall,
     Break,
 }

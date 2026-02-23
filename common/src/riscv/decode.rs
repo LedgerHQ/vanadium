@@ -360,6 +360,30 @@ fn decode_uncompressed(inst: u32) -> Op {
             0x02007033 => Op::Remu { rd: rd(inst), rs1: rs1(inst), rs2: rs2(inst) },
             _ => Op::Unknown,
         },
+        // RV32A - Atomic instructions (opcode 0x2F, funct3 = 0b010 for .W)
+        0x0000002f => match inst & 0x0000707f {
+            0x0000202f => match inst & 0xf800707f {
+                0x1000202f => {
+                    if rs2(inst) == 0 {
+                        Op::LrW { rd: rd(inst), rs1: rs1(inst) }
+                    } else {
+                        Op::Unknown
+                    }
+                },
+                0x1800202f => Op::ScW { rd: rd(inst), rs1: rs1(inst), rs2: rs2(inst) },
+                0x0800202f => Op::AmoswapW { rd: rd(inst), rs1: rs1(inst), rs2: rs2(inst) },
+                0x0000202f => Op::AmoaddW { rd: rd(inst), rs1: rs1(inst), rs2: rs2(inst) },
+                0x2000202f => Op::AmoxorW { rd: rd(inst), rs1: rs1(inst), rs2: rs2(inst) },
+                0x6000202f => Op::AmoandW { rd: rd(inst), rs1: rs1(inst), rs2: rs2(inst) },
+                0x4000202f => Op::AmoorW { rd: rd(inst), rs1: rs1(inst), rs2: rs2(inst) },
+                0x8000202f => Op::AmominW { rd: rd(inst), rs1: rs1(inst), rs2: rs2(inst) },
+                0xa000202f => Op::AmomaxW { rd: rd(inst), rs1: rs1(inst), rs2: rs2(inst) },
+                0xc000202f => Op::AmominuW { rd: rd(inst), rs1: rs1(inst), rs2: rs2(inst) },
+                0xe000202f => Op::AmomaxuW { rd: rd(inst), rs1: rs1(inst), rs2: rs2(inst) },
+                _ => Op::Unknown,
+            },
+            _ => Op::Unknown,
+        },
         // 0x0000000f => match inst & 0x0000707f {
         //     0x0000000f => match inst & 0xffffffff {
         //         0x8330000f => Op::RV_OP_FENCE_TSO,
