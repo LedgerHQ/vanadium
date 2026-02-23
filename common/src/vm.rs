@@ -480,31 +480,55 @@ impl<'a, M: PagedMemory> Cpu<'a, M> {
     #[inline]
     fn write_u8<E: fmt::Debug>(&mut self, address: u32, value: u8) -> Result<(), CpuError<E>> {
         if self.stack_seg.contains(address) {
-            return Ok(self.stack_seg.write_u8(address, value)?);
+            self.stack_seg.write_u8(address, value)?;
         } else if self.data_seg.contains(address) {
-            return Ok(self.data_seg.write_u8(address, value)?);
+            self.data_seg.write_u8(address, value)?;
+        } else {
+            return Err(MemoryError::AddressOutOfBounds.into());
         }
-        Err(MemoryError::AddressOutOfBounds.into())
+        // Invalidate reservation if the store touches the reserved 4-byte word
+        if let Some(res) = self.reservation_addr {
+            if address.saturating_sub(res) < 4 && res.saturating_sub(address) < 1 {
+                self.reservation_addr = None;
+            }
+        }
+        Ok(())
     }
 
     #[inline]
     fn write_u16<E: fmt::Debug>(&mut self, address: u32, value: u16) -> Result<(), CpuError<E>> {
         if self.stack_seg.contains(address) {
-            return Ok(self.stack_seg.write_u16(address, value)?);
+            self.stack_seg.write_u16(address, value)?;
         } else if self.data_seg.contains(address) {
-            return Ok(self.data_seg.write_u16(address, value)?);
+            self.data_seg.write_u16(address, value)?;
+        } else {
+            return Err(MemoryError::AddressOutOfBounds.into());
         }
-        Err(MemoryError::AddressOutOfBounds.into())
+        // Invalidate reservation if the store touches the reserved 4-byte word
+        if let Some(res) = self.reservation_addr {
+            if address.saturating_sub(res) < 4 && res.saturating_sub(address) < 2 {
+                self.reservation_addr = None;
+            }
+        }
+        Ok(())
     }
 
     #[inline]
     fn write_u32<E: fmt::Debug>(&mut self, address: u32, value: u32) -> Result<(), CpuError<E>> {
         if self.stack_seg.contains(address) {
-            return Ok(self.stack_seg.write_u32(address, value)?);
+            self.stack_seg.write_u32(address, value)?;
         } else if self.data_seg.contains(address) {
-            return Ok(self.data_seg.write_u32(address, value)?);
+            self.data_seg.write_u32(address, value)?;
+        } else {
+            return Err(MemoryError::AddressOutOfBounds.into());
         }
-        Err(MemoryError::AddressOutOfBounds.into())
+        // Invalidate reservation if the store touches the reserved 4-byte word
+        if let Some(res) = self.reservation_addr {
+            if address.saturating_sub(res) < 4 && res.saturating_sub(address) < 4 {
+                self.reservation_addr = None;
+            }
+        }
+        Ok(())
     }
 
     #[inline(always)]
