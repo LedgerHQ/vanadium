@@ -19,7 +19,8 @@ use sha2::Digest as _;
 use common::{
     constants::STORAGE_SLOT_SIZE,
     ecall_constants::{
-        CurveKind, HashId, CTX_RIPEMD160_SIZE, CTX_SHA256_SIZE, CTX_SHA512_SIZE, MAX_BIGNUMBER_SIZE,
+        CurveKind, HashId, CTX_RIPEMD160_SIZE, CTX_SHA256_SIZE, CTX_SHA3_SIZE, CTX_SHA512_SIZE,
+        MAX_BIGNUMBER_SIZE,
     },
     ux::{Deserializable, EventCode, EventData},
     BufferType,
@@ -1245,6 +1246,16 @@ const _: () = assert!(
     std::mem::size_of::<ripemd::Ripemd160>() <= CTX_RIPEMD160_SIZE,
     "ripemd::Ripemd160 does not fit in CtxRipemd160",
 );
+// All sha3/keccak variants wrap the same Keccak-f[1600] state, so checking one representative
+// of each family is sufficient.
+const _: () = assert!(
+    std::mem::size_of::<sha3::Keccak256>() <= CTX_SHA3_SIZE,
+    "sha3::Keccak256 does not fit in CTX_SHA3_SIZE",
+);
+const _: () = assert!(
+    std::mem::size_of::<sha3::Sha3_256>() <= CTX_SHA3_SIZE,
+    "sha3::Sha3_256 does not fit in CTX_SHA3_SIZE",
+);
 
 pub fn hash_init(hash_identifier: u32, ctx: *mut u8) {
     let output_size = (hash_identifier & 0xFFFF) as usize; // requested output size from low 16 bits
@@ -1274,6 +1285,42 @@ pub fn hash_init(hash_identifier: u32, ctx: *mut u8) {
             let hasher = ripemd::Ripemd160::new();
             unsafe { std::ptr::write_unaligned(ctx as *mut ripemd::Ripemd160, hasher) };
         }
+        id if id == HashId::Keccak as u32 => match output_size {
+            28 => unsafe {
+                std::ptr::write_unaligned(ctx as *mut sha3::Keccak224, sha3::Keccak224::new())
+            },
+            32 => unsafe {
+                std::ptr::write_unaligned(ctx as *mut sha3::Keccak256, sha3::Keccak256::new())
+            },
+            48 => unsafe {
+                std::ptr::write_unaligned(ctx as *mut sha3::Keccak384, sha3::Keccak384::new())
+            },
+            64 => unsafe {
+                std::ptr::write_unaligned(ctx as *mut sha3::Keccak512, sha3::Keccak512::new())
+            },
+            _ => panic!(
+                "hash_init: invalid output size {} for Keccak (must be 28, 32, 48 or 64)",
+                output_size
+            ),
+        },
+        id if id == HashId::Sha3 as u32 => match output_size {
+            28 => unsafe {
+                std::ptr::write_unaligned(ctx as *mut sha3::Sha3_224, sha3::Sha3_224::new())
+            },
+            32 => unsafe {
+                std::ptr::write_unaligned(ctx as *mut sha3::Sha3_256, sha3::Sha3_256::new())
+            },
+            48 => unsafe {
+                std::ptr::write_unaligned(ctx as *mut sha3::Sha3_384, sha3::Sha3_384::new())
+            },
+            64 => unsafe {
+                std::ptr::write_unaligned(ctx as *mut sha3::Sha3_512, sha3::Sha3_512::new())
+            },
+            _ => panic!(
+                "hash_init: invalid output size {} for SHA-3 (must be 28, 32, 48 or 64)",
+                output_size
+            ),
+        },
         _ => panic!("hash_init: unsupported hash_id {}", hash_id),
     }
 }
@@ -1307,6 +1354,52 @@ pub fn hash_update(hash_identifier: u32, ctx: *mut u8, data: *const u8, len: usi
             hasher.update(data_slice);
             unsafe { std::ptr::write_unaligned(ctx as *mut ripemd::Ripemd160, hasher) };
         }
+        id if id == HashId::Keccak as u32 => match output_size {
+            28 => {
+                let mut h = unsafe { std::ptr::read_unaligned(ctx as *const sha3::Keccak224) };
+                h.update(data_slice);
+                unsafe { std::ptr::write_unaligned(ctx as *mut sha3::Keccak224, h) };
+            }
+            32 => {
+                let mut h = unsafe { std::ptr::read_unaligned(ctx as *const sha3::Keccak256) };
+                h.update(data_slice);
+                unsafe { std::ptr::write_unaligned(ctx as *mut sha3::Keccak256, h) };
+            }
+            48 => {
+                let mut h = unsafe { std::ptr::read_unaligned(ctx as *const sha3::Keccak384) };
+                h.update(data_slice);
+                unsafe { std::ptr::write_unaligned(ctx as *mut sha3::Keccak384, h) };
+            }
+            64 => {
+                let mut h = unsafe { std::ptr::read_unaligned(ctx as *const sha3::Keccak512) };
+                h.update(data_slice);
+                unsafe { std::ptr::write_unaligned(ctx as *mut sha3::Keccak512, h) };
+            }
+            _ => return 0,
+        },
+        id if id == HashId::Sha3 as u32 => match output_size {
+            28 => {
+                let mut h = unsafe { std::ptr::read_unaligned(ctx as *const sha3::Sha3_224) };
+                h.update(data_slice);
+                unsafe { std::ptr::write_unaligned(ctx as *mut sha3::Sha3_224, h) };
+            }
+            32 => {
+                let mut h = unsafe { std::ptr::read_unaligned(ctx as *const sha3::Sha3_256) };
+                h.update(data_slice);
+                unsafe { std::ptr::write_unaligned(ctx as *mut sha3::Sha3_256, h) };
+            }
+            48 => {
+                let mut h = unsafe { std::ptr::read_unaligned(ctx as *const sha3::Sha3_384) };
+                h.update(data_slice);
+                unsafe { std::ptr::write_unaligned(ctx as *mut sha3::Sha3_384, h) };
+            }
+            64 => {
+                let mut h = unsafe { std::ptr::read_unaligned(ctx as *const sha3::Sha3_512) };
+                h.update(data_slice);
+                unsafe { std::ptr::write_unaligned(ctx as *mut sha3::Sha3_512, h) };
+            }
+            _ => return 0,
+        },
         _ => return 0, // Unsupported hash_id
     }
     1
@@ -1344,6 +1437,38 @@ pub fn hash_final(hash_identifier: u32, ctx: *mut u8, digest: *mut u8) -> u32 {
             let result = hasher.finalize();
             unsafe {
                 std::ptr::copy_nonoverlapping(result.as_ptr(), digest as *mut u8, 20);
+            }
+        }
+        id if id == HashId::Keccak as u32 => {
+            macro_rules! keccak_final {
+                ($ty:ty, $len:expr) => {{
+                    let h = unsafe { std::ptr::read_unaligned(ctx as *const $ty) };
+                    let result = h.finalize();
+                    unsafe { std::ptr::copy_nonoverlapping(result.as_ptr(), digest, $len) };
+                }};
+            }
+            match output_size {
+                28 => keccak_final!(sha3::Keccak224, 28),
+                32 => keccak_final!(sha3::Keccak256, 32),
+                48 => keccak_final!(sha3::Keccak384, 48),
+                64 => keccak_final!(sha3::Keccak512, 64),
+                _ => return 0,
+            }
+        }
+        id if id == HashId::Sha3 as u32 => {
+            macro_rules! sha3_final {
+                ($ty:ty, $len:expr) => {{
+                    let h = unsafe { std::ptr::read_unaligned(ctx as *const $ty) };
+                    let result = h.finalize();
+                    unsafe { std::ptr::copy_nonoverlapping(result.as_ptr(), digest, $len) };
+                }};
+            }
+            match output_size {
+                28 => sha3_final!(sha3::Sha3_224, 28),
+                32 => sha3_final!(sha3::Sha3_256, 32),
+                48 => sha3_final!(sha3::Sha3_384, 48),
+                64 => sha3_final!(sha3::Sha3_512, 64),
+                _ => return 0,
             }
         }
         _ => return 0, // Unsupported hash_id
@@ -1422,5 +1547,39 @@ mod tests {
         // RIPEMD-160("abc")
         let result = Ripemd160::hash(b"abc");
         assert_eq!(result, hex!("8eb208f7e05d987a9b044a8e98c6b087f15a0bfc"));
+    }
+
+    #[test]
+    fn test_hash_keccak256() {
+        use crate::hash::{Hasher, Keccak256};
+
+        // Keccak-256("") = c5d24601...
+        let result = Keccak256::hash(b"");
+        assert_eq!(
+            result,
+            hex!("c5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470")
+        );
+
+        // Keccak-256("abc")
+        let mut hasher = Keccak256::new();
+        hasher.update(b"a");
+        hasher.update(b"bc");
+        let result = hasher.finalize();
+        assert_eq!(
+            result,
+            hex!("4e03657aea45a94fc7d47ba826c8d667c0d1e6e33a64a036ec44f58fa12d6c45")
+        );
+    }
+
+    #[test]
+    fn test_hash_sha3_256() {
+        use crate::hash::{Hasher, Sha3_256};
+
+        // SHA3-256("abc")
+        let result = Sha3_256::hash(b"abc");
+        assert_eq!(
+            result,
+            hex!("3a985da74fe225b2045c172d6bd390bd855f086e3e9d525b46bfe24511431532")
+        );
     }
 }

@@ -44,20 +44,25 @@ pub enum HashId {
     Ripemd160 = 1,
     Sha256 = 3,
     Sha512 = 5,
+    Keccak = 6,
+    Sha3 = 7,
 }
 
 impl HashId {
     /// Returns the composite ECALL hash_id passed to hash_init / hash_update / hash_final.
     ///
     /// Layout (32 bits):
-    ///   - high 16 bits: algorithm identifier (matches the Ledger SDK hash type constants)
-    ///   - low 16 bits:  output size in bytes, supplied by the caller
+    ///   - bits 31-24: always 0 (reserved for future extensibility)
+    ///   - bits 23-16: algorithm identifier (u8, matches the Ledger SDK hash type constants)
+    ///   - bits 15-0:  output size in bytes, supplied by the caller
     ///
+    /// Casting through `u8` enforces that the algorithm identifier always fits in a single byte,
+    /// keeping the high 8 bits of the hash_id parameter free for future use.
     /// The output size is passed explicitly rather than being derived from `self` so that
     /// one algorithm identifier can support multiple output lengths.
     /// Note that only certain output sizes might be valid for each algorithm.
     pub const fn ecall_id(self, output_size: u16) -> u32 {
-        ((self as u32) << 16) | (output_size as u32)
+        ((self as u8 as u32) << 16) | (output_size as u32)
     }
 }
 
@@ -94,6 +99,10 @@ pub const ECALL_HASH_DIGEST: u32 = 152;
 pub const CTX_SHA256_SIZE: usize = 128;
 pub const CTX_SHA512_SIZE: usize = 224;
 pub const CTX_RIPEMD160_SIZE: usize = 120;
+// Keccak and SHA-3 share the same internal Keccak-f[1600] state (cx_sha3_t on Ledger, ~200 bytes
+// of rate buffer + 25×u64 state). 448 bytes gives comfortable headroom above the 424-byte
+// cx_sha3_t and the RustCrypto sha3 context structs.
+pub const CTX_SHA3_SIZE: usize = 448;
 
 // Operations for public keys over elliptic curves
 pub const ECALL_ECFP_ADD_POINT: u32 = 160;
