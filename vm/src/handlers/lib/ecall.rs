@@ -17,7 +17,8 @@ use common::{
     BufferType,
 };
 use ledger_device_sdk::sys::{
-    self, cx_ripemd160_t, cx_sha256_t, cx_sha512_t, CX_OK, CX_RIPEMD160, CX_SHA256, CX_SHA512,
+    self, cx_ripemd160_t, cx_sha256_t, cx_sha3_t, cx_sha512_t, CX_KECCAK, CX_OK, CX_RIPEMD160,
+    CX_SHA256, CX_SHA3, CX_SHA512,
 };
 use ledger_device_sdk::{hash::HashInit, io::DecodedEventType};
 
@@ -210,6 +211,8 @@ union LedgerHashContext {
     ripemd160: cx_ripemd160_t,
     sha256: cx_sha256_t,
     sha512: cx_sha512_t,
+    // cx_sha3_t is shared by both CX_SHA3 and CX_KECCAK on the Ledger SDK
+    sha3: cx_sha3_t,
 }
 
 impl LedgerHashContext {
@@ -224,6 +227,7 @@ impl LedgerHashContext {
             CX_RIPEMD160 => core::mem::size_of::<cx_ripemd160_t>(),
             CX_SHA256 => core::mem::size_of::<cx_sha256_t>(),
             CX_SHA512 => core::mem::size_of::<cx_sha512_t>(),
+            CX_KECCAK | CX_SHA3 => core::mem::size_of::<cx_sha3_t>(),
             _ => return Err(LedgerHashContextError::UnsupportedHashId),
         };
 
@@ -237,6 +241,14 @@ impl LedgerHashContext {
         // validate that the algorithm in the high 16 bits is supported
         match (hash_identifier >> 16) as u8 {
             CX_RIPEMD160 | CX_SHA256 | CX_SHA512 => {}
+            CX_KECCAK | CX_SHA3 => {
+                // only the following output lengths are supported
+                let output_size = (hash_identifier & 0xFFFF) as usize;
+                match output_size {
+                    28 | 32 | 48 | 64 => {}
+                    _ => return Err(LedgerHashContextError::InvalidHashId),
+                }
+            }
             _ => return Err(LedgerHashContextError::UnsupportedHashId),
         };
         // the output size is encoded in the low 16 bits by the app
@@ -891,10 +903,17 @@ impl<'a, const N: usize> CommEcallHandler<'a, N> {
             .read_buffer(ctx.0, &mut ctx_local[0..ctx_size])?;
 
         unsafe {
-            sys::cx_hash_init(
-                ctx_local.as_mut_ptr() as *mut sys::cx_hash_header_s,
-                (hash_identifier >> 16) as u8,
+            let output_size = (hash_identifier & 0xFFFF) as usize;
+            // bits 23-16 carry the algorithm identifier (always fits in u8 by construction)
+            let hash_id = (hash_identifier >> 16) as u8;
+            let err = sys::cx_hash_init_ex(
+                ctx_local.as_mut_ptr() as *mut sys::cx_hash_t,
+                hash_id,
+                output_size,
             );
+            if err != CX_OK {
+                return Err(CommEcallError::GenericError("hash init failed"));
+            }
         }
 
         // copy context back to V-App memory
