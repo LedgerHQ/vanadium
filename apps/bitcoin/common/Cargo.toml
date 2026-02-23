@@ -5,12 +5,26 @@ edition = "2021"
 
 [features]
 default = ["target_native"]
-target_native = ["sdk/target_native", "bitcoin/target_native"]
-target_vanadium_ledger = ["sdk/target_vanadium_ledger", "bitcoin/target_vanadium_ledger"]
+target_native = [
+    "sdk/target_native",
+    "hashes/target_native",
+    "secp256k1/target_native",
+    "base58/target_native"
+]
+target_vanadium_ledger = [
+    "sdk/target_vanadium_ledger",
+    "hashes/target_vanadium_ledger",
+    "secp256k1/target_vanadium_ledger",
+    "base58/target_vanadium_ledger"
+]
 
 [dependencies]
-base64 = { version = "0.22.1", default-features = false, features = ["alloc"] }
 bitcoin = { version = "0.32.0", features = ["serde"], default-features = false }
+hashes   = { package = "bitcoin_hashes", version = "0.14", default-features = false, features = ["alloc", "io"] }
+secp256k1 = { package = "secp256k1", version = "0.29", default-features = false }
+base58   = { package = "base58ck", version = "0.1", default-features = false }
+
+base64 = { version = "0.22.1", default-features = false, features = ["alloc"] }
 hex = { version = "0.4.3", default-features = false, features = ["alloc"] }
 nom = { version = "7.1.3", default-features = false, features = ["alloc"] }
 sdk = { package = "vanadium-app-sdk", path = "../../../app-sdk", default-features = false }
@@ -27,8 +41,6 @@ lto = true
 
 [workspace]
 
-[patch.crates-io.bitcoin]
-path = "../../../libs/bitcoin"
 [patch.crates-io.bitcoin_hashes]
 path = "../../../libs/bitcoin_hashes"
 [patch.crates-io.secp256k1]
