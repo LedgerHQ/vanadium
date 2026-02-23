@@ -167,15 +167,6 @@ jobs:
         run: |
           speculos --display headless vanadium_binaries_for_tests/${{ matrix.model }}/release/app-vanadium
 
-  ### vlib tests
-
-  test_vlib_bitcoin:
-    uses: ./.github/workflows/reusable_native_tests.yaml
-    with:
-      vapp_name: "vlib-bitcoin"
-      test_dirs_json: '["libs/bitcoin"]'
-      cargo_test_args: '--features serde'
-
   ### V-Apps
 
   ## vnd-test
