@@ -1506,202 +1506,122 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_hash_sha256() {
-        use crate::hash::{Hasher, Sha256};
+    macro_rules! test_hash {
+        ($test_fn:ident, $ty:ty, $vectors_file:literal) => {
+            #[test]
+            fn $test_fn() {
+                use crate::hash::Hasher as _;
 
-        let result = Sha256::hash(b"");
-        assert_eq!(
-            result,
-            hex!("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855")
-        );
+                let vectors: serde_json::Value = serde_json::from_str(include_str!($vectors_file))
+                    .expect("invalid test vectors JSON");
 
-        let result = Sha256::hash(b"abc");
-        assert_eq!(
-            result,
-            hex!("ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad")
-        );
+                for vector in vectors.as_array().expect("expected JSON array") {
+                    let input_hex = vector["input"].as_str().expect("missing input field");
+                    let expected_hex = vector["expected"].as_str().expect("missing expected field");
 
-        // Test incremental hashing
-        let mut hasher = Sha256::new();
-        hasher.update(b"a");
-        hasher.update(b"bc");
-        let result = hasher.finalize();
-        assert_eq!(
-            result,
-            hex!("ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad")
-        );
+                    let input_bytes: Vec<u8> = if input_hex.is_empty() {
+                        vec![]
+                    } else {
+                        hex::decode(input_hex).expect("invalid hex in input")
+                    };
+                    let expected_bytes =
+                        hex::decode(expected_hex).expect("invalid hex in expected");
+
+                    // Single-pass
+                    let result = <$ty>::hash(&input_bytes);
+                    assert_eq!(
+                        &result[..],
+                        expected_bytes.as_slice(),
+                        "single-pass mismatch for input \"{}\"",
+                        input_hex
+                    );
+
+                    // Incremental (first byte + rest) for inputs longer than 1 byte
+                    if input_bytes.len() > 1 {
+                        let mut hasher = <$ty>::new();
+                        hasher.update(&input_bytes[..1]);
+                        hasher.update(&input_bytes[1..]);
+                        let result = hasher.finalize();
+                        assert_eq!(
+                            &result[..],
+                            expected_bytes.as_slice(),
+                            "incremental mismatch for input \"{}\"",
+                            input_hex
+                        );
+                    }
+
+                    // Incremental: one byte at a time
+                    if input_bytes.len() > 1 {
+                        let mut hasher = <$ty>::new();
+                        for byte in &input_bytes {
+                            hasher.update(&[*byte]);
+                        }
+                        let result = hasher.finalize();
+                        assert_eq!(
+                            &result[..],
+                            expected_bytes.as_slice(),
+                            "incremental (byte-by-byte) mismatch for input \"{}\"",
+                            input_hex
+                        );
+                    }
+                }
+            }
+        };
     }
 
-    #[test]
-    fn test_hash_sha512() {
-        use crate::hash::{Hasher, Sha512 as Sha512Hash};
-
-        let result = Sha512Hash::hash(b"");
-        assert_eq!(
-            result,
-            hex!("cf83e1357eefb8bdf1542850d66d8007d620e4050b5715dc83f4a921d36ce9ce47d0d13c5d85f2b0ff8318d2877eec2f63b931bd47417a81a538327af927da3e")
-        );
-
-        let result = Sha512Hash::hash(b"abc");
-        assert_eq!(
-            result,
-            hex!("ddaf35a193617abacc417349ae20413112e6fa4e89a97ea20a9eeee64b55d39a2192992a274fc1a836ba3c23a3feebbd454d4423643ce80e2a9ac94fa54ca49f")
-        );
-    }
-
-    #[test]
-    fn test_hash_ripemd160() {
-        use crate::hash::{Hasher, Ripemd160};
-
-        let result = Ripemd160::hash(b"");
-        assert_eq!(result, hex!("9c1185a5c5e9fc54612808977ee8f548b2258d31"));
-
-        let result = Ripemd160::hash(b"abc");
-        assert_eq!(result, hex!("8eb208f7e05d987a9b044a8e98c6b087f15a0bfc"));
-    }
-
-    #[test]
-    fn test_hash_sha3_224() {
-        use crate::hash::{Hasher, Sha3_224};
-        let result = Sha3_224::hash(b"");
-        assert_eq!(
-            result,
-            hex!("6b4e03423667dbb73b6e15454f0eb1abd4597f9a1b078e3f5b5a6bc7")
-        );
-
-        let result = Sha3_224::hash(b"abc");
-        assert_eq!(
-            result,
-            hex!("e642824c3f8cf24ad09234ee7d3c766fc9a3a5168d0c94ad73b46fdf")
-        );
-    }
-
-    #[test]
-    fn test_hash_sha3_256() {
-        use crate::hash::{Hasher, Sha3_256};
-
-        let result = Sha3_256::hash(b"");
-        assert_eq!(
-            result,
-            hex!("a7ffc6f8bf1ed76651c14756a061d662f580ff4de43b49fa82d80a4b80f8434a")
-        );
-
-        let result = Sha3_256::hash(b"abc");
-        assert_eq!(
-            result,
-            hex!("3a985da74fe225b2045c172d6bd390bd855f086e3e9d525b46bfe24511431532")
-        );
-    }
-
-    #[test]
-    fn test_hash_sha3_384() {
-        use crate::hash::{Hasher, Sha3_384};
-        let result = Sha3_384::hash(b"");
-        assert_eq!(
-            result,
-            hex!("0c63a75b845e4f7d01107d852e4c2485c51a50aaaa94fc61995e71bbee983a2ac3713831264adb47fb6bd1e058d5f004")
-        );
-
-        let result = Sha3_384::hash(b"abc");
-        assert_eq!(
-            result,
-            hex!("ec01498288516fc926459f58e2c6ad8df9b473cb0fc08c2596da7cf0e49be4b298d88cea927ac7f539f1edf228376d25")
-        );
-    }
-    #[test]
-    fn test_hash_sha3_512() {
-        use crate::hash::{Hasher, Sha3_512};
-        let result = Sha3_512::hash(b"");
-        assert_eq!(
-            result,
-            hex!("a69f73cca23a9ac5c8b567dc185a756e97c982164fe25859e0d1dcc1475c80a615b2123af1f5f94c11e3e9402c3ac558f500199d95b6d3e301758586281dcd26")
-        );
-
-        let result = Sha3_512::hash(b"abc");
-        assert_eq!(
-            result,
-            hex!("b751850b1a57168a5693cd924b6b096e08f621827444f70d884f5d0240d2712e10e116e9192af3c91a7ec57647e3934057340b4cf408d5a56592f8274eec53f0")
-        );
-    }
-
-    #[test]
-    fn test_hash_keccak224() {
-        use crate::hash::{Hasher, Keccak224};
-
-        let result = Keccak224::hash(b"");
-        assert_eq!(
-            result,
-            hex!("f71837502ba8e10837bdd8d365adb85591895602fc552b48b7390abd")
-        );
-
-        let mut hasher = Keccak224::new();
-        hasher.update(b"a");
-        hasher.update(b"bc");
-        let result = hasher.finalize();
-        assert_eq!(
-            result,
-            hex!("c30411768506ebe1c2871b1ee2e87d38df342317300a9b97a95ec6a8")
-        );
-    }
-
-    #[test]
-    fn test_hash_keccak256() {
-        use crate::hash::{Hasher, Keccak256};
-
-        let result = Keccak256::hash(b"");
-        assert_eq!(
-            result,
-            hex!("c5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470")
-        );
-
-        let mut hasher = Keccak256::new();
-        hasher.update(b"a");
-        hasher.update(b"bc");
-        let result = hasher.finalize();
-        assert_eq!(
-            result,
-            hex!("4e03657aea45a94fc7d47ba826c8d667c0d1e6e33a64a036ec44f58fa12d6c45")
-        );
-    }
-
-    #[test]
-    fn test_hash_keccak384() {
-        use crate::hash::{Hasher, Keccak384};
-
-        let result = Keccak384::hash(b"");
-        assert_eq!(
-            result,
-            hex!("2c23146a63a29acf99e73b88f8c24eaa7dc60aa771780ccc006afbfa8fe2479b2dd2b21362337441ac12b515911957ff")
-        );
-
-        let mut hasher = Keccak384::new();
-        hasher.update(b"a");
-        hasher.update(b"bc");
-        let result = hasher.finalize();
-        assert_eq!(
-            result,
-            hex!("f7df1165f033337be098e7d288ad6a2f74409d7a60b49c36642218de161b1f99f8c681e4afaf31a34db29fb763e3c28e")
-        );
-    }
-
-    #[test]
-    fn test_hash_keccak512() {
-        use crate::hash::{Hasher, Keccak512};
-
-        let result = Keccak512::hash(b"");
-        assert_eq!(
-            result,
-            hex!("0eab42de4c3ceb9235fc91acffe746b29c29a8c366b7c60e4e67c466f36a4304c00fa9caf9d87976ba469bcbe06713b435f091ef2769fb160cdab33d3670680e")
-        );
-
-        let mut hasher = Keccak512::new();
-        hasher.update(b"a");
-        hasher.update(b"bc");
-        let result = hasher.finalize();
-        assert_eq!(
-            result,
-            hex!("18587dc2ea106b9a1563e32b3312421ca164c7f1f07bc922a9c83d77cea3a1e5d0c69910739025372dc14ac9642629379540c17e2a65b19d77aa511a9d00bb96")
-        );
-    }
+    test_hash!(
+        test_hash_sha256,
+        crate::hash::Sha256,
+        "../test-vectors/hashes/sha256.json"
+    );
+    test_hash!(
+        test_hash_sha512,
+        crate::hash::Sha512,
+        "../test-vectors/hashes/sha512.json"
+    );
+    test_hash!(
+        test_hash_ripemd160,
+        crate::hash::Ripemd160,
+        "../test-vectors/hashes/ripemd160.json"
+    );
+    test_hash!(
+        test_hash_sha3_224,
+        crate::hash::Sha3_224,
+        "../test-vectors/hashes/sha3_224.json"
+    );
+    test_hash!(
+        test_hash_sha3_256,
+        crate::hash::Sha3_256,
+        "../test-vectors/hashes/sha3_256.json"
+    );
+    test_hash!(
+        test_hash_sha3_384,
+        crate::hash::Sha3_384,
+        "../test-vectors/hashes/sha3_384.json"
+    );
+    test_hash!(
+        test_hash_sha3_512,
+        crate::hash::Sha3_512,
+        "../test-vectors/hashes/sha3_512.json"
+    );
+    test_hash!(
+        test_hash_keccak224,
+        crate::hash::Keccak224,
+        "../test-vectors/hashes/keccak224.json"
+    );
+    test_hash!(
+        test_hash_keccak256,
+        crate::hash::Keccak256,
+        "../test-vectors/hashes/keccak256.json"
+    );
+    test_hash!(
+        test_hash_keccak384,
+        crate::hash::Keccak384,
+        "../test-vectors/hashes/keccak384.json"
+    );
+    test_hash!(
+        test_hash_keccak512,
+        crate::hash::Keccak512,
+        "../test-vectors/hashes/keccak512.json"
+    );
 }

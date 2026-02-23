@@ -1,0 +1,10 @@
+[
+    {
+        "input": "",
+        "expected": "9c1185a5c5e9fc54612808977ee8f548b2258d31"
+    },
+    {
+        "input": "616263",
+        "expected": "8eb208f7e05d987a9b044a8e98c6b087f15a0bfc"
+    }
+]
