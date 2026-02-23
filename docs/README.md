@@ -5,13 +5,13 @@ All crates used by V-Apps use explicit features in order to distinguish which co
 Here are the currently defined target features:
 
 - `target_native`: indicates compilation of a V-App for the *native* environment, which is what runs on your machine. With this target, V-Apps run as a process that communicates with the client via a socket. This is typically the default and is ***only*** used for development and testing.
-- `target_vanadium_ledger`: indicates compilation of a V-App for execution on the Ledger Vanadium VM app. Depending whether the device is a simulated device on Speculos or a real device, the Transport protocol would use tcp or the HID interface. The actual compilation target for this feature is `riscv32imc-unknown-none-elf`.
+- `target_vanadium_ledger`: indicates compilation of a V-App for execution on the Ledger Vanadium VM app. Depending whether the device is a simulated device on Speculos or a real device, the Transport protocol would use tcp or the HID interface. The actual compilation target for this feature is `riscv32imac-unknown-none-elf`.
 
 The `vanadium-app-sdk`, every V-App and any V-App library using the `vanadium-app-sdk` crate must have a feature for each supported target (and transitively propagate to dependencies, if relevant).
 
 When building for the Ledger target, use:
 ```bash
-cargo build --release --target riscv32imc-unknown-none-elf --no-default-features --features target_vanadium_ledger
+cargo build --release --target riscv32imac-unknown-none-elf --no-default-features --features target_vanadium_ledger
 ```
 
 The `vanadium-client-sdk` and the V-App clients always compile and run for the native target. They might use the feature flags only to distinguish which transport protocol is supported by clients - and might therefore have multiple (or all) target features simultaneously.

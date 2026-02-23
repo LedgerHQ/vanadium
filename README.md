@@ -25,7 +25,7 @@ Before you begin, ensure you have the following installed:
 
 1.  **Rust & Risc-V Target:**
     ```bash
-    rustup target add riscv32imc-unknown-none-elf
+    rustup target add riscv32imac-unknown-none-elf
     ```
 
 2.  **just** (Command runner):

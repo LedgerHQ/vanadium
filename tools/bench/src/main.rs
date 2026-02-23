@@ -53,7 +53,7 @@ struct BenchCase {
 impl BenchCase {
     fn app_path(&self) -> String {
         format!(
-            "cases/{}/target/riscv32imc-unknown-none-elf/release/{}",
+            "cases/{}/target/riscv32imac-unknown-none-elf/release/{}",
             self.case_name, self.crate_name
         )
     }

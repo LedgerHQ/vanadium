@@ -32,7 +32,7 @@ on:
       riscv_target:
         description: "RISC-V target triple"
         required: false
-        default: riscv32imc-unknown-none-elf
+        default: riscv32imac-unknown-none-elf
         type: string
 
 jobs:

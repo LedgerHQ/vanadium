@@ -80,11 +80,11 @@ fn main() -> Result<()> {
 
             let elf_path = match app {
                 Some(path) => path,
-                // if the app path is not provided, default to release binary for the riscv32imc target
+                // if the app path is not provided, default to release binary for the riscv32imac target
                 None => cargo_toml_path
                     .parent()
                     .unwrap()
-                    .join("target/riscv32imc-unknown-none-elf/release")
+                    .join("target/riscv32imac-unknown-none-elf/release")
                     .join(vapp_crate_name),
             };
             // if the output path is not provided, default to adding the .vapp extension to the elf

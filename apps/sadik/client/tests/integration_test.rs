@@ -11,7 +11,7 @@ pub async fn setup() -> TestSetup<SadikClient> {
     let vanadium_binary = std::env::var("VANADIUM_BINARY")
         .unwrap_or_else(|_| "../../../vm/target/flex/release/app-vanadium".to_string());
     let vapp_binary = std::env::var("VAPP_BINARY").unwrap_or_else(|_| {
-        "../app/target/riscv32imc-unknown-none-elf/release/vnd-sadik".to_string()
+        "../app/target/riscv32imac-unknown-none-elf/release/vnd-sadik".to_string()
     });
     setup_test(&vanadium_binary, &vapp_binary, |transport| {
         SadikClient::new(transport)
