@@ -36,8 +36,8 @@ These are the currently defined commands:
 **Example:**
 
 ```
-cargo build --release --target riscv32imc-unknown-none-elf --no-default-features --features target_vanadium_ledger
+cargo build --release --target riscv32imac-unknown-none-elf --no-default-features --features target_vanadium_ledger
 cargo vnd package
 ```
 
-This will create a file like `target/riscv32imc-unknown-none-elf/release/<appname>.vapp`.
+This will create a file like `target/riscv32imac-unknown-none-elf/release/<appname>.vapp`.

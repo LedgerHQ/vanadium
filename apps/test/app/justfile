@@ -4,7 +4,7 @@ run:
 # build for both native and riscv targets
 build:
   cargo build --release
-  cargo build --release --target=riscv32imc-unknown-none-elf --no-default-features --features target_vanadium_ledger
+  cargo build --release --target=riscv32imac-unknown-none-elf --no-default-features --features target_vanadium_ledger
 
 # build for native target
 build-native:
@@ -12,12 +12,12 @@ build-native:
 
 # build for riscv target (Ledger Vanadium)
 build-riscv:
-  cargo build --release --target=riscv32imc-unknown-none-elf --no-default-features --features target_vanadium_ledger
+  cargo build --release --target=riscv32imac-unknown-none-elf --no-default-features --features target_vanadium_ledger
 
 # disassembles the riscv binary
 disassemble:
-  riscv64-linux-gnu-objdump -d target/riscv32imc-unknown-none-elf/release/vnd-test
+  riscv64-linux-gnu-objdump -d target/riscv32imac-unknown-none-elf/release/vnd-test
 
 # show the sections of the riscv binary
 show-sections:
-  readelf -S target/riscv32imc-unknown-none-elf/release/vnd-test
+  readelf -S target/riscv32imac-unknown-none-elf/release/vnd-test

@@ -2083,7 +2083,7 @@ pub mod client_utils {
         use_hmacs: bool,
     ) -> Result<Box<dyn VAppTransport + Send>, ClientUtilsError> {
         let vapp_path = format!(
-            "../app/target/riscv32imc-unknown-none-elf/release/{}",
+            "../app/target/riscv32imac-unknown-none-elf/release/{}",
             vapp_name
         );
 

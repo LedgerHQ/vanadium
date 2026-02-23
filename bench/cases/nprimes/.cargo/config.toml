@@ -1,8 +1,8 @@
 [build]
-target = "riscv32imc-unknown-none-elf"
+target = "riscv32imac-unknown-none-elf"
 
 
-[target.riscv32imc-unknown-none-elf]
+[target.riscv32imac-unknown-none-elf]
 rustflags = [
   # The VM expects ELF binaries with 2 segments (rx and rw). Don't put
   # read-only non-executable sections in their own segment.

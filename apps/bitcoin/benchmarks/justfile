@@ -4,5 +4,5 @@ run:
 # build all the testcases for riscv target (Ledger Vanadium)
 build-cases:
   for case_dir in ./cases/*; do\
-    (cd "$case_dir" && cargo build --release --target=riscv32imc-unknown-none-elf --no-default-features --features target_vanadium_ledger)\
+    (cd "$case_dir" && cargo build --release --target=riscv32imac-unknown-none-elf --no-default-features --features target_vanadium_ledger)\
   done
