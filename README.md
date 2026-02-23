@@ -203,8 +203,7 @@ This repository is organized in a monorepo structure.
   * [bitcoin](apps/bitcoin) - A work-in-progess app for signing bitcoin transactions.
   * [test](apps/test) - Simple V-App to test the Vanadium VM, implementing various computational tasks.
   * [sadik](apps/sadik) - A V-App specifically designed to test the various functionality of the Vanadium V-App SDK, and particularly the ECALLs.
-* [libs](libs) - General purpose libraries that can be used by V-Apps.
-  * [bitcoin](libs/bitcoin) - A custom clone of the [rust-bitcoin](https://github.com/rust-bitcoin/rust-bitcoin) library.
+* [libs](libs) - General purpose libraries that can be used by V-Apps. It contains patched versions of the dependencies of `rust-bitcoin` that are modified to use the `app-sdk` for cryptographic functions.
 * [cargo-vnd](cargo-vnd) - A tool to create and package V-Apps.
 * [bench](bench) - A suite of benchmarks for various V-App operations.
 * tools
