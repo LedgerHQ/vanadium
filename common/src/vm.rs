@@ -586,13 +586,13 @@ impl<'a, M: PagedMemory> Cpu<'a, M> {
             Op::And { rd, rs1, rs2 } => { self.regs[rd as usize] = self.regs[rs1 as usize] & self.regs[rs2 as usize]; },
             Op::Mul { rd, rs1, rs2 } => { self.regs[rd as usize] = self.regs[rs1 as usize].wrapping_mul(self.regs[rs2 as usize]); },
             Op::Mulh { rd, rs1, rs2 } => {
-                let result = ((self.regs[rs1 as usize] as i64) * (self.regs[rs2 as usize] as i64)) >> 32;
+                let result = ((self.regs[rs1 as usize] as i32 as i64) * (self.regs[rs2 as usize] as i32 as i64)) >> 32;
                 self.regs[rd as usize] = result as u32;
             },
             Op::Mulhsu { rd, rs1, rs2 } => {
-                let signed_val = self.regs[rs1 as usize] as i32 as i64;
-                let unsigned_val = self.regs[rs2 as usize] as u64;
-                let result = (signed_val * (unsigned_val as i64)) >> 32;
+                let a = self.regs[rs1 as usize] as i32 as i64 as i128;
+                let b = self.regs[rs2 as usize] as u64 as i128;
+                let result = (a * b) >> 32;
                 self.regs[rd as usize] = result as u32;
             },
             Op::Mulhu { rd, rs1, rs2 } => {
@@ -1058,5 +1058,575 @@ mod tests {
         let mut read_buffer = vec![0; 0];
         let read_result = segment.read_buffer(0, &mut read_buffer);
         assert!(read_result.is_ok());
+    }
+
+    // Helper: encode an RV32A instruction.
+    // funct5 [31:27] | aq [26] | rl [25] | rs2 [24:20] | rs1 [19:15] | funct3 [14:12] | rd [11:7] | opcode [6:0]
+    fn encode_amo(funct5: u32, rs2: u32, rs1: u32, rd: u32) -> u32 {
+        (funct5 << 27) | (rs2 << 20) | (rs1 << 15) | (0b010 << 12) | (rd << 7) | 0x2F
+    }
+
+    #[test]
+    fn test_decode_atomic_instructions() {
+        use crate::riscv::decode::decode;
+
+        // LR.W x1, (x2)  — funct5 = 0b00010, rs2 = 0
+        let inst = encode_amo(0b00010, 0, 2, 1);
+        let (op, size) = decode(inst);
+        assert_eq!(size, 4);
+        assert!(matches!(op, Op::LrW { rd: 1, rs1: 2 }));
+
+        // SC.W x3, x4, (x5)  — funct5 = 0b00011
+        let inst = encode_amo(0b00011, 4, 5, 3);
+        let (op, _) = decode(inst);
+        assert!(matches!(
+            op,
+            Op::ScW {
+                rd: 3,
+                rs1: 5,
+                rs2: 4
+            }
+        ));
+
+        // AMOSWAP.W x6, x7, (x8)  — funct5 = 0b00001
+        let inst = encode_amo(0b00001, 7, 8, 6);
+        let (op, _) = decode(inst);
+        assert!(matches!(
+            op,
+            Op::AmoswapW {
+                rd: 6,
+                rs1: 8,
+                rs2: 7
+            }
+        ));
+
+        // AMOADD.W x9, x10, (x11)  — funct5 = 0b00000
+        let inst = encode_amo(0b00000, 10, 11, 9);
+        let (op, _) = decode(inst);
+        assert!(matches!(
+            op,
+            Op::AmoaddW {
+                rd: 9,
+                rs1: 11,
+                rs2: 10
+            }
+        ));
+
+        // AMOXOR.W  — funct5 = 0b00100
+        let inst = encode_amo(0b00100, 2, 3, 1);
+        let (op, _) = decode(inst);
+        assert!(matches!(
+            op,
+            Op::AmoxorW {
+                rd: 1,
+                rs1: 3,
+                rs2: 2
+            }
+        ));
+
+        // AMOAND.W  — funct5 = 0b01100
+        let inst = encode_amo(0b01100, 2, 3, 1);
+        let (op, _) = decode(inst);
+        assert!(matches!(
+            op,
+            Op::AmoandW {
+                rd: 1,
+                rs1: 3,
+                rs2: 2
+            }
+        ));
+
+        // AMOOR.W  — funct5 = 0b01000
+        let inst = encode_amo(0b01000, 2, 3, 1);
+        let (op, _) = decode(inst);
+        assert!(matches!(
+            op,
+            Op::AmoorW {
+                rd: 1,
+                rs1: 3,
+                rs2: 2
+            }
+        ));
+
+        // AMOMIN.W  — funct5 = 0b10000
+        let inst = encode_amo(0b10000, 2, 3, 1);
+        let (op, _) = decode(inst);
+        assert!(matches!(
+            op,
+            Op::AmominW {
+                rd: 1,
+                rs1: 3,
+                rs2: 2
+            }
+        ));
+
+        // AMOMAX.W  — funct5 = 0b10100
+        let inst = encode_amo(0b10100, 2, 3, 1);
+        let (op, _) = decode(inst);
+        assert!(matches!(
+            op,
+            Op::AmomaxW {
+                rd: 1,
+                rs1: 3,
+                rs2: 2
+            }
+        ));
+
+        // AMOMINU.W  — funct5 = 0b11000
+        let inst = encode_amo(0b11000, 2, 3, 1);
+        let (op, _) = decode(inst);
+        assert!(matches!(
+            op,
+            Op::AmominuW {
+                rd: 1,
+                rs1: 3,
+                rs2: 2
+            }
+        ));
+
+        // AMOMAXU.W  — funct5 = 0b11100
+        let inst = encode_amo(0b11100, 2, 3, 1);
+        let (op, _) = decode(inst);
+        assert!(matches!(
+            op,
+            Op::AmomaxuW {
+                rd: 1,
+                rs1: 3,
+                rs2: 2
+            }
+        ));
+    }
+
+    #[test]
+    fn test_decode_atomic_with_aq_rl_bits() {
+        use crate::riscv::decode::decode;
+
+        // LR.W with aq=1, rl=1 should still decode correctly (aq/rl are ignored in decoding)
+        let inst = encode_amo(0b00010, 0, 2, 1) | (1 << 26) | (1 << 25);
+        let (op, _) = decode(inst);
+        assert!(matches!(op, Op::LrW { rd: 1, rs1: 2 }));
+
+        // AMOADD.W with aq=1
+        let inst = encode_amo(0b00000, 5, 6, 4) | (1 << 26);
+        let (op, _) = decode(inst);
+        assert!(matches!(
+            op,
+            Op::AmoaddW {
+                rd: 4,
+                rs1: 6,
+                rs2: 5
+            }
+        ));
+    }
+
+    // Helper to set up a simple CPU for testing atomic operations.
+    // Returns a CPU with data segment at address 0, code loaded at address 0x1000.
+    struct AtomicTestEnv {
+        data_mem: VecMemory,
+        code_mem: VecMemory,
+        stack_mem: VecMemory,
+    }
+
+    impl AtomicTestEnv {
+        fn new() -> Self {
+            Self {
+                data_mem: VecMemory::new(4),
+                code_mem: VecMemory::new(4),
+                stack_mem: VecMemory::new(4),
+            }
+        }
+
+        fn cpu(&mut self) -> Cpu<'_, VecMemory> {
+            let data_seg =
+                MemorySegment::new(0, (PAGE_SIZE * 4) as u32, &mut self.data_mem).unwrap();
+            let code_seg =
+                MemorySegment::new(0x1000, (PAGE_SIZE * 4) as u32, &mut self.code_mem).unwrap();
+            let stack_seg =
+                MemorySegment::new(0x2000, (PAGE_SIZE * 4) as u32, &mut self.stack_mem).unwrap();
+            Cpu::new(0x1000, code_seg, data_seg, stack_seg)
+        }
+    }
+
+    #[test]
+    fn test_exec_lr_sc_success() {
+        let mut env = AtomicTestEnv::new();
+        let mut cpu = env.cpu();
+
+        // Write initial value 42 at address 0
+        cpu.data_seg.write_u32(0, 42).unwrap();
+
+        // Set x1 = 0 (address for LR/SC)
+        cpu.regs[1] = 0;
+        // Set x3 = 99 (value to store)
+        cpu.regs[3] = 99;
+
+        // Execute LR.W x2, (x1) — should load 42 into x2 and set reservation
+        let inst = encode_amo(0b00010, 0, 1, 2);
+        let (op, _) = crate::riscv::decode::decode(inst);
+        assert!(matches!(op, Op::LrW { .. }));
+        cpu.execute::<&str>(
+            inst,
+            None::<&mut dyn EcallHandler<Memory = VecMemory, Error = &str>>,
+        )
+        .unwrap();
+        assert_eq!(cpu.regs[2], 42);
+
+        // Execute SC.W x4, x3, (x1) — should succeed (rd=x4 gets 0), store 99
+        let inst = encode_amo(0b00011, 3, 1, 4);
+        cpu.execute::<&str>(
+            inst,
+            None::<&mut dyn EcallHandler<Memory = VecMemory, Error = &str>>,
+        )
+        .unwrap();
+        assert_eq!(cpu.regs[4], 0); // success
+        assert_eq!(cpu.data_seg.read_u32(0).unwrap(), 99);
+    }
+
+    #[test]
+    fn test_exec_sc_without_reservation() {
+        let mut env = AtomicTestEnv::new();
+        let mut cpu = env.cpu();
+
+        cpu.data_seg.write_u32(0, 42).unwrap();
+        cpu.regs[1] = 0;
+        cpu.regs[3] = 99;
+
+        // Execute SC.W without prior LR.W — should fail (rd gets 1), memory unchanged
+        let inst = encode_amo(0b00011, 3, 1, 4);
+        cpu.execute::<&str>(
+            inst,
+            None::<&mut dyn EcallHandler<Memory = VecMemory, Error = &str>>,
+        )
+        .unwrap();
+        assert_eq!(cpu.regs[4], 1); // failure
+        assert_eq!(cpu.data_seg.read_u32(0).unwrap(), 42); // unchanged
+    }
+
+    #[test]
+    fn test_exec_amoswap() {
+        let mut env = AtomicTestEnv::new();
+        let mut cpu = env.cpu();
+
+        cpu.data_seg.write_u32(0, 100).unwrap();
+        cpu.regs[1] = 0; // address
+        cpu.regs[2] = 200; // new value
+
+        // AMOSWAP.W x3, x2, (x1)
+        let inst = encode_amo(0b00001, 2, 1, 3);
+        cpu.execute::<&str>(
+            inst,
+            None::<&mut dyn EcallHandler<Memory = VecMemory, Error = &str>>,
+        )
+        .unwrap();
+        assert_eq!(cpu.regs[3], 100); // old value loaded into rd
+        assert_eq!(cpu.data_seg.read_u32(0).unwrap(), 200); // new value in memory
+    }
+
+    #[test]
+    fn test_exec_amoadd() {
+        let mut env = AtomicTestEnv::new();
+        let mut cpu = env.cpu();
+
+        cpu.data_seg.write_u32(0, 10).unwrap();
+        cpu.regs[1] = 0;
+        cpu.regs[2] = 5;
+
+        // AMOADD.W x3, x2, (x1)
+        let inst = encode_amo(0b00000, 2, 1, 3);
+        cpu.execute::<&str>(
+            inst,
+            None::<&mut dyn EcallHandler<Memory = VecMemory, Error = &str>>,
+        )
+        .unwrap();
+        assert_eq!(cpu.regs[3], 10); // old value
+        assert_eq!(cpu.data_seg.read_u32(0).unwrap(), 15); // 10 + 5
+    }
+
+    #[test]
+    fn test_exec_amoxor() {
+        let mut env = AtomicTestEnv::new();
+        let mut cpu = env.cpu();
+
+        cpu.data_seg.write_u32(0, 0xFF00).unwrap();
+        cpu.regs[1] = 0;
+        cpu.regs[2] = 0xF0F0;
+
+        let inst = encode_amo(0b00100, 2, 1, 3);
+        cpu.execute::<&str>(
+            inst,
+            None::<&mut dyn EcallHandler<Memory = VecMemory, Error = &str>>,
+        )
+        .unwrap();
+        assert_eq!(cpu.regs[3], 0xFF00);
+        assert_eq!(cpu.data_seg.read_u32(0).unwrap(), 0xFF00 ^ 0xF0F0);
+    }
+
+    #[test]
+    fn test_exec_amoand() {
+        let mut env = AtomicTestEnv::new();
+        let mut cpu = env.cpu();
+
+        cpu.data_seg.write_u32(0, 0xFF0F).unwrap();
+        cpu.regs[1] = 0;
+        cpu.regs[2] = 0x0FFF;
+
+        let inst = encode_amo(0b01100, 2, 1, 3);
+        cpu.execute::<&str>(
+            inst,
+            None::<&mut dyn EcallHandler<Memory = VecMemory, Error = &str>>,
+        )
+        .unwrap();
+        assert_eq!(cpu.regs[3], 0xFF0F);
+        assert_eq!(cpu.data_seg.read_u32(0).unwrap(), 0xFF0F & 0x0FFF);
+    }
+
+    #[test]
+    fn test_exec_amoor() {
+        let mut env = AtomicTestEnv::new();
+        let mut cpu = env.cpu();
+
+        cpu.data_seg.write_u32(0, 0xF000).unwrap();
+        cpu.regs[1] = 0;
+        cpu.regs[2] = 0x000F;
+
+        let inst = encode_amo(0b01000, 2, 1, 3);
+        cpu.execute::<&str>(
+            inst,
+            None::<&mut dyn EcallHandler<Memory = VecMemory, Error = &str>>,
+        )
+        .unwrap();
+        assert_eq!(cpu.regs[3], 0xF000);
+        assert_eq!(cpu.data_seg.read_u32(0).unwrap(), 0xF000 | 0x000F);
+    }
+
+    #[test]
+    fn test_exec_amomin_signed() {
+        let mut env = AtomicTestEnv::new();
+        let mut cpu = env.cpu();
+
+        // Store -5 (as i32 in u32 representation)
+        cpu.data_seg.write_u32(0, (-5i32) as u32).unwrap();
+        cpu.regs[1] = 0;
+        cpu.regs[2] = 3u32; // positive 3
+
+        // AMOMIN.W x3, x2, (x1) — min(-5, 3) = -5
+        let inst = encode_amo(0b10000, 2, 1, 3);
+        cpu.execute::<&str>(
+            inst,
+            None::<&mut dyn EcallHandler<Memory = VecMemory, Error = &str>>,
+        )
+        .unwrap();
+        assert_eq!(cpu.regs[3], (-5i32) as u32); // old value
+        assert_eq!(cpu.data_seg.read_u32(0).unwrap(), (-5i32) as u32); // min is -5
+    }
+
+    #[test]
+    fn test_exec_amomax_signed() {
+        let mut env = AtomicTestEnv::new();
+        let mut cpu = env.cpu();
+
+        cpu.data_seg.write_u32(0, (-5i32) as u32).unwrap();
+        cpu.regs[1] = 0;
+        cpu.regs[2] = 3u32;
+
+        // AMOMAX.W x3, x2, (x1) — max(-5, 3) = 3
+        let inst = encode_amo(0b10100, 2, 1, 3);
+        cpu.execute::<&str>(
+            inst,
+            None::<&mut dyn EcallHandler<Memory = VecMemory, Error = &str>>,
+        )
+        .unwrap();
+        assert_eq!(cpu.regs[3], (-5i32) as u32);
+        assert_eq!(cpu.data_seg.read_u32(0).unwrap(), 3);
+    }
+
+    #[test]
+    fn test_exec_amominu_unsigned() {
+        let mut env = AtomicTestEnv::new();
+        let mut cpu = env.cpu();
+
+        cpu.data_seg.write_u32(0, 100).unwrap();
+        cpu.regs[1] = 0;
+        cpu.regs[2] = 50;
+
+        let inst = encode_amo(0b11000, 2, 1, 3);
+        cpu.execute::<&str>(
+            inst,
+            None::<&mut dyn EcallHandler<Memory = VecMemory, Error = &str>>,
+        )
+        .unwrap();
+        assert_eq!(cpu.regs[3], 100);
+        assert_eq!(cpu.data_seg.read_u32(0).unwrap(), 50);
+    }
+
+    #[test]
+    fn test_exec_amomaxu_unsigned() {
+        let mut env = AtomicTestEnv::new();
+        let mut cpu = env.cpu();
+
+        cpu.data_seg.write_u32(0, 100).unwrap();
+        cpu.regs[1] = 0;
+        cpu.regs[2] = 200;
+
+        let inst = encode_amo(0b11100, 2, 1, 3);
+        cpu.execute::<&str>(
+            inst,
+            None::<&mut dyn EcallHandler<Memory = VecMemory, Error = &str>>,
+        )
+        .unwrap();
+        assert_eq!(cpu.regs[3], 100);
+        assert_eq!(cpu.data_seg.read_u32(0).unwrap(), 200);
+    }
+
+    #[test]
+    fn test_exec_amo_unaligned_address() {
+        let mut env = AtomicTestEnv::new();
+        let mut cpu = env.cpu();
+
+        cpu.regs[1] = 3; // unaligned address
+
+        // LR.W with unaligned address should error
+        let inst = encode_amo(0b00010, 0, 1, 2);
+        let result = cpu.execute::<&str>(
+            inst,
+            None::<&mut dyn EcallHandler<Memory = VecMemory, Error = &str>>,
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_exec_sc_invalidated_by_store() {
+        let mut env = AtomicTestEnv::new();
+        let mut cpu = env.cpu();
+
+        cpu.data_seg.write_u32(0, 42).unwrap();
+        cpu.regs[1] = 0; // address for LR/SC
+        cpu.regs[3] = 99; // SC value
+        cpu.regs[5] = 77; // SW value
+
+        // LR.W x2, (x1) — sets reservation at address 0
+        let lr = encode_amo(0b00010, 0, 1, 2);
+        cpu.execute::<&str>(
+            lr,
+            None::<&mut dyn EcallHandler<Memory = VecMemory, Error = &str>>,
+        )
+        .unwrap();
+        assert_eq!(cpu.regs[2], 42);
+
+        // SW x5, 0(x1) — store to address 0 should invalidate the reservation
+        // SW: opcode=0x23, funct3=0x2, rs1=x1, rs2=x5, imm=0
+        // Encoding: imm[11:5] | rs2 | rs1 | funct3 | imm[4:0] | opcode
+        let sw = (5u32 << 20) | (1u32 << 15) | (0b010 << 12) | 0x23;
+        cpu.execute::<&str>(
+            sw,
+            None::<&mut dyn EcallHandler<Memory = VecMemory, Error = &str>>,
+        )
+        .unwrap();
+        assert_eq!(cpu.data_seg.read_u32(0).unwrap(), 77);
+
+        // SC.W x4, x3, (x1) — should fail because reservation was invalidated
+        let sc = encode_amo(0b00011, 3, 1, 4);
+        cpu.execute::<&str>(
+            sc,
+            None::<&mut dyn EcallHandler<Memory = VecMemory, Error = &str>>,
+        )
+        .unwrap();
+        assert_eq!(cpu.regs[4], 1); // failure
+        assert_eq!(cpu.data_seg.read_u32(0).unwrap(), 77); // unchanged
+    }
+
+    #[test]
+    fn test_exec_sc_invalidated_by_byte_store_in_word() {
+        let mut env = AtomicTestEnv::new();
+        let mut cpu = env.cpu();
+
+        cpu.data_seg.write_u32(0, 0).unwrap();
+        cpu.regs[1] = 0; // address
+        cpu.regs[2] = 0xFF;
+
+        // LR.W at address 0
+        let lr = encode_amo(0b00010, 0, 1, 3);
+        cpu.execute::<&str>(
+            lr,
+            None::<&mut dyn EcallHandler<Memory = VecMemory, Error = &str>>,
+        )
+        .unwrap();
+
+        // SB x2, 2(x1) — byte store to address 2 (within the reserved word [0..3])
+        // imm=2, rs1=x1, rs2=x2, funct3=0, opcode=0x23
+        // imm[11:5]=0, imm[4:0]=2 → bit layout: 0 | rs2(x2=2) | rs1(x1=1) | 000 | 00010 | 0100011
+        let sb = (2u32 << 20) | (1u32 << 15) | (0b000 << 12) | (2 << 7) | 0x23;
+        cpu.execute::<&str>(
+            sb,
+            None::<&mut dyn EcallHandler<Memory = VecMemory, Error = &str>>,
+        )
+        .unwrap();
+
+        // SC.W should now fail
+        let sc = encode_amo(0b00011, 2, 1, 4);
+        cpu.execute::<&str>(
+            sc,
+            None::<&mut dyn EcallHandler<Memory = VecMemory, Error = &str>>,
+        )
+        .unwrap();
+        assert_eq!(cpu.regs[4], 1); // failure
+    }
+
+    #[test]
+    fn test_exec_sc_not_invalidated_by_store_to_different_word() {
+        let mut env = AtomicTestEnv::new();
+        let mut cpu = env.cpu();
+
+        cpu.data_seg.write_u32(0, 42).unwrap();
+        cpu.data_seg.write_u32(4, 0).unwrap();
+        cpu.regs[1] = 0; // address for LR/SC (word at 0)
+        cpu.regs[6] = 4; // address for the other store (word at 4)
+        cpu.regs[2] = 99; // SC value
+
+        // LR.W at address 0
+        let lr = encode_amo(0b00010, 0, 1, 3);
+        cpu.execute::<&str>(
+            lr,
+            None::<&mut dyn EcallHandler<Memory = VecMemory, Error = &str>>,
+        )
+        .unwrap();
+
+        // SW to address 4 — different word, should NOT invalidate the reservation
+        let sw = (0u32 << 25) | (2u32 << 20) | (6u32 << 15) | (0b010 << 12) | 0x23;
+        cpu.execute::<&str>(
+            sw,
+            None::<&mut dyn EcallHandler<Memory = VecMemory, Error = &str>>,
+        )
+        .unwrap();
+
+        // SC.W at address 0 should still succeed
+        let sc = encode_amo(0b00011, 2, 1, 4);
+        cpu.execute::<&str>(
+            sc,
+            None::<&mut dyn EcallHandler<Memory = VecMemory, Error = &str>>,
+        )
+        .unwrap();
+        assert_eq!(cpu.regs[4], 0); // success
+        assert_eq!(cpu.data_seg.read_u32(0).unwrap(), 99);
+    }
+
+    #[test]
+    fn test_exec_amoadd_wrapping() {
+        let mut env = AtomicTestEnv::new();
+        let mut cpu = env.cpu();
+
+        cpu.data_seg.write_u32(0, u32::MAX).unwrap();
+        cpu.regs[1] = 0;
+        cpu.regs[2] = 1;
+
+        // AMOADD.W should wrap: 0xFFFFFFFF + 1 = 0
+        let inst = encode_amo(0b00000, 2, 1, 3);
+        cpu.execute::<&str>(
+            inst,
+            None::<&mut dyn EcallHandler<Memory = VecMemory, Error = &str>>,
+        )
+        .unwrap();
+        assert_eq!(cpu.regs[3], u32::MAX);
+        assert_eq!(cpu.data_seg.read_u32(0).unwrap(), 0);
     }
 }
