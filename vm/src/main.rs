@@ -56,6 +56,7 @@ macro_rules! print {
         use core::fmt::Write;
         let mut buf = alloc::string::String::new();
         write!(&mut buf, $($arg)*).unwrap();
+        #[allow(deprecated)]
         ledger_device_sdk::testing::debug_print(&buf);
     }};
 }
