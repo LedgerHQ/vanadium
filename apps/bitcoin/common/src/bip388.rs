@@ -12,16 +12,6 @@ use core::str::FromStr;
 
 use hex::{self, FromHex};
 
-use nom::{
-    branch::alt,
-    bytes::complete::{tag, take},
-    character::complete::{alpha1, char, digit1},
-    combinator::{map, map_res, opt, verify},
-    multi::{many_m_n, separated_list1},
-    sequence::{delimited, pair, preceded, terminated, tuple},
-    IResult,
-};
-
 use bitcoin::{
     bip32::{ChildNumber, Xpub},
     consensus::{encode, Decodable, Encodable},
@@ -352,69 +342,79 @@ pub trait ToDescriptor {
     ) -> Result<String, &'static str>;
 }
 
-// Creates a parser that recognizes a number between 0 and `n` (both included).
-// The returned parser will only accept the number if it doesn't have leading zeros,
-// unless the number is exactly "0".
-fn parse_number_up_to(n: u32) -> impl Fn(&str) -> IResult<&str, u32> {
-    move |input: &str| {
-        let mut parser = verify(map_res(digit1, str::parse::<u32>), |&num| {
-            num <= n && ((num == 0 && !input.starts_with("00")) || !input.starts_with('0'))
-        });
-        parser(input)
+// Return type for all hand-rolled parser functions: (remaining_input, parsed_value)
+type ParseResult<'a, T> = Result<(&'a str, T), &'static str>;
+
+// Parses a decimal u32 (no leading zeros unless "0"), value <= max.
+fn parse_number_up_to(input: &str, max: u32) -> ParseResult<'_, u32> {
+    if input.is_empty() || !input.starts_with(|c: char| c.is_ascii_digit()) {
+        return Err("expected digit");
     }
+    // reject leading zeros on multi-digit numbers
+    if input.starts_with('0') && input.len() > 1 && input.as_bytes()[1].is_ascii_digit() {
+        return Err("leading zeros not allowed");
+    }
+    let end = input
+        .bytes()
+        .position(|b| !b.is_ascii_digit())
+        .unwrap_or(input.len());
+    let num: u32 = input[..end].parse().map_err(|_| "number out of range")?;
+    if num > max {
+        return Err("number exceeds maximum");
+    }
+    Ok((&input[end..], num))
 }
 
+// Entry-point: parse a complete descriptor template string.
 fn parse_descriptor_template(input: &str) -> Result<DescriptorTemplate, &'static str> {
-    match parse_descriptor(input) {
-        Ok((rest, descriptor)) => {
-            if rest.is_empty() {
-                Ok(descriptor)
-            } else {
-                Err("Failed to parse descriptor template: extra input remaining")
-            }
-        }
-        Err(_) => Err("Failed to parse descriptor template"),
+    let (rest, descriptor) = parse_descriptor(input)?;
+    if rest.is_empty() {
+        Ok(descriptor)
+    } else {
+        Err("Failed to parse descriptor template: extra input remaining")
     }
 }
 
-fn parse_derivation_step_number(input: &str) -> IResult<&str, u32> {
-    let (input, (num, hardened)) =
-        pair(parse_number_up_to(HARDENED_INDEX - 1), opt(char('\'')))(input)?;
-
-    let result = if hardened.is_some() {
-        num + HARDENED_INDEX
+// Parses a derivation-step number like "44" or "44'".
+fn parse_derivation_step_number(input: &str) -> ParseResult<'_, u32> {
+    let (rest, num) = parse_number_up_to(input, HARDENED_INDEX - 1)?;
+    if rest.starts_with('\'') {
+        Ok((&rest[1..], num + HARDENED_INDEX))
     } else {
-        num
-    };
-    Ok((input, result))
+        Ok((rest, num))
+    }
 }
 
-fn parse_key_placeholder(input: &str) -> IResult<&str, KeyPlaceholder> {
-    let (input, key_index) = delimited(char('@'), parse_number_up_to(u32::MAX), char('/'))(input)?;
+// Parses a key placeholder: @N/** or @N/<num1;num2>/*
+fn parse_key_placeholder(input: &str) -> ParseResult<'_, KeyPlaceholder> {
+    if !input.starts_with('@') {
+        return Err("expected '@'");
+    }
+    let (rest, key_index) = parse_number_up_to(&input[1..], u32::MAX)?;
+    if !rest.starts_with('/') {
+        return Err("expected '/'");
+    }
+    let rest = &rest[1..];
 
-    // "**"
-    let parse_double_star = map(tag::<&str, &str, nom::error::Error<&str>>("**"), |_| {
-        (0u32, 1u32)
-    });
-
-    // "<NUM;NUM>/*"
-    let parse_num_pair = map(
-        delimited(
-            char('<'),
-            tuple((
-                parse_derivation_step_number, // TODO: we only want to accept unhardened
-                char(';'),
-                parse_derivation_step_number,
-            )),
-            tag(">/*"),
-        ),
-        |(num1, _, num2)| (num1, num2),
-    );
-
-    let (input, (num1, num2)) = alt((parse_double_star, parse_num_pair))(input)?;
+    let (rest, (num1, num2)) = if rest.starts_with("**") {
+        (&rest[2..], (0u32, 1u32))
+    } else if rest.starts_with('<') {
+        let rest = &rest[1..];
+        let (rest, num1) = parse_derivation_step_number(rest)?;
+        if !rest.starts_with(';') {
+            return Err("expected ';'");
+        }
+        let (rest, num2) = parse_derivation_step_number(&rest[1..])?;
+        if !rest.starts_with(">/*") {
+            return Err("expected '>/*'");
+        }
+        (&rest[3..], (num1, num2))
+    } else {
+        return Err("expected '**' or '<num;num>/*'");
+    };
 
     Ok((
-        input,
+        rest,
         KeyPlaceholder {
             key_index,
             num1,
@@ -423,349 +423,371 @@ fn parse_key_placeholder(input: &str) -> IResult<&str, KeyPlaceholder> {
     ))
 }
 
-fn parse_descriptor(input: &str) -> IResult<&str, DescriptorTemplate> {
-    let (input, wrappers) = opt(terminated(alpha1, char(':')))(input)?;
+// Parses a descriptor, optionally preceded by a wrapper prefix like "asc:".
+fn parse_descriptor(input: &str) -> ParseResult<'_, DescriptorTemplate> {
+    // A wrapper prefix is a run of ASCII alphabetic chars followed by ':'.
+    // Fragment keywords are always followed by '(' instead, so no ambiguity.
+    let alpha_end = input
+        .bytes()
+        .position(|b| !b.is_ascii_alphabetic())
+        .unwrap_or(input.len());
+    let (input, wrappers) = if alpha_end > 0 && input.as_bytes().get(alpha_end) == Some(&b':') {
+        let wrappers = &input[..alpha_end];
+        (&input[alpha_end + 1..], wrappers)
+    } else {
+        (input, "")
+    };
 
-    let wrappers = wrappers.unwrap_or("");
+    let (input, inner) = parse_inner_descriptor(input)?;
 
-    let (input, inner_descriptor) = alt((
-        parse_sh,
-        parse_wsh,
-        parse_pkh,
-        parse_wpkh,
-        parse_multi,
-        parse_sortedmulti,
-        parse_multi_a,
-        parse_sortedmulti_a,
-        parse_tr,
-        parse_zero,
-        parse_one,
-        parse_pk,
-        parse_pk_k,
-        parse_pk_h,
-        parse_older,
-        parse_after,
-        parse_sha256,
-        parse_ripemd160,
-        parse_hash256,
-        parse_hash160,
-        alt((
-            parse_andor,
-            parse_and_b,
-            parse_and_v,
-            parse_or_b,
-            parse_or_c,
-            parse_or_d,
-            parse_or_i,
-            parse_thresh,
-        )),
-    ))(input)?;
-
-    let mut result = inner_descriptor;
-
+    // Apply wrappers in reverse character order (rightmost char = outermost wrapper)
+    let mut result = inner;
     for wrapper in wrappers.chars().rev() {
-        match wrapper {
-            'a' => result = DescriptorTemplate::A(Box::new(result)),
-            's' => result = DescriptorTemplate::S(Box::new(result)),
-            'c' => result = DescriptorTemplate::C(Box::new(result)),
-            't' => result = DescriptorTemplate::T(Box::new(result)),
-            'd' => result = DescriptorTemplate::D(Box::new(result)),
-            'v' => result = DescriptorTemplate::V(Box::new(result)),
-            'j' => result = DescriptorTemplate::J(Box::new(result)),
-            'n' => result = DescriptorTemplate::N(Box::new(result)),
-            'l' => result = DescriptorTemplate::L(Box::new(result)),
-            'u' => result = DescriptorTemplate::U(Box::new(result)),
-            _ => {
-                return Err(nom::Err::Failure(nom::error::Error::new(
-                    input,
-                    nom::error::ErrorKind::Alpha,
-                )))
-            }
-        }
+        result = match wrapper {
+            'a' => DescriptorTemplate::A(Box::new(result)),
+            's' => DescriptorTemplate::S(Box::new(result)),
+            'c' => DescriptorTemplate::C(Box::new(result)),
+            't' => DescriptorTemplate::T(Box::new(result)),
+            'd' => DescriptorTemplate::D(Box::new(result)),
+            'v' => DescriptorTemplate::V(Box::new(result)),
+            'j' => DescriptorTemplate::J(Box::new(result)),
+            'n' => DescriptorTemplate::N(Box::new(result)),
+            'l' => DescriptorTemplate::L(Box::new(result)),
+            'u' => DescriptorTemplate::U(Box::new(result)),
+            _ => return Err("invalid wrapper character"),
+        };
     }
-
     Ok((input, result))
 }
 
-fn parse_fragment_with_placeholder(
-    tag_str: &'static str,
-    template_constructor: impl Fn(KeyPlaceholder) -> DescriptorTemplate,
-) -> impl Fn(&str) -> IResult<&str, DescriptorTemplate> {
-    move |input: &str| {
-        let (input, key_placeholder) = delimited(
-            pair(tag(tag_str), char('(')),
-            parse_key_placeholder,
-            char(')'),
-        )(input)?;
-
-        Ok((input, template_constructor(key_placeholder)))
+fn parse_inner_descriptor(input: &str) -> ParseResult<'_, DescriptorTemplate> {
+    // Longer names checked before shorter to avoid premature prefix matches.
+    if input.starts_with("sortedmulti_a(") {
+        return parse_threshold_kp_fragment(
+            input,
+            "sortedmulti_a",
+            DescriptorTemplate::Sortedmulti_a,
+        );
     }
-}
-
-fn parse_fragment_with_n_scripts(
-    tag_str: &'static str,
-    n: usize,
-    template_constructor: impl Fn(&mut Vec<DescriptorTemplate>) -> DescriptorTemplate,
-) -> impl Fn(&str) -> IResult<&str, DescriptorTemplate> {
-    move |input: &str| {
-        let (input, mut scripts) = verify(
-            delimited(
-                pair(tag(tag_str), char('(')),
-                separated_list1(char(','), parse_descriptor),
-                char(')'),
-            ),
-            |scripts: &Vec<DescriptorTemplate>| scripts.len() == n,
-        )(input)?;
-
-        Ok((input, template_constructor(&mut scripts)))
+    if input.starts_with("sortedmulti(") {
+        return parse_threshold_kp_fragment(input, "sortedmulti", DescriptorTemplate::Sortedmulti);
     }
-}
-
-fn parse_fragment_with_threshold_and_placeholders(
-    tag_str: &'static str,
-    template_constructor: fn(u32, Vec<KeyPlaceholder>) -> DescriptorTemplate,
-) -> impl Fn(&str) -> IResult<&str, DescriptorTemplate> {
-    move |input: &str| {
-        let parse_threshold = map_res(digit1, str::parse::<u32>);
-        let parse_key_placeholders = many_m_n(2, 20, preceded(char(','), parse_key_placeholder));
-
-        let (input, (threshold, key_placeholders)) = delimited(
-            pair(tag(tag_str), char('(')),
-            pair(parse_threshold, parse_key_placeholders),
-            char(')'),
-        )(input)?;
-
-        Ok((input, template_constructor(threshold, key_placeholders)))
+    if input.starts_with("multi_a(") {
+        return parse_threshold_kp_fragment(input, "multi_a", DescriptorTemplate::Multi_a);
     }
-}
-
-fn parse_fragment_with_number(
-    tag_str: &'static str,
-    max_n: u32,
-    template_constructor: impl Fn(u32) -> DescriptorTemplate,
-) -> impl Fn(&str) -> IResult<&str, DescriptorTemplate> {
-    move |input: &str| {
-        let (input, number) = delimited(
-            pair(tag(tag_str), char('(')),
-            parse_number_up_to(max_n),
-            char(')'),
-        )(input)?;
-
-        Ok((input, template_constructor(number)))
+    if input.starts_with("multi(") {
+        return parse_threshold_kp_fragment(input, "multi", DescriptorTemplate::Multi);
     }
-}
-
-fn parse_fragment_with_hex20(
-    tag_str: &'static str,
-    template_constructor: impl Fn([u8; 20]) -> DescriptorTemplate,
-) -> impl Fn(&str) -> IResult<&str, DescriptorTemplate> {
-    move |input: &str| {
-        let (input, hex_string) =
-            delimited(pair(tag(tag_str), char('(')), take(2 * 20usize), char(')'))(input)?;
-
-        let decoded = <[u8; 20]>::from_hex(hex_string).map_err(|_| {
-            nom::Err::Failure(nom::error::Error::new(input, nom::error::ErrorKind::MapRes))
-        })?;
-
-        Ok((input, template_constructor(decoded)))
+    if input.starts_with("thresh(") {
+        return parse_thresh(input);
     }
-}
-
-fn parse_fragment_with_hex32(
-    tag_str: &'static str,
-    template_constructor: impl Fn([u8; 32]) -> DescriptorTemplate,
-) -> impl Fn(&str) -> IResult<&str, DescriptorTemplate> {
-    move |input: &str| {
-        let (input, hex_string) =
-            delimited(pair(tag(tag_str), char('(')), take(2 * 32usize), char(')'))(input)?;
-
-        let decoded = <[u8; 32]>::from_hex(hex_string).map_err(|_| {
-            nom::Err::Failure(nom::error::Error::new(input, nom::error::ErrorKind::MapRes))
-        })?;
-
-        Ok((input, template_constructor(decoded)))
+    if input.starts_with("wsh(") {
+        let (rest, scripts) = parse_n_subscripts(&input[4..], 1)?;
+        return Ok((
+            rest,
+            DescriptorTemplate::Wsh(Box::new(scripts.into_iter().next().unwrap())),
+        ));
     }
-}
-
-fn parse_pk(input: &str) -> IResult<&str, DescriptorTemplate> {
-    parse_fragment_with_placeholder("pk", DescriptorTemplate::Pk)(input)
-}
-
-fn parse_pkh(input: &str) -> IResult<&str, DescriptorTemplate> {
-    parse_fragment_with_placeholder("pkh", DescriptorTemplate::Pkh)(input)
-}
-
-fn parse_wpkh(input: &str) -> IResult<&str, DescriptorTemplate> {
-    parse_fragment_with_placeholder("wpkh", DescriptorTemplate::Wpkh)(input)
-}
-
-fn parse_sh(input: &str) -> IResult<&str, DescriptorTemplate> {
-    parse_fragment_with_n_scripts("sh", 1, |scripts: &mut Vec<DescriptorTemplate>| {
-        DescriptorTemplate::Sh(Box::new(scripts.remove(0)))
-    })(input)
-}
-
-fn parse_wsh(input: &str) -> IResult<&str, DescriptorTemplate> {
-    parse_fragment_with_n_scripts("wsh", 1, |scripts: &mut Vec<DescriptorTemplate>| {
-        DescriptorTemplate::Wsh(Box::new(scripts.remove(0)))
-    })(input)
-}
-
-fn parse_multi(input: &str) -> IResult<&str, DescriptorTemplate> {
-    parse_fragment_with_threshold_and_placeholders("multi", DescriptorTemplate::Multi)(input)
-}
-
-fn parse_sortedmulti(input: &str) -> IResult<&str, DescriptorTemplate> {
-    parse_fragment_with_threshold_and_placeholders("sortedmulti", DescriptorTemplate::Sortedmulti)(
-        input,
-    )
-}
-
-fn parse_multi_a(input: &str) -> IResult<&str, DescriptorTemplate> {
-    parse_fragment_with_threshold_and_placeholders("multi_a", DescriptorTemplate::Multi_a)(input)
-}
-
-fn parse_sortedmulti_a(input: &str) -> IResult<&str, DescriptorTemplate> {
-    parse_fragment_with_threshold_and_placeholders(
-        "sortedmulti_a",
-        DescriptorTemplate::Sortedmulti_a,
-    )(input)
-}
-
-fn parse_zero(input: &str) -> IResult<&str, DescriptorTemplate> {
-    map(tag("0"), |_| DescriptorTemplate::Zero)(input)
-}
-
-fn parse_one(input: &str) -> IResult<&str, DescriptorTemplate> {
-    map(tag("1"), |_| DescriptorTemplate::One)(input)
-}
-
-fn parse_pk_k(input: &str) -> IResult<&str, DescriptorTemplate> {
-    parse_fragment_with_placeholder("pk_k", DescriptorTemplate::Pk_k)(input)
-}
-
-fn parse_pk_h(input: &str) -> IResult<&str, DescriptorTemplate> {
-    parse_fragment_with_placeholder("pk_h", DescriptorTemplate::Pk_h)(input)
-}
-
-fn parse_older(input: &str) -> IResult<&str, DescriptorTemplate> {
-    parse_fragment_with_number("older", MAX_OLDER_AFTER, DescriptorTemplate::Older)(input)
-}
-
-fn parse_after(input: &str) -> IResult<&str, DescriptorTemplate> {
-    parse_fragment_with_number("after", MAX_OLDER_AFTER, DescriptorTemplate::After)(input)
-}
-
-fn parse_sha256(input: &str) -> IResult<&str, DescriptorTemplate> {
-    parse_fragment_with_hex32("sha256", DescriptorTemplate::Sha256)(input)
-}
-
-fn parse_ripemd160(input: &str) -> IResult<&str, DescriptorTemplate> {
-    parse_fragment_with_hex20("ripemd160", DescriptorTemplate::Ripemd160)(input)
-}
-
-fn parse_hash256(input: &str) -> IResult<&str, DescriptorTemplate> {
-    parse_fragment_with_hex32("hash256", DescriptorTemplate::Hash256)(input)
-}
-
-fn parse_hash160(input: &str) -> IResult<&str, DescriptorTemplate> {
-    parse_fragment_with_hex20("hash160", DescriptorTemplate::Hash160)(input)
-}
-
-fn parse_andor(input: &str) -> IResult<&str, DescriptorTemplate> {
-    parse_fragment_with_n_scripts("andor", 3, |scripts| {
+    if input.starts_with("sh(") {
+        let (rest, scripts) = parse_n_subscripts(&input[3..], 1)?;
+        return Ok((
+            rest,
+            DescriptorTemplate::Sh(Box::new(scripts.into_iter().next().unwrap())),
+        ));
+    }
+    if input.starts_with("wpkh(") {
+        return parse_kp_fragment(input, "wpkh", DescriptorTemplate::Wpkh);
+    }
+    if input.starts_with("pkh(") {
+        return parse_kp_fragment(input, "pkh", DescriptorTemplate::Pkh);
+    }
+    if input.starts_with("tr(") {
+        return parse_tr(input);
+    }
+    if input.starts_with("pk_k(") {
+        return parse_kp_fragment(input, "pk_k", DescriptorTemplate::Pk_k);
+    }
+    if input.starts_with("pk_h(") {
+        return parse_kp_fragment(input, "pk_h", DescriptorTemplate::Pk_h);
+    }
+    if input.starts_with("pk(") {
+        return parse_kp_fragment(input, "pk", DescriptorTemplate::Pk);
+    }
+    if input.starts_with("older(") {
+        return parse_num_fragment(input, "older", MAX_OLDER_AFTER, DescriptorTemplate::Older);
+    }
+    if input.starts_with("after(") {
+        return parse_num_fragment(input, "after", MAX_OLDER_AFTER, DescriptorTemplate::After);
+    }
+    if input.starts_with("sha256(") {
+        return parse_hex32_fragment(input, "sha256", DescriptorTemplate::Sha256);
+    }
+    if input.starts_with("hash256(") {
+        return parse_hex32_fragment(input, "hash256", DescriptorTemplate::Hash256);
+    }
+    if input.starts_with("ripemd160(") {
+        return parse_hex20_fragment(input, "ripemd160", DescriptorTemplate::Ripemd160);
+    }
+    if input.starts_with("hash160(") {
+        return parse_hex20_fragment(input, "hash160", DescriptorTemplate::Hash160);
+    }
+    if input.starts_with("andor(") {
+        let (rest, mut scripts) = parse_n_subscripts(&input[6..], 3)?;
+        let z = Box::new(scripts.remove(2));
+        let y = Box::new(scripts.remove(1));
         let x = Box::new(scripts.remove(0));
-        let y = Box::new(scripts.remove(0));
-        let z = Box::new(scripts.remove(0));
-        DescriptorTemplate::Andor(x, y, z)
-    })(input)
-}
-
-fn parse_and_b(input: &str) -> IResult<&str, DescriptorTemplate> {
-    parse_fragment_with_n_scripts("and_b", 2, |scripts| {
+        return Ok((rest, DescriptorTemplate::Andor(x, y, z)));
+    }
+    if input.starts_with("and_b(") {
+        let (rest, mut scripts) = parse_n_subscripts(&input[6..], 2)?;
+        let y = Box::new(scripts.remove(1));
         let x = Box::new(scripts.remove(0));
-        let y = Box::new(scripts.remove(0));
-        DescriptorTemplate::And_b(x, y)
-    })(input)
-}
-
-fn parse_and_v(input: &str) -> IResult<&str, DescriptorTemplate> {
-    parse_fragment_with_n_scripts("and_v", 2, |scripts| {
+        return Ok((rest, DescriptorTemplate::And_b(x, y)));
+    }
+    if input.starts_with("and_v(") {
+        let (rest, mut scripts) = parse_n_subscripts(&input[6..], 2)?;
+        let y = Box::new(scripts.remove(1));
         let x = Box::new(scripts.remove(0));
-        let y = Box::new(scripts.remove(0));
-        DescriptorTemplate::And_v(x, y)
-    })(input)
-}
-
-fn parse_or_b(input: &str) -> IResult<&str, DescriptorTemplate> {
-    parse_fragment_with_n_scripts("or_b", 2, |scripts| {
+        return Ok((rest, DescriptorTemplate::And_v(x, y)));
+    }
+    if input.starts_with("and_n(") {
+        let (rest, mut scripts) = parse_n_subscripts(&input[6..], 2)?;
+        let y = Box::new(scripts.remove(1));
         let x = Box::new(scripts.remove(0));
-        let z = Box::new(scripts.remove(0));
-        DescriptorTemplate::Or_b(x, z)
-    })(input)
-}
-
-fn parse_or_c(input: &str) -> IResult<&str, DescriptorTemplate> {
-    parse_fragment_with_n_scripts("or_c", 2, |scripts| {
+        return Ok((rest, DescriptorTemplate::And_n(x, y)));
+    }
+    if input.starts_with("or_b(") {
+        let (rest, mut scripts) = parse_n_subscripts(&input[5..], 2)?;
+        let z = Box::new(scripts.remove(1));
         let x = Box::new(scripts.remove(0));
-        let z = Box::new(scripts.remove(0));
-        DescriptorTemplate::Or_c(x, z)
-    })(input)
-}
-
-fn parse_or_d(input: &str) -> IResult<&str, DescriptorTemplate> {
-    parse_fragment_with_n_scripts("or_d", 2, |scripts| {
+        return Ok((rest, DescriptorTemplate::Or_b(x, z)));
+    }
+    if input.starts_with("or_c(") {
+        let (rest, mut scripts) = parse_n_subscripts(&input[5..], 2)?;
+        let z = Box::new(scripts.remove(1));
         let x = Box::new(scripts.remove(0));
-        let z = Box::new(scripts.remove(0));
-        DescriptorTemplate::Or_d(x, z)
-    })(input)
-}
-fn parse_or_i(input: &str) -> IResult<&str, DescriptorTemplate> {
-    parse_fragment_with_n_scripts("or_i", 2, |scripts| {
+        return Ok((rest, DescriptorTemplate::Or_c(x, z)));
+    }
+    if input.starts_with("or_d(") {
+        let (rest, mut scripts) = parse_n_subscripts(&input[5..], 2)?;
+        let z = Box::new(scripts.remove(1));
         let x = Box::new(scripts.remove(0));
-        let z = Box::new(scripts.remove(0));
-        DescriptorTemplate::Or_i(x, z)
-    })(input)
+        return Ok((rest, DescriptorTemplate::Or_d(x, z)));
+    }
+    if input.starts_with("or_i(") {
+        let (rest, mut scripts) = parse_n_subscripts(&input[5..], 2)?;
+        let z = Box::new(scripts.remove(1));
+        let x = Box::new(scripts.remove(0));
+        return Ok((rest, DescriptorTemplate::Or_i(x, z)));
+    }
+    // Simple terminals: bare "0" and "1"
+    if input.starts_with('0') {
+        return Ok((&input[1..], DescriptorTemplate::Zero));
+    }
+    if input.starts_with('1') {
+        return Ok((&input[1..], DescriptorTemplate::One));
+    }
+    Err("unrecognized descriptor fragment")
 }
 
-fn parse_thresh(input: &str) -> IResult<&str, DescriptorTemplate> {
-    let (input, k) = delimited(tag("thresh("), parse_number_up_to(u32::MAX), char(','))(input)?;
-
-    let (input, scripts) = verify(
-        terminated(separated_list1(char(','), parse_descriptor), char(')')),
-        |scripts: &Vec<DescriptorTemplate>| k as usize <= scripts.len(),
-    )(input)?;
-
-    Ok((input, DescriptorTemplate::Thresh(k, scripts)))
+// Parses a named fragment that wraps a single key placeholder: name(@...)
+fn parse_kp_fragment<'a>(
+    input: &'a str,
+    name: &str,
+    constructor: fn(KeyPlaceholder) -> DescriptorTemplate,
+) -> ParseResult<'a, DescriptorTemplate> {
+    let rest = &input[name.len()..]; // caller already checked starts_with(name)
+    let (rest, kp) = parse_key_placeholder(&rest[1..])?; // skip '('
+    if !rest.starts_with(')') {
+        return Err("expected ')'");
+    }
+    Ok((&rest[1..], constructor(kp)))
 }
 
-fn parse_tr(input: &str) -> IResult<&str, DescriptorTemplate> {
-    let (input, key_placeholder) = preceded(tag("tr("), parse_key_placeholder)(input)?;
-
-    let parse_tree = opt(preceded(char(','), parse_tap_tree));
-
-    let (input, tree) = terminated(parse_tree, char(')'))(input)?;
-
-    Ok((input, DescriptorTemplate::Tr(key_placeholder, tree)))
+// Parses "name(n)" where n is a number <= max.
+fn parse_num_fragment<'a>(
+    input: &'a str,
+    name: &str,
+    max: u32,
+    constructor: fn(u32) -> DescriptorTemplate,
+) -> ParseResult<'a, DescriptorTemplate> {
+    let rest = &input[name.len()..]; // caller already checked starts_with(name)
+    let (rest, num) = parse_number_up_to(&rest[1..], max)?; // skip '('
+    if !rest.starts_with(')') {
+        return Err("expected ')'");
+    }
+    Ok((&rest[1..], constructor(num)))
 }
 
-fn parse_tap_tree(input: &str) -> IResult<&str, TapTree> {
-    let parse_branch = || {
-        delimited(
-            tag("{"),
-            pair(parse_tap_tree, preceded(char(','), parse_tap_tree)),
-            tag("}"),
-        )
+// Parses "name(<40 hex chars>)".
+fn parse_hex20_fragment<'a>(
+    input: &'a str,
+    name: &str,
+    constructor: fn([u8; 20]) -> DescriptorTemplate,
+) -> ParseResult<'a, DescriptorTemplate> {
+    let rest = &input[name.len() + 1..]; // skip name and '('
+    if rest.len() < 40 {
+        return Err("not enough hex chars");
+    }
+    let bytes = <[u8; 20]>::from_hex(&rest[..40]).map_err(|_| "invalid hex")?;
+    let rest = &rest[40..];
+    if !rest.starts_with(')') {
+        return Err("expected ')'");
+    }
+    Ok((&rest[1..], constructor(bytes)))
+}
+
+// Parses "name(<64 hex chars>)".
+fn parse_hex32_fragment<'a>(
+    input: &'a str,
+    name: &str,
+    constructor: fn([u8; 32]) -> DescriptorTemplate,
+) -> ParseResult<'a, DescriptorTemplate> {
+    let rest = &input[name.len() + 1..]; // skip name and '('
+    if rest.len() < 64 {
+        return Err("not enough hex chars");
+    }
+    let bytes = <[u8; 32]>::from_hex(&rest[..64]).map_err(|_| "invalid hex")?;
+    let rest = &rest[64..];
+    if !rest.starts_with(')') {
+        return Err("expected ')'");
+    }
+    Ok((&rest[1..], constructor(bytes)))
+}
+
+// Parses "name(threshold,@kp1,@kp2,...)".
+fn parse_threshold_kp_fragment<'a>(
+    input: &'a str,
+    name: &str,
+    constructor: fn(u32, Vec<KeyPlaceholder>) -> DescriptorTemplate,
+) -> ParseResult<'a, DescriptorTemplate> {
+    let rest = &input[name.len() + 1..]; // skip name and '('
+    let (mut rest, threshold) = parse_number_up_to(rest, u32::MAX)?;
+    let mut keys: Vec<KeyPlaceholder> = Vec::new();
+    loop {
+        if !rest.starts_with(',') {
+            break;
+        }
+        match parse_key_placeholder(&rest[1..]) {
+            Ok((r, kp)) => {
+                keys.push(kp);
+                rest = r;
+                if keys.len() == 20 {
+                    break;
+                }
+            }
+            Err(_) => break,
+        }
+    }
+    if keys.len() < 2 {
+        return Err("expected at least 2 key placeholders");
+    }
+    if !rest.starts_with(')') {
+        return Err("expected ')'");
+    }
+    Ok((&rest[1..], constructor(threshold, keys)))
+}
+
+// Parses exactly n comma-separated sub-descriptors, then ')'.
+// Called after the opening '(' of the enclosing fragment has been consumed.
+fn parse_n_subscripts(input: &str, n: usize) -> ParseResult<'_, Vec<DescriptorTemplate>> {
+    let mut rest = input;
+    let mut scripts: Vec<DescriptorTemplate> = Vec::new();
+    for i in 0..n {
+        let (r, desc) = parse_descriptor(rest)?;
+        scripts.push(desc);
+        rest = r;
+        if i + 1 < n {
+            if !rest.starts_with(',') {
+                return Err("expected ','");
+            }
+            rest = &rest[1..];
+        }
+    }
+    if !rest.starts_with(')') {
+        return Err("expected ')'");
+    }
+    Ok((&rest[1..], scripts))
+}
+
+#[cfg(test)]
+fn parse_wsh(input: &str) -> ParseResult<'_, DescriptorTemplate> {
+    if !input.starts_with("wsh(") {
+        return Err("expected 'wsh('");
+    }
+    let (rest, scripts) = parse_n_subscripts(&input[4..], 1)?;
+    Ok((
+        rest,
+        DescriptorTemplate::Wsh(Box::new(scripts.into_iter().next().unwrap())),
+    ))
+}
+
+#[cfg(test)]
+fn parse_sortedmulti(input: &str) -> ParseResult<'_, DescriptorTemplate> {
+    parse_threshold_kp_fragment(input, "sortedmulti", DescriptorTemplate::Sortedmulti)
+}
+
+fn parse_thresh(input: &str) -> ParseResult<'_, DescriptorTemplate> {
+    // input starts with "thresh("
+    let (rest, k) = parse_number_up_to(&input[7..], u32::MAX)?;
+    if !rest.starts_with(',') {
+        return Err("expected ',' after threshold");
+    }
+    // parse first script (mandatory)
+    let (rest, first) = parse_descriptor(&rest[1..])?;
+    let mut scripts = vec![first];
+    let mut rest = rest;
+    loop {
+        if !rest.starts_with(',') {
+            break;
+        }
+        match parse_descriptor(&rest[1..]) {
+            Ok((r, desc)) => {
+                scripts.push(desc);
+                rest = r;
+            }
+            Err(_) => break,
+        }
+    }
+    if (k as usize) > scripts.len() {
+        return Err("thresh: k exceeds number of sub-scripts");
+    }
+    if !rest.starts_with(')') {
+        return Err("expected ')'");
+    }
+    Ok((&rest[1..], DescriptorTemplate::Thresh(k, scripts)))
+}
+
+fn parse_tr(input: &str) -> ParseResult<'_, DescriptorTemplate> {
+    // input starts with "tr("
+    let (rest, key_placeholder) = parse_key_placeholder(&input[3..])?;
+    let (rest, tree) = if rest.starts_with(',') {
+        let (rest, tree) = parse_tap_tree(&rest[1..])?;
+        (rest, Some(tree))
+    } else {
+        (rest, None)
     };
+    if !rest.starts_with(')') {
+        return Err("expected ')'");
+    }
+    Ok((&rest[1..], DescriptorTemplate::Tr(key_placeholder, tree)))
+}
 
-    alt((
-        map(parse_descriptor, |descriptor| {
-            TapTree::Script(Box::new(descriptor))
-        }),
-        map(parse_branch(), |(left, right)| {
-            TapTree::Branch(Box::new(left), Box::new(right))
-        }),
-    ))(input)
+fn parse_tap_tree(input: &str) -> ParseResult<'_, TapTree> {
+    if input.starts_with('{') {
+        let (rest, left) = parse_tap_tree(&input[1..])?;
+        if !rest.starts_with(',') {
+            return Err("expected ','");
+        }
+        let (rest, right) = parse_tap_tree(&rest[1..])?;
+        if !rest.starts_with('}') {
+            return Err("expected '}'");
+        }
+        Ok((&rest[1..], TapTree::Branch(Box::new(left), Box::new(right))))
+    } else {
+        let (rest, desc) = parse_descriptor(input)?;
+        Ok((rest, TapTree::Script(Box::new(desc))))
+    }
 }
 
 impl FromStr for DescriptorTemplate {
