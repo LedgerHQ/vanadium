@@ -31,7 +31,40 @@ jobs:
     with:
       vapp_name: "common"
       test_dirs_json: '["common"]'
-       
+
+  test_riscv_arch:
+    name: RISC-V architecture tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout sources
+        uses: actions/checkout@v4
+
+      - name: Set up Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo dirs
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-stable-riscv-arch-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-stable-riscv-arch-
+
+      - name: Install RISC-V cross-compiler
+        run: sudo apt-get update && sudo apt-get install -y gcc-riscv64-unknown-elf
+
+      - name: Clone riscv-arch-test suite
+        run: |
+          git clone --depth 1 --branch 3.9.1 \
+            https://github.com/riscv-non-isa/riscv-arch-test \
+            riscv-arch-tests/vendor/riscv-arch-test
+
+      - name: Run RISC-V arch tests
+        run: cargo test -p vanadium-riscv-arch-tests
+
   # build Vanadium VM app
 
   build_vanadium_app:
