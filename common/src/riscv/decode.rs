@@ -194,8 +194,8 @@ mod rv32c {
                 match c_funct3(inst) {
                     // C.ADDI
                     0b000 => Op::Addi { rd: c_rd(inst), rs1: c_rd(inst), imm: ci_imm(inst) },
-                    // // C.JAL
-                    // 0b001 => Op::Jal { rd: 1, imm: cj_imm(inst) },
+                    // C.JAL
+                    0b001 => Op::Jal { rd: 1, imm: cj_imm(inst) },
                     // C.LI
                     0b010 => Op::Addi { rd: c_rd(inst), rs1: 0, imm: ci_imm(inst) },
                     0b011 => match c_rd(inst) {
