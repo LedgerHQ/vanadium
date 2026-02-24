@@ -107,6 +107,10 @@
       "name": "🛠 tools"
     },
     {
+      "path": "riscv-arch-tests",
+      "name": "riscv-arch-tests"
+    },
+    {
       "path": ".github",
       "name": ".github"
     }
