@@ -284,7 +284,7 @@ impl ToScriptWithKeyInfoInner for DescriptorTemplate {
 
                 builder
                     .push_int(1)
-                    .push_slice(taproot_key.to_inner().serialize())
+                    .push_slice(taproot_key.to_x_only_public_key().serialize())
             }
             DescriptorTemplate::Zero => builder.push_opcode(OP_0),
             DescriptorTemplate::One => builder.push_opcode(OP_PUSHNUM_1),

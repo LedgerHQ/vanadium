@@ -184,7 +184,7 @@ fn sign_input_schnorr(
             taptree_hash.map(|t| TapNodeHash::from_slice(&t).unwrap()),
         );
 
-        EcfpPrivateKey::new(tweaked_keypair.to_inner().secret_bytes())
+        EcfpPrivateKey::new(tweaked_keypair.to_keypair().secret_bytes())
     };
 
     let mut signature = signing_privkey
