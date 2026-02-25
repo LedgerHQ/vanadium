@@ -25,7 +25,7 @@ pub mod slip21;
 pub mod storage;
 pub mod ux;
 
-pub use app::{App, AppBuilder};
+pub use app::{App, AppBuilder, IsReady, TaskHandle};
 pub use vanadium_macros::handler;
 
 mod ecalls;

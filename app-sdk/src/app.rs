@@ -4,7 +4,12 @@ use alloc::{
     vec::Vec,
 };
 use common::ux::TagValue;
-use core::{future::Future, pin::Pin};
+use core::{
+    cell::Cell,
+    future::Future,
+    pin::Pin,
+    task::{Context, Poll},
+};
 
 use crate::{
     comm::MessageError,
@@ -124,23 +129,82 @@ pub struct App<S = ()> {
     pub state: S,
 }
 
+/// Trait for checking whether a spawned task has completed.
+///
+/// This is implemented by [`TaskHandle<T>`] and enables [`App::await_all`]
+/// to accept handles of different result types.
+pub trait IsReady {
+    /// Returns `true` if the task has completed and the result is available.
+    fn is_ready(&self) -> bool;
+}
+
 /// Handle to a task spawned with [`App::spawn_task`].
 ///
 /// The task runs cooperatively, interleaved with any subsequent UX flow
 /// driven by [`App::review_pairs`]. Retrieve the result by calling
 /// [`TaskHandle::take`] once the UX flow has returned.
-pub struct TaskHandle<T>(alloc::rc::Rc<core::cell::RefCell<Option<T>>>);
+///
+/// **Cancellation:** if the handle is dropped without calling [`take`],
+/// the background task is cancelled on the next executor poll.  This lets
+/// you interrupt incomplete work simply by dropping the handle.
+pub struct TaskHandle<T> {
+    result: alloc::rc::Rc<core::cell::RefCell<Option<T>>>,
+    cancelled: alloc::rc::Rc<Cell<bool>>,
+    taken: Cell<bool>,
+}
+
+impl<T> IsReady for TaskHandle<T> {
+    fn is_ready(&self) -> bool {
+        self.result.borrow().is_some()
+    }
+}
 
 impl<T> TaskHandle<T> {
     /// Returns the result of the task.
     ///
-    /// If the task has not finished yet , this polls the executor until it is ready.
+    /// If the task has not finished yet, this polls the executor until it is ready.
     pub fn take(self) -> T {
+        self.taken.set(true);
         loop {
-            if let Some(val) = self.0.borrow_mut().take() {
+            if let Some(val) = self.result.borrow_mut().take() {
                 return val;
             }
             crate::executor::poll_once();
+        }
+    }
+}
+
+impl<T> Drop for TaskHandle<T> {
+    fn drop(&mut self) {
+        if !self.taken.get() {
+            self.cancelled.set(true);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// CancellableFuture – wraps a user future and aborts when the flag is set
+// ---------------------------------------------------------------------------
+
+struct CancellableFuture<F> {
+    inner: F,
+    cancelled: alloc::rc::Rc<Cell<bool>>,
+}
+
+impl<F: Future> Future for CancellableFuture<F> {
+    type Output = Option<F::Output>;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        // SAFETY: `cancelled` is `Unpin` (Rc<Cell<bool>>); we only pin-project
+        // to `inner`, which is structurally pinned.
+        let this = unsafe { self.get_unchecked_mut() };
+        if this.cancelled.get() {
+            return Poll::Ready(None);
+        }
+        let inner = unsafe { Pin::new_unchecked(&mut this.inner) };
+        match inner.poll(cx) {
+            Poll::Ready(val) => Poll::Ready(Some(val)),
+            Poll::Pending => Poll::Pending,
         }
     }
 }
@@ -391,10 +455,74 @@ where
         use core::cell::RefCell;
         let cell: Rc<RefCell<Option<T>>> = Rc::new(RefCell::new(None));
         let cell2 = cell.clone();
+        let cancelled: Rc<Cell<bool>> = Rc::new(Cell::new(false));
+        let cancelled2 = cancelled.clone();
         crate::executor::spawn(async move {
-            *cell2.borrow_mut() = Some(work.await);
+            let wrapper = CancellableFuture {
+                inner: work,
+                cancelled: cancelled2,
+            };
+            if let Some(val) = wrapper.await {
+                *cell2.borrow_mut() = Some(val);
+            }
         });
-        TaskHandle(cell)
+        TaskHandle {
+            result: cell,
+            cancelled,
+            taken: Cell::new(false),
+        }
+    }
+
+    // --- Task helpers ---
+
+    /// Waits for the given task to complete, returning its result.
+    ///
+    /// If the task is not yet ready, a spinner with the given `text` is
+    /// displayed while polling. If the task is already complete when this
+    /// method is called, no spinner is shown and the result is returned
+    /// immediately.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let handle = app.spawn_task(async move { heavy_computation().await });
+    /// // ... run a UX flow concurrently ...
+    /// let result = app.await_task("Processing...", handle);
+    /// ```
+    pub fn await_task<T>(&mut self, text: &str, handle: TaskHandle<T>) -> T {
+        if !handle.is_ready() {
+            self.show_spinner(text);
+        }
+        handle.take()
+    }
+
+    /// Waits for **all** of the given tasks to complete.
+    ///
+    /// If any task is still pending, a spinner with the given `text` is
+    /// displayed and the executor is polled until every task reports ready.
+    /// If all tasks are already complete, no spinner is shown.
+    ///
+    /// After this method returns, each individual [`TaskHandle::take`] will
+    /// return immediately.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let h1 = app.spawn_task(async { first_job().await });
+    /// let h2 = app.spawn_task(async { second_job().await });
+    /// // ... drive a UX flow ...
+    /// app.await_all("Processing...", &[&h1, &h2]);
+    /// let r1 = h1.take();
+    /// let r2 = h2.take();
+    /// ```
+    pub fn await_all(&mut self, text: &str, handles: &[&dyn IsReady]) {
+        if handles.iter().all(|h| h.is_ready()) {
+            return;
+        }
+        self.show_spinner(text);
+        while !handles.iter().all(|h| h.is_ready()) {
+            crate::executor::poll_once();
+        }
     }
 
     // --- UX Flows ---
