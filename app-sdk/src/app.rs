@@ -1,8 +1,10 @@
 use alloc::{
+    boxed::Box,
     string::{String, ToString},
     vec::Vec,
 };
 use common::ux::TagValue;
+use core::{future::Future, pin::Pin};
 
 use crate::{
     comm::MessageError,
@@ -12,8 +14,9 @@ use crate::{
 };
 
 /// A Handler is a function that is called when a message is received from the host, and
-/// returns the app's response.
-pub type Handler<S = ()> = fn(&mut App<S>, &[u8]) -> Vec<u8>;
+/// returns the app's response asynchronously.
+pub type Handler<S = ()> =
+    for<'a> fn(&'a mut App<S>, &'a [u8]) -> Pin<Box<dyn Future<Output = Vec<u8>> + 'a>>;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum View {
@@ -160,10 +163,10 @@ where
     ///
     /// This method enters a loop where it continuously processes user interface events and checks for incoming messages.
     /// It will not return until a message is received or an error occurs.
-    pub fn exchange(&mut self, msg: &[u8]) -> Result<Vec<u8>, MessageError> {
+    pub async fn exchange(&mut self, msg: &[u8]) -> Result<Vec<u8>, MessageError> {
         crate::comm::send_message(msg);
         loop {
-            self.process_ux_events(false);
+            self.process_ux_events(false).await;
             match crate::comm::receive_message() {
                 Ok(msg) => return Ok(msg),
                 Err(crate::comm::MessageError::NoMessage) => continue,
@@ -178,7 +181,7 @@ where
         self.cleanup_ticks = 0;
     }
 
-    fn process_ux_events(&mut self, show_dashboard: bool) {
+    async fn process_ux_events(&mut self, show_dashboard: bool) {
         use common::ux::Action::*;
         use common::ux::Event::{Action, Ticker};
 
@@ -191,7 +194,7 @@ where
             self.ux_dirty = false;
         }
 
-        let ev = block_on(crate::ux::get_event());
+        let ev = crate::ux::get_event().await;
         match (self.current_view, ev) {
             // Page API navigation
             (View::HomePage, Action(Quit)) => crate::ecalls::exit(0),
@@ -306,22 +309,28 @@ where
     /// It never returns, as it keeps the app running until sdk::exit() is called,
     /// or a fatal error occurs.
     fn run_loop(&mut self) -> ! {
-        loop {
-            self.process_ux_events(true);
+        block_on(async {
+            loop {
+                self.process_ux_events(true).await;
 
-            let req_msg = match crate::comm::receive_message() {
-                Ok(msg) => msg,
-                Err(crate::comm::MessageError::NoMessage) => continue, // TODO: should we wait before retrying, to avoid spamming the channel?
-                Err(e) => panic!("Communication error: {}", e),
-            };
-            let resp_msg = (self.handler)(self, &req_msg);
-            crate::comm::send_message(&resp_msg);
-        }
+                let req_msg = match crate::comm::receive_message() {
+                    Ok(msg) => msg,
+                    Err(crate::comm::MessageError::NoMessage) => continue, // TODO: should we wait before retrying, to avoid spamming the channel?
+                    Err(e) => panic!("Communication error: {}", e),
+                };
+                let handler = self.handler;
+                let resp_msg = handler(self, &req_msg).await;
+                crate::comm::send_message(&resp_msg);
+            }
+        })
     }
 
     /// This is only useful to produce a valid app instance in tests.
     pub fn singleton() -> Self {
-        AppBuilder::new("test_app", "0.0.1", |_app, _msg| Vec::new()).build()
+        AppBuilder::new("test_app", "0.0.1", |_app, _msg| {
+            Box::pin(async { Vec::new() })
+        })
+        .build()
     }
 
     /// Returns a reference to the cached home info page, computing it if needed.
@@ -403,7 +412,7 @@ where
     /// * `long_press` - When true, the final approval may require a long press gesture instead of a simple confirm.
     ///
     /// Returns `true` if the user confirms/approves on the final screen; `false` if the user aborts (e.g. quits or rejects).
-    pub fn review_pairs(
+    pub async fn review_pairs(
         &mut self,
         intro_text: &str,
         intro_subtext: &str,
@@ -413,14 +422,15 @@ where
         long_press: bool,
     ) -> bool {
         self.set_ux_dirty();
-        block_on(crate::ux::review_pairs(
+        crate::ux::review_pairs(
             intro_text,
             intro_subtext,
             pairs,
             final_text,
             final_button_text,
             long_press,
-        ))
+        )
+        .await
     }
 
     /// Shows a progress indicator with the provided status text.
@@ -447,7 +457,7 @@ where
     /// * `reject` - Label for the reject/abort action.
     ///
     /// Returns `true` if the user selects the confirm action; `false` if the user selects reject.
-    pub fn show_confirm_reject(
+    pub async fn show_confirm_reject(
         &mut self,
         title: &str,
         text: &str,
@@ -455,7 +465,7 @@ where
         reject: &str,
     ) -> bool {
         self.set_ux_dirty();
-        block_on(crate::ux::show_confirm_reject(title, text, confirm, reject))
+        crate::ux::show_confirm_reject(title, text, confirm, reject).await
     }
 
     /// Shows a temporary informational screen with an icon and message.

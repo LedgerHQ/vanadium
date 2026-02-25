@@ -8,6 +8,7 @@ common = { path = "../common", default-features = false }
 critical-section = "1.1.2"
 subtle = { version="2.6.1", default-features = false }
 hex-literal = "0.4.1"
+vanadium_macros = { path = "../macros" }
 zeroize = "1.8.1"
 
 # target_vanadium_ledger dependencies (optional)

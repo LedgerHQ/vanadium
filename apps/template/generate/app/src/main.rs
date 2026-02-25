@@ -20,7 +20,7 @@ const H: u32 = 0x80000000u32;
 
 // Shows the message to the user and asks for confirmation to sign
 #[cfg(not(test))]
-fn show_message_ui(app: &mut App, msg: &str) -> bool {
+async fn show_message_ui(app: &mut App, msg: &str) -> bool {
     use alloc::format;
 
     let approved = app.show_confirm_reject(
@@ -28,23 +28,23 @@ fn show_message_ui(app: &mut App, msg: &str) -> bool {
         &format!("Message: {}", msg),
         "Sign message",
         "Reject",
-    );
+    ).await;
 
     approved
 }
 
 #[cfg(test)]
-fn show_message_ui(_app: &mut App, _msg: &str) -> bool {
+async fn show_message_ui(_app: &mut App, _msg: &str) -> bool {
     true
 }
 
-fn process_sign_message(app: &mut App, msg: &[u8]) -> Vec<u8> {
+async fn process_sign_message(app: &mut App, msg: &[u8]) -> Vec<u8> {
     let msg_str = match from_utf8(msg) {
         Ok(m) => m,
         Err(_) => return vec![],
     };
 
-    if show_message_ui(app, msg_str) {
+    if show_message_ui(app, msg_str).await {
         let path: Vec<u32> = [H + 9999].to_vec();
         let hd_node = sdk::curve::Secp256k1::derive_hd_node(&path).expect("This shouldn't happen");
         let privkey: EcfpPrivateKey<sdk::curve::Secp256k1, 32> = EcfpPrivateKey::new(
@@ -66,7 +66,8 @@ fn process_sign_message(app: &mut App, msg: &[u8]) -> Vec<u8> {
     }
 }
 
-fn process_message(app: &mut App, msg: &[u8]) -> Vec<u8> {
+#[sdk::handler]
+async fn process_message(app: &mut App, msg: &[u8]) -> Vec<u8> {
     if msg.is_empty() {
         sdk::exit(0);
     }
@@ -77,7 +78,7 @@ fn process_message(app: &mut App, msg: &[u8]) -> Vec<u8> {
     };
 
     match command {
-        Command::SignMessage { msg } => process_sign_message(app, &msg),
+        Command::SignMessage { msg } => process_sign_message(app, &msg).await,
     }
 }
 
@@ -99,7 +100,7 @@ mod tests {
 
         let msg = b"Hello, Vanadium!";
         let msg_hash = sdk::hash::Sha256::hash(msg);
-        let sig = process_sign_message(&mut app, msg);
+        let sig = sdk::executor::block_on(process_sign_message(&mut app, msg));
 
         let path: Vec<u32> = [H + 9999].to_vec();
         let hd_node = sdk::curve::Secp256k1::derive_hd_node(&path).expect("This shouldn't happen");

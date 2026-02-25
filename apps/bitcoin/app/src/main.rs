@@ -14,32 +14,40 @@ use sdk::{App, AppBuilder};
 
 sdk::bootstrap!();
 
-fn handle_request(app: &mut App, request: &Request) -> Result<Response, common::errors::Error> {
+async fn handle_request(
+    app: &mut App,
+    request: &Request,
+) -> Result<Response, common::errors::Error> {
     match request {
         Request::GetVersion => todo!(),
         Request::Exit => sdk::exit(0),
         Request::GetMasterFingerprint => handle_get_master_fingerprint(app),
         Request::GetExtendedPubkey { path, display } => {
-            handle_get_extended_pubkey(app, path, *display)
+            handle_get_extended_pubkey(app, path, *display).await
         }
-        Request::RegisterAccount { name, account } => handle_register_account(app, name, account),
+        Request::RegisterAccount { name, account } => {
+            handle_register_account(app, name, account).await
+        }
         Request::GetAddress {
             name,
             account,
             por,
             coordinates,
             display,
-        } => handle_get_address(app, name.as_deref(), account, por, coordinates, *display),
-        Request::SignPsbt { psbt } => handle_sign_psbt(app, psbt),
+        } => handle_get_address(app, name.as_deref(), account, por, coordinates, *display).await,
+        Request::SignPsbt { psbt } => handle_sign_psbt(app, psbt).await,
     }
 }
 
-fn process_message(app: &mut App, request: &[u8]) -> Vec<u8> {
+#[sdk::handler]
+async fn process_message(app: &mut App, request: &[u8]) -> Vec<u8> {
     let Ok(request) = postcard::from_bytes(request) else {
         return postcard::to_allocvec(&Response::Error(common::errors::Error::InvalidRequest))
             .unwrap();
     };
-    let response = handle_request(app, &request).unwrap_or_else(|e| Response::Error(e));
+    let response = handle_request(app, &request)
+        .await
+        .unwrap_or_else(|e| Response::Error(e));
     postcard::to_allocvec(&response).unwrap()
 }
 

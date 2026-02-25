@@ -26,6 +26,7 @@ pub mod storage;
 pub mod ux;
 
 pub use app::{App, AppBuilder};
+pub use vanadium_macros::handler;
 
 mod ecalls;
 

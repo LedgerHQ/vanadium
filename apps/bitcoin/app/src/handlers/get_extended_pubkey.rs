@@ -25,7 +25,7 @@ fn get_pubkey_fingerprint(pubkey: &EcfpPublicKey<Secp256k1, 32>) -> u32 {
 }
 
 #[cfg(not(any(test, feature = "autoapprove")))]
-fn display_xpub(app: &mut sdk::App, xpub: &str, path: &[u32]) -> bool {
+async fn display_xpub(app: &mut sdk::App, xpub: &str, path: &[u32]) -> bool {
     use alloc::{string::ToString, vec};
     use sdk::ux::{Icon, TagValue};
 
@@ -38,23 +38,25 @@ fn display_xpub(app: &mut sdk::App, xpub: &str, path: &[u32]) -> bool {
         ("Verify Bitcoin", "extended public key")
     };
 
-    let approved = app.review_pairs(
-        intro_text,
-        intro_subtext,
-        &vec![
-            TagValue {
-                tag: "Path".into(),
-                value: path.to_string(),
-            },
-            TagValue {
-                tag: "Public key".into(),
-                value: xpub.into(),
-            },
-        ],
-        "Verify public key",
-        "Confirm",
-        false,
-    );
+    let approved = app
+        .review_pairs(
+            intro_text,
+            intro_subtext,
+            &vec![
+                TagValue {
+                    tag: "Path".into(),
+                    value: path.to_string(),
+                },
+                TagValue {
+                    tag: "Public key".into(),
+                    value: xpub.into(),
+                },
+            ],
+            "Verify public key",
+            "Confirm",
+            false,
+        )
+        .await;
     if approved {
         app.show_info(Icon::Success, "Public key verified");
     } else {
@@ -65,11 +67,11 @@ fn display_xpub(app: &mut sdk::App, xpub: &str, path: &[u32]) -> bool {
 }
 
 #[cfg(any(test, feature = "autoapprove"))]
-fn display_xpub(_app: &mut sdk::App, _xpub: &str, _path: &[u32]) -> bool {
+async fn display_xpub(_app: &mut sdk::App, _xpub: &str, _path: &[u32]) -> bool {
     true
 }
 
-pub fn handle_get_extended_pubkey(
+pub async fn handle_get_extended_pubkey(
     app: &mut sdk::App,
     bip32_path: &common::message::Bip32Path,
     display: bool,
@@ -114,7 +116,7 @@ pub fn handle_get_extended_pubkey(
 
     if display {
         let xpub_base58 = bitcoin::base58::encode_check(&xpub);
-        if !display_xpub(app, &xpub_base58, &bip32_path.0) {
+        if !display_xpub(app, &xpub_base58, &bip32_path.0).await {
             return Err(Error::UserRejected);
         }
     }
@@ -189,11 +191,11 @@ mod tests {
         for (path, expected_xpub) in testcases {
             // decode the derivation path into a Vec<u32>
 
-            let response = handle_get_extended_pubkey(
+            let response = sdk::executor::block_on(handle_get_extended_pubkey(
                 &mut sdk::App::singleton(),
                 &common::message::Bip32Path(parse_derivation_path(path).unwrap()),
                 false,
-            )
+            ))
             .unwrap();
 
             assert_eq!(
