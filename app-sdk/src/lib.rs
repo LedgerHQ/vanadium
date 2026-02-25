@@ -18,6 +18,7 @@ pub mod app;
 pub mod bignum;
 pub mod comm;
 pub mod curve;
+pub mod executor;
 pub mod hash;
 pub mod rand;
 pub mod slip21;
