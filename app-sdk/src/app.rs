@@ -121,6 +121,27 @@ pub struct App<S = ()> {
     pub state: S,
 }
 
+/// Handle to a task spawned with [`App::spawn_task`].
+///
+/// The task runs cooperatively, interleaved with any subsequent UX flow
+/// driven by [`App::review_pairs`]. Retrieve the result by calling
+/// [`TaskHandle::take`] once the UX flow has returned.
+pub struct TaskHandle<T>(alloc::rc::Rc<core::cell::RefCell<Option<T>>>);
+
+impl<T> TaskHandle<T> {
+    /// Returns the result of the task.
+    ///
+    /// If the task has not finished yet , this polls the executor until it is ready.
+    pub fn take(self) -> T {
+        loop {
+            if let Some(val) = self.0.borrow_mut().take() {
+                return val;
+            }
+            crate::executor::poll_once();
+        }
+    }
+}
+
 impl<S> App<S>
 where
     S: Default,
@@ -325,6 +346,46 @@ where
             self.home_info_page = Some(raw);
         }
         self.home_info_page.as_ref().unwrap() // safe, just populated
+    }
+
+    /// Spawns a task that runs cooperatively during a UX flow.
+    ///
+    /// The future is registered with the SDK executor. [`review_pairs`] drives
+    /// that executor while waiting for user input, so the task overlaps
+    /// with the time the user spends reading the on-screen content.
+    ///
+    /// The future **should** call [`crate::executor::yield_now`] periodically
+    /// (e.g. after each iteration or chunk of work) to keep the UI responsive.
+    ///
+    /// Returns a [`TaskHandle`] from which the result is retrieved after
+    /// the UX flow returns.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use vanadium_app_sdk::executor::yield_now;
+    ///
+    /// let handle = app.spawn_task(async move {
+    ///     let mut results = Vec::new();
+    ///     for job in jobs {
+    ///         results.push(process(job));
+    ///         yield_now().await;
+    ///     }
+    ///     results
+    /// });
+    /// ```
+    pub fn spawn_task<T: 'static>(
+        &mut self,
+        work: impl core::future::Future<Output = T> + 'static,
+    ) -> TaskHandle<T> {
+        use alloc::rc::Rc;
+        use core::cell::RefCell;
+        let cell: Rc<RefCell<Option<T>>> = Rc::new(RefCell::new(None));
+        let cell2 = cell.clone();
+        crate::executor::spawn(async move {
+            *cell2.borrow_mut() = Some(work.await);
+        });
+        TaskHandle(cell)
     }
 
     // --- UX Flows ---

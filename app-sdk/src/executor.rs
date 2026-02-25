@@ -152,7 +152,7 @@ pub fn block_on<T, F: Future<Output = T>>(future: F) -> T {
 /// responsive.
 ///
 /// ```ignore
-/// let handle = app.spawn_background(async {
+/// let handle = app.spawn_task(async {
 ///     for chunk in data.chunks(64) {
 ///         process(chunk);
 ///         yield_now().await;
