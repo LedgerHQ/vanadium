@@ -7,7 +7,7 @@ use common::{
 use common::errors::Error;
 
 #[cfg(not(any(test, feature = "autoapprove")))]
-fn display_address(app: &mut sdk::App, account_name: Option<&str>, addr: &str) -> bool {
+async fn display_address(app: &mut sdk::App, account_name: Option<&str>, addr: &str) -> bool {
     use alloc::vec;
     use sdk::ux::{Icon, TagValue};
 
@@ -31,14 +31,16 @@ fn display_address(app: &mut sdk::App, account_name: Option<&str>, addr: &str) -
     } else {
         ("Verify Bitcoin", "address")
     };
-    let approved = app.review_pairs(
-        intro_text,
-        intro_subtext,
-        &pairs,
-        "The address is correct",
-        "Confirm",
-        false,
-    );
+    let approved = app
+        .review_pairs(
+            intro_text,
+            intro_subtext,
+            &pairs,
+            "The address is correct",
+            "Confirm",
+            false,
+        )
+        .await;
 
     if approved {
         app.show_info(Icon::Success, "Address verified");
@@ -50,11 +52,11 @@ fn display_address(app: &mut sdk::App, account_name: Option<&str>, addr: &str) -
 }
 
 #[cfg(any(test, feature = "autoapprove"))]
-fn display_address(_app: &mut sdk::App, _account_name: Option<&str>, _addr: &str) -> bool {
+async fn display_address(_app: &mut sdk::App, _account_name: Option<&str>, _addr: &str) -> bool {
     true
 }
 
-pub fn handle_get_address(
+pub async fn handle_get_address(
     app: &mut sdk::App,
     name: Option<&str>,
     account: &common::message::Account,
@@ -91,7 +93,7 @@ pub fn handle_get_address(
         .map_err(|_| Error::InvalidWalletPolicy)?;
 
     if display {
-        if !display_address(app, name, &address) {
+        if !display_address(app, name, &address).await {
             return Err(Error::UserRejected);
         }
     }
@@ -139,7 +141,7 @@ mod tests {
         let hmac =
             ProofOfRegistration::new(&wallet_policy.get_id(account_name)).dangerous_as_bytes();
 
-        let resp = handle_get_address(
+        let resp = sdk::executor::block_on(handle_get_address(
             &mut sdk::App::singleton(),
             Some(account_name),
             &account,
@@ -149,7 +151,7 @@ mod tests {
                 address_index: 0,
             }),
             false,
-        )
+        ))
         .unwrap();
 
         assert_eq!(

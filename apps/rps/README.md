@@ -16,7 +16,7 @@ Risc-V and the native binaries.
 In order to build the app for the Risc-V target, enter the `app` folder and run:
 
    ```sh
-   cargo build --release --target=riscv32imc-unknown-none-elf
+   cargo build --release --target=riscv32imac-unknown-none-elf
    ```
 
 ### Native

@@ -37,37 +37,39 @@ use crate::constants::COIN_TICKER;
 use sdk::ux::Icon;
 
 #[cfg(not(any(test, feature = "autoapprove")))]
-fn display_warning_high_fee(app: &mut sdk::App, fee_percent: u64) -> bool {
+async fn display_warning_high_fee(app: &mut sdk::App, fee_percent: u64) -> bool {
     app.show_confirm_reject(
         "High fees",
         &format!("Transaction fee fraction is higher than {}%", fee_percent),
         "Continue",
         "Reject",
     )
+    .await
 }
 
 #[cfg(any(test, feature = "autoapprove"))]
-fn display_warning_high_fee(_app: &mut sdk::App, _fee_percent: u64) -> bool {
+async fn display_warning_high_fee(_app: &mut sdk::App, _fee_percent: u64) -> bool {
     true
 }
 
 #[cfg(not(any(test, feature = "autoapprove")))]
-fn display_warning_unverified_inputs(app: &mut sdk::App) -> bool {
+async fn display_warning_unverified_inputs(app: &mut sdk::App) -> bool {
     app.show_confirm_reject(
         "Unverified inputs",
         "Some inputs could not be verified.\nReject if you're not sure.",
         "Continue",
         "Reject",
     )
+    .await
 }
 
 #[cfg(any(test, feature = "autoapprove"))]
-fn display_warning_unverified_inputs(_app: &mut sdk::App) -> bool {
+async fn display_warning_unverified_inputs(_app: &mut sdk::App) -> bool {
     true
 }
 
 #[cfg(not(any(test, feature = "autoapprove")))]
-fn display_transaction(app: &mut sdk::App, pairs: &[TagValue]) -> bool {
+async fn display_transaction(app: &mut sdk::App, pairs: &[TagValue]) -> bool {
     // message on speculos or real device
 
     let button_text = if sdk::ux::has_page_api() {
@@ -89,10 +91,11 @@ fn display_transaction(app: &mut sdk::App, pairs: &[TagValue]) -> bool {
         button_text,
         true,
     )
+    .await
 }
 
 #[cfg(any(test, feature = "autoapprove"))]
-fn display_transaction(_app: &mut sdk::App, _pairs: &[TagValue]) -> bool {
+async fn display_transaction(_app: &mut sdk::App, _pairs: &[TagValue]) -> bool {
     true
 }
 
@@ -203,7 +206,7 @@ fn sign_input_schnorr(
     })
 }
 
-pub fn handle_sign_psbt(app: &mut sdk::App, psbt: &[u8]) -> Result<Response, Error> {
+pub async fn handle_sign_psbt(app: &mut sdk::App, psbt: &[u8]) -> Result<Response, Error> {
     app.show_spinner("Processing...");
 
     let psbt = fastpsbt::Psbt::parse(&psbt).map_err(|_| Error::FailedToDeserializePsbt)?;
@@ -421,14 +424,14 @@ pub fn handle_sign_psbt(app: &mut sdk::App, psbt: &[u8]) -> Result<Response, Err
     // show necessary warnings
 
     if warn_unverified_inputs {
-        if !display_warning_unverified_inputs(app) {
+        if !display_warning_unverified_inputs(app).await {
             return Err(Error::UserRejected);
         }
     }
     if inputs_total_amount >= crate::constants::THRESHOLD_WARN_HIGH_FEES_AMOUNT {
         let fee_percent = fee.saturating_mul(100) / inputs_total_amount;
         if fee_percent >= crate::constants::THRESHOLD_WARN_HIGH_FEES_PERCENT {
-            if !display_warning_high_fee(app, fee_percent) {
+            if !display_warning_high_fee(app, fee_percent).await {
                 return Err(Error::UserRejected);
             }
         }
@@ -520,7 +523,7 @@ pub fn handle_sign_psbt(app: &mut sdk::App, psbt: &[u8]) -> Result<Response, Err
         value: format!("{} {}", fee, COIN_TICKER),
     });
 
-    if !display_transaction(app, &pairs) {
+    if !display_transaction(app, &pairs).await {
         #[cfg(not(any(test, feature = "autoapprove")))]
         app.show_info(Icon::Failure, "Transaction rejected");
 
@@ -682,8 +685,11 @@ mod tests {
 
         prepare_psbt(&mut psbt, &[(&wallet_policy, account_name, &por)]).unwrap();
 
-        let response =
-            handle_sign_psbt(&mut sdk::App::singleton(), &serialize_as_psbtv2(&psbt)).unwrap();
+        let response = sdk::executor::block_on(handle_sign_psbt(
+            &mut sdk::App::singleton(),
+            &serialize_as_psbtv2(&psbt),
+        ))
+        .unwrap();
 
         assert_eq!(response, Response::PsbtSigned(vec![
             PartialSignature {
@@ -711,8 +717,11 @@ mod tests {
             ProofOfRegistration::new(&wallet_policy.get_id(account_name)).dangerous_as_bytes();
         prepare_psbt(&mut psbt, &[(&wallet_policy, &account_name, &por)]).unwrap();
 
-        let response =
-            handle_sign_psbt(&mut sdk::App::singleton(), &serialize_as_psbtv2(&psbt)).unwrap();
+        let response = sdk::executor::block_on(handle_sign_psbt(
+            &mut sdk::App::singleton(),
+            &serialize_as_psbtv2(&psbt),
+        ))
+        .unwrap();
 
         assert_eq!(response, Response::PsbtSigned(vec![
             PartialSignature {
@@ -741,8 +750,11 @@ mod tests {
             ProofOfRegistration::new(&wallet_policy.get_id(account_name)).dangerous_as_bytes();
         prepare_psbt(&mut psbt, &[(&wallet_policy, &account_name, &por)]).unwrap();
 
-        let response =
-            handle_sign_psbt(&mut sdk::App::singleton(), &serialize_as_psbtv2(&psbt)).unwrap();
+        let response = sdk::executor::block_on(handle_sign_psbt(
+            &mut sdk::App::singleton(),
+            &serialize_as_psbtv2(&psbt),
+        ))
+        .unwrap();
 
         let Response::PsbtSigned(partial_signatures) = response else {
             panic!("Expected PsbtSigned response");

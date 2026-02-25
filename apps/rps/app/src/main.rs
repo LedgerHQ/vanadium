@@ -33,7 +33,7 @@ fn display_move(move_num: u8) -> &'static str {
 // Shows the game summary and the app's chosen move
 // Returns true if the user accepts
 #[cfg(not(test))]
-fn show_game_ui(app: &mut App<RPSGame>, c_a: &[u8; 32], m_b: u8) -> bool {
+async fn show_game_ui(app: &mut App<RPSGame>, c_a: &[u8; 32], m_b: u8) -> bool {
     app.show_confirm_reject(
         "Game started",
         &format!(
@@ -43,11 +43,11 @@ fn show_game_ui(app: &mut App<RPSGame>, c_a: &[u8; 32], m_b: u8) -> bool {
         ),
         "Continue game",
         "Cancel",
-    )
+    ).await
 }
 
 #[cfg(test)]
-fn show_game_ui(_app: &mut App<RPSGame>, _c_a: &[u8; 32], _m_b: u8) -> bool {
+async fn show_game_ui(_app: &mut App<RPSGame>, _c_a: &[u8; 32], _m_b: u8) -> bool {
     true
 }
 
@@ -106,11 +106,11 @@ pub enum Command {
     Reveal { m_a: u8, r_a: [u8; 32] },
 }
 
-fn process_commit_command(app: &mut App<RPSGame>, c_a: [u8; 32]) -> Vec<u8> {
+async fn process_commit_command(app: &mut App<RPSGame>, c_a: [u8; 32]) -> Vec<u8> {
     // Generate a uniform random move in [0, 2]
     let m_b = random_move();
 
-    if show_game_ui(app, &c_a, m_b) {
+    if show_game_ui(app, &c_a, m_b).await {
         // Create a new game only if accepted
         app.state = RPSGame {
             is_game_active: true,
@@ -151,7 +151,8 @@ fn process_reveal_command(app: &mut App<RPSGame>, m_a: u8, r_a: [u8; 32]) -> Vec
     vec![winner]
 }
 
-fn process_message(app: &mut App<RPSGame>, msg: &[u8]) -> Vec<u8> {
+#[sdk::handler]
+async fn process_message(app: &mut App<RPSGame>, msg: &[u8]) -> Vec<u8> {
     if msg.is_empty() {
         sdk::exit(0);
     }
@@ -163,12 +164,12 @@ fn process_message(app: &mut App<RPSGame>, msg: &[u8]) -> Vec<u8> {
 
     match command {
         Command::Commit { c_a } => {
-            let to_send = process_commit_command(app, c_a);
+            let to_send = process_commit_command(app, c_a).await;
             if to_send.is_empty() {
                 return vec![];
             }
             app.show_spinner("Waiting for Alice");
-            let response = match app.exchange(&to_send) {
+            let response = match app.exchange(&to_send).await {
                 Ok(resp) => resp,
                 Err(_) => return vec![],
             };
@@ -206,7 +207,7 @@ mod tests {
             .try_into()
             .unwrap();
 
-        let res = process_commit_command(&mut app, c_a);
+        let res = sdk::executor::block_on(process_commit_command(&mut app, c_a));
         assert!(res.len() == 1);
         let m_b = res[0];
         assert!(m_b <= 2, "Invalid move: {}", m_b);

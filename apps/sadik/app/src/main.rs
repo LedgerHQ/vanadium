@@ -40,7 +40,8 @@ fn parse_pubkey(pubkey: &[u8]) -> EcfpPublicKey<sdk::curve::Secp256k1, 32> {
     )
 }
 
-fn process_message(_app: &mut App, msg: &[u8]) -> Vec<u8> {
+#[sdk::handler]
+async fn process_message(_app: &mut App, msg: &[u8]) -> Vec<u8> {
     let command: Command = postcard::from_bytes(&msg).expect("Deserialization failed");
 
     let response: Vec<u8> = match command {

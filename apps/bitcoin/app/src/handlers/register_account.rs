@@ -6,7 +6,7 @@ use common::{
 };
 
 #[cfg(not(any(test, feature = "autoapprove")))]
-fn display_wallet_policy(
+async fn display_wallet_policy(
     app: &mut sdk::App,
     name: &str,
     wallet_policy: &bip388::WalletPolicy,
@@ -37,14 +37,16 @@ fn display_wallet_policy(
     } else {
         ("Register Bitcoin", "account")
     };
-    let approved = app.review_pairs(
-        intro_text,
-        intro_subtext,
-        &pairs,
-        "Confirm registration",
-        "Register",
-        false,
-    );
+    let approved = app
+        .review_pairs(
+            intro_text,
+            intro_subtext,
+            &pairs,
+            "Confirm registration",
+            "Register",
+            false,
+        )
+        .await;
 
     if approved {
         app.show_info(Icon::Success, "Account registered");
@@ -56,7 +58,7 @@ fn display_wallet_policy(
 }
 
 #[cfg(any(test, feature = "autoapprove"))]
-fn display_wallet_policy(
+async fn display_wallet_policy(
     _app: &mut sdk::App,
     _name: &str,
     _wallet_policy: &bip388::WalletPolicy,
@@ -64,7 +66,7 @@ fn display_wallet_policy(
     true
 }
 
-pub fn handle_register_account(
+pub async fn handle_register_account(
     app: &mut sdk::App,
     name: &str,
     account: &common::message::Account,
@@ -74,7 +76,7 @@ pub fn handle_register_account(
 
     // TODO: necessary sanity checks on the wallet policy
 
-    if !display_wallet_policy(app, name, &wallet_policy) {
+    if !display_wallet_policy(app, name, &wallet_policy).await {
         return Err(Error::UserRejected);
     }
 
@@ -128,7 +130,11 @@ mod tests {
         let wallet_policy: bip388::WalletPolicy = (&account).try_into().unwrap();
         let expected_account_id = wallet_policy.get_id(account_name);
 
-        let resp = handle_register_account(&mut sdk::App::singleton(), account_name, &account);
+        let resp = sdk::executor::block_on(handle_register_account(
+            &mut sdk::App::singleton(),
+            account_name,
+            &account,
+        ));
 
         assert_eq!(
             resp,
