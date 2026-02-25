@@ -267,7 +267,7 @@ fn process_message(_app: &mut App, msg: &[u8]) -> Vec<u8> {
         Command::Sleep { n_ticks } => {
             let mut count = 0;
             loop {
-                match sdk::ux::get_event() {
+                match sdk::executor::block_on(sdk::ux::get_event()) {
                     sdk::ux::Event::Ticker => {
                         count += 1;
                         if count == n_ticks {

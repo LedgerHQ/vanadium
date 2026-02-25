@@ -6,6 +6,7 @@ use common::ux::TagValue;
 
 use crate::{
     comm::MessageError,
+    executor::block_on,
     ux::{has_page_api, step_pos},
     ux_generated,
 };
@@ -169,7 +170,7 @@ where
             self.ux_dirty = false;
         }
 
-        let ev = crate::ux::get_event();
+        let ev = block_on(crate::ux::get_event());
         match (self.current_view, ev) {
             // Page API navigation
             (View::HomePage, Action(Quit)) => crate::ecalls::exit(0),
@@ -351,14 +352,14 @@ where
         long_press: bool,
     ) -> bool {
         self.set_ux_dirty();
-        crate::ux::review_pairs(
+        block_on(crate::ux::review_pairs(
             intro_text,
             intro_subtext,
             pairs,
             final_text,
             final_button_text,
             long_press,
-        )
+        ))
     }
 
     /// Shows a progress indicator with the provided status text.
@@ -393,7 +394,7 @@ where
         reject: &str,
     ) -> bool {
         self.set_ux_dirty();
-        crate::ux::show_confirm_reject(title, text, confirm, reject)
+        block_on(crate::ux::show_confirm_reject(title, text, confirm, reject))
     }
 
     /// Shows a temporary informational screen with an icon and message.

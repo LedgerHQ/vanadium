@@ -44,13 +44,16 @@ pub(crate) fn show_step_raw(step: &[u8]) {
 }
 
 /// Blocks until an event is received, then returns it.
-pub fn get_event() -> Event {
+pub async fn get_event() -> Event {
     loop {
         let mut event_data = EventData::default();
         // SAFETY: event_data is a properly aligned, initialized EventData on the stack.
         let event_code = EventCode::from(unsafe { ecalls::get_event(&mut event_data) });
         match event_code {
             EventCode::Ticker => {
+                // Give a chance to the executor to make progress on registered tasks
+                crate::executor::yield_now().await;
+
                 return Event::Ticker;
             }
             EventCode::Action => {
@@ -66,14 +69,11 @@ pub fn get_event() -> Event {
 }
 
 // waits for a number of ticker events
-pub fn wait(n: u32) {
+pub async fn wait(n: u32) {
     let mut n_tickers = 0u32;
     loop {
-        let mut event_data = EventData::default();
-        // SAFETY: event_data is a properly aligned, initialized EventData on the stack.
-        let event_code = EventCode::from(unsafe { ecalls::get_event(&mut event_data) });
-        match event_code {
-            EventCode::Ticker => {
+        match get_event().await {
+            Event::Ticker => {
                 n_tickers += 1;
                 if n_tickers >= n {
                     return;
@@ -85,16 +85,16 @@ pub fn wait(n: u32) {
 }
 
 // Like get_event, but it ignores any event that is not an Action
-pub fn get_action() -> Action {
+pub async fn get_action() -> Action {
     loop {
-        if let Event::Action(action) = get_event() {
+        if let Event::Action(action) = get_event().await {
             return action;
         }
     }
 }
 
 // implementation of review_pairs() for the page API
-fn __page_review_pairs(
+async fn __page_review_pairs(
     intro_text: &str,
     intro_subtext: &str,
     pairs: &[TagValue],
@@ -159,7 +159,7 @@ fn __page_review_pairs(
 
         // Process events
         loop {
-            match get_event() {
+            match get_event().await {
                 Event::Action(Action::PreviousPage) if active_page > 0 => {
                     active_page -= 1;
                     break;
@@ -181,7 +181,7 @@ fn __page_review_pairs(
 }
 
 // implementation of review_pairs() for the step API
-fn __step_review_pairs(
+async fn __step_review_pairs(
     intro_text: &str,
     intro_subtext: &str,
     pairs: &[TagValue],
@@ -226,7 +226,7 @@ fn __step_review_pairs(
         }
 
         loop {
-            match get_event() {
+            match get_event().await {
                 Event::Action(action) => {
                     if action == Action::NextPage && cur_step < n_steps - 1 {
                         cur_step += 1;
@@ -249,7 +249,7 @@ fn __step_review_pairs(
 }
 
 // Temporary function; similar to nbgl_useCaseReview
-pub fn review_pairs(
+pub async fn review_pairs(
     intro_text: &str,
     intro_subtext: &str,
     pairs: &[TagValue],
@@ -266,6 +266,7 @@ pub fn review_pairs(
             final_button_text,
             long_press,
         )
+        .await
     } else {
         __step_review_pairs(
             intro_text,
@@ -275,6 +276,7 @@ pub fn review_pairs(
             final_button_text,
             long_press,
         )
+        .await
     }
 }
 
@@ -286,14 +288,14 @@ pub fn show_spinner(text: &str) {
     }
 }
 
-pub fn show_info(icon: Icon, text: &str) {
+pub async fn show_info(icon: Icon, text: &str) {
     if has_page_api() {
         ux_generated::show_page_info(icon, text);
     } else {
         ux_generated::show_step_info_single(text);
     }
 
-    wait(20); // Wait for 20 ticker events (about 2 seconds)
+    wait(20).await; // Wait for 20 ticker events (about 2 seconds)
 }
 
 // computes the correct constant among SINGLE_STEP, FIRST_STEP, LAST_STEP, NEITHER_FIRST_NOR_LAST_STEP
@@ -304,13 +306,13 @@ pub(crate) const fn step_pos(n_steps: u32, cur_step: u32) -> u8 {
     has_left_arrow << 1 | has_right_arrow
 }
 
-pub fn show_confirm_reject(title: &str, text: &str, confirm: &str, reject: &str) -> bool {
+pub async fn show_confirm_reject(title: &str, text: &str, confirm: &str, reject: &str) -> bool {
     if has_page_api() {
         ux_generated::show_page_confirm_reject(title, text, confirm, reject);
 
         // wait until a button is pressed
         loop {
-            match get_event() {
+            match get_event().await {
                 Event::Action(action) => {
                     if action == Action::Reject {
                         return false;
@@ -338,7 +340,7 @@ pub fn show_confirm_reject(title: &str, text: &str, confirm: &str, reject: &str)
             }
 
             loop {
-                match get_event() {
+                match get_event().await {
                     Event::Action(action) => {
                         if action == Action::NextPage && cur_step < n_steps - 1 {
                             cur_step += 1;

@@ -1,4 +1,5 @@
 use alloc::{vec, vec::Vec};
+use sdk::executor::block_on;
 
 pub fn handle_show_ux_screen(data: &[u8]) -> Vec<u8> {
     if data.len() != 1 {
@@ -8,22 +9,27 @@ pub fn handle_show_ux_screen(data: &[u8]) -> Vec<u8> {
     let screen_id = data[0];
     match screen_id {
         0 => {
-            sdk::ux::show_info(sdk::ux::Icon::Success, "Oh yeah!");
-            sdk::ux::wait(10);
+            block_on(sdk::ux::show_info(sdk::ux::Icon::Success, "Oh yeah!"));
+            block_on(sdk::ux::wait(10));
         }
         1 => {
-            sdk::ux::show_info(sdk::ux::Icon::Failure, "Oh no!");
-            sdk::ux::wait(10);
+            block_on(sdk::ux::show_info(sdk::ux::Icon::Failure, "Oh no!"));
+            block_on(sdk::ux::wait(10));
         }
         2 => {
             sdk::ux::show_spinner("Loading...");
-            sdk::ux::wait(10);
+            block_on(sdk::ux::wait(10));
         }
         3 => {
-            sdk::ux::show_confirm_reject("Confirm", "Do you want to confirm?", "Yes", "No");
+            block_on(sdk::ux::show_confirm_reject(
+                "Confirm",
+                "Do you want to confirm?",
+                "Yes",
+                "No",
+            ));
         }
         4 => {
-            sdk::ux::review_pairs(
+            block_on(sdk::ux::review_pairs(
                 "Review the pairs",
                 "It's important",
                 &vec![
@@ -51,7 +57,7 @@ pub fn handle_show_ux_screen(data: &[u8]) -> Vec<u8> {
                 "Hope you checked",
                 "Confirm",
                 true,
-            );
+            ));
         }
         _ => panic!("Unknown screen id"),
     }
