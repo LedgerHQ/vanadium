@@ -206,53 +206,84 @@ fn sign_input_schnorr(
     })
 }
 
-pub async fn handle_sign_psbt(app: &mut sdk::App, psbt: &[u8]) -> Result<Response, Error> {
-    app.show_spinner("Processing...");
+/// A script derivation check to be verified in the background task.
+struct ScriptCheck {
+    account_id: u32,
+    is_change: bool,
+    address_index: u32,
+    expected_script: ScriptBuf,
+    is_input: bool,
+}
 
-    let psbt = fastpsbt::Psbt::parse(&psbt).map_err(|_| Error::FailedToDeserializePsbt)?;
+/// The result of analyzing a PSBT: lightweight data needed for UI display and signing.
+struct TransactionSummary {
+    accounts: Vec<PsbtAccount>,
+    account_names: Vec<Option<String>>,
+    input_coordinates: Vec<(u32, PsbtAccountCoordinates)>,
+    account_spent_amounts: Vec<i64>,
+    external_outputs_indexes: Vec<usize>,
+    inputs_total_amount: u64,
+    outputs_total_amount: u64,
+    warn_unverified_inputs: bool,
+}
 
+impl TransactionSummary {
+    fn fee(&self) -> u64 {
+        self.inputs_total_amount - self.outputs_total_amount
+    }
+}
+
+/// Perform cheap structural validation of the PSBT and extract the data needed for
+/// UI display (`TransactionSummary`) and deferred cryptographic verification.
+///
+/// Returns the summary (which owns accounts and account names), plus the
+/// proof-of-registration list and script checks needed by `verify_transaction`.
+///
+/// Expensive operations (proof-of-registration validation, script derivation) are NOT
+/// performed here — they are deferred to `verify_transaction`.
+fn analyze_transaction(
+    psbt: &fastpsbt::Psbt,
+) -> Result<
+    (
+        TransactionSummary,
+        Vec<ProofOfRegistration>,
+        Vec<ScriptCheck>,
+    ),
+    Error,
+> {
     let accounts = psbt
         .get_accounts()
         .map_err(|_| Error::InvalidWalletPolicy)?;
-    let mut account_spent_amounts: Vec<i64> = vec![0; accounts.len()];
-    let mut external_outputs_indexes = Vec::new();
-    let mut inputs_total_amount: u64 = 0;
-    let mut outputs_total_amount: u64 = 0;
 
-    let mut warn_unverified_inputs: bool = false;
-
-    /***** verify accounts *****/
-    for (account_id, account) in accounts.iter().enumerate() {
-        let account_name = psbt
+    // Extract account names and raw proof-of-registration bytes
+    let mut account_names = Vec::with_capacity(accounts.len());
+    let mut account_proofs = Vec::with_capacity(accounts.len());
+    for account_id in 0..accounts.len() {
+        let name = psbt
             .get_account_name(account_id as u32)
-            .map_err(|_| Error::InvalidWalletPolicy)?
-            .unwrap_or("".to_string());
+            .map_err(|_| Error::InvalidWalletPolicy)?;
+        account_names.push(name);
 
         let por = psbt
             .get_account_proof_of_registration(account_id as u32)
             .map_err(|_| Error::InvalidWalletPolicy)?;
-        // verify that por is 32 bytes, and convert to ProofOfRegistration
-
         let por = por.ok_or(Error::DefaultAccountsNotSupported)?;
         let por = ProofOfRegistration::from_bytes(
             por.try_into()
                 .map_err(|_| Error::InvalidProofOfRegistrationLength)?,
         );
-
-        match account {
-            PsbtAccount::WalletPolicy(wallet_policy) => {
-                // verify proof of registration
-                let id = wallet_policy.get_id(&account_name);
-                if por != ProofOfRegistration::new(&id) {
-                    return Err(Error::InvalidProofOfRegistration);
-                }
-            }
-        }
+        account_proofs.push(por);
     }
 
-    /***** extract account coordinates for all inputs and outputs *****/
+    let mut account_spent_amounts: Vec<i64> = vec![0; accounts.len()];
+    let mut external_outputs_indexes = Vec::new();
+    let mut inputs_total_amount: u64 = 0;
+    let mut outputs_total_amount: u64 = 0;
+    let mut warn_unverified_inputs = false;
+    let mut script_checks = Vec::new();
 
-    // Pre-compute account coordinates for all inputs (must be internal)
+    /***** extract account coordinates for all inputs *****/
+
     let input_coordinates: Vec<(u32, PsbtAccountCoordinates)> = psbt
         .inputs
         .iter()
@@ -264,7 +295,7 @@ pub async fn handle_sign_psbt(app: &mut sdk::App, psbt: &[u8]) -> Result<Respons
         })
         .collect::<Result<Vec<_>, Error>>()?;
 
-    /***** input checks *****/
+    /***** input checks (structural only — script derivation is deferred) *****/
 
     for (input_index, input) in psbt.inputs.iter().enumerate() {
         let (account_id, ref coords) = input_coordinates[input_index];
@@ -285,8 +316,6 @@ pub async fn handle_sign_psbt(app: &mut sdk::App, psbt: &[u8]) -> Result<Respons
         }
 
         if segwit_version == SegwitVersion::Legacy || segwit_version == SegwitVersion::SegwitV0 {
-            // if the non-witness UTXO is present, validate it matches the previous output.
-            // If missing, fail for legacy inputs, while we show a warning for SegWit v0 inputs.
             match input
                 .get_non_witness_utxo()
                 .map_err(|_| Error::InvalidNonWitnessUtxo)?
@@ -299,11 +328,8 @@ pub async fn handle_sign_psbt(app: &mut sdk::App, psbt: &[u8]) -> Result<Respons
                 }
                 None => {
                     if segwit_version == SegwitVersion::Legacy {
-                        // for legacy transactions, non-witness UTXO is not required
                         return Err(Error::NonWitnessUtxoRequired);
                     } else if segwit_version == SegwitVersion::SegwitV0 {
-                        // for Segwitv0 transactions, non-witness UTXO is not mandatory,
-                        // but we show a warning if missing
                         warn_unverified_inputs = true;
                     }
                 }
@@ -357,20 +383,21 @@ pub async fn handle_sign_psbt(app: &mut sdk::App, psbt: &[u8]) -> Result<Respons
             return Err(Error::MissingInputUtxo);
         };
 
-        // verify that the account, derived at the coordinates in the PSBT, produces the same script
-        if wallet_policy
-            .to_script(coords.is_change, coords.address_index)
-            .map_err(|_| Error::InvalidWalletPolicy)?
-            != tx_out.script_pubkey
-        {
-            return Err(Error::InputScriptMismatch);
-        }
+        // Record for deferred script derivation check
+        script_checks.push(ScriptCheck {
+            account_id,
+            is_change: coords.is_change,
+            address_index: coords.address_index,
+            expected_script: tx_out.script_pubkey.clone(),
+            is_input: true,
+        });
 
         account_spent_amounts[account_id as usize] += tx_out.value.to_sat() as i64;
         inputs_total_amount += tx_out.value.to_sat();
     }
 
-    // Pre-compute account coordinates for all outputs (None means external)
+    /***** output checks (structural only — script derivation is deferred) *****/
+
     let output_coordinates: Vec<Option<(u32, PsbtAccountCoordinates)>> = psbt
         .outputs
         .iter()
@@ -381,32 +408,29 @@ pub async fn handle_sign_psbt(app: &mut sdk::App, psbt: &[u8]) -> Result<Respons
         })
         .collect::<Result<Vec<_>, Error>>()?;
 
-    /***** output checks *****/
     for (output_index, output) in psbt.outputs.iter().enumerate() {
         let amount = output.amount.ok_or(Error::OutputAmountMissing)?;
         if let Some((account_id, ref coords)) = output_coordinates[output_index] {
-            // output internal to an account (change, or receiving to an account). Check if it's true
             if account_id as usize >= accounts.len() {
                 return Err(Error::InvalidAccountId);
             }
 
-            let PsbtAccount::WalletPolicy(wallet_policy) = &accounts[account_id as usize];
             let PsbtAccountCoordinates::WalletPolicy(coords) = coords;
 
-            // verify that the account, derived at the coordinates in the PSBT, produces the same script
             let out_script_pubkey = output.script.ok_or(Error::OutputScriptMissing)?;
             let out_script_pubkey = ScriptBuf::from_bytes(out_script_pubkey.to_vec());
-            if wallet_policy
-                .to_script(coords.is_change, coords.address_index)
-                .map_err(|_| Error::InvalidWalletPolicy)?
-                != out_script_pubkey
-            {
-                return Err(Error::OutputScriptMismatch);
-            }
+
+            // Record for deferred script derivation check
+            script_checks.push(ScriptCheck {
+                account_id,
+                is_change: coords.is_change,
+                address_index: coords.address_index,
+                expected_script: out_script_pubkey,
+                is_input: false,
+            });
 
             account_spent_amounts[account_id as usize] -= amount as i64;
         } else {
-            // nothing more to do for external outputs (they will be shown to the user)
             external_outputs_indexes.push(output_index);
         };
 
@@ -414,61 +438,89 @@ pub async fn handle_sign_psbt(app: &mut sdk::App, psbt: &[u8]) -> Result<Respons
     }
 
     if outputs_total_amount > inputs_total_amount {
-        // for now we don't support sighash flags - so output amounts can't be smaller than input amounts
         return Err(Error::InputsLessThanOutputs);
     }
-    let fee = inputs_total_amount - outputs_total_amount;
 
-    /***** user validation UI *****/
+    let summary = TransactionSummary {
+        accounts,
+        account_names,
+        input_coordinates,
+        account_spent_amounts,
+        external_outputs_indexes,
+        inputs_total_amount,
+        outputs_total_amount,
+        warn_unverified_inputs,
+    };
 
-    // show necessary warnings
+    Ok((summary, account_proofs, script_checks))
+}
 
-    if warn_unverified_inputs {
-        if !display_warning_unverified_inputs(app).await {
-            return Err(Error::UserRejected);
+/// Task to perform the expensive verification (proof-of-registration and script
+/// derivation checks) in the background.
+async fn verify_transaction(
+    accounts: &[PsbtAccount],
+    account_names: &[Option<String>],
+    account_proofs: &[ProofOfRegistration],
+    script_checks: &[ScriptCheck],
+) -> Result<(), Error> {
+    // Verify proof-of-registration for each account
+    for (account_id, account) in accounts.iter().enumerate() {
+        let PsbtAccount::WalletPolicy(wallet_policy) = account;
+        let account_name = account_names[account_id].as_deref().unwrap_or("");
+        let id = wallet_policy.get_id(account_name);
+        if account_proofs[account_id] != ProofOfRegistration::new(&id) {
+            return Err(Error::InvalidProofOfRegistration);
         }
+        sdk::executor::yield_now().await;
     }
-    if inputs_total_amount >= crate::constants::THRESHOLD_WARN_HIGH_FEES_AMOUNT {
-        let fee_percent = fee.saturating_mul(100) / inputs_total_amount;
-        if fee_percent >= crate::constants::THRESHOLD_WARN_HIGH_FEES_PERCENT {
-            if !display_warning_high_fee(app, fee_percent).await {
-                return Err(Error::UserRejected);
-            }
+
+    // Verify that each input/output script matches the account derivation
+    for check in script_checks {
+        let PsbtAccount::WalletPolicy(wallet_policy) = &accounts[check.account_id as usize];
+        let derived_script = wallet_policy
+            .to_script(check.is_change, check.address_index)
+            .map_err(|_| Error::InvalidWalletPolicy)?;
+        if derived_script != check.expected_script {
+            return Err(if check.is_input {
+                Error::InputScriptMismatch
+            } else {
+                Error::OutputScriptMismatch
+            });
         }
+        sdk::executor::yield_now().await;
     }
 
-    // display transaction
-    //
-    // pairs:
-    // - accounts we're sending from (non-negative spent amount)
-    // - accounts we're receiving to (negative spent amount)
-    // - external outputs and amounts
-    // - total in fees
+    Ok(())
+}
 
-    let mut pairs: Vec<TagValue> =
-        Vec::with_capacity(accounts.len() * 2 + external_outputs_indexes.len() * 2 + 1);
+/// Build the `TagValue` pairs shown to the user during transaction review.
+fn build_display_pairs(
+    psbt: &fastpsbt::Psbt,
+    summary: &TransactionSummary,
+) -> Result<Vec<TagValue>, Error> {
+    let fee = summary.fee();
+    let n_accounts = summary.accounts.len();
+    let n_external = summary.external_outputs_indexes.len();
 
-    // TODO: format amounts correctly, with commas and decimals
-    // pairs for accounts we're spending from (or refreshing)
-    for (account_id, spent_amount) in account_spent_amounts.iter().enumerate() {
-        let account_description = match psbt
-            .get_account_name(account_id as u32)
-            .map_err(|_| Error::InvalidWalletPolicy)?
-        {
+    let mut pairs: Vec<TagValue> = Vec::with_capacity(n_accounts * 2 + n_external * 2 + 1);
+
+    // Accounts we're spending from (non-negative spent amount)
+    for (account_id, spent_amount) in summary.account_spent_amounts.iter().enumerate() {
+        let account_description = match &summary.account_names[account_id] {
             Some(name) => format!("account: {}", name),
             None => "default account".to_string(),
         };
         if *spent_amount >= 0 {
             pairs.push(TagValue {
                 tag: "Spend from".into(),
-                value: format!("{}", account_description),
+                value: account_description,
             });
             if *spent_amount > 0 {
                 pairs.push(TagValue {
                     tag: "Amount".into(),
                     value: format_amount(*spent_amount as u64, COIN_TICKER),
                 });
-            } else if *spent_amount == 0 {
+            } else {
                 pairs.push(TagValue {
                     tag: "Amount".into(),
                     value: "0 (self-tansfer)".to_string(),
@@ -476,31 +528,28 @@ pub async fn handle_sign_psbt(app: &mut sdk::App, psbt: &[u8]) -> Result<Respons
             }
         }
     }
-    // pairs for accounts we're receiving from (negative spent amount)
-    for (account_id, spent_amount) in account_spent_amounts.iter().enumerate() {
-        let account_description = match psbt
-            .get_account_name(account_id as u32)
-            .map_err(|_| Error::InvalidWalletPolicy)?
-        {
+
+    // Accounts we're receiving to (negative spent amount)
+    for (account_id, spent_amount) in summary.account_spent_amounts.iter().enumerate() {
+        let account_description = match &summary.account_names[account_id] {
             Some(name) => format!("account: {}", name),
             None => "default account".to_string(),
         };
-
         if *spent_amount < 0 {
             pairs.push(TagValue {
                 tag: "Send to".into(),
-                value: format!("{}", account_description),
+                value: account_description,
             });
-
             pairs.push(TagValue {
                 tag: "Amount".into(),
                 value: format_amount(-*spent_amount as u64, COIN_TICKER),
             });
         }
     }
-    // pairs for external outputs. For these, we show the address as usual.
-    for output_index in external_outputs_indexes.iter() {
-        let output = &psbt.outputs[*output_index];
+
+    // External outputs (show address)
+    for &output_index in &summary.external_outputs_indexes {
+        let output = &psbt.outputs[output_index];
         let out_script_pubkey = output.script.ok_or(Error::OutputScriptMissing)?;
         let out_script_pubkey = ScriptBuf::from_bytes(out_script_pubkey.to_vec());
         let amount = output.amount.ok_or(Error::OutputAmountMissing)?;
@@ -517,41 +566,34 @@ pub async fn handle_sign_psbt(app: &mut sdk::App, psbt: &[u8]) -> Result<Respons
         });
     }
 
-    // pair for total fee
+    // Fee
     pairs.push(TagValue {
         tag: "Fee".to_string(),
         value: format!("{} {}", fee, COIN_TICKER),
     });
 
-    if !display_transaction(app, &pairs).await {
-        #[cfg(not(any(test, feature = "autoapprove")))]
-        app.show_info(Icon::Failure, "Transaction rejected");
+    Ok(pairs)
+}
 
-        return Err(Error::UserRejected);
-    }
-
-    app.show_spinner("Signing transaction...");
-
-    /***** Sign transaction *****/
+/// Sign all inputs of the PSBT, producing one `PartialSignature` per signing key per input.
+fn sign_all_inputs(
+    psbt: &fastpsbt::Psbt,
+    summary: &TransactionSummary,
+) -> Result<Vec<PartialSignature>, Error> {
     let unsigned_tx = psbt
         .unsigned_tx()
         .map_err(|_| Error::FailedUnsignedTransaction)?;
     let mut sighash_cache = SighashCache::new(unsigned_tx.clone());
 
-    // Pre-compute prevouts once for all taproot (schnorr) signing calls.
-    // This is lazily initialized on the first taproot input encountered.
     let mut prevouts: Option<Vec<TxOut>> = None;
-
     let master_fingerprint = sdk::curve::Secp256k1::get_master_fingerprint();
-
     let mut partial_signatures = Vec::with_capacity(psbt.inputs.len());
 
     for (input_index, input) in psbt.inputs.iter().enumerate() {
-        let (account_id, ref coords) = input_coordinates[input_index];
-
+        let (account_id, ref coords) = summary.input_coordinates[input_index];
         let PsbtAccountCoordinates::WalletPolicy(coords) = coords;
+        let PsbtAccount::WalletPolicy(wallet_policy) = &summary.accounts[account_id as usize];
 
-        let PsbtAccount::WalletPolicy(wallet_policy) = &accounts[account_id as usize];
         for (kp, tapleaf_desc) in wallet_policy.descriptor_template.placeholders() {
             let key_info = wallet_policy.key_information[kp.key_index as usize].clone();
             let Some(key_origin) = key_info
@@ -574,16 +616,13 @@ pub async fn handle_sign_psbt(app: &mut sdk::App, psbt: &[u8]) -> Result<Respons
             path.push(coords.address_index.into());
 
             if input.witness_utxo.is_some() {
-                // sign all segwit types (including wrapped)
                 match wallet_policy.get_segwit_version() {
                     Ok(SegwitVersion::SegwitV0) => {
-                        // sign as segwit v0
                         let partial_signature =
-                            sign_input_ecdsa(&psbt, input_index, &mut sighash_cache, &path)?;
+                            sign_input_ecdsa(psbt, input_index, &mut sighash_cache, &path)?;
                         partial_signatures.push(partial_signature);
                     }
                     Ok(SegwitVersion::Taproot) => {
-                        // TODO currently only handling key path spends (with or without a taptree)
                         let taptree_hash = match &wallet_policy.descriptor_template {
                             DescriptorTemplate::Tr(_, tree) => tree
                                 .as_ref()
@@ -610,7 +649,6 @@ pub async fn handle_sign_psbt(app: &mut sdk::App, psbt: &[u8]) -> Result<Respons
                             .transpose()
                             .map_err(|_| Error::InvalidWalletPolicy)?;
 
-                        // Pre-compute prevouts once for all taproot signing calls
                         let prevouts = prevouts.get_or_insert_with(|| {
                             psbt.inputs
                                 .iter()
@@ -637,9 +675,8 @@ pub async fn handle_sign_psbt(app: &mut sdk::App, psbt: &[u8]) -> Result<Respons
                     _ => return Err(Error::UnexpectedSegwitVersion),
                 }
             } else {
-                // sign as legacy p2pkh or p2sh
                 partial_signatures.push(sign_input_ecdsa(
-                    &psbt,
+                    psbt,
                     input_index,
                     &mut sighash_cache,
                     &path,
@@ -647,6 +684,63 @@ pub async fn handle_sign_psbt(app: &mut sdk::App, psbt: &[u8]) -> Result<Respons
             }
         }
     }
+
+    Ok(partial_signatures)
+}
+
+pub async fn handle_sign_psbt(app: &mut sdk::App, psbt: &[u8]) -> Result<Response, Error> {
+    app.show_spinner("Processing...");
+
+    let psbt = fastpsbt::Psbt::parse(psbt).map_err(|_| Error::FailedToDeserializePsbt)?;
+
+    // Lightweight analysis: structural validation + extract data for display and verification
+    let (summary, account_proofs, script_checks) = analyze_transaction(&psbt)?;
+
+    // Spawn expensive verification (proof-of-registration + script derivation) as a background
+    // task so it runs concurrently with the UX flows below.
+    let verification_handle = app.spawn_task(async {
+        verify_transaction(
+            &summary.accounts,
+            &summary.account_names,
+            &account_proofs,
+            &script_checks,
+        )
+        .await
+    });
+
+    // Show warnings (runs while verification task progresses in the background)
+    if summary.warn_unverified_inputs {
+        if !display_warning_unverified_inputs(app).await {
+            return Err(Error::UserRejected);
+            // verification_handle is dropped here → task is cancelled
+        }
+    }
+
+    let fee = summary.fee();
+    if summary.inputs_total_amount >= crate::constants::THRESHOLD_WARN_HIGH_FEES_AMOUNT {
+        let fee_percent = fee.saturating_mul(100) / summary.inputs_total_amount;
+        if fee_percent >= crate::constants::THRESHOLD_WARN_HIGH_FEES_PERCENT {
+            if !display_warning_high_fee(app, fee_percent).await {
+                return Err(Error::UserRejected);
+            }
+        }
+    }
+
+    // Display transaction for user approval
+    let pairs = build_display_pairs(&psbt, &summary)?;
+    if !display_transaction(app, &pairs).await {
+        #[cfg(not(any(test, feature = "autoapprove")))]
+        app.show_info(Icon::Failure, "Transaction rejected");
+
+        return Err(Error::UserRejected);
+    }
+
+    // Wait for verification to complete (likely already done by now)
+    app.await_task("Verifying...", verification_handle)?;
+
+    // All checks passed — sign
+    app.show_spinner("Signing transaction...");
+    let partial_signatures = sign_all_inputs(&psbt, &summary)?;
 
     #[cfg(not(any(test, feature = "autoapprove")))]
     app.show_info(Icon::Success, "Transaction signed");
