@@ -34,6 +34,8 @@ jobs:
   native-integration-tests:
     name: Native integration tests (${{ inputs.vapp_name }})
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
       - name: Set up Rust toolchain
         uses: dtolnay/rust-toolchain@master
