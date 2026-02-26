@@ -343,6 +343,15 @@ jobs:
       vapp_name: "vnd-rps"
       test_dirs_json: '["apps/rps/app"]'
 
+  ## vnd-async
+  build_vnd_async:
+    uses: ./.github/workflows/reusable_vapp_build.yaml
+    with:
+      vapp_name: "vnd-async"
+      vapp_dir: "apps/async/app"
+      artifact_name: "vnd_async_riscv_binary"
+      binary_name: "vnd-async"
+
   ## cargo-vnd tool test
   test_cargo_vnd_new:
     name: Test 'cargo vnd new' command
