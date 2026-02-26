@@ -9,6 +9,7 @@ target_native = ["sdk/target_native"]
 target_vanadium_ledger = ["sdk/target_vanadium_ledger"]
 target_all = ["sdk/target_all"]
 speculos-tests = []
+native-tests = []
 debug = ["dep:env_logger", "sdk/debug"]
 
 [dependencies]

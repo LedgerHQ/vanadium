@@ -26,8 +26,16 @@ In order to build the app for the native target, enter the `app` folder and run:
 
 ## Tests with speculos
 
-In order to run the integration tests, enter the `client` folder and run:
+In order to run the integration tests with Sadik running on the Vanadium VM on speculos, enter the `client` folder and run:
 
    ```sh
   cargo test --features speculos-tests
+   ```
+
+## Tests natively
+
+In order to run the integration tests with sadik running natively, enter the `client` folder and run:
+
+   ```sh
+  cargo test --features native-tests
    ```

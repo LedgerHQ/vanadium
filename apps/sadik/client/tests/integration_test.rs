@@ -1,13 +1,16 @@
-#![cfg(feature = "speculos-tests")]
+#![cfg(any(feature = "speculos-tests", feature = "native-tests"))]
 use common::{BigIntOperator, HashId};
 use hex_literal::hex;
 use sha2::Digest;
 
-use sdk::test_utils::{setup_test, TestSetup};
+use sdk::test_utils::TestSetup;
 
 use vnd_sadik_client::SadikClient;
 
+#[cfg(feature = "speculos-tests")]
 pub async fn setup() -> TestSetup<SadikClient> {
+    use sdk::test_utils::setup_test;
+
     let vanadium_binary = std::env::var("VANADIUM_BINARY")
         .unwrap_or_else(|_| "../../../vm/target/flex/release/app-vanadium".to_string());
     let vapp_binary = std::env::var("VAPP_BINARY").unwrap_or_else(|_| {
@@ -17,6 +20,15 @@ pub async fn setup() -> TestSetup<SadikClient> {
         SadikClient::new(transport)
     })
     .await
+}
+
+#[cfg(feature = "native-tests")]
+pub async fn setup() -> TestSetup<SadikClient> {
+    use sdk::test_utils::setup_native_test;
+
+    let vapp_binary = std::env::var("VAPP_BINARY")
+        .unwrap_or_else(|_| "../app/target/release/vnd-sadik".to_string());
+    setup_native_test(&vapp_binary, |transport| SadikClient::new(transport)).await
 }
 
 #[tokio::test]
