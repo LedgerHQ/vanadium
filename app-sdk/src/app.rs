@@ -7,6 +7,7 @@ use common::ux::TagValue;
 use core::{
     cell::Cell,
     future::Future,
+    marker::PhantomData,
     pin::Pin,
     task::{Context, Poll},
 };
@@ -140,26 +141,31 @@ pub trait IsReady {
 
 /// Handle to a task spawned with [`App::spawn_task`].
 ///
+/// The lifetime parameter `'a` captures any borrows held by the spawned
+/// future.  The compiler ensures the handle cannot outlive that data.
+///
 /// The task runs cooperatively, interleaved with any subsequent UX flow
 /// driven by [`App::review_pairs`]. Retrieve the result by calling
 /// [`TaskHandle::take`] once the UX flow has returned.
 ///
 /// **Cancellation:** if the handle is dropped without calling [`take`],
-/// the background task is cancelled on the next executor poll.  This lets
-/// you interrupt incomplete work simply by dropping the handle.
-pub struct TaskHandle<T> {
+/// the background task is cancelled and its inner future is dropped
+/// *before* `Drop` returns.  This guarantees that borrowed data is never
+/// accessed after the handle goes out of scope.
+pub struct TaskHandle<'a, T> {
     result: alloc::rc::Rc<core::cell::RefCell<Option<T>>>,
     cancelled: alloc::rc::Rc<Cell<bool>>,
     taken: Cell<bool>,
+    _scope: PhantomData<&'a ()>,
 }
 
-impl<T> IsReady for TaskHandle<T> {
+impl<T> IsReady for TaskHandle<'_, T> {
     fn is_ready(&self) -> bool {
         self.result.borrow().is_some()
     }
 }
 
-impl<T> TaskHandle<T> {
+impl<T> TaskHandle<'_, T> {
     /// Returns the result of the task.
     ///
     /// If the task has not finished yet, this polls the executor until it is ready.
@@ -174,10 +180,21 @@ impl<T> TaskHandle<T> {
     }
 }
 
-impl<T> Drop for TaskHandle<T> {
+impl<T> Drop for TaskHandle<'_, T> {
     fn drop(&mut self) {
         if !self.taken.get() {
+            // Signal cancellation so that `CancellableFuture` resolves on
+            // its next poll, which causes the executor to drop the inner
+            // future (and any data it borrows).
             self.cancelled.set(true);
+
+            // Spin `poll_once` until the executor has actually dropped the
+            // task.  Once the only remaining `Rc` clone is ours
+            // (`strong_count == 1`), the inner future has been dropped and
+            // it is safe for the borrowed data to go out of scope.
+            while alloc::rc::Rc::strong_count(&self.cancelled) > 1 {
+                crate::executor::poll_once();
+            }
         }
     }
 }
@@ -447,17 +464,24 @@ where
     ///     results
     /// });
     /// ```
-    pub fn spawn_task<T: 'static>(
+    ///
+    /// The spawned future may borrow local data. The returned [`TaskHandle`]
+    /// ties the task's lifetime to the borrowed data.
+    /// When the handle is dropped (explicitly or on early return), the
+    /// background task is cancelled and its inner future is dropped before
+    /// `Drop` returns, so the borrows are always valid.
+    pub fn spawn_task<'a, T: 'a>(
         &mut self,
-        work: impl core::future::Future<Output = T> + 'static,
-    ) -> TaskHandle<T> {
+        work: impl core::future::Future<Output = T> + 'a,
+    ) -> TaskHandle<'a, T> {
         use alloc::rc::Rc;
         use core::cell::RefCell;
         let cell: Rc<RefCell<Option<T>>> = Rc::new(RefCell::new(None));
         let cell2 = cell.clone();
         let cancelled: Rc<Cell<bool>> = Rc::new(Cell::new(false));
         let cancelled2 = cancelled.clone();
-        crate::executor::spawn(async move {
+
+        let task_future: Pin<Box<dyn Future<Output = ()> + 'a>> = Box::pin(async move {
             let wrapper = CancellableFuture {
                 inner: work,
                 cancelled: cancelled2,
@@ -466,10 +490,30 @@ where
                 *cell2.borrow_mut() = Some(val);
             }
         });
+
+        // SAFETY: the lifetime `'a` is erased here, but soundness is
+        // maintained by three guarantees:
+        //
+        // 1. `TaskHandle<'a, T>` cannot outlive `'a` (enforced by the
+        //    type system via `PhantomData<&'a ()>`).
+        //
+        // 2. `TaskHandle::drop` ensures the inner future is dropped
+        //    *before* the handle itself goes out of scope: it sets the
+        //    cancellation flag and spins `poll_once` until the executor
+        //    has removed the task (verified via `Rc::strong_count`).
+        //
+        // 3. V-Apps are single-threaded — no concurrent access is
+        //    possible.
+        let task_static: Pin<Box<dyn Future<Output = ()> + 'static>> =
+            unsafe { core::mem::transmute(task_future) };
+
+        crate::executor::spawn_boxed(task_static);
+
         TaskHandle {
             result: cell,
             cancelled,
             taken: Cell::new(false),
+            _scope: PhantomData,
         }
     }
 
@@ -489,7 +533,7 @@ where
     /// // ... run a UX flow concurrently ...
     /// let result = app.await_task("Processing...", handle);
     /// ```
-    pub fn await_task<T>(&mut self, text: &str, handle: TaskHandle<T>) -> T {
+    pub fn await_task<T>(&mut self, text: &str, handle: TaskHandle<'_, T>) -> T {
         if !handle.is_ready() {
             self.show_spinner(text);
         }
@@ -515,7 +559,7 @@ where
     /// let r1 = h1.take();
     /// let r2 = h2.take();
     /// ```
-    pub fn await_all(&mut self, text: &str, handles: &[&dyn IsReady]) {
+    pub fn await_all<'a>(&mut self, text: &str, handles: &[&(dyn IsReady + 'a)]) {
         if handles.iter().all(|h| h.is_ready()) {
             return;
         }
