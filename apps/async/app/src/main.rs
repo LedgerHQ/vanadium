@@ -10,8 +10,10 @@ use client::Command;
 sdk::bootstrap!();
 
 /// Number of inner iterations per `do_work` call.
-/// Tune this constant so that a single `do_work` call takes ~0.2 s.
-const WORK_ITERATIONS: u32 = 100_000;
+/// Tune this constant so that a single `do_work` call takes ~0.1-0.2s.
+const WORK_ITERATIONS: u32 = 100_000; // on speculos
+
+// const WORK_ITERATIONS: u32 = 2_250; // on the real device
 
 /// A single unit of pure local computation.
 /// Performs `WORK_ITERATIONS` arithmetic steps on `value` and returns the result.
