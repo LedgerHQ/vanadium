@@ -820,6 +820,15 @@ pub fn ecfp_scalar_mult(curve: u32, r: *mut u8, p: *const u8, k: *const u8, k_le
     let p_slice = unsafe { std::slice::from_raw_parts(p, 65) };
     let k_slice = unsafe { std::slice::from_raw_parts(k, k_len) };
 
+    // Handle point at infinity: represented as prefix byte 0x00
+    if p_slice[0] == 0x00 {
+        // O * k = O
+        unsafe {
+            std::ptr::write_bytes(r, 0, 65);
+        }
+        return 1;
+    }
+
     // Validate and decode point P
     let p_point = match EncodedPoint::from_bytes(p_slice) {
         Ok(enc) => enc,
@@ -1086,6 +1095,12 @@ fn slip21_derive_child_node(cur_node: &[u8; 64], label: &[u8]) -> [u8; 64] {
 }
 
 fn get_storage_file() -> String {
+    // Allow overriding the storage file path via environment variable,
+    // which is useful for test isolation (each test instance gets its own file).
+    if let Ok(path) = std::env::var("VAPP_STORAGE_FILE") {
+        return path;
+    }
+
     let file_name = std::env::current_exe()
         .ok()
         .and_then(|p| p.file_stem().map(|s| s.to_string_lossy().into_owned()))
