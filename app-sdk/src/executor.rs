@@ -99,6 +99,14 @@ pub fn spawn(future: impl Future<Output = ()> + 'static) {
     GLOBAL_EXECUTOR.0.borrow_mut().spawn(future);
 }
 
+/// Like [`spawn`], but accepts a pre-boxed, pre-pinned future.
+///
+/// This is used by [`App::spawn_task`] to register futures whose `'static`
+/// bound has been established (or safely transmuted) by the caller.
+pub(crate) fn spawn_boxed(future: Pin<Box<dyn Future<Output = ()>>>) {
+    GLOBAL_EXECUTOR.0.borrow_mut().tasks.push(Task(future));
+}
+
 /// Advances all pending background tasks by one round of polling.
 ///
 /// Tasks that call [`spawn`] during polling are picked up in the same round.
