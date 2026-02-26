@@ -1,6 +1,7 @@
-use std::fs::{File, OpenOptions};
+use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener};
+use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::sync::Arc;
 use tokio::time::{sleep, Duration};
@@ -16,6 +17,8 @@ pub struct TestSetup<C> {
     /// The child process — either Speculos or a native V-App binary.
     child: Child,
     log_file: File,
+    /// Temporary storage file created for native V-App tests (cleaned up on drop).
+    storage_file: Option<PathBuf>,
 }
 
 impl<C> TestSetup<C> {
@@ -49,6 +52,7 @@ impl<C> TestSetup<C> {
             transport_tcp: Some(transport_tcp),
             child,
             log_file,
+            storage_file: None,
         }
     }
 }
@@ -184,6 +188,11 @@ impl<C> Drop for TestSetup<C> {
                 eprintln!("Error querying child process status: {e}");
             }
         }
+
+        // Clean up temporary storage file
+        if let Some(ref path) = self.storage_file {
+            let _ = fs::remove_file(path);
+        }
     }
 }
 
@@ -234,7 +243,8 @@ where
 {
     init_test_logger();
 
-    let (child, native_client) = spawn_native_vapp_and_connect(vapp_binary).await;
+    let (child, native_client, storage_file) =
+        spawn_native_vapp_and_connect(vapp_binary).await;
 
     let client = create_client(Box::new(native_client));
 
@@ -257,16 +267,20 @@ where
         transport_tcp: None,
         child,
         log_file,
+        storage_file: Some(storage_file),
     }
 }
 
 /// Spawn a native V-App binary and poll until a [`NativeAppClient`] can
 /// connect to it.
-async fn spawn_native_vapp_and_connect(vapp_binary: &str) -> (Child, NativeAppClient) {
+async fn spawn_native_vapp_and_connect(vapp_binary: &str) -> (Child, NativeAppClient, PathBuf) {
     const MAX_LAUNCH_ATTEMPTS: usize = 10;
     const MAX_POLL_ATTEMPTS: usize = 10;
 
     let mut launch_attempts = 0;
+
+    // Each test instance gets its own storage file to avoid cross-test contamination.
+    let storage_file = PathBuf::from(format!("vapp_storage_{}.dat", std::process::id()));
 
     loop {
         let port =
@@ -289,6 +303,7 @@ async fn spawn_native_vapp_and_connect(vapp_binary: &str) -> (Child, NativeAppCl
 
         let mut child = Command::new(vapp_binary)
             .env("VAPP_ADDRESS", &addr)
+            .env("VAPP_STORAGE_FILE", &storage_file)
             .stdout(Stdio::from(stdout_file))
             .stderr(Stdio::from(stderr_file))
             .spawn()
@@ -322,7 +337,7 @@ async fn spawn_native_vapp_and_connect(vapp_binary: &str) -> (Child, NativeAppCl
         }
 
         if let Some(client) = connected_client {
-            return (child, client);
+            return (child, client, storage_file);
         }
 
         // Kill and retry
