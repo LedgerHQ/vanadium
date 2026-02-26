@@ -523,7 +523,7 @@ fn build_display_pairs(
             } else {
                 pairs.push(TagValue {
                     tag: "Amount".into(),
-                    value: "0 (self-tansfer)".to_string(),
+                    value: "0 (self-transfer)".to_string(),
                 });
             }
         }
