@@ -1,0 +1,92 @@
+name: Reusable V-App Native Integration Tests
+
+on:
+  workflow_call:
+    inputs:
+      vapp_name:
+        description: "Human readable V-App name (e.g. vnd-sadik)"
+        required: true
+        type: string
+      vapp_dir:
+        description: "Relative path to the V-App crate directory (e.g. apps/sadik/app)"
+        required: true
+        type: string
+      client_dir:
+        description: "Relative path to the client crate directory running integration tests"
+        required: true
+        type: string
+      vapp_binary_name:
+        description: "Cargo binary name produced by the V-App crate (e.g. vnd-sadik)"
+        required: true
+        type: string
+      cargo_test_features:
+        description: "Cargo features to enable for integration tests"
+        required: false
+        default: native-tests
+        type: string
+      rust_toolchain:
+        description: "Rust toolchain"
+        required: false
+        default: nightly
+        type: string
+
+jobs:
+  native-integration-tests:
+    name: Native integration tests (${{ inputs.vapp_name }})
+    runs-on: ubuntu-latest
+    steps:
+      - name: Set up Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ inputs.rust_toolchain }}
+          targets: x86_64-unknown-linux-gnu
+          components: rustfmt, clippy
+
+      - name: Cache cargo dirs
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ inputs.rust_toolchain }}-native-integration-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-${{ inputs.rust_toolchain }}-native-integration-
+
+      - name: Install system deps
+        run: |
+          sudo apt-get update && \
+          sudo apt-get install -y libudev-dev pkg-config
+
+      - name: Checkout sources
+        uses: actions/checkout@v4
+
+      - name: Build V-App natively
+        working-directory: ${{ inputs.vapp_dir }}
+        run: |
+          cargo +${{ inputs.rust_toolchain }} build
+
+      - name: Run native integration tests
+        working-directory: ${{ inputs.client_dir }}
+        env:
+          VAPP_BINARY: ../app/target/debug/${{ inputs.vapp_binary_name }}
+        run: |
+          cargo test --features ${{ inputs.cargo_test_features }}
+
+      - name: Show test log
+        if: always()
+        working-directory: ${{ inputs.client_dir }}
+        run: |
+          # Print only the first 1000 lines to avoid excessively large logs
+          head -n 1000 test.log 2>/dev/null || echo "No test.log found"
+
+      - name: Upload test logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ inputs.vapp_name }}_native_logs
+          path: |
+            ${{ inputs.client_dir }}/test.log
+            ${{ inputs.client_dir }}/native_vapp_stdout.log
+            ${{ inputs.client_dir }}/native_vapp_stderr.log
+            ${{ inputs.client_dir }}/print.log

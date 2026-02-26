@@ -260,6 +260,15 @@ jobs:
       models_json: '["nanox","nanosplus","flex","stax","apex_p"]'
       cargo_test_features: 'speculos-tests,debug'
 
+  vnd_sadik_native_integration_tests:
+    uses: ./.github/workflows/reusable_vapp_native_integration_tests.yaml
+    with:
+      vapp_name: 'vnd-sadik'
+      vapp_dir: 'apps/sadik/app'
+      client_dir: 'apps/sadik/client'
+      vapp_binary_name: 'vnd-sadik'
+      cargo_test_features: 'native-tests'
+
   ## vnd-template
 
   # build template V-App
