@@ -162,6 +162,34 @@ impl<'a> BitcoinClient {
         }
     }
 
+    pub async fn get_resident_pubkey(
+        &mut self,
+        index: u16,
+        display: bool,
+    ) -> Result<[u8; 78], BitcoinClientError> {
+        let msg = postcard::to_allocvec(&Request::GetResidentPubkey { display, index }).map_err(
+            |_| {
+                BitcoinClientError::GenericError(
+                    "Failed to serialize GetResidentPubkey request".to_string(),
+                )
+            },
+        )?;
+
+        let response_raw = self.send_message(&msg).await?;
+        match Self::parse_response(&response_raw).await? {
+            Response::ResidentPubkey(pubkey) => {
+                let arr: [u8; 78] = pubkey.as_slice().try_into().map_err(|_| {
+                    BitcoinClientError::InvalidResponse("Invalid pubkey length".to_string())
+                })?;
+                Ok(arr)
+            }
+            e => Err(BitcoinClientError::InvalidResponse(format!(
+                "Invalid response: {:?}",
+                e
+            ))),
+        }
+    }
+
     pub async fn register_account(
         &mut self,
         name: &str,

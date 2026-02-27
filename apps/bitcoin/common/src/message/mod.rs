@@ -84,6 +84,10 @@ pub enum Request {
     SignPsbt {
         psbt: Vec<u8>,
     },
+    GetResidentPubkey {
+        display: bool,
+        index: u16,
+    },
 }
 
 // Partial signature for PSBT signing
@@ -107,6 +111,7 @@ pub enum Response {
     },
     Address(String),
     PsbtSigned(Vec<PartialSignature>),
+    ResidentPubkey(Vec<u8>),
     Error(crate::errors::Error),
 }
 
