@@ -38,6 +38,12 @@ enum CliCommand {
         #[clap(long, default_missing_value = "true", num_args = 0..=1)]
         display: bool,
     },
+    GetResidentPubkey {
+        #[clap(long, default_value = "0")]
+        index: u16,
+        #[clap(long, default_missing_value = "true", num_args = 0..=1)]
+        display: bool,
+    },
     RegisterAccount {
         #[clap(long)]
         name: String,
@@ -262,6 +268,13 @@ async fn handle_cli_command(
         CliCommand::GetPubkey { path, display } => {
             let xpub = bitcoin_client.get_extended_pubkey(&path, *display).await?;
 
+            match bitcoin::bip32::Xpub::decode(&xpub) {
+                Ok(xpub) => println!("{}", xpub),
+                Err(_) => println!("Invalid xpub returned"),
+            }
+        }
+        CliCommand::GetResidentPubkey { index, display } => {
+            let xpub = bitcoin_client.get_resident_pubkey(*index, *display).await?;
             match bitcoin::bip32::Xpub::decode(&xpub) {
                 Ok(xpub) => println!("{}", xpub),
                 Err(_) => println!("Invalid xpub returned"),

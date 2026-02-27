@@ -49,6 +49,9 @@ pub enum Error {
     UnexpectedTaprootPolicy,
     UnexpectedSegwitVersion,
 
+    // Storage errors
+    StorageError,
+
     // User rejections (separate to keep enum small and avoid strings)
     UserRejected,
 }
@@ -108,6 +111,8 @@ impl fmt::Display for Error {
 
             UnexpectedTaprootPolicy => write!(f, "Unexpected state: should be a Taproot wallet policy"),
             UnexpectedSegwitVersion => write!(f, "Unexpected state: should be SegwitV0 or Taproot"),
+
+            StorageError => write!(f, "Storage error"),
 
             UserRejected => write!(f, "Rejected by the user"),
         }
