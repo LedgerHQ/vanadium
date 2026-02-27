@@ -1,14 +1,12 @@
 use alloc::vec::Vec;
 
-use common::message::Response;
+use common::{errors::Error, message::Response};
 use sdk::{
     curve::{Curve, EcfpPrivateKey, EcfpPublicKey, Secp256k1, ToPublicKey},
     hash::{Hasher, Ripemd160, Sha256},
 };
 
-use common::errors::Error;
-
-const BIP32_TESTNET_PUBKEY_VERSION: u32 = 0x043587CFu32;
+use crate::constants::BIP32_TESTNET_PUBKEY_VERSION;
 
 // TODO: refactor using vlib_bitcoin
 fn get_pubkey_fingerprint(pubkey: &EcfpPublicKey<Secp256k1, 32>) -> u32 {
