@@ -1,5 +1,7 @@
 pub const COIN_TICKER: &'static str = "TEST";
 
+pub const BIP32_TESTNET_PUBKEY_VERSION: u32 = 0x043587CFu32;
+
 // For amount (in sats) not smaller than THRESHOLD_WARN_HIGH_FEES_AMOUNT, we show a warning
 // if the percentage (in whole percents) of fees over total input amount is greater than or
 // equal to THRESHOLD_WARN_HIGH_FEES_PERCENT. (E.g. 10 means 10%).
