@@ -1,5 +1,31 @@
 use crate::ecalls;
 pub use common::constants::STORAGE_SLOT_SIZE;
+use subtle::ConstantTimeEq;
+
+/// Checks whether the specified storage slot contains only zero bytes, in constant time.
+///
+/// # Parameters
+/// - `slot_index`: The index of the storage slot to check (0 to n_storage_slots-1).
+///
+/// # Returns
+/// A `Result` containing `true` if the slot is all zeros, `false` otherwise, or an error
+/// message if the slot could not be read.
+///
+/// # Examples
+/// ```no_run
+/// use vanadium_app_sdk::storage::is_slot_empty;
+///
+/// match is_slot_empty(0) {
+///     Ok(true) => println!("Slot is empty"),
+///     Ok(false) => println!("Slot contains data"),
+///     Err(e) => eprintln!("Error reading storage: {}", e),
+/// }
+/// ```
+pub fn is_slot_empty(slot_index: u32) -> Result<bool, &'static str> {
+    let data = read_slot(slot_index)?;
+    let zeroes = [0u8; STORAGE_SLOT_SIZE];
+    Ok(data.ct_eq(&zeroes).into())
+}
 
 /// Reads a 32-byte value from the specified storage slot.
 ///
@@ -8,6 +34,13 @@ pub use common::constants::STORAGE_SLOT_SIZE;
 ///
 /// # Returns
 /// A `Result` containing the 32-byte array on success, or an error message on failure.
+///
+/// # Security
+/// If the stored value is a secret, the caller must ensure that any subsequent access or
+/// comparison is guaranteed to execute in constant time (e.g. using the `subtle` crate)
+/// to prevent side-channel attacks.
+/// The is_slot_empty function can be used to check if a slot is uninitialized (all zeros)
+/// and it is guaranteed to run in constant time.
 ///
 /// # Examples
 /// ```no_run
@@ -21,7 +54,8 @@ pub use common::constants::STORAGE_SLOT_SIZE;
 pub fn read_slot(slot_index: u32) -> Result<[u8; STORAGE_SLOT_SIZE], &'static str> {
     let mut buffer = [0u8; STORAGE_SLOT_SIZE];
     // SAFETY: buffer is a valid [u8; STORAGE_SLOT_SIZE] on the stack.
-    let result = unsafe { ecalls::storage_read(slot_index, buffer.as_mut_ptr(), STORAGE_SLOT_SIZE) };
+    let result =
+        unsafe { ecalls::storage_read(slot_index, buffer.as_mut_ptr(), STORAGE_SLOT_SIZE) };
 
     if result == 1 {
         Ok(buffer)
