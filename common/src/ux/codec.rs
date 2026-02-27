@@ -11,8 +11,8 @@ pub trait Serializable {
     /// starting from the position indicated by `pos`.
     ///
     /// # Safety
-    /// The caller must ensure that `is a valid index into the buffer, and that the buffer has enough space to hold
-    /// the serialized data.
+    /// The caller must ensure that `pos` is a valid index into the buffer, and that the buffer has enough space
+    /// to hold the serialized data.
     fn serialize(&self, buf: &mut [MaybeUninit<u8>], pos: &mut usize);
 
     #[inline(always)]
