@@ -580,6 +580,103 @@ impl ToPublicKey<Secp256k1, 32> for EcfpPrivateKey<Secp256k1, 32> {
     }
 }
 
+/// Computes HMAC-SHA512(key, data1 || data2).
+///
+/// Key must be at most 128 bytes (the SHA-512 block size); if shorter it is
+/// zero-padded to the block size.
+fn hmac_sha512(key: &[u8; 32], data1: &[u8], data2: &[u8]) -> [u8; 64] {
+    use crate::hash::{Hasher, Sha512};
+
+    // SHA-512 block size is 128 bytes. Key (32 bytes) < block size, so pad with zeros.
+    let mut ipad_key = [0x36u8; 128];
+    let mut opad_key = [0x5cu8; 128];
+    for i in 0..32 {
+        ipad_key[i] ^= key[i];
+        opad_key[i] ^= key[i];
+    }
+
+    // Inner hash: SHA-512(ipad_key || data1 || data2)
+    let mut inner = Sha512::new();
+    inner.update(&ipad_key);
+    inner.update(data1);
+    inner.update(data2);
+    let mut inner_digest = [0u8; 64];
+    inner.digest(&mut inner_digest);
+
+    // Outer hash: SHA-512(opad_key || inner_digest)
+    let mut outer = Sha512::new();
+    outer.update(&opad_key);
+    outer.update(&inner_digest);
+    let mut result = [0u8; 64];
+    outer.digest(&mut result);
+    result
+}
+
+impl HDPrivNode<Secp256k1, 32> {
+    /// The secp256k1 group order n.
+    const SECP256K1_ORDER: [u8; 32] =
+        hex!("FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141");
+
+    /// Performs BIP32 non-hardened child key derivation (CKDpriv).
+    ///
+    /// `child` is a raw BIP32 child index. Values `>= 0x80000000` are hardened
+    /// and will return an error.
+    ///
+    /// Algorithm (per BIP32):
+    /// 1. Compute compressed public key from the private key.
+    /// 2. HMAC-SHA512(key = chaincode, data = compressed_pubkey || child_index_be).
+    /// 3. Split output: left 32 bytes = tweak, right 32 bytes = new chaincode.
+    /// 4. New private key = parent_key + tweak (mod secp256k1 order).
+    pub fn ckd_priv(&self, child: u32) -> Result<HDPrivNode<Secp256k1, 32>, &'static str> {
+        if child >= 0x80000000 {
+            return Err("hardened child derivation is not supported");
+        }
+
+        // 1. Compressed public key from private key.
+        let privkey = EcfpPrivateKey::<Secp256k1, 32>::new(*self.privkey);
+        let pubkey = privkey.to_public_key();
+        let uncompressed = pubkey.as_ref().to_bytes();
+        let mut compressed_pubkey = [0u8; 33];
+        compressed_pubkey[0] = 2 + uncompressed[64] % 2;
+        compressed_pubkey[1..33].copy_from_slice(&uncompressed[1..33]);
+
+        // 2. HMAC-SHA512(key = chaincode, data = compressed_pubkey || child_index_be).
+        let hmac_result = hmac_sha512(&self.chaincode, &compressed_pubkey, &child.to_be_bytes());
+
+        // 3. Split: left 32 bytes = tweak, right 32 bytes = new chaincode.
+        let mut tweak = [0u8; 32];
+        tweak.copy_from_slice(&hmac_result[0..32]);
+        let mut new_chaincode = [0u8; 32];
+        new_chaincode.copy_from_slice(&hmac_result[32..64]);
+
+        // 4. new_privkey = (parent_privkey + tweak) mod n.
+        let mut child_privkey = [0u8; 32];
+        let privkey_bytes: &[u8; 32] = &*self.privkey;
+        // SAFETY: child_privkey, privkey_bytes, tweak, and SECP256K1_ORDER are all
+        // valid, non-overlapping 32-byte buffers.
+        if 1 != unsafe {
+            ecalls::bn_addm(
+                child_privkey.as_mut_ptr(),
+                privkey_bytes.as_ptr(),
+                tweak.as_ptr(),
+                Self::SECP256K1_ORDER.as_ptr(),
+                32,
+            )
+        } {
+            return Err("key derivation failed");
+        }
+
+        if child_privkey == [0u8; 32] {
+            return Err("derived child key is the zero scalar");
+        }
+
+        let mut result = HDPrivNode::<Secp256k1, 32>::default();
+        result.chaincode = new_chaincode;
+        *result.privkey = child_privkey;
+        Ok(result)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use crate::hash::Hasher;
@@ -829,5 +926,106 @@ mod tests {
         assert_eq!(point.prefix, 0x00);
         assert_eq!(point.x, [0u8; 32]);
         assert_eq!(point.y, [0u8; 32]);
+    }
+
+    // BIP-32 test vector 1 (seed 000102030405060708090a0b0c0d0e0f).
+    // Only non-hardened derivation steps are exercised here since ckd_priv
+    // does not support hardened children.
+
+    /// m/0h  →  m/0h/1  (child index 1, non-hardened)
+    #[test]
+    fn test_ckd_priv_bip32_tv1_m0h_to_m0h1() {
+        // BIP-32 test vector 1, node m/0h
+        let parent = HDPrivNode::<Secp256k1, 32> {
+            curve_marker: PhantomData,
+            privkey: Zeroizing::new(hex!(
+                "edb2e14f9ee77d26dd93b4ecede8d16ed408ce149b6cd80b0715a2d911a0afea"
+            )),
+            chaincode: hex!("47fdacbd0f1097043b78c63c20c34ef4ed9a111d980047ad16282c7ae6236141"),
+        };
+
+        let child = parent
+            .ckd_priv(1)
+            .expect("non-hardened derivation should succeed");
+
+        // Expected: m/0h/1
+        assert_eq!(
+            child.privkey[..],
+            hex!("3c6cb8d0f6a264c91ea8b5030fadaa8e538b020f0a387421a12de9319dc93368")
+        );
+        assert_eq!(
+            child.chaincode,
+            hex!("2a7857631386ba23dacac34180dd1983734e444fdbf774041578e9b6adb37c19")
+        );
+    }
+
+    /// m/0h/1/2h  →  m/0h/1/2h/2  (child index 2, non-hardened)
+    #[test]
+    fn test_ckd_priv_bip32_tv1_m0h12h_to_m0h12h2() {
+        // BIP-32 test vector 1, node m/0h/1/2h
+        let parent = HDPrivNode::<Secp256k1, 32> {
+            curve_marker: PhantomData,
+            privkey: Zeroizing::new(hex!(
+                "cbce0d719ecf7431d88e6a89fa1483e02e35092af60c042b1df2ff59fa424dca"
+            )),
+            chaincode: hex!("04466b9cc8e161e966409ca52986c584f07e9dc81f735db683c3ff6ec7b1503f"),
+        };
+
+        let child = parent
+            .ckd_priv(2)
+            .expect("non-hardened derivation should succeed");
+
+        // Expected: m/0h/1/2h/2
+        assert_eq!(
+            child.privkey[..],
+            hex!("0f479245fb19a38a1954c5c7c0ebab2f9bdfd96a17563ef28a6a4b1a2a764ef4")
+        );
+        assert_eq!(
+            child.chaincode,
+            hex!("cfb71883f01676f587d023cc53a35bc7f88f724b1f8c2892ac1275ac822a3edd")
+        );
+    }
+
+    /// m/0h/1/2h/2  →  m/0h/1/2h/2/1000000000  (child index 1_000_000_000, non-hardened)
+    #[test]
+    fn test_ckd_priv_bip32_tv1_m0h12h2_to_m0h12h2_1e9() {
+        // BIP-32 test vector 1, node m/0h/1/2h/2
+        let parent = HDPrivNode::<Secp256k1, 32> {
+            curve_marker: PhantomData,
+            privkey: Zeroizing::new(hex!(
+                "0f479245fb19a38a1954c5c7c0ebab2f9bdfd96a17563ef28a6a4b1a2a764ef4"
+            )),
+            chaincode: hex!("cfb71883f01676f587d023cc53a35bc7f88f724b1f8c2892ac1275ac822a3edd"),
+        };
+
+        let child = parent
+            .ckd_priv(1_000_000_000)
+            .expect("non-hardened derivation should succeed");
+
+        // Expected: m/0h/1/2h/2/1000000000
+        assert_eq!(
+            child.privkey[..],
+            hex!("471b76e389e528d6de6d816857e012c5455051cad6660850e58372a6c3e6e7c8")
+        );
+        assert_eq!(
+            child.chaincode,
+            hex!("c783e67b921d2beb8f6b389cc646d7263b4145701dadd2161548a8b078e65e9e")
+        );
+    }
+
+    /// Hardened child index (≥ 0x80000000) must be rejected.
+    #[test]
+    fn test_ckd_priv_rejects_hardened_index() {
+        let node = HDPrivNode::<Secp256k1, 32> {
+            curve_marker: PhantomData,
+            privkey: Zeroizing::new(hex!(
+                "edb2e14f9ee77d26dd93b4ecede8d16ed408ce149b6cd80b0715a2d911a0afea"
+            )),
+            chaincode: hex!("47fdacbd0f1097043b78c63c20c34ef4ed9a111d980047ad16282c7ae6236141"),
+        };
+
+        assert!(node.ckd_priv(0x80000000).is_err());
+        assert!(node.ckd_priv(0x80000001).is_err());
+        assert!(node.ckd_priv(u32::MAX).is_err());
     }
 }
