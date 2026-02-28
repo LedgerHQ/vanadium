@@ -267,6 +267,14 @@ where
             private_key: Zeroizing::new(private_key),
         }
     }
+
+    /// Converts this private key into an `HDPrivNode` by pairing it with the given chaincode.
+    pub fn into_hd_node(self, chaincode: &[u8; 32]) -> HDPrivNode<C, SCALAR_LENGTH> {
+        let mut node = HDPrivNode::default();
+        node.chaincode = *chaincode;
+        node.privkey = self.private_key;
+        node
+    }
 }
 
 impl<C, const SCALAR_LENGTH: usize> PartialEq for EcfpPrivateKey<C, SCALAR_LENGTH>
