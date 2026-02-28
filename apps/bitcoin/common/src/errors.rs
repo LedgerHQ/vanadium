@@ -17,6 +17,7 @@ pub enum Error {
     // Derivation / crypto
     DerivationPathTooLong,
     KeyDerivationFailed,
+    HardenedDerivationNotSupported,
     InvalidKey,
     ErrorComputingSighash,
     SigningFailed,
@@ -72,6 +73,7 @@ impl fmt::Display for Error {
 
             DerivationPathTooLong => write!(f, "Derivation path is too long"),
             KeyDerivationFailed => write!(f, "Failed to derive key for the given path"),
+            HardenedDerivationNotSupported => write!(f, "Hardened derivation is not supported for resident keys"),
             InvalidKey => write!(f, "Invalid key"),
             ErrorComputingSighash => write!(f, "Error computing sighash"),
             SigningFailed => write!(f, "Failed to produce signature"),
