@@ -27,11 +27,12 @@ use bitcoin::{
 };
 use common::fastpsbt;
 use sdk::{
-    curve::{Curve, EcfpPrivateKey, ToPublicKey},
+    curve::{Curve, EcfpPrivateKey, HDPrivNode, ToPublicKey},
     ux::TagValue,
 };
 
 use crate::constants::COIN_TICKER;
+use crate::resident_key;
 
 #[cfg(not(any(test, feature = "autoapprove")))]
 use sdk::ux::Icon;
@@ -108,19 +109,56 @@ fn format_amount(value: u64, ticker: &str) -> String {
     format!("{}.{:08} {}", whole_part, fractional_part, ticker)
 }
 
+/// Identifies how the signing private key should be obtained.
+enum KeySource<'a> {
+    /// Derive from the master seed via the BIP32 ECALL using the full derivation path.
+    MasterSeed(Vec<ChildNumber>),
+    /// Derive from the resident private key using the given synthetic chaincode
+    /// and a two-step non-hardened derivation (`change_step / address_index`).
+    ResidentKey {
+        chaincode: &'a [u8; 32],
+        change_step: ChildNumber,
+        address_index: ChildNumber,
+    },
+}
+
+/// Resolves a `KeySource` into an `HDPrivNode` containing the final private key.
+fn resolve_private_key(
+    key_source: &KeySource,
+) -> Result<HDPrivNode<sdk::curve::Secp256k1, 32>, Error> {
+    match key_source {
+        KeySource::MasterSeed(path) => {
+            let path: Vec<u32> = path.iter().map(|&x| x.into()).collect();
+            sdk::curve::Secp256k1::derive_hd_node(&path)
+                .map_err(|_| Error::KeyDerivationFailed)
+        }
+        KeySource::ResidentKey {
+            chaincode,
+            change_step,
+            address_index,
+        } => {
+            let root = resident_key::get_or_init_resident_private_key()?.into_hd_node(chaincode);
+            let intermediate = root
+                .ckd_priv(u32::from(*change_step))
+                .map_err(|_| Error::KeyDerivationFailed)?;
+            intermediate
+                .ckd_priv(u32::from(*address_index))
+                .map_err(|_| Error::KeyDerivationFailed)
+        }
+    }
+}
+
 fn sign_input_ecdsa(
     psbt: &fastpsbt::Psbt,
     input_index: usize,
     sighash_cache: &mut SighashCache<Transaction>,
-    path: &[ChildNumber],
+    key_source: &KeySource,
 ) -> Result<PartialSignature, Error> {
     let (sighash, sighash_type) = psbt
         .sighash_ecdsa(input_index, sighash_cache)
         .map_err(|_| Error::ErrorComputingSighash)?;
 
-    let path: Vec<u32> = path.iter().map(|&x| x.into()).collect();
-    let hd_node =
-        sdk::curve::Secp256k1::derive_hd_node(&path).map_err(|_| Error::KeyDerivationFailed)?;
+    let hd_node = resolve_private_key(key_source)?;
     let privkey: EcfpPrivateKey<sdk::curve::Secp256k1, 32> = EcfpPrivateKey::new(*hd_node.privkey);
     let pubkey = privkey.to_public_key();
     let pubkey_uncompressed = pubkey.as_ref().to_bytes();
@@ -145,7 +183,7 @@ fn sign_input_schnorr(
     input_index: usize,
     sighash_cache: &mut SighashCache<Transaction>,
     prevouts: &[TxOut],
-    path: &[ChildNumber],
+    key_source: &KeySource,
     taptree_hash: Option<[u8; 32]>,
     leaf_hash: Option<TapLeafHash>,
 ) -> Result<PartialSignature, Error> {
@@ -170,9 +208,7 @@ fn sign_input_schnorr(
             .map_err(|_| Error::ErrorComputingSighash)?
     };
 
-    let path: Vec<u32> = path.iter().map(|&x| x.into()).collect();
-    let hd_node =
-        sdk::curve::Secp256k1::derive_hd_node(&path).map_err(|_| Error::KeyDerivationFailed)?;
+    let hd_node = resolve_private_key(key_source)?;
     let secp = bitcoin::secp256k1::Secp256k1::new();
     let keypair: Keypair = Keypair::from_seckey_slice(&secp, hd_node.privkey.as_ref())
         .map_err(|_| Error::InvalidKey)?;
@@ -589,6 +625,10 @@ fn sign_all_inputs(
     let master_fingerprint = sdk::curve::Secp256k1::get_master_fingerprint();
     let mut partial_signatures = Vec::with_capacity(psbt.inputs.len());
 
+    // Cache the resident compressed pubkey to avoid repeated storage reads.
+    // Lazily initialised on first use.
+    let mut cached_resident_pubkey: Option<Option<[u8; 33]>> = None;
+
     for (input_index, input) in psbt.inputs.iter().enumerate() {
         let (account_id, ref coords) = summary.input_coordinates[input_index];
         let PsbtAccountCoordinates::WalletPolicy(coords) = coords;
@@ -596,30 +636,64 @@ fn sign_all_inputs(
 
         for (kp, tapleaf_desc) in wallet_policy.descriptor_template.placeholders() {
             let key_info = wallet_policy.key_information[kp.key_index as usize].clone();
-            let Some(key_origin) = key_info
+
+            // Determine the key source: either the master seed (fingerprint match)
+            // or the resident key (compressed pubkey + synthetic chaincode match).
+            let change_step: ChildNumber = if !coords.is_change {
+                kp.num1.into()
+            } else {
+                kp.num2.into()
+            };
+            let address_index: ChildNumber = coords.address_index.into();
+
+            let key_source = if key_info
                 .origin_info
                 .as_ref()
-                .filter(|x| x.fingerprint == master_fingerprint)
-            else {
-                continue;
-            };
+                .is_some_and(|x| x.fingerprint == master_fingerprint)
+            {
+                // Master seed key: build the full BIP32 derivation path
+                let key_origin = key_info.origin_info.as_ref().unwrap();
 
-            // TODO: in principle, there could be collisions on the fingerprint; we shouldn't sign in that case
+                // TODO: in principle, there could be collisions on the fingerprint;
+                // we shouldn't sign in that case
 
-            let mut path = Vec::with_capacity(key_origin.derivation_path.len() + 2);
-            path.extend_from_slice(&key_origin.derivation_path);
-            if !coords.is_change {
-                path.push(kp.num1.into());
+                let mut path = Vec::with_capacity(key_origin.derivation_path.len() + 2);
+                path.extend_from_slice(&key_origin.derivation_path);
+                path.push(change_step);
+                path.push(address_index);
+                KeySource::MasterSeed(path)
             } else {
-                path.push(kp.num2.into());
-            }
-            path.push(coords.address_index.into());
+                // Check if this is a resident key
+                let resident_pubkey = cached_resident_pubkey.get_or_insert_with(|| {
+                    resident_key::get_resident_compressed_pubkey().ok()
+                });
+                let Some(resident_pubkey) = resident_pubkey else {
+                    continue;
+                };
+
+                let xpub_pubkey = key_info.pubkey.public_key.serialize();
+                if *resident_pubkey != xpub_pubkey {
+                    continue;
+                }
+
+                let chain_code: &[u8; 32] = key_info.pubkey.chain_code.as_ref();
+                // First 30 bytes of chaincode must be zero for it to be a resident key
+                if chain_code[..30].iter().any(|&b| b != 0) {
+                    continue;
+                }
+
+                KeySource::ResidentKey {
+                    chaincode: chain_code,
+                    change_step,
+                    address_index,
+                }
+            };
 
             if input.witness_utxo.is_some() {
                 match wallet_policy.get_segwit_version() {
                     Ok(SegwitVersion::SegwitV0) => {
                         let partial_signature =
-                            sign_input_ecdsa(psbt, input_index, &mut sighash_cache, &path)?;
+                            sign_input_ecdsa(psbt, input_index, &mut sighash_cache, &key_source)?;
                         partial_signatures.push(partial_signature);
                     }
                     Ok(SegwitVersion::Taproot) => {
@@ -666,7 +740,7 @@ fn sign_all_inputs(
                             input_index,
                             &mut sighash_cache,
                             prevouts,
-                            &path,
+                            &key_source,
                             taptree_hash,
                             leaf_hash,
                         )?;
@@ -679,7 +753,7 @@ fn sign_all_inputs(
                     psbt,
                     input_index,
                     &mut sighash_cache,
-                    &path,
+                    &key_source,
                 )?);
             }
         }

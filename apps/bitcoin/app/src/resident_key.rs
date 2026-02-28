@@ -1,5 +1,6 @@
+use common::bip388::KeyInformation;
 use common::errors::Error;
-use sdk::curve::{EcfpPrivateKey, EcfpPublicKey, Secp256k1, ToPublicKey};
+use sdk::curve::{EcfpPrivateKey, EcfpPublicKey, HDPrivNode, Secp256k1, ToPublicKey};
 use sdk::storage::{is_slot_empty, read_slot, write_slot};
 
 const RESIDENT_KEY_SLOT: u32 = 0;
@@ -24,4 +25,14 @@ pub fn get_or_init_resident_private_key() -> Result<EcfpPrivateKey<Secp256k1, 32
 /// generating and storing a fresh random private key on first use.
 pub fn get_or_init_resident_public_key() -> Result<EcfpPublicKey<Secp256k1, 32>, Error> {
     Ok(get_or_init_resident_private_key()?.to_public_key())
+}
+
+/// Returns the compressed resident public key.
+pub fn get_resident_compressed_pubkey() -> Result<[u8; 33], Error> {
+    let pubkey = get_or_init_resident_public_key()?;
+    let uncompressed = pubkey.as_ref().to_bytes();
+    let mut compressed = [0u8; 33];
+    compressed[0] = 2 + uncompressed[64] % 2;
+    compressed[1..33].copy_from_slice(&uncompressed[1..33]);
+    Ok(compressed)
 }
