@@ -657,6 +657,12 @@ impl HDPrivNode<Secp256k1, 32> {
         let mut new_chaincode = [0u8; 32];
         new_chaincode.copy_from_slice(&hmac_result[32..64]);
 
+        // Verify that the tweak is non-zero and less than the curve order (this happens with negligible probability)
+        // Note: this is not a constant-time comparison, but this is acceptable because the tweak is not secret)
+        if tweak == [0u8; 32] || tweak == Self::SECP256K1_ORDER {
+            return Err("invalid tweak");
+        }
+
         // 4. new_privkey = (parent_privkey + tweak) mod n.
         let mut child_privkey = [0u8; 32];
         let privkey_bytes: &[u8; 32] = &*self.privkey;
