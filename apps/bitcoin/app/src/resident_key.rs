@@ -1,6 +1,5 @@
-use common::bip388::KeyInformation;
 use common::errors::Error;
-use sdk::curve::{EcfpPrivateKey, EcfpPublicKey, HDPrivNode, Secp256k1, ToPublicKey};
+use sdk::curve::{EcfpPrivateKey, EcfpPublicKey, Secp256k1, ToPublicKey};
 use sdk::storage::{is_slot_empty, read_slot, write_slot};
 
 const RESIDENT_KEY_SLOT: u32 = 0;
@@ -10,11 +9,9 @@ const RESIDENT_KEY_SLOT: u32 = 0;
 pub fn get_or_init_resident_private_key() -> Result<EcfpPrivateKey<Secp256k1, 32>, Error> {
     if is_slot_empty(RESIDENT_KEY_SLOT).map_err(|_| Error::StorageError)? {
         // First run: generate a random 32-byte private key and persist it.
-        let random = sdk::rand::random_bytes(32);
-        let mut key = [0u8; 32];
-        key.copy_from_slice(&random);
-        write_slot(RESIDENT_KEY_SLOT, &key).map_err(|_| Error::StorageError)?;
-        Ok(EcfpPrivateKey::new(key))
+        let random_key = sdk::rand::random_bytes(32).try_into().unwrap();
+        write_slot(RESIDENT_KEY_SLOT, &random_key).map_err(|_| Error::StorageError)?;
+        Ok(EcfpPrivateKey::new(random_key))
     } else {
         let slot = read_slot(RESIDENT_KEY_SLOT).map_err(|_| Error::StorageError)?;
         Ok(EcfpPrivateKey::new(slot))
