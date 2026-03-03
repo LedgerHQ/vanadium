@@ -1,12 +1,33 @@
 use common::errors::Error;
 use sdk::curve::{EcfpPrivateKey, EcfpPublicKey, Secp256k1, ToPublicKey};
-use sdk::storage::{is_slot_empty, read_slot, write_slot};
 
+#[cfg(not(any(test, feature = "fixed_resident_key")))]
+use sdk::storage::{is_slot_empty, read_slot};
+
+#[cfg(not(feature = "fixed_resident_key"))]
+use sdk::storage::write_slot;
+
+#[cfg(not(feature = "fixed_resident_key"))]
 const RESIDENT_KEY_SLOT: u32 = 0;
+
+#[cfg(any(test, feature = "fixed_resident_key"))]
+pub const FIXED_RESIDENT_KEY: [u8; 32] =
+    hex_literal::hex!("5245534944454e544b45595245534944454e544b45595245534944454e544b45");
+#[cfg(test)]
+pub const FIXED_RESIDENT_PUBKEY: [u8; 33] =
+    hex_literal::hex!("032349d1abe6d9e0c174f011a1c4bd09fe5b6e88b2a162e61ddec5d07554fa275a");
 
 /// Returns the resident private key from storage slot 0, generating and storing
 /// a fresh random key on first use (detected by the slot being all-zeros).
+///
+/// If the `fixed_resident_key` feature is enabled, always returns the fixed
+/// compile-time key FIXED_RESIDENT_KEY.
+/// This is only useful for testing.
 pub fn get_or_init_resident_private_key() -> Result<EcfpPrivateKey<Secp256k1, 32>, Error> {
+    #[cfg(any(test, feature = "fixed_resident_key"))]
+    return Ok(EcfpPrivateKey::new(FIXED_RESIDENT_KEY));
+
+    #[cfg(not(any(test, feature = "fixed_resident_key")))]
     if is_slot_empty(RESIDENT_KEY_SLOT).map_err(|_| Error::StorageError)? {
         // First run: generate a random 32-byte private key and persist it.
         let random_key = sdk::rand::random_bytes(32).try_into().unwrap();
