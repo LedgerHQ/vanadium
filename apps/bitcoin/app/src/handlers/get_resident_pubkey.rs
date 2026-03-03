@@ -82,3 +82,105 @@ pub async fn handle_get_resident_pubkey(
 
     Ok(Response::ResidentPubkey(xpub))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::resident_key::set_resident_key;
+
+    const KNOWN_KEY: [u8; 32] = [
+        0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e,
+        0x0f, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c,
+        0x1d, 0x1e, 0x1f, 0x20,
+    ];
+
+    fn get_xpub(index: u16, display: bool) -> Vec<u8> {
+        set_resident_key(KNOWN_KEY).unwrap();
+        let resp = sdk::executor::block_on(handle_get_resident_pubkey(
+            &mut sdk::App::singleton(),
+            index,
+            display,
+        ))
+        .unwrap();
+        let Response::ResidentPubkey(xpub) = resp else {
+            panic!("Expected ResidentPubkey response");
+        };
+        xpub
+    }
+
+    #[test]
+    fn test_xpub_structure() {
+        let xpub = get_xpub(0, false);
+
+        assert_eq!(xpub.len(), 78, "xpub must be 78 bytes");
+
+        // Version bytes (testnet: 0x043587CF)
+        assert_eq!(
+            &xpub[0..4],
+            &BIP32_TESTNET_PUBKEY_VERSION.to_be_bytes(),
+            "version mismatch"
+        );
+
+        // Depth = 0
+        assert_eq!(xpub[4], 0, "depth must be 0");
+
+        // Parent fingerprint = 0
+        assert_eq!(&xpub[5..9], &[0u8; 4], "parent fingerprint must be zero");
+
+        // Child number = 0
+        assert_eq!(&xpub[9..13], &[0u8; 4], "child number must be zero");
+
+        // Chaincode: first 30 bytes are zero
+        assert_eq!(&xpub[13..43], &[0u8; 30], "first 30 chaincode bytes must be zero");
+
+        // Compressed pubkey prefix is 0x02 or 0x03
+        assert!(
+            xpub[45] == 0x02 || xpub[45] == 0x03,
+            "pubkey prefix must be 0x02 or 0x03"
+        );
+    }
+
+    #[test]
+    fn test_chaincode_encodes_index() {
+        let xpub0 = get_xpub(0, false);
+        let xpub1 = get_xpub(1, false);
+        let xpub42 = get_xpub(42, false);
+        let xpub_max = get_xpub(u16::MAX, false);
+
+        // Chaincode index bytes are at positions 43-44 (offset 30-31 within the 32-byte chaincode
+        // that starts at byte 13).
+        assert_eq!(&xpub0[43..45], &0u16.to_be_bytes());
+        assert_eq!(&xpub1[43..45], &1u16.to_be_bytes());
+        assert_eq!(&xpub42[43..45], &42u16.to_be_bytes());
+        assert_eq!(&xpub_max[43..45], &u16::MAX.to_be_bytes());
+    }
+
+    #[test]
+    fn test_pubkey_is_deterministic() {
+        // Same key and index should always produce the same xpub.
+        let xpub_a = get_xpub(7, false);
+        let xpub_b = get_xpub(7, false);
+        assert_eq!(xpub_a, xpub_b);
+    }
+
+    #[test]
+    fn test_different_indices_differ_only_in_chaincode() {
+        let xpub0 = get_xpub(0, false);
+        let xpub1 = get_xpub(1, false);
+
+        // The public key portion (bytes 45-77) must be identical.
+        assert_eq!(&xpub0[45..], &xpub1[45..], "public key must not depend on index");
+
+        // But the full xpub (including chaincode) must differ.
+        assert_ne!(xpub0, xpub1);
+    }
+
+    #[test]
+    fn test_display_true_returns_ok() {
+        // In test / autoapprove mode the UI is skipped, so display=true must still succeed.
+        let xpub_no_display = get_xpub(3, false);
+        let xpub_display = get_xpub(3, true);
+        assert_eq!(xpub_no_display, xpub_display);
+    }
+}
+

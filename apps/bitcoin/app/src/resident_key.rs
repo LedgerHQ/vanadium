@@ -33,3 +33,9 @@ pub fn get_resident_compressed_pubkey() -> Result<[u8; 33], Error> {
     compressed[1..33].copy_from_slice(&uncompressed[1..33]);
     Ok(compressed)
 }
+
+/// Sets the resident key to the given 32-byte value. Only available in tests.
+#[cfg(test)]
+pub fn set_resident_key(key: [u8; 32]) -> Result<(), Error> {
+    write_slot(RESIDENT_KEY_SLOT, &key).map_err(|_| Error::StorageError)
+}
