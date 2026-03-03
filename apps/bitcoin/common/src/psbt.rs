@@ -1,6 +1,6 @@
 use crate::{
     account::{AccountCoordinates, WalletPolicy, WalletPolicyCoordinates},
-    bip388::{KeyOrigin, KeyPlaceholder},
+    bip388::KeyPlaceholder,
 };
 
 use alloc::{collections::btree_map::BTreeMap, string::String, vec::Vec};
@@ -569,16 +569,17 @@ fn get_wallet_policy_coordinates(
         bitcoin::secp256k1::XOnlyPublicKey,
         (Vec<TapLeafHash>, (Fingerprint, DerivationPath)),
     >,
-    key_orig_info: &KeyOrigin,
+    fingerprint: Fingerprint,
+    origin_path_len: usize,
     key_placeholder: &KeyPlaceholder,
 ) -> Option<WalletPolicyCoordinates> {
     // iterate over all derivations; if it's a key derived from the internal key,
     // deduce the coordinates and insert them
     for (_, (fpr, der)) in bip32_derivation.iter() {
-        if *fpr != key_orig_info.fingerprint.to_be_bytes().into() {
+        if *fpr != fingerprint {
             continue;
         }
-        if key_orig_info.derivation_path.len() + 2 != der.len() {
+        if origin_path_len + 2 != der.len() {
             continue;
         }
         let change_step: u32 = der[der.len() - 2].into();
@@ -597,10 +598,10 @@ fn get_wallet_policy_coordinates(
     // do the same for the tap_bip32_derivations
     // TODO: we might want to avoid the code duplication
     for (_, (_, (fpr, der))) in tap_bip32_derivation.iter() {
-        if *fpr != key_orig_info.fingerprint.to_be_bytes().into() {
+        if *fpr != fingerprint {
             continue;
         }
-        if key_orig_info.derivation_path.len() + 2 != der.len() {
+        if origin_path_len + 2 != der.len() {
             continue;
         }
         let change_step: u32 = der[der.len() - 2].into();
@@ -643,8 +644,15 @@ pub fn fill_psbt_with_bip388_coordinates(
 
     // we will look for keys derived from this
     let key_expr = &wallet_policy.key_information[key_placeholder.key_index as usize];
-    let Some(ref key_orig_info) = key_expr.origin_info else {
-        return Err("Key expression has no origin info");
+    // When origin info is present, use its fingerprint and derivation-path length to
+    // locate derived keys inside the PSBT.  When it is absent (e.g. a bare/resident
+    // xpub), fall back to the xpub's own fingerprint with an origin path length of 0.
+    let (fingerprint, origin_path_len): (Fingerprint, usize) = match &key_expr.origin_info {
+        Some(key_orig_info) => (
+            key_orig_info.fingerprint.to_be_bytes().into(),
+            key_orig_info.derivation_path.len(),
+        ),
+        None => (key_expr.pubkey.fingerprint(), 0),
     };
 
     // Fill input coordinates
@@ -652,7 +660,8 @@ pub fn fill_psbt_with_bip388_coordinates(
         if let Some(coords) = get_wallet_policy_coordinates(
             &input.bip32_derivation,
             &input.tap_key_origins,
-            key_orig_info,
+            fingerprint,
+            origin_path_len,
             key_placeholder,
         ) {
             input.set_account_coordinates(
@@ -667,7 +676,8 @@ pub fn fill_psbt_with_bip388_coordinates(
         if let Some(coords) = get_wallet_policy_coordinates(
             &output.bip32_derivation,
             &output.tap_key_origins,
-            key_orig_info,
+            fingerprint,
+            origin_path_len,
             key_placeholder,
         ) {
             output.set_account_coordinates(
