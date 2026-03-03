@@ -76,6 +76,10 @@ pub async fn handle_register_account(
 
     // TODO: necessary sanity checks on the wallet policy
 
+    // TODO:
+    // distinguish internal keys (after checking the derivation is correct) and external ones
+    // We should also clearly mark any resident key among the internal keys
+    
     if !display_wallet_policy(app, name, &wallet_policy).await {
         return Err(Error::UserRejected);
     }
