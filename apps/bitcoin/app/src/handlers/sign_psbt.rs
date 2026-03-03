@@ -129,8 +129,7 @@ fn resolve_private_key(
     match key_source {
         KeySource::MasterSeed(path) => {
             let path: Vec<u32> = path.iter().map(|&x| x.into()).collect();
-            sdk::curve::Secp256k1::derive_hd_node(&path)
-                .map_err(|_| Error::KeyDerivationFailed)
+            sdk::curve::Secp256k1::derive_hd_node(&path).map_err(|_| Error::KeyDerivationFailed)
         }
         KeySource::ResidentKey {
             chaincode,
@@ -664,9 +663,8 @@ fn sign_all_inputs(
                 KeySource::MasterSeed(path)
             } else {
                 // Check if this is a resident key
-                let resident_pubkey = cached_resident_pubkey.get_or_insert_with(|| {
-                    resident_key::get_resident_compressed_pubkey().ok()
-                });
+                let resident_pubkey = cached_resident_pubkey
+                    .get_or_insert_with(|| resident_key::get_resident_compressed_pubkey().ok());
                 let Some(resident_pubkey) = resident_pubkey else {
                     continue;
                 };
@@ -949,5 +947,59 @@ mod tests {
             &pubkey,
         )
         .expect("Signature verification failed");
+    }
+
+    #[test]
+    fn test_handle_sign_psbt_with_resident_pubkey() {
+        // 5th resident pubkey: tpubD6NzVbkrYhZ4WLczPJWReQycCJdd6YVWXubbVUFnJ5KgU5MDQrD998ZK5NXERxDkze3yNr1iFmEoAA4g2GVfmzA68K6AVfC7bzGVgsBRWhy
+
+        let psbt_b64 = "cHNidP8BALICAAAAAkvuLQL+TXmgc8ium+Kxqwxz49lhcIpCcVqy6DhF8NzIAQAAAAAAAAAA0+nh2KBbX8AeoKNkieT0V/2Q9f0mdiByktGXpJFd87oDAAAAAAAAAAACmDoAAAAAAAAiUSDcH+P34kHoc+fctxVKmO/RlrwtgevDkXfwxtAqCZC8tZc6AAAAAAAAIlEg+ShCMPZNPe1LBkU3ek3IGUMm1Ml1EZ6BbBaFAxSPvqQAAAAATwEENYfPAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAUDI0nRq+bZ4MF08BGhxL0J/ltuiLKhYuYd3sXQdVT6J1oEvEygWQABASsQJwAAAAAAACJRIN2eHExRF8dd6oSbSpJmBUt15uwLwXdFOPHk99AwE6HsIRZQMypmzBRgIOw8KtjxVpzu2DKFhkG+eIOv9rMqfD7xyQ0AvEygWQEAAACGFgAAARcgUDMqZswUYCDsPCrY8Vac7tgyhYZBvniDr/azKnw+8ckAAQErIE4AAAAAAAAiUSBnOzCR0Q6WkMJu2p169fohrlhi1ARRQ45xweAF/5uDBCEWAMELtUrxE8aXfsXtqRNjCWELcP90hDZ/jvxSWKSU1NMNALxMoFkAAAAASRkAAAEXIADBC7VK8RPGl37F7akTYwlhC3D/dIQ2f478UliklNTTAAABBSBr/eLmT/+0ZlJIcsfxV+k9OBXtxXEenbErhFpy/Dtv2iEHa/3i5k//tGZSSHLH8VfpPTgV7cVxHp2xK4Racvw7b9oNALxMoFkBAAAA3SMAAAA=";
+        let mut psbt = Psbt::deserialize(&STANDARD.decode(&psbt_b64).unwrap()).unwrap();
+
+        let wallet_policy = WalletPolicy::new(
+            "tr(@0/**)",
+            vec![
+                "tpubD6NzVbkrYhZ4WLczPJWReQycCJdd6YVWXubbVUFnJ5KgU5MDQrD998ZK5NXERxDkze3yNr1iFmEoAA4g2GVfmzA68K6AVfC7bzGVgsBRWhy".try_into().unwrap()
+            ]
+        ).unwrap();
+
+        let account_name = "Resident taproot account";
+        let por =
+            ProofOfRegistration::new(&wallet_policy.get_id(account_name)).dangerous_as_bytes();
+        prepare_psbt(&mut psbt, &[(&wallet_policy, &account_name, &por)]).unwrap();
+
+        let response = sdk::executor::block_on(handle_sign_psbt(
+            &mut sdk::App::singleton(),
+            &serialize_as_psbtv2(&psbt),
+        ))
+        .unwrap();
+
+        let Response::PsbtSigned(partial_signatures) = response else {
+            panic!("Expected PsbtSigned response");
+        };
+
+        assert_eq!(partial_signatures.len(), 2);
+
+        let expected_pubkey0 = psbt.inputs[0]
+            .witness_utxo
+            .as_ref()
+            .unwrap()
+            .script_pubkey
+            .as_bytes()[2..]
+            .to_vec();
+
+        assert_eq!(partial_signatures[0].input_index, 0);
+        assert_eq!(partial_signatures[0].pubkey, expected_pubkey0);
+
+        let expected_pubkey1 = psbt.inputs[1]
+            .witness_utxo
+            .as_ref()
+            .unwrap()
+            .script_pubkey
+            .as_bytes()[2..]
+            .to_vec();
+
+        assert_eq!(partial_signatures[1].input_index, 1);
+        assert_eq!(partial_signatures[1].pubkey, expected_pubkey1);
     }
 }
