@@ -60,6 +60,14 @@ pub struct NamedAccount {
     descriptor: WalletPolicy,
 }
 
+/// A Schnorr signature for object authentication, containing the compressed public key of the
+/// identity key that produced the signature, and the 64-byte BIP-340 signature.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct IdentitySignature {
+    pub identity_pubkey: Vec<u8>,
+    pub signature: Vec<u8>,
+}
+
 // Request types
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub enum Request {
@@ -69,6 +77,9 @@ pub enum Request {
     GetExtendedPubkey {
         display: bool,
         path: Bip32Path,
+        /// If set, the response will include a Schnorr signature over the xpub
+        /// using the identity key at this index.
+        identity_index: Option<u32>,
     },
     RegisterAccount {
         name: String,
@@ -80,6 +91,9 @@ pub enum Request {
         account: Account,
         por: Vec<u8>,
         coordinates: AccountCoordinates,
+        /// If set, the response will include a Schnorr signature over the output
+        /// script using the identity key at this index.
+        identity_index: Option<u32>,
     },
     SignPsbt {
         psbt: Vec<u8>,
@@ -104,12 +118,18 @@ pub struct PartialSignature {
 pub enum Response {
     Version(String),
     MasterFingerprint(u32),
-    ExtendedPubkey(Vec<u8>),
+    ExtendedPubkey {
+        xpub: Vec<u8>,
+        identity_sig: Option<IdentitySignature>,
+    },
     AccountRegistered {
         account_id: [u8; 32],
         hmac: [u8; 32],
     },
-    Address(String),
+    Address {
+        address: String,
+        identity_sig: Option<IdentitySignature>,
+    },
     PsbtSigned(Vec<PartialSignature>),
     ResidentPubkey(Vec<u8>),
     Error(crate::errors::Error),

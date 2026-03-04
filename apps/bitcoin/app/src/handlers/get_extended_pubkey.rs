@@ -1,6 +1,10 @@
-use alloc::vec::Vec;
+use alloc::{format, vec::Vec};
 
-use common::{errors::Error, message::Response};
+use common::{
+    errors::Error,
+    identity,
+    message::{IdentitySignature, Response},
+};
 use sdk::{
     curve::{Curve, EcfpPrivateKey, EcfpPublicKey, Secp256k1, ToPublicKey},
     hash::{Hasher, Ripemd160, Sha256},
@@ -23,12 +27,60 @@ fn get_pubkey_fingerprint(pubkey: &EcfpPublicKey<Secp256k1, 32>) -> u32 {
 }
 
 #[cfg(not(any(test, feature = "autoapprove")))]
+async fn display_identity_key(app: &mut sdk::App, value: &str, index: Option<u32>) -> bool {
+    use alloc::vec;
+    use sdk::ux::{Icon, TagValue};
+
+    let (intro_text, intro_subtext): (alloc::string::String, alloc::string::String) = match index {
+        None => {
+            if sdk::ux::has_page_api() {
+                ("Export root\nidentity key".into(), "".into())
+            } else {
+                ("Export root".into(), "identity key".into())
+            }
+        }
+        Some(i) => (format!("Export identity\nkey #{}", i), "".into()),
+    };
+
+    let tag = match index {
+        None => "Identity key",
+        Some(_) => "Compressed pubkey",
+    };
+
+    let pairs = vec![TagValue {
+        tag: tag.into(),
+        value: value.into(),
+    }];
+
+    let approved = app
+        .review_pairs(
+            &intro_text,
+            &intro_subtext,
+            &pairs,
+            "Verify identity key",
+            "Confirm",
+            false,
+        )
+        .await;
+    app.show_info(
+        if approved {
+            Icon::Success
+        } else {
+            Icon::Failure
+        },
+        if approved {
+            "Identity key verified"
+        } else {
+            "Identity key rejected"
+        },
+    );
+    approved
+}
+
+#[cfg(not(any(test, feature = "autoapprove")))]
 async fn display_xpub(app: &mut sdk::App, xpub: &str, path: &[u32]) -> bool {
     use alloc::{string::ToString, vec};
     use sdk::ux::{Icon, TagValue};
-
-    let path =
-        bitcoin::bip32::DerivationPath::from(path.iter().map(|&x| x.into()).collect::<Vec<_>>());
 
     let (intro_text, intro_subtext) = if sdk::ux::has_page_api() {
         ("Verify Bitcoin\nextended public key", "")
@@ -36,32 +88,48 @@ async fn display_xpub(app: &mut sdk::App, xpub: &str, path: &[u32]) -> bool {
         ("Verify Bitcoin", "extended public key")
     };
 
+    let path_display =
+        bitcoin::bip32::DerivationPath::from(path.iter().map(|&x| x.into()).collect::<Vec<_>>());
+
+    let pairs = vec![
+        TagValue {
+            tag: "Path".into(),
+            value: path_display.to_string(),
+        },
+        TagValue {
+            tag: "Public key".into(),
+            value: xpub.into(),
+        },
+    ];
+
     let approved = app
         .review_pairs(
             intro_text,
             intro_subtext,
-            &vec![
-                TagValue {
-                    tag: "Path".into(),
-                    value: path.to_string(),
-                },
-                TagValue {
-                    tag: "Public key".into(),
-                    value: xpub.into(),
-                },
-            ],
+            &pairs,
             "Verify public key",
             "Confirm",
             false,
         )
         .await;
-    if approved {
-        app.show_info(Icon::Success, "Public key verified");
-    } else {
-        app.show_info(Icon::Failure, "Public key rejected");
-    }
-
+    app.show_info(
+        if approved {
+            Icon::Success
+        } else {
+            Icon::Failure
+        },
+        if approved {
+            "Public key verified"
+        } else {
+            "Public key rejected"
+        },
+    );
     approved
+}
+
+#[cfg(any(test, feature = "autoapprove"))]
+async fn display_identity_key(_app: &mut sdk::App, _value: &str, _index: Option<u32>) -> bool {
+    true
 }
 
 #[cfg(any(test, feature = "autoapprove"))]
@@ -73,6 +141,7 @@ pub async fn handle_get_extended_pubkey(
     app: &mut sdk::App,
     bip32_path: &common::message::Bip32Path,
     display: bool,
+    identity_index: Option<u32>,
 ) -> Result<Response, Error> {
     if bip32_path.0.len() > 256 {
         return Err(Error::DerivationPathTooLong);
@@ -83,6 +152,15 @@ pub async fn handle_get_extended_pubkey(
     let privkey: EcfpPrivateKey<Secp256k1, 32> = EcfpPrivateKey::new(*hd_node.privkey);
     let pubkey = privkey.to_public_key();
     let pubkey_bytes = pubkey.as_ref().to_bytes();
+
+    let compressed_pubkey_hex = {
+        let mut compressed = alloc::vec![pubkey_bytes[64] % 2 + 0x02];
+        compressed.extend_from_slice(&pubkey_bytes[1..33]);
+        compressed
+            .iter()
+            .map(|b| format!("{:02x}", b))
+            .collect::<alloc::string::String>()
+    };
 
     let depth = bip32_path.0.len() as u8;
 
@@ -114,12 +192,59 @@ pub async fn handle_get_extended_pubkey(
 
     if display {
         let xpub_base58 = bitcoin::base58::encode_check(&xpub);
-        if !display_xpub(app, &xpub_base58, &bip32_path.0).await {
+        let value = match identity::is_identity_path(&bip32_path.0) {
+            Some(None) => &xpub_base58,
+            Some(Some(_)) => &compressed_pubkey_hex,
+            None => &xpub_base58,
+        };
+        let approved = match identity::is_identity_path(&bip32_path.0) {
+            Some(index) => display_identity_key(app, value, index).await,
+            None => display_xpub(app, &xpub_base58, &bip32_path.0).await,
+        };
+        if !approved {
             return Err(Error::UserRejected);
         }
     }
 
-    Ok(Response::ExtendedPubkey(xpub))
+    let identity_sig = match identity_index {
+        Some(i) => Some(compute_identity_signature(
+            identity::MSG_TYPE_XPUB,
+            &xpub,
+            i,
+        )?),
+        None => None,
+    };
+
+    Ok(Response::ExtendedPubkey { xpub, identity_sig })
+}
+
+/// Derives the i-th identity key and signs the given object with it.
+pub(crate) fn compute_identity_signature(
+    msg_type: &[u8],
+    object: &[u8],
+    identity_index: u32,
+) -> Result<IdentitySignature, Error> {
+    let id_path = identity::identity_derivation_path(Some(identity_index));
+    let id_node =
+        sdk::curve::Secp256k1::derive_hd_node(&id_path).map_err(|_| Error::KeyDerivationFailed)?;
+    let id_privkey: EcfpPrivateKey<Secp256k1, 32> = EcfpPrivateKey::new(*id_node.privkey);
+    let id_pubkey = id_privkey.to_public_key();
+    let id_pubkey_bytes = id_pubkey.as_ref().to_bytes();
+
+    // Compressed public key: 0x02 or 0x03 prefix + 32-byte x-coordinate
+    let mut compressed_pubkey = Vec::with_capacity(33);
+    compressed_pubkey.push(id_pubkey_bytes[64] % 2 + 0x02);
+    compressed_pubkey.extend_from_slice(&id_pubkey_bytes[1..33]);
+
+    let msg = identity::build_identity_message(msg_type, object);
+    let signature = id_privkey
+        .schnorr_sign(&msg, None)
+        .map_err(|_| Error::SigningFailed)?;
+
+    Ok(IdentitySignature {
+        identity_pubkey: compressed_pubkey,
+        signature,
+    })
 }
 
 #[cfg(test)]
@@ -193,12 +318,16 @@ mod tests {
                 &mut sdk::App::singleton(),
                 &common::message::Bip32Path(parse_derivation_path(path).unwrap()),
                 false,
+                None,
             ))
             .unwrap();
 
             assert_eq!(
                 response,
-                Response::ExtendedPubkey(bitcoin::base58::decode_check(expected_xpub).unwrap())
+                Response::ExtendedPubkey {
+                    xpub: bitcoin::base58::decode_check(expected_xpub).unwrap(),
+                    identity_sig: None,
+                }
             );
         }
     }

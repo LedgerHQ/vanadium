@@ -6,6 +6,7 @@ pub mod account;
 pub mod bip388;
 pub mod errors;
 pub mod fastpsbt;
+pub mod identity;
 pub mod message;
 pub mod psbt;
 pub mod script;

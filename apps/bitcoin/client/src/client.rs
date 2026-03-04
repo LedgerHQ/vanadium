@@ -2,7 +2,7 @@ use std::str::FromStr;
 
 use bitcoin::bip32::DerivationPath;
 use common::account::ProofOfRegistration;
-use common::message::{self, PartialSignature, Request, Response};
+use common::message::{self, IdentitySignature, PartialSignature, Request, Response};
 use sdk::vanadium_client::{VAppExecutionError, VAppTransport};
 
 use sdk::comm::SendMessageError;
@@ -134,13 +134,15 @@ impl<'a> BitcoinClient {
         &mut self,
         bip32_path: &str,
         display: bool,
-    ) -> Result<[u8; 78], BitcoinClientError> {
+        identity_index: Option<u32>,
+    ) -> Result<([u8; 78], Option<IdentitySignature>), BitcoinClientError> {
         let path = DerivationPath::from_str(bip32_path)
             .map_err(|e| format!("Failed to convert bip32_path: {}", e))?;
 
         let msg = postcard::to_allocvec(&Request::GetExtendedPubkey {
             display,
             path: message::Bip32Path(path.to_u32_vec()),
+            identity_index,
         })
         .map_err(|_| {
             BitcoinClientError::GenericError(
@@ -149,8 +151,40 @@ impl<'a> BitcoinClient {
         })?;
         let response_raw = self.send_message(&msg).await?;
         match Self::parse_response(&response_raw).await? {
-            Response::ExtendedPubkey(pubkey) => {
-                let arr: [u8; 78] = pubkey.as_slice().try_into().map_err(|_| {
+            Response::ExtendedPubkey { xpub, identity_sig } => {
+                let arr: [u8; 78] = xpub.as_slice().try_into().map_err(|_| {
+                    BitcoinClientError::InvalidResponse("Invalid pubkey length".to_string())
+                })?;
+                Ok((arr, identity_sig))
+            }
+            e => Err(BitcoinClientError::InvalidResponse(format!(
+                "Invalid response: {:?}",
+                e
+            ))),
+        }
+    }
+
+    /// Gets the i-th identity public key (xpub at path `m/1229210958'/i`).
+    pub async fn get_identity_key(
+        &mut self,
+        index: Option<u32>,
+        display: bool,
+    ) -> Result<[u8; 78], BitcoinClientError> {
+        let path = common::identity::identity_derivation_path(index);
+        let msg = postcard::to_allocvec(&Request::GetExtendedPubkey {
+            display,
+            path: message::Bip32Path(path),
+            identity_index: None,
+        })
+        .map_err(|_| {
+            BitcoinClientError::GenericError(
+                "Failed to serialize GetExtendedPubkey request".to_string(),
+            )
+        })?;
+        let response_raw = self.send_message(&msg).await?;
+        match Self::parse_response(&response_raw).await? {
+            Response::ExtendedPubkey { xpub, .. } => {
+                let arr: [u8; 78] = xpub.as_slice().try_into().map_err(|_| {
                     BitcoinClientError::InvalidResponse("Invalid pubkey length".to_string())
                 })?;
                 Ok(arr)
@@ -224,7 +258,8 @@ impl<'a> BitcoinClient {
         coords: &message::AccountCoordinates,
         por: Option<&ProofOfRegistration>,
         display: bool,
-    ) -> Result<String, BitcoinClientError> {
+        identity_index: Option<u32>,
+    ) -> Result<(String, Option<IdentitySignature>), BitcoinClientError> {
         let msg = postcard::to_allocvec(&Request::GetAddress {
             display,
             name: Some(name.to_string()),
@@ -233,6 +268,7 @@ impl<'a> BitcoinClient {
                 .map(|p| p.dangerous_as_bytes().to_vec())
                 .unwrap_or(vec![]),
             coordinates: coords.clone(),
+            identity_index,
         })
         .map_err(|_| {
             BitcoinClientError::GenericError("Failed to serialize GetAddress request".to_string())
@@ -240,7 +276,10 @@ impl<'a> BitcoinClient {
 
         let response_raw = self.send_message(&msg).await?;
         match Self::parse_response(&response_raw).await? {
-            Response::Address(addr) => Ok(addr),
+            Response::Address {
+                address,
+                identity_sig,
+            } => Ok((address, identity_sig)),
             e => Err(BitcoinClientError::InvalidResponse(format!(
                 "Invalid response: {:?}",
                 e
