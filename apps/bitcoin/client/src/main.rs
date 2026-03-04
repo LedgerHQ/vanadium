@@ -37,6 +37,16 @@ enum CliCommand {
         path: String,
         #[clap(long, default_missing_value = "true", num_args = 0..=1)]
         display: bool,
+        /// If set, the response will include a Schnorr signature over the xpub
+        /// using the identity key at this index.
+        #[clap(long)]
+        identity_index: Option<u32>,
+    },
+    GetIdentityKey {
+        #[clap(long)]
+        index: Option<u32>,
+        #[clap(long, default_missing_value = "true", num_args = 0..=1)]
+        display: bool,
     },
     GetResidentPubkey {
         #[clap(long, default_value = "0")]
@@ -67,6 +77,10 @@ enum CliCommand {
         is_change: bool,
         #[clap(long, default_missing_value = "0")]
         address_index: u32,
+        /// If set, the response will include a Schnorr signature over the output
+        /// script using the identity key at this index.
+        #[clap(long)]
+        identity_index: Option<u32>,
     },
     SignPsbt {
         #[clap(long)]
@@ -265,9 +279,27 @@ async fn handle_cli_command(
             let fpr = bitcoin_client.get_master_fingerprint().await?;
             println!("{:08x}", fpr);
         }
-        CliCommand::GetPubkey { path, display } => {
-            let xpub = bitcoin_client.get_extended_pubkey(&path, *display).await?;
+        CliCommand::GetPubkey {
+            path,
+            display,
+            identity_index,
+        } => {
+            let (xpub, identity_sig) = bitcoin_client
+                .get_extended_pubkey(&path, *display, *identity_index)
+                .await?;
 
+            match bitcoin::bip32::Xpub::decode(&xpub) {
+                Ok(xpub) => println!("{}", xpub),
+                Err(_) => println!("Invalid xpub returned"),
+            }
+
+            if let Some(sig) = identity_sig {
+                println!("Identity pubkey: {}", hex::encode(&sig.identity_pubkey));
+                println!("Identity signature: {}", hex::encode(&sig.signature));
+            }
+        }
+        CliCommand::GetIdentityKey { index, display } => {
+            let xpub = bitcoin_client.get_identity_key(*index, *display).await?;
             match bitcoin::bip32::Xpub::decode(&xpub) {
                 Ok(xpub) => println!("{}", xpub),
                 Err(_) => println!("Invalid xpub returned"),
@@ -308,6 +340,7 @@ async fn handle_cli_command(
             descriptor_template,
             por,
             keys_info,
+            identity_index,
         } => {
             let wallet_policy_msg = parse_wallet_policy(descriptor_template, keys_info)?;
             let wallet_policy_coords = common::message::WalletPolicyCoordinates {
@@ -329,16 +362,22 @@ async fn handle_cli_command(
                 })
                 .transpose()?; // Result<Option<ProofOfRegistration>, _>
 
-            let addr = bitcoin_client
+            let (addr, identity_sig) = bitcoin_client
                 .get_address(
                     &common::message::Account::WalletPolicy(wallet_policy_msg),
                     name.as_deref().unwrap_or(""),
                     &common::message::AccountCoordinates::WalletPolicy(wallet_policy_coords),
                     proof_of_registration.as_ref(),
                     *display,
+                    *identity_index,
                 )
                 .await?;
             println!("{}", addr);
+
+            if let Some(sig) = identity_sig {
+                println!("Identity pubkey: {}", hex::encode(&sig.identity_pubkey));
+                println!("Identity signature: {}", hex::encode(&sig.signature));
+            }
         }
         CliCommand::SignPsbt { psbt } => {
             let mut psbt = base64::engine::general_purpose::STANDARD

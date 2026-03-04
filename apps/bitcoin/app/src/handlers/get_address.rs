@@ -1,10 +1,13 @@
 use common::{
     account::{Account, ProofOfRegistration},
     bip388,
+    errors::Error,
+    identity,
     message::Response,
+    script::ToScript,
 };
 
-use common::errors::Error;
+use crate::identity::compute_identity_signature;
 
 #[cfg(not(any(test, feature = "autoapprove")))]
 async fn display_address(app: &mut sdk::App, account_name: Option<&str>, addr: &str) -> bool {
@@ -63,6 +66,7 @@ pub async fn handle_get_address(
     por: &[u8],
     coordinates: &common::message::AccountCoordinates,
     display: bool,
+    identity_index: Option<u32>,
 ) -> Result<Response, Error> {
     app.show_spinner("Processing...");
 
@@ -98,7 +102,25 @@ pub async fn handle_get_address(
         }
     }
 
-    Ok(Response::Address(address))
+    let identity_sig = match identity_index {
+        Some(i) => {
+            // Derive the scriptPubKey to sign over
+            let script = wallet_policy
+                .to_script(coordinates.is_change, coordinates.address_index)
+                .map_err(|_| Error::InvalidWalletPolicy)?;
+            Some(compute_identity_signature(
+                identity::MSG_TYPE_OUTPUT,
+                script.as_bytes(),
+                i,
+            )?)
+        }
+        None => None,
+    };
+
+    Ok(Response::Address {
+        address,
+        identity_sig,
+    })
 }
 
 #[cfg(test)]
@@ -151,12 +173,16 @@ mod tests {
                 address_index: 0,
             }),
             false,
+            None,
         ))
         .unwrap();
 
         assert_eq!(
             resp,
-            Response::Address("tb1qzdr7s2sr0dwmkwx033r4nujzk86u0cy6fmzfjk".into())
+            Response::Address {
+                address: "tb1qzdr7s2sr0dwmkwx033r4nujzk86u0cy6fmzfjk".into(),
+                identity_sig: None,
+            }
         );
     }
 }
