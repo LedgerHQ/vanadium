@@ -49,3 +49,4 @@ lto = true
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(hashes_fuzz)', 'cfg(bench)'] }
+warnings = "allow"

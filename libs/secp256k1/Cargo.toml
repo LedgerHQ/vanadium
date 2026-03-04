@@ -59,3 +59,4 @@ exclude = ["no_std_test"]
 
  [lints.rust]
  unexpected_cfgs = { level = "warn", check-cfg = ['cfg(secp256k1_fuzz)', 'cfg(bench)'] }
+ warnings = "allow"

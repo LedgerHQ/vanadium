@@ -31,5 +31,6 @@ hex = { package = "hex-conservative", version = "0.2.0", default-features = fals
 
 [lints.rust]
 unexpected_cfgs = { level = "deny", check-cfg = ['cfg(bench)', 'cfg(fuzzing)', 'cfg(kani)' ] }
+warnings = "allow"
 
 [workspace]
