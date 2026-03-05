@@ -3,6 +3,7 @@ mod get_extended_pubkey;
 mod get_master_fingerprint;
 mod get_resident_pubkey;
 mod register_account;
+mod register_identity_key;
 mod sign_psbt;
 
 pub use get_address::handle_get_address;
@@ -10,4 +11,5 @@ pub use get_extended_pubkey::handle_get_extended_pubkey;
 pub use get_master_fingerprint::handle_get_master_fingerprint;
 pub use get_resident_pubkey::handle_get_resident_pubkey;
 pub use register_account::handle_register_account;
+pub use register_identity_key::handle_register_identity_key;
 pub use sign_psbt::handle_sign_psbt;
