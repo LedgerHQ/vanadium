@@ -46,6 +46,9 @@ pub enum Error {
     FailedUnsignedTransaction,
     AddressFromScriptFailed,
 
+    // Identity authentication
+    InvalidIdentitySignature,
+
     // Unexpected states
     UnexpectedTaprootPolicy,
     UnexpectedSegwitVersion,
@@ -110,6 +113,8 @@ impl fmt::Display for Error {
             InputsLessThanOutputs => write!(f, "Transaction outputs total amount is greater than inputs total amount"),
             FailedUnsignedTransaction => write!(f, "Failed to get unsigned transaction"),
             AddressFromScriptFailed => write!(f, "Failed to convert script to address"),
+
+            InvalidIdentitySignature => write!(f, "Invalid identity signature on output"),
 
             UnexpectedTaprootPolicy => write!(f, "Unexpected state: should be a Taproot wallet policy"),
             UnexpectedSegwitVersion => write!(f, "Unexpected state: should be SegwitV0 or Taproot"),

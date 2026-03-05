@@ -9,10 +9,11 @@ use common::{
     account::{Account, ProofOfRegistration},
     bip388::{DescriptorTemplate, SegwitVersion},
     errors::Error,
+    identity::{build_identity_message, MSG_TYPE_OUTPUT},
     message::{PartialSignature, Response},
     psbt::{
         PsbtAccount, PsbtAccountCoordinates, PsbtAccountGlobalRead, PsbtAccountInputRead,
-        PsbtAccountOutputRead,
+        PsbtAccountOutputRead, PsbtOutputAuthRead,
     },
     script::ToScript,
     taproot::{GetTapLeafHash, GetTapTreeHash},
@@ -27,7 +28,7 @@ use bitcoin::{
 };
 use common::fastpsbt;
 use sdk::{
-    curve::{Curve, EcfpPrivateKey, HDPrivNode, ToPublicKey},
+    curve::{Curve, EcfpPrivateKey, EcfpPublicKey, HDPrivNode, ToPublicKey},
     ux::TagValue,
 };
 
@@ -257,6 +258,9 @@ struct TransactionSummary {
     input_coordinates: Vec<(u32, PsbtAccountCoordinates)>,
     account_spent_amounts: Vec<i64>,
     external_outputs_indexes: Vec<usize>,
+    /// Parallel to `external_outputs_indexes`: `Some(pubkey)` if the output carries a valid
+    /// id_auth proof, `None` otherwise.
+    external_output_auth_pubkeys: Vec<Option<[u8; 33]>>,
     inputs_total_amount: u64,
     outputs_total_amount: u64,
     warn_unverified_inputs: bool,
@@ -312,6 +316,7 @@ fn analyze_transaction(
 
     let mut account_spent_amounts: Vec<i64> = vec![0; accounts.len()];
     let mut external_outputs_indexes = Vec::new();
+    let mut external_output_auth_pubkeys: Vec<Option<[u8; 33]>> = Vec::new();
     let mut inputs_total_amount: u64 = 0;
     let mut outputs_total_amount: u64 = 0;
     let mut warn_unverified_inputs = false;
@@ -466,7 +471,31 @@ fn analyze_transaction(
 
             account_spent_amounts[account_id as usize] -= amount as i64;
         } else {
+            // Verify any id_auth proofs on external outputs immediately.
+            let proofs = output
+                .get_auth_proofs()
+                .map_err(|_| Error::InvalidIdentitySignature)?;
+            let mut first_pubkey: Option<[u8; 33]> = None;
+            let out_script_bytes = output.script.ok_or(Error::OutputScriptMissing)?.to_vec();
+            for proof in proofs {
+                match proof {
+                    common::psbt::OutputAuthProof::IdentitySignature { pubkey, sig } => {
+                        // Verify the Schnorr signature against the output scriptPubKey.
+                        let ecfp_pubkey =
+                            EcfpPublicKey::<sdk::curve::Secp256k1, 32>::from_compressed(&pubkey)
+                                .map_err(|_| Error::InvalidIdentitySignature)?;
+                        let msg = build_identity_message(MSG_TYPE_OUTPUT, &out_script_bytes);
+                        ecfp_pubkey
+                            .schnorr_verify(&msg, &sig)
+                            .map_err(|_| Error::InvalidIdentitySignature)?;
+                        if first_pubkey.is_none() {
+                            first_pubkey = Some(pubkey);
+                        }
+                    }
+                }
+            }
             external_outputs_indexes.push(output_index);
+            external_output_auth_pubkeys.push(first_pubkey);
         };
 
         outputs_total_amount += amount;
@@ -482,6 +511,7 @@ fn analyze_transaction(
         input_coordinates,
         account_spent_amounts,
         external_outputs_indexes,
+        external_output_auth_pubkeys,
         inputs_total_amount,
         outputs_total_amount,
         warn_unverified_inputs,
@@ -582,8 +612,8 @@ fn build_display_pairs(
         }
     }
 
-    // External outputs (show address)
-    for &output_index in &summary.external_outputs_indexes {
+    // External outputs (show address, prefixed with identity pubkey if auth proof present)
+    for (i, &output_index) in summary.external_outputs_indexes.iter().enumerate() {
         let output = &psbt.outputs[output_index];
         let out_script_pubkey = output.script.ok_or(Error::OutputScriptMissing)?;
         let out_script_pubkey = ScriptBuf::from_bytes(out_script_pubkey.to_vec());
@@ -591,9 +621,16 @@ fn build_display_pairs(
         let address = Address::from_script(&out_script_pubkey, bitcoin::Network::Testnet)
             .map_err(|_| Error::AddressFromScriptFailed)?;
 
+        let address_value = if let Some(ref pk) = summary.external_output_auth_pubkeys[i] {
+            let hex: String = pk.iter().map(|b| format!("{:02x}", b)).collect();
+            format!("{}:{}", hex, address)
+        } else {
+            format!("{}", address)
+        };
+
         pairs.push(TagValue {
             tag: format!("Output {}", output_index),
-            value: format!("{}", address),
+            value: address_value,
         });
         pairs.push(TagValue {
             tag: "Amount".into(),
