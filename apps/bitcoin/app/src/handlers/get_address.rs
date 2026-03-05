@@ -1,9 +1,10 @@
 use common::{
-    account::{Account, ProofOfRegistration},
+    account::Account,
     bip388,
     errors::Error,
     identity,
     message::Response,
+    por::{ProofOfRegistration, Registerable},
     script::ToScript,
 };
 
@@ -82,8 +83,8 @@ pub async fn handle_get_address(
 
     let hmac = hmac.ok_or(Error::DefaultAccountsNotSupported)?;
 
-    let id = wallet_policy.get_id(name.unwrap_or(""));
-    let por = common::account::ProofOfRegistration::from_bytes(*hmac);
+    let id = wallet_policy.registration_id(name.unwrap_or(""));
+    let por = ProofOfRegistration::<bip388::WalletPolicy>::from_bytes(*hmac);
     if por != ProofOfRegistration::new(&id) {
         return Err(Error::InvalidProofOfRegistration);
     }
@@ -160,8 +161,8 @@ mod tests {
         // default wallet accounts are not supported yet, so we simulate registration
         let account_name = "Segwit account";
         let wallet_policy: bip388::WalletPolicy = (&account).try_into().unwrap();
-        let hmac =
-            ProofOfRegistration::new(&wallet_policy.get_id(account_name)).dangerous_as_bytes();
+        let hmac = ProofOfRegistration::new(&wallet_policy.registration_id(account_name))
+            .dangerous_as_bytes();
 
         let resp = sdk::executor::block_on(handle_get_address(
             &mut sdk::App::singleton(),

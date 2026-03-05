@@ -2,7 +2,7 @@ use base64::Engine as _;
 use bitcoin::psbt::Psbt;
 
 use clap::{CommandFactory, Parser, Subcommand};
-use common::account::ProofOfRegistration;
+use common::por::ProofOfRegistration;
 use rustyline::completion::{Completer, Pair};
 use rustyline::error::ReadlineError;
 use rustyline::highlight::{CmdKind, Highlighter};
@@ -328,7 +328,7 @@ async fn handle_cli_command(
             println!(
                 "Account {} registered.\nAccount ID: {}\nHMAC: {}",
                 name,
-                hex::encode(account_id),
+                hex::encode(account_id.as_bytes()),
                 hex::encode(hmac.dangerous_as_bytes())
             );
         }
@@ -350,17 +350,19 @@ async fn handle_cli_command(
             // convert por from hex to bytes if provided
             let proof_of_registration = por
                 .as_ref()
-                .map(|s| -> Result<ProofOfRegistration, &'static str> {
-                    let bytes =
-                        hex::decode(s).map_err(|_| "Failed to decode proof of registration")?;
+                .map(
+                    |s| -> Result<ProofOfRegistration<common::bip388::WalletPolicy>, &'static str> {
+                        let bytes =
+                            hex::decode(s).map_err(|_| "Failed to decode proof of registration")?;
 
-                    let array: [u8; 32] = bytes
-                        .try_into()
-                        .map_err(|_| "Proof of registration must be 32 bytes long")?;
+                        let array: [u8; 32] = bytes
+                            .try_into()
+                            .map_err(|_| "Proof of registration must be 32 bytes long")?;
 
-                    Ok(ProofOfRegistration::from_bytes(array))
-                })
-                .transpose()?; // Result<Option<ProofOfRegistration>, _>
+                        Ok(ProofOfRegistration::from_bytes(array))
+                    },
+                )
+                .transpose()?; // Result<Option<ProofOfRegistration<...>>, _>
 
             let (addr, identity_sig) = bitcoin_client
                 .get_address(

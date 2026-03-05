@@ -1,10 +1,8 @@
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use bitcoin::consensus::{encode, Decodable, Encodable};
-use bitcoin::hashes::{Hash, HashEngine, Hmac, HmacEngine};
 use bitcoin::io::Read;
 use bitcoin::VarInt;
-
 use sdk::hash::{Hasher, Sha256};
 
 // re-export, as we use this both as a message and as an internal data type
@@ -13,10 +11,10 @@ pub use crate::message::WalletPolicyCoordinates;
 pub use crate::bip388::{
     DescriptorTemplate, KeyInformation, KeyPlaceholder, TapTree, WalletPolicy,
 };
+use crate::por::{Registerable, RegistrationId};
 use bitcoin::{params::Params, Address};
 
 use crate::script::ToScript;
-use subtle::ConstantTimeEq;
 
 // TODO: maybe we can modify the serialize() methods to use bitcoin::io::Write instead
 
@@ -41,7 +39,7 @@ impl AccountCoordinates for WalletPolicyCoordinates {
         })
     }
 }
-const ACCOUNT_MAGIC: [u8; 14] = *b"\x0DNAMED_ACCOUNT";
+pub(crate) const ACCOUNT_MAGIC: [u8; 14] = *b"\x0DNAMED_ACCOUNT";
 
 /// A generic trait for "accounts", parameterized by the type of coordinates.
 ///
@@ -115,45 +113,10 @@ impl Account for WalletPolicy {
     }
 }
 
-// m/POR_MAGIC computed with SLIP21 is the hmac key for Proofs of Registration.
-const POR_MAGIC: &[u8] = b"Proof of Registration";
+impl<T: Account> Registerable for T {
+    type Context = str;
 
-#[repr(transparent)]
-#[derive(Debug, Clone, Copy)]
-pub struct ProofOfRegistration([u8; 32]);
-
-impl PartialEq for ProofOfRegistration {
-    /// Uses constant-time comparison to prevent timing attacks.
-    fn eq(&self, other: &Self) -> bool {
-        self.0.ct_eq(&other.0).into()
-    }
-}
-impl Eq for ProofOfRegistration {}
-
-impl ProofOfRegistration {
-    #[cfg(any(feature = "target_native", feature = "target_vanadium_ledger"))]
-    pub fn new(id: &[u8; 32]) -> Self {
-        let por_key = sdk::slip21::derive_slip21_key(&[&POR_MAGIC]);
-
-        let mut mac =
-            HmacEngine::<bitcoin::hashes::sha256::Hash>::new(por_key.dangerous_as_raw_bytes());
-        mac.input(id);
-        Self(Hmac::<bitcoin::hashes::sha256::Hash>::from_engine(mac).to_byte_array())
-    }
-
-    pub fn from_bytes(bytes: [u8; 32]) -> Self {
-        Self(bytes)
-    }
-
-    /// Returns the raw bytes of the proof of registration.
-    ///
-    /// This is necessary for example to serialize and return the proof externally. However,
-    /// it is generally dangerous to use the serialized form of proofs of registrations, as
-    /// incorrect use might lead to side-channel attacks.
-    ///
-    /// In order to verify the proof, build a new instance using the `from_bytes` method
-    /// before comparing it with the expected proof.
-    pub fn dangerous_as_bytes(&self) -> [u8; 32] {
-        self.0
+    fn registration_id(&self, name: &str) -> RegistrationId<Self> {
+        RegistrationId::<T>::from_bytes(self.get_id(name))
     }
 }
