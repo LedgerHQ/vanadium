@@ -455,6 +455,14 @@ impl Curve<32> for Secp256k1 {
 pub type Secp256k1Point = Point<Secp256k1, 32>;
 
 impl Secp256k1 {
+    // secp256k1 field prime p
+    const P: [u8; 32] = hex!("FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEFFFFFC2F");
+    // (p + 1) / 4  (used for modular square root since p ≡ 3 mod 4)
+    const SQUAREROOT_EXP: [u8; 32] =
+        hex!("3FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFBFFFFF0C");
+    const SEVEN: [u8; 32] =
+        hex!("0000000000000000000000000000000000000000000000000000000000000007");
+
     pub const fn get_generator() -> Secp256k1Point {
         Point {
             curve_marker: PhantomData,
@@ -540,6 +548,100 @@ impl EcfpPrivateKey<Secp256k1, 32> {
 }
 
 impl EcfpPublicKey<Secp256k1, 32> {
+    /// Creates an `EcfpPublicKey` from a 33-byte compressed SEC1 public key.
+    ///
+    /// Returns `Err` if `compressed` does not represent a valid secp256k1 point.
+    pub fn from_compressed(compressed: &[u8; 33]) -> Result<Self, &'static str> {
+        if compressed[0] != 0x02 && compressed[0] != 0x03 {
+            return Err("Invalid compressed key prefix");
+        }
+
+        let mut x = [0u8; 32];
+        x.copy_from_slice(&compressed[1..33]);
+
+        let y = {
+            let mut x2 = [0u8; 32];
+            let mut x3 = [0u8; 32];
+            let mut rhs = [0u8; 32]; // x^3 + 7  mod p
+            let mut y = [0u8; 32];
+
+            // SAFETY: all buffers are 32-byte arrays; inputs are valid field elements < p.
+            let ok = unsafe {
+                ecalls::bn_multm(
+                    x2.as_mut_ptr(),
+                    x.as_ptr(),
+                    x.as_ptr(),
+                    Secp256k1::P.as_ptr(),
+                    32,
+                ) != 0
+                    && ecalls::bn_multm(
+                        x3.as_mut_ptr(),
+                        x2.as_ptr(),
+                        x.as_ptr(),
+                        Secp256k1::P.as_ptr(),
+                        32,
+                    ) != 0
+                    && ecalls::bn_addm(
+                        rhs.as_mut_ptr(),
+                        x3.as_ptr(),
+                        Secp256k1::SEVEN.as_ptr(),
+                        Secp256k1::P.as_ptr(),
+                        32,
+                    ) != 0
+                    && ecalls::bn_powm(
+                        y.as_mut_ptr(),
+                        rhs.as_ptr(),
+                        Secp256k1::SQUAREROOT_EXP.as_ptr(),
+                        32,
+                        Secp256k1::P.as_ptr(),
+                        32,
+                    ) != 0
+            };
+            if !ok {
+                return Err("Point decompression failed");
+            }
+
+            // verify that y^2 is indeed equal to rhs
+            let mut y2 = [0u8; 32];
+            let ok = unsafe {
+                ecalls::bn_multm(
+                    y2.as_mut_ptr(),
+                    y.as_ptr(),
+                    y.as_ptr(),
+                    Secp256k1::P.as_ptr(),
+                    32,
+                ) != 0
+                    && y2 == rhs
+            };
+            if !ok {
+                return Err("Point not on curve");
+            }
+
+            // y must be negated when its parity doesn't match the prefix:
+            let expected_odd = compressed[0] & 1; // 0 for 0x02, 1 for 0x03
+            if (y[31] & 1) != expected_odd {
+                // negate: y = p - y  (big-endian byte subtraction with borrow)
+                let mut neg_y = [0u8; 32];
+                let mut borrow: i16 = 0;
+                for i in (0..32).rev() {
+                    let diff = Secp256k1::P[i] as i16 - y[i] as i16 - borrow;
+                    if diff < 0 {
+                        neg_y[i] = (diff + 256) as u8;
+                        borrow = 1;
+                    } else {
+                        neg_y[i] = diff as u8;
+                        borrow = 0;
+                    }
+                }
+                neg_y
+            } else {
+                y
+            }
+        };
+
+        Ok(Self::new(x, y))
+    }
+
     pub fn ecdsa_verify_hash(
         &self,
         msg_hash: &[u8; 32],
@@ -1025,6 +1127,52 @@ mod tests {
             child.chaincode,
             hex!("c783e67b921d2beb8f6b389cc646d7263b4145701dadd2161548a8b078e65e9e")
         );
+    }
+
+    #[test]
+    fn test_from_compressed_generator_even_y() {
+        // Generator point: y is even → 0x02 prefix
+        let compressed = hex!("0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798");
+        let pubkey = EcfpPublicKey::<Secp256k1, 32>::from_compressed(&compressed).unwrap();
+        assert_eq!(
+            pubkey.as_ref().x,
+            hex!("79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798")
+        );
+        assert_eq!(
+            pubkey.as_ref().y,
+            hex!("483ada7726a3c4655da4fbfc0e1108a8fd17b448a68554199c47d08ffb10d4b8")
+        );
+        assert_eq!(pubkey.as_ref().y[31] & 1, 0, "y should be even");
+    }
+
+    #[test]
+    fn test_from_compressed_generator_odd_y() {
+        // Generator point negation: same x, 0x03 prefix → y = p - y_G
+        let compressed = hex!("0379be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798");
+        let pubkey = EcfpPublicKey::<Secp256k1, 32>::from_compressed(&compressed).unwrap();
+        assert_eq!(
+            pubkey.as_ref().x,
+            hex!("79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798")
+        );
+        // y = p - y_G = FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEFFFFFC2F
+        //             - 483ADA7726A3C4655DA4FBFC0E1108A8FD17B448A68554199C47D08FFB10D4B8
+        //             = B7C52588D95C3B9AA25B0403F1EEF75702E84BB7597AABE663B82F6F04EF2777
+        assert_eq!(
+            pubkey.as_ref().y,
+            hex!("b7c52588d95c3b9aa25b0403f1eef75702e84bb7597aabe663b82f6f04ef2777")
+        );
+        assert_eq!(pubkey.as_ref().y[31] & 1, 1, "y should be odd");
+    }
+
+    #[test]
+    fn test_from_compressed_invalid_prefix() {
+        // 0x04 is an uncompressed prefix, not a valid compressed prefix
+        let compressed = hex!("0479be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798");
+        assert!(EcfpPublicKey::<Secp256k1, 32>::from_compressed(&compressed).is_err());
+
+        // 0x00 is also invalid
+        let compressed = hex!("0079be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798");
+        assert!(EcfpPublicKey::<Secp256k1, 32>::from_compressed(&compressed).is_err());
     }
 
     /// Hardened child index (≥ 0x80000000) must be rejected.
