@@ -21,15 +21,6 @@ pub const PSBT_ACCOUNT_GLOBAL_ACCOUNT_POR: u8 = 0x02;
 pub const PSBT_ACCOUNT_IN_COORDINATES: u8 = 0x00;
 pub const PSBT_ACCOUNT_OUT_COORDINATES: u8 = 0x00;
 
-/// Proprietary key prefix for output authentication data in PSBT fields
-pub const PSBT_IDAUTH_PROPRIETARY_IDENTIFIER: [u8; 6] = *b"IDAUTH";
-
-/// Subkey type for output authentication proof (per-output only)
-pub const PSBT_IDAUTH_OUT_SIGNATURE: u8 = 0x00;
-
-/// auth_tag value for identity-based Schnorr signatures
-pub const PSBT_IDAUTH_TAG_IDENTITY: u8 = 0x00;
-
 // the largest value that is represented as a single byte in compact size
 const MAX_SINGLE_BYTE_COMPACTSIZE: u8 = 252;
 
@@ -102,32 +93,6 @@ pub trait PsbtAccountOutputWrite {
         id: u32,
         coordinates: PsbtAccountCoordinates,
     ) -> Result<(), &'static str>;
-}
-
-/// An output authentication proof, stored in a per-output PSBT proprietary field.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum OutputAuthProof {
-    /// An identity-based Schnorr signature over the output's scriptPubKey.
-    IdentitySignature {
-        /// The compressed identity public key (33 bytes).
-        pubkey: [u8; 33],
-        /// The 64-byte Schnorr signature.
-        sig: [u8; 64],
-    },
-    // other auth types will be added here
-}
-
-pub trait PsbtOutputAuthRead {
-    /// Returns all well-formed output authentication proofs for this output.
-    /// Unknown auth_tag values and malformed entries are silently skipped.
-    fn get_auth_proofs(&self) -> Result<Vec<OutputAuthProof>, &'static str>;
-}
-
-pub trait PsbtOutputAuthWrite {
-    /// Adds an output authentication proof to this output.
-    /// The proprietary key is `(PSBT_IDAUTH_OUT_SIGNATURE, [auth_tag, pubkey])` and the
-    /// value is the 64-byte Schnorr signature.
-    fn add_auth_proof(&mut self, proof: &OutputAuthProof) -> Result<(), &'static str>;
 }
 
 impl PsbtAccountGlobalRead for Psbt {
@@ -408,59 +373,6 @@ impl PsbtAccountOutputWrite for psbt::Output {
     }
 }
 
-impl PsbtOutputAuthRead for psbt::Output {
-    fn get_auth_proofs(&self) -> Result<Vec<OutputAuthProof>, &'static str> {
-        let mut proofs = Vec::new();
-        for (key, value) in &self.proprietary {
-            if key.prefix != PSBT_IDAUTH_PROPRIETARY_IDENTIFIER.to_vec() {
-                continue;
-            }
-            if key.subtype != PSBT_IDAUTH_OUT_SIGNATURE {
-                continue;
-            }
-            // key.key must be: [auth_tag (1 byte), pubkey (33 bytes)]
-            if key.key.len() != 34 {
-                continue; // malformed — skip
-            }
-            let auth_tag = key.key[0];
-            // value must be exactly 64 bytes
-            if value.len() != 64 {
-                continue; // malformed — skip
-            }
-            match auth_tag {
-                PSBT_IDAUTH_TAG_IDENTITY => {
-                    let mut pubkey = [0u8; 33];
-                    pubkey.copy_from_slice(&key.key[1..34]);
-                    let mut sig = [0u8; 64];
-                    sig.copy_from_slice(&value[..64]);
-                    proofs.push(OutputAuthProof::IdentitySignature { pubkey, sig });
-                }
-                _ => continue, // unknown auth_tag — skip
-            }
-        }
-        Ok(proofs)
-    }
-}
-
-impl PsbtOutputAuthWrite for psbt::Output {
-    fn add_auth_proof(&mut self, proof: &OutputAuthProof) -> Result<(), &'static str> {
-        match proof {
-            OutputAuthProof::IdentitySignature { pubkey, sig } => {
-                let mut key_bytes = Vec::with_capacity(34);
-                key_bytes.push(PSBT_IDAUTH_TAG_IDENTITY);
-                key_bytes.extend_from_slice(pubkey);
-                let key = ProprietaryKey {
-                    prefix: PSBT_IDAUTH_PROPRIETARY_IDENTIFIER.to_vec(),
-                    subtype: PSBT_IDAUTH_OUT_SIGNATURE,
-                    key: key_bytes,
-                };
-                self.proprietary.insert(key, sig.to_vec());
-            }
-        }
-        Ok(())
-    }
-}
-
 impl<'a> PsbtAccountGlobalRead for crate::fastpsbt::Psbt<'a> {
     fn get_accounts(&self) -> Result<Vec<PsbtAccount>, &'static str> {
         let mut id = 0u32;
@@ -650,49 +562,6 @@ impl<'a> PsbtAccountOutputRead for crate::fastpsbt::Output<'a> {
     }
 }
 
-impl<'a> PsbtOutputAuthRead for crate::fastpsbt::Output<'a> {
-    fn get_auth_proofs(&self) -> Result<Vec<OutputAuthProof>, &'static str> {
-        // Proprietary key_data format for ID_AUTH:
-        // [prefix_len=7][b"ID_AUTH"][subtype=0x00][auth_tag(1)][pubkey(33)]
-        // total key_data length: 1 + 7 + 1 + 1 + 33 = 43
-        const EXPECTED_KD_LEN: usize = 1 + 7 + 1 + 1 + 33;
-
-        let mut proofs = Vec::new();
-        for (kd, value) in self.iter_keys(0xFC) {
-            if kd.len() != EXPECTED_KD_LEN {
-                continue;
-            }
-            let prefix_len = kd[0] as usize;
-            if prefix_len != PSBT_IDAUTH_PROPRIETARY_IDENTIFIER.len() {
-                continue;
-            }
-            let prefix = &kd[1..1 + prefix_len];
-            if prefix != PSBT_IDAUTH_PROPRIETARY_IDENTIFIER {
-                continue;
-            }
-            let subtype = kd[1 + prefix_len];
-            if subtype != PSBT_IDAUTH_OUT_SIGNATURE {
-                continue;
-            }
-            let auth_tag = kd[1 + prefix_len + 1];
-            if value.len() != 64 {
-                continue; // malformed — skip
-            }
-            match auth_tag {
-                PSBT_IDAUTH_TAG_IDENTITY => {
-                    let mut pubkey = [0u8; 33];
-                    pubkey.copy_from_slice(&kd[1 + prefix_len + 2..1 + prefix_len + 2 + 33]);
-                    let mut sig = [0u8; 64];
-                    sig.copy_from_slice(value);
-                    proofs.push(OutputAuthProof::IdentitySignature { pubkey, sig });
-                }
-                _ => continue, // unknown auth_tag — skip
-            }
-        }
-        Ok(proofs)
-    }
-}
-
 // Helper function to get wallet policy coordinates from a PSBT input or output
 fn get_wallet_policy_coordinates(
     bip32_derivation: &BTreeMap<bitcoin::secp256k1::PublicKey, (Fingerprint, DerivationPath)>,
@@ -853,225 +722,14 @@ pub fn prepare_psbt(
     Ok(())
 }
 
-mod convert_v0_to_v2 {
-    // This module provides a minimal conversion code from psbtv0 to psbtv2, directly in binary format.
-    // It performs very little validation, so it should only be used to convert a serialized PSBTv0 to PSBTv2
-    // before passing it to some other code that expects PSBTv2.
-    //
-    // Not thoroughly tested.
-
-    use alloc::{vec, vec::Vec};
-    use bitcoin::{
-        consensus::{encode as enc, Decodable, Encodable},
-        hashes::Hash,
-        io::{Cursor, Read},
-        Transaction,
-    };
-
-    struct KV {
-        key: Vec<u8>,
-        val: Vec<u8>,
-    }
-
-    fn read_varint<R: Read>(r: &mut R) -> Result<u64, &'static str> {
-        Ok(enc::VarInt::consensus_decode(r)
-            .map_err(|_| "Failed to read varint")?
-            .0)
-    }
-    fn write_varint(buf: &mut Vec<u8>, n: u64) -> Result<(), &'static str> {
-        enc::VarInt(n)
-            .consensus_encode(buf)
-            .map_err(|_| "Failed to write varint")?;
-        Ok(())
-    }
-    fn read_bytes<R: Read>(r: &mut R, len: usize) -> Result<Vec<u8>, &'static str> {
-        let mut v = vec![0u8; len];
-        r.read_exact(&mut v).map_err(|_| "Failed to read bytes")?;
-        Ok(v)
-    }
-    fn read_map<R: Read>(r: &mut R) -> Result<Vec<KV>, &'static str> {
-        let mut out = Vec::new();
-        loop {
-            let key_len = read_varint(r)? as usize;
-            if key_len == 0 {
-                break;
-            } // map sep
-            let key = read_bytes(r, key_len)?;
-            let val_len = read_varint(r)? as usize;
-            let val = read_bytes(r, val_len)?;
-            out.push(KV { key, val });
-        }
-        Ok(out)
-    }
-    fn key_type(raw_key: &[u8]) -> Result<u64, &'static str> {
-        let mut c = Cursor::new(raw_key);
-        Ok(enc::VarInt::consensus_decode(&mut c)
-            .map_err(|_| "Failed to read key type")?
-            .0)
-    }
-    fn mk_key(typ: u64, keydata: &[u8]) -> Result<Vec<u8>, &'static str> {
-        let mut k = Vec::with_capacity(1 + keydata.len() + 9);
-        enc::VarInt(typ)
-            .consensus_encode(&mut k)
-            .map_err(|_| "Failed to write key")?;
-        k.extend_from_slice(keydata);
-        Ok(k)
-    }
-    fn push_kv(
-        glob: &mut Vec<KV>,
-        typ: u64,
-        keydata: &[u8],
-        val: Vec<u8>,
-    ) -> Result<(), &'static str> {
-        glob.push(KV {
-            key: mk_key(typ, keydata)?,
-            val,
-        });
-        Ok(())
-    }
-
-    fn write_map_sorted(buf: &mut Vec<u8>, mut m: Vec<KV>) -> Result<(), &'static str> {
-        m.sort_unstable_by(|a, b| a.key.cmp(&b.key).then_with(|| a.val.cmp(&b.val)));
-        for KV { key, val } in m {
-            write_varint(buf, key.len() as u64)?;
-            buf.extend_from_slice(&key);
-            write_varint(buf, val.len() as u64)?;
-            buf.extend_from_slice(&val);
-        }
-        buf.push(0x00); // map separator
-        Ok(())
-    }
-
-    /// Converts a PSBTv0 to PSBTv2 in binary format, and makes sure that the keys are sorted in each map.
-    /// Returns an error if the input is not a valid PSBTv0; however, very little validation is performed on the
-    /// input PSBTv0.
-    pub fn psbt_v0_to_v2(raw_psbt: &[u8]) -> Result<Vec<u8>, &'static str> {
-        // Header
-        if raw_psbt.len() < 5 || &raw_psbt[0..5] != b"psbt\xff" {
-            return Err("Not a PSBT");
-        }
-        let mut cur = Cursor::new(&raw_psbt[5..]);
-
-        // Parse v0 global map and capture unsigned tx
-        let mut g0 = read_map(&mut cur)?;
-        let mut unsigned_tx_bytes: Option<Vec<u8>> = None;
-        let mut g_pass = Vec::<KV>::new();
-
-        for kv in g0.drain(..) {
-            let t = key_type(&kv.key)?;
-            match t {
-            0x00 /* PSBT_GLOBAL_UNSIGNED_TX */ => { unsigned_tx_bytes = Some(kv.val); }
-            0x02 | 0x03 | 0x04 | 0x05 | 0xFB => { return Err("v2 fields already present"); }
-            _ => g_pass.push(kv),
-        }
-        }
-        let utx = unsigned_tx_bytes.ok_or("missing unsigned tx")?;
-        let tx: Transaction =
-            enc::deserialize(&utx).map_err(|_| "Failed to deserialize unsigned tx")?;
-
-        // Knowing counts, parse inputs and outputs from v0
-        let n_inputs = tx.input.len();
-        let n_outputs = tx.output.len();
-
-        let mut ins_v0: Vec<Vec<KV>> = Vec::with_capacity(n_inputs);
-        for _ in 0..n_inputs {
-            ins_v0.push(read_map(&mut cur)?);
-        }
-        let mut outs_v0: Vec<Vec<KV>> = Vec::with_capacity(n_outputs);
-        for _ in 0..n_outputs {
-            outs_v0.push(read_map(&mut cur)?);
-        }
-
-        // Build v2
-        let mut out = Vec::<u8>::new();
-        out.extend_from_slice(b"psbt\xff");
-
-        // v2 global map
-        let mut g2 = g_pass;
-        // PSBT_GLOBAL_VERSION = 0xFB, value: u32 LE 2
-        push_kv(&mut g2, 0xFB, &[], 2u32.to_le_bytes().to_vec())?;
-        // PSBT_GLOBAL_TX_VERSION = 0x02, value: i32 LE
-        push_kv(&mut g2, 0x02, &[], tx.version.0.to_le_bytes().to_vec())?;
-        // PSBT_GLOBAL_FALLBACK_LOCKTIME = 0x03, value: u32 LE
-        push_kv(
-            &mut g2,
-            0x03,
-            &[],
-            tx.lock_time.to_consensus_u32().to_le_bytes().to_vec(),
-        )?;
-        // PSBT_GLOBAL_INPUT_COUNT = 0x04, value: compactsize
-        {
-            let mut v = Vec::new();
-            write_varint(&mut v, n_inputs as u64)?;
-            push_kv(&mut g2, 0x04, &[], v)?;
-        }
-        // PSBT_GLOBAL_OUTPUT_COUNT = 0x05, value: compactsize
-        {
-            let mut v = Vec::new();
-            write_varint(&mut v, n_outputs as u64)?;
-            push_kv(&mut g2, 0x05, &[], v)?;
-        }
-        write_map_sorted(&mut out, g2)?;
-
-        // v2 inputs: copy v0 fields + add {prev_txid, vout, sequence}
-        for (i, mut imap) in ins_v0.into_iter().enumerate() {
-            let txin = &tx.input[i];
-
-            // PSBT_IN_PREVIOUS_TXID = 0x0e, value: 32-byte txid
-            {
-                let mut v = Vec::with_capacity(32);
-                // Use the hash's underlying bytes
-                v.extend_from_slice(txin.previous_output.txid.as_raw_hash().as_byte_array());
-                push_kv(&mut imap, 0x0e, &[], v)?;
-            }
-            // PSBT_IN_OUTPUT_INDEX = 0x0f, value: u32 LE
-            push_kv(
-                &mut imap,
-                0x0f,
-                &[],
-                txin.previous_output.vout.to_le_bytes().to_vec(),
-            )?;
-            // PSBT_IN_SEQUENCE = 0x10, value: u32 LE (include unconditionally)
-            push_kv(&mut imap, 0x10, &[], txin.sequence.0.to_le_bytes().to_vec())?;
-
-            write_map_sorted(&mut out, imap)?;
-        }
-
-        // v2 outputs: copy v0 fields + add {amount, script}
-        for (j, mut omap) in outs_v0.into_iter().enumerate() {
-            let txout = &tx.output[j];
-
-            // PSBT_OUT_AMOUNT = 0x03, value: i64 LE
-            push_kv(
-                &mut omap,
-                0x03,
-                &[],
-                (txout.value.to_sat() as i64).to_le_bytes().to_vec(),
-            )?;
-            // PSBT_OUT_SCRIPT = 0x04, value: scriptPubKey bytes
-            push_kv(
-                &mut omap,
-                0x04,
-                &[],
-                txout.script_pubkey.as_bytes().to_vec(),
-            )?;
-
-            write_map_sorted(&mut out, omap)?;
-        }
-
-        Ok(out)
-    }
-}
-
-pub use convert_v0_to_v2::psbt_v0_to_v2;
-
 #[cfg(test)]
 mod tests {
     use base64::{engine::general_purpose::STANDARD, Engine as _};
+    use bitcoin::psbt::{self, Psbt};
 
     use super::*;
 
-    const TEST_PSBT: &'static str = "cHNidP8BAFUCAAAAAVEiws3mgj5VdUF1uSycV6Co4ayDw44Xh/06H/M0jpUTAQAAAAD9////AXhBDwAAAAAAGXapFBPX1YFmlGw+wCKTQGbYwNER0btBiKwaBB0AAAEA+QIAAAAAAQHsIw5TCVJWBSokKCcO7ASYlEsQ9vHFePQxwj0AmLSuWgEAAAAXFgAUKBU5gg4t6XOuQbpgBLQxySHE2G3+////AnJydQAAAAAAF6kUyLkGrymMcOYDoow+/C+uGearKA+HQEIPAAAAAAAZdqkUy65bUM+Tnm9TG4prer14j+FLApeIrAJHMEQCIDfstCSDYar9T4wR5wXw+npfvc1ZUXL81WQ/OxG+/11AAiACDG0yb2w31jzsra9OszX67ffETgX17x0raBQLAjvRPQEhA9rIL8Cs/Pw2NI1KSKRvAc6nfyuezj+MO0yZ0LCy+ZXShPIcACIGAu6GCCB+IQKEJvaedkR9fj1eB3BJ9eaDwxNsIxR2KkcYGPWswv0sAACAAQAAgAAAAIAAAAAAAAAAAAAA";
+    const TEST_PSBT: &str = "cHNidP8BAFUCAAAAAVEiws3mgj5VdUF1uSycV6Co4ayDw44Xh/06H/M0jpUTAQAAAAD9////AXhBDwAAAAAAGXapFBPX1YFmlGw+wCKTQGbYwNER0btBiKwaBB0AAAEA+QIAAAAAAQHsIw5TCVJWBSokKCcO7ASYlEsQ9vHFePQxwj0AmLSuWgEAAAAXFgAUKBU5gg4t6XOuQbpgBLQxySHE2G3+////AnJydQAAAAAAF6kUyLkGrymMcOYDoow+/C+uGearKA+HQEIPAAAAAAAZdqkUy65bUM+Tnm9TG4prer14j+FLApeIrAJHMEQCIDfstCSDYar9T4wR5wXw+npfvc1ZUXL81WQ/OxG+/11AAiACDG0yb2w31jzsra9OszX67ffETgX17x0raBQLAjvRPQEhA9rIL8Cs/Pw2NI1KSKRvAc6nfyuezj+MO0yZ0LCy+ZXShPIcACIGAu6GCCB+IQKEJvaedkR9fj1eB3BJ9eaDwxNsIxR2KkcYGPWswv0sAACAAQAAgAAAAIAAAAAAAAAAAAAA";
 
     fn psbt_from_str(psbt: &str) -> Result<Psbt, String> {
         let decoded = STANDARD
@@ -1159,7 +817,6 @@ mod tests {
 
     #[test]
     fn test_set_and_get_input_coordinates() {
-        use super::*;
         let mut input = psbt::Input::default();
         let account_id = 0;
         let coords = PsbtAccountCoordinates::WalletPolicy(WalletPolicyCoordinates {
@@ -1175,7 +832,6 @@ mod tests {
 
     #[test]
     fn test_set_and_get_output_coordinates() {
-        use super::*;
         let mut output = psbt::Output::default();
         let account_id = 0;
         let coords = PsbtAccountCoordinates::WalletPolicy(WalletPolicyCoordinates {
@@ -1241,73 +897,5 @@ mod tests {
             ))
         );
         assert_eq!(psbt.outputs[1].get_account_coordinates().unwrap(), None);
-    }
-
-    #[test]
-    fn test_psbt_v0_to_v2() {
-        let psbt_v0 = "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";
-        let psbt_v2 = "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";
-        let psbt_v0_bytes = STANDARD.decode(psbt_v0).unwrap();
-        let psbt_v2_bytes = STANDARD.decode(psbt_v2).unwrap();
-
-        let psbt_v2_converted = psbt_v0_to_v2(&psbt_v0_bytes).unwrap();
-        assert_eq!(psbt_v2_converted, psbt_v2_bytes);
-    }
-
-    #[test]
-    fn test_add_and_get_output_auth_proof() {
-        let mut output = psbt::Output::default();
-        let pubkey = [0x02u8; 33]; // dummy compressed pubkey
-        let sig = [0x11u8; 64]; // dummy Schnorr signature
-        let proof = OutputAuthProof::IdentitySignature { pubkey, sig };
-
-        output.add_auth_proof(&proof).unwrap();
-
-        let proofs = output.get_auth_proofs().unwrap();
-        assert_eq!(proofs.len(), 1);
-        assert_eq!(proofs[0], proof);
-    }
-
-    #[test]
-    fn test_output_auth_multiple_proofs() {
-        let mut output = psbt::Output::default();
-        let pubkey1 = [0x02u8; 33];
-        let sig1 = [0x11u8; 64];
-        let pubkey2 = [0x03u8; 33];
-        let sig2 = [0x22u8; 64];
-
-        output
-            .add_auth_proof(&OutputAuthProof::IdentitySignature {
-                pubkey: pubkey1,
-                sig: sig1,
-            })
-            .unwrap();
-        output
-            .add_auth_proof(&OutputAuthProof::IdentitySignature {
-                pubkey: pubkey2,
-                sig: sig2,
-            })
-            .unwrap();
-
-        let proofs = output.get_auth_proofs().unwrap();
-        assert_eq!(proofs.len(), 2);
-    }
-
-    #[test]
-    fn test_output_auth_malformed_value_skipped() {
-        let mut output = psbt::Output::default();
-        // Manually insert a malformed entry (wrong signature length)
-        let mut key_bytes = Vec::with_capacity(34);
-        key_bytes.push(PSBT_IDAUTH_TAG_IDENTITY);
-        key_bytes.extend_from_slice(&[0x02u8; 33]);
-        let key = ProprietaryKey {
-            prefix: PSBT_IDAUTH_PROPRIETARY_IDENTIFIER.to_vec(),
-            subtype: PSBT_IDAUTH_OUT_SIGNATURE,
-            key: key_bytes,
-        };
-        output.proprietary.insert(key, vec![0x11u8; 32]); // wrong: 32 bytes instead of 64
-
-        let proofs = output.get_auth_proofs().unwrap();
-        assert_eq!(proofs.len(), 0); // malformed entry is skipped
     }
 }
