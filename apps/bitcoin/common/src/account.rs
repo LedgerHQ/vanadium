@@ -131,9 +131,7 @@ impl PartialEq for ProofOfRegistration {
 impl Eq for ProofOfRegistration {}
 
 impl ProofOfRegistration {
-    // TODO: This function should really only be available if compiling inside a Vanadium V-App,
-    //       regardless if natively or for the riscv targets.
-    //       How to gate this properly?
+    #[cfg(any(feature = "target_native", feature = "target_vanadium_ledger"))]
     pub fn new(id: &[u8; 32]) -> Self {
         let por_key = sdk::slip21::derive_slip21_key(&[&POR_MAGIC]);
 
