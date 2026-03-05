@@ -1,8 +1,8 @@
 use std::str::FromStr;
 
 use bitcoin::bip32::DerivationPath;
-use common::account::ProofOfRegistration;
 use common::message::{self, IdentitySignature, PartialSignature, Request, Response};
+use common::por::{ProofOfRegistration, RegistrationId};
 use sdk::vanadium_client::{VAppExecutionError, VAppTransport};
 
 use sdk::comm::SendMessageError;
@@ -228,7 +228,13 @@ impl<'a> BitcoinClient {
         &mut self,
         name: &str,
         account: &message::Account,
-    ) -> Result<([u8; 32], ProofOfRegistration), BitcoinClientError> {
+    ) -> Result<
+        (
+            RegistrationId<common::bip388::WalletPolicy>,
+            ProofOfRegistration<common::bip388::WalletPolicy>,
+        ),
+        BitcoinClientError,
+    > {
         let msg = postcard::to_allocvec(&Request::RegisterAccount {
             name: name.into(),
             account: account.clone(),
@@ -241,9 +247,10 @@ impl<'a> BitcoinClient {
 
         let response_raw = self.send_message(&msg).await?;
         match Self::parse_response(&response_raw).await? {
-            Response::AccountRegistered { account_id, hmac } => {
-                Ok((account_id, ProofOfRegistration::from_bytes(hmac)))
-            }
+            Response::AccountRegistered { account_id, hmac } => Ok((
+                RegistrationId::from_bytes(account_id),
+                ProofOfRegistration::from_bytes(hmac),
+            )),
             e => Err(BitcoinClientError::InvalidResponse(format!(
                 "Invalid response: {:?}",
                 e
@@ -256,7 +263,7 @@ impl<'a> BitcoinClient {
         account: &message::Account,
         name: &str,
         coords: &message::AccountCoordinates,
-        por: Option<&ProofOfRegistration>,
+        por: Option<&ProofOfRegistration<common::bip388::WalletPolicy>>,
         display: bool,
         identity_index: Option<u32>,
     ) -> Result<(String, Option<IdentitySignature>), BitcoinClientError> {

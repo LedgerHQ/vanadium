@@ -1,8 +1,8 @@
 use common::{
-    account::{Account, ProofOfRegistration},
     bip388,
     errors::Error,
     message::Response,
+    por::{ProofOfRegistration, Registerable},
 };
 
 #[cfg(not(any(test, feature = "autoapprove")))]
@@ -79,16 +79,15 @@ pub async fn handle_register_account(
     // TODO:
     // distinguish internal keys (after checking the derivation is correct) and external ones
     // We should also clearly mark any resident key among the internal keys
-    
     if !display_wallet_policy(app, name, &wallet_policy).await {
         return Err(Error::UserRejected);
     }
 
-    let id = wallet_policy.get_id(name);
+    let id = wallet_policy.registration_id(name);
     let por = ProofOfRegistration::new(&id);
 
     Ok(Response::AccountRegistered {
-        account_id: id,
+        account_id: *id.as_bytes(),
         hmac: por.dangerous_as_bytes(),
     })
 }
@@ -97,9 +96,10 @@ pub async fn handle_register_account(
 mod tests {
     use super::*;
     use common::{
-        account::{KeyInformation, ProofOfRegistration},
+        account::KeyInformation,
         bip388,
         message::{self, Response},
+        por::{ProofOfRegistration, Registerable},
     };
 
     fn ki(key_info_str: &str) -> message::PubkeyInfo {
@@ -132,7 +132,7 @@ mod tests {
         });
 
         let wallet_policy: bip388::WalletPolicy = (&account).try_into().unwrap();
-        let expected_account_id = wallet_policy.get_id(account_name);
+        let expected_account_id = wallet_policy.registration_id(account_name);
 
         let resp = sdk::executor::block_on(handle_register_account(
             &mut sdk::App::singleton(),
@@ -143,7 +143,7 @@ mod tests {
         assert_eq!(
             resp,
             Ok(Response::AccountRegistered {
-                account_id: expected_account_id,
+                account_id: *expected_account_id.as_bytes(),
                 // can't really test the hmac here, so we duplicate the app's logic
                 hmac: ProofOfRegistration::new(&expected_account_id).dangerous_as_bytes(),
             })

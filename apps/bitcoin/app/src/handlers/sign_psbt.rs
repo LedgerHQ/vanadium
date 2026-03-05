@@ -6,11 +6,11 @@ use alloc::{
 };
 
 use common::{
-    account::{Account, ProofOfRegistration},
     bip388::{DescriptorTemplate, SegwitVersion},
     errors::Error,
     identity::{build_identity_message, MSG_TYPE_OUTPUT},
     message::{PartialSignature, Response},
+    por::{ProofOfRegistration, Registerable},
     psbt::{
         PsbtAccount, PsbtAccountCoordinates, PsbtAccountGlobalRead, PsbtAccountInputRead,
         PsbtAccountOutputRead, PsbtOutputAuthRead,
@@ -285,7 +285,7 @@ fn analyze_transaction(
 ) -> Result<
     (
         TransactionSummary,
-        Vec<ProofOfRegistration>,
+        Vec<ProofOfRegistration<common::bip388::WalletPolicy>>,
         Vec<ScriptCheck>,
     ),
     Error,
@@ -525,14 +525,14 @@ fn analyze_transaction(
 async fn verify_transaction(
     accounts: &[PsbtAccount],
     account_names: &[Option<String>],
-    account_proofs: &[ProofOfRegistration],
+    account_proofs: &[ProofOfRegistration<common::bip388::WalletPolicy>],
     script_checks: &[ScriptCheck],
 ) -> Result<(), Error> {
     // Verify proof-of-registration for each account
     for (account_id, account) in accounts.iter().enumerate() {
         let PsbtAccount::WalletPolicy(wallet_policy) = account;
         let account_name = account_names[account_id].as_deref().unwrap_or("");
-        let id = wallet_policy.get_id(account_name);
+        let id = wallet_policy.registration_id(account_name);
         if account_proofs[account_id] != ProofOfRegistration::new(&id) {
             return Err(Error::InvalidProofOfRegistration);
         }
@@ -883,8 +883,8 @@ mod tests {
         ).unwrap();
 
         let account_name = "My legacy account #0";
-        let por =
-            ProofOfRegistration::new(&wallet_policy.get_id(account_name)).dangerous_as_bytes();
+        let por = ProofOfRegistration::new(&wallet_policy.registration_id(account_name))
+            .dangerous_as_bytes();
 
         prepare_psbt(&mut psbt, &[(&wallet_policy, account_name, &por)]).unwrap();
 
@@ -916,8 +916,8 @@ mod tests {
             ]
         ).unwrap();
         let account_name = "My segwit account #0";
-        let por =
-            ProofOfRegistration::new(&wallet_policy.get_id(account_name)).dangerous_as_bytes();
+        let por = ProofOfRegistration::new(&wallet_policy.registration_id(account_name))
+            .dangerous_as_bytes();
         prepare_psbt(&mut psbt, &[(&wallet_policy, &account_name, &por)]).unwrap();
 
         let response = sdk::executor::block_on(handle_sign_psbt(
@@ -949,8 +949,8 @@ mod tests {
         ).unwrap();
 
         let account_name = "My taproot account #0";
-        let por =
-            ProofOfRegistration::new(&wallet_policy.get_id(account_name)).dangerous_as_bytes();
+        let por = ProofOfRegistration::new(&wallet_policy.registration_id(account_name))
+            .dangerous_as_bytes();
         prepare_psbt(&mut psbt, &[(&wallet_policy, &account_name, &por)]).unwrap();
 
         let response = sdk::executor::block_on(handle_sign_psbt(
@@ -1001,8 +1001,8 @@ mod tests {
         ).unwrap();
 
         let account_name = "Resident taproot account";
-        let por =
-            ProofOfRegistration::new(&wallet_policy.get_id(account_name)).dangerous_as_bytes();
+        let por = ProofOfRegistration::new(&wallet_policy.registration_id(account_name))
+            .dangerous_as_bytes();
         prepare_psbt(&mut psbt, &[(&wallet_policy, &account_name, &por)]).unwrap();
 
         let response = sdk::executor::block_on(handle_sign_psbt(
