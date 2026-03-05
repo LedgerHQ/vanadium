@@ -102,6 +102,10 @@ pub enum Request {
         display: bool,
         index: u16,
     },
+    RegisterIdentityKey {
+        name: String,
+        pubkey: Vec<u8>,
+    },
 }
 
 // Partial signature for PSBT signing
@@ -132,6 +136,10 @@ pub enum Response {
     },
     PsbtSigned(Vec<PartialSignature>),
     ResidentPubkey(Vec<u8>),
+    IdentityKeyRegistered {
+        key_id: [u8; 32],
+        hmac: [u8; 32],
+    },
     Error(crate::errors::Error),
 }
 

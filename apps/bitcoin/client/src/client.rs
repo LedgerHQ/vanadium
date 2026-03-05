@@ -258,6 +258,40 @@ impl<'a> BitcoinClient {
         }
     }
 
+    pub async fn register_identity_key(
+        &mut self,
+        name: &str,
+        pubkey: &[u8; 33],
+    ) -> Result<
+        (
+            RegistrationId<common::identity::IdentityKey>,
+            ProofOfRegistration<common::identity::IdentityKey>,
+        ),
+        BitcoinClientError,
+    > {
+        let msg = postcard::to_allocvec(&Request::RegisterIdentityKey {
+            name: name.into(),
+            pubkey: pubkey.to_vec(),
+        })
+        .map_err(|_| {
+            BitcoinClientError::GenericError(
+                "Failed to serialize RegisterIdentityKey request".to_string(),
+            )
+        })?;
+
+        let response_raw = self.send_message(&msg).await?;
+        match Self::parse_response(&response_raw).await? {
+            Response::IdentityKeyRegistered { key_id, hmac } => Ok((
+                RegistrationId::from_bytes(key_id),
+                ProofOfRegistration::from_bytes(hmac),
+            )),
+            e => Err(BitcoinClientError::InvalidResponse(format!(
+                "Invalid response: {:?}",
+                e
+            ))),
+        }
+    }
+
     pub async fn get_address(
         &mut self,
         account: &message::Account,

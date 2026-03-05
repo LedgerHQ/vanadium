@@ -62,6 +62,13 @@ enum CliCommand {
         #[clap(long)]
         keys_info: String,
     },
+    RegisterIdentityKey {
+        #[clap(long)]
+        name: String,
+        /// 33-byte compressed secp256k1 public key, hex-encoded
+        #[clap(long)]
+        pubkey: String,
+    },
     GetAddress {
         #[clap(long, default_missing_value = "true", num_args = 0..=1)]
         display: bool,
@@ -329,6 +336,21 @@ async fn handle_cli_command(
                 "Account {} registered.\nAccount ID: {}\nHMAC: {}",
                 name,
                 hex::encode(account_id.as_bytes()),
+                hex::encode(hmac.dangerous_as_bytes())
+            );
+        }
+        CliCommand::RegisterIdentityKey { name, pubkey } => {
+            let pubkey_bytes = hex::decode(pubkey).map_err(|_| "Failed to decode pubkey hex")?;
+            let pubkey_arr: [u8; 33] = pubkey_bytes
+                .try_into()
+                .map_err(|_| "Pubkey must be exactly 33 bytes")?;
+            let (key_id, hmac) = bitcoin_client
+                .register_identity_key(name, &pubkey_arr)
+                .await?;
+            println!(
+                "Identity key '{}' registered.\nKey ID: {}\nHMAC: {}",
+                name,
+                hex::encode(key_id.as_bytes()),
                 hex::encode(hmac.dangerous_as_bytes())
             );
         }

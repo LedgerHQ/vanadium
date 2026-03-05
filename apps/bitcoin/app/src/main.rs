@@ -35,6 +35,9 @@ async fn handle_request(
         Request::RegisterAccount { name, account } => {
             handle_register_account(app, name, account).await
         }
+        Request::RegisterIdentityKey { name, pubkey } => {
+            handle_register_identity_key(app, name, pubkey).await
+        }
         Request::GetAddress {
             name,
             account,

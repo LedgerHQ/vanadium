@@ -1,5 +1,8 @@
 use alloc::vec::Vec;
 
+use crate::por::{Registerable, RegistrationId};
+use sdk::hash::{Hasher, Sha256};
+
 /// The hardened root path component for identity keys: `1229210958'`
 /// 1229210958 is the decimal encoding of the ASCII string "IDEN".
 pub const IDENTITY_ROOT_PATH_COMPONENT: u32 = 1229210958 | 0x8000_0000;
@@ -36,6 +39,54 @@ pub fn is_identity_path(path: &[u32]) -> Option<Option<u32>> {
         [root] if *root == IDENTITY_ROOT_PATH_COMPONENT => Some(None),
         [root, index] if *root == IDENTITY_ROOT_PATH_COMPONENT => Some(Some(*index)),
         _ => None,
+    }
+}
+
+pub(crate) const IDENTITY_KEY_MAGIC: [u8; 13] = *b"\x0CIDENTITY_KEY";
+
+/// A newtype wrapping a 33-byte compressed secp256k1 public key used as an
+/// identity key.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IdentityKey(pub [u8; 33]);
+
+impl IdentityKey {
+    /// Creates a new `IdentityKey` from a 33-byte compressed public key.
+    ///
+    /// Returns `Err` if the first byte is not `0x02` or `0x03`.
+    pub fn new(compressed: [u8; 33]) -> Result<Self, &'static str> {
+        if compressed[0] != 0x02 && compressed[0] != 0x03 {
+            return Err("Invalid compressed key prefix");
+        }
+        Ok(Self(compressed))
+    }
+
+    /// Returns a reference to the 33-byte compressed public key.
+    pub fn as_bytes(&self) -> &[u8; 33] {
+        &self.0
+    }
+
+    /// Returns a unique identifier for the named identity key.
+    ///
+    /// The identifier is the SHA-256 hash of:
+    /// - the magic constant `IDENTITY_KEY_MAGIC`
+    /// - the length of the name (as a single byte)
+    /// - the name itself
+    /// - the 33-byte compressed public key
+    fn get_id(&self, name: &str) -> [u8; 32] {
+        let mut hasher = Sha256::new();
+        hasher.update(&IDENTITY_KEY_MAGIC);
+        hasher.update(&[name.len() as u8]);
+        hasher.update(name.as_bytes());
+        hasher.update(&self.0);
+        hasher.finalize().into()
+    }
+}
+
+impl Registerable for IdentityKey {
+    type Context = str;
+
+    fn registration_id(&self, name: &Self::Context) -> RegistrationId<Self> {
+        RegistrationId::<Self>::from_bytes(self.get_id(name))
     }
 }
 
