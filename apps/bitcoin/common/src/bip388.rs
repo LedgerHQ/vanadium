@@ -22,6 +22,43 @@ use bitcoin::{
 const HARDENED_INDEX: u32 = 0x80000000u32;
 const MAX_OLDER_AFTER: u32 = 2147483647; // maximum allowed in older/after
 
+/// Error type for descriptor template / wallet policy parsing and serialization.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ParseError {
+    /// Input string was empty when content was expected.
+    EmptyInput,
+    /// Parsing succeeded but left unconsumed input.
+    TrailingInput,
+    /// A required syntactic token was missing or unexpected.
+    InvalidSyntax,
+    /// Hex-encoded data was not valid hex.
+    InvalidHex,
+    /// A key, xpub, fingerprint, hash, or compressed-key byte was invalid.
+    InvalidKey,
+    /// A numeric literal was out of range or had illegal leading zeros.
+    NumberOutOfRange,
+    /// A data field was the wrong length.
+    InvalidLength,
+    /// An unrecognized descriptor fragment keyword was encountered.
+    UnrecognizedFragment,
+    /// A multisig/sortedmulti fragment had fewer than 2 key placeholders.
+    TooFewKeyPlaceholders,
+    /// The threshold `k` in `thresh(k, ...)` exceeds the number of sub-scripts.
+    ThreshExceedsScripts,
+    /// A key placeholder index was out of range for the key-information list.
+    InvalidKeyIndex,
+    /// The top-level descriptor type is not supported.
+    InvalidTopLevelPolicy,
+    /// Writing a descriptor to a `String` buffer failed.
+    FormatError,
+    /// `sh`/`wsh`/`wpkh` used in a position that is not allowed by the spec.
+    InvalidScriptContext,
+    /// Too many keys for a multisig fragment.
+    TooManyKeys,
+    /// Invalid multisig quorum (threshold).
+    InvalidMultisigQuorum,
+}
+
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub struct KeyOrigin {
     pub fingerprint: u32,
@@ -278,23 +315,22 @@ impl core::fmt::Display for KeyOrigin {
 }
 
 impl core::convert::TryFrom<&str> for KeyOrigin {
-    type Error = &'static str;
+    type Error = ParseError;
 
     fn try_from(s: &str) -> Result<Self, Self::Error> {
         // parse a string in the form "76223a6e/48'/1'/0'/1'"
         // the key origin info between [] is optional and might not be present
         if s.is_empty() {
-            return Err("Empty string");
+            return Err(ParseError::EmptyInput);
         }
         let parts: Vec<&str> = s.split('/').collect();
         if parts[0].len() != 8 {
-            return Err("Invalid fingerprint length");
+            return Err(ParseError::InvalidLength);
         }
-        let fingerprint =
-            u32::from_str_radix(parts[0], 16).map_err(|_| "Failed to parse fingerprint")?;
+        let fingerprint = u32::from_str_radix(parts[0], 16).map_err(|_| ParseError::InvalidKey)?;
         let derivation_path = parts[1..]
             .iter()
-            .map(|x| ChildNumber::from_str(x).map_err(|_| "Failed to parse derivation step"))
+            .map(|x| ChildNumber::from_str(x).map_err(|_| ParseError::InvalidKey))
             .collect::<Result<Vec<ChildNumber>, Self::Error>>()?;
         Ok(KeyOrigin {
             fingerprint,
@@ -313,19 +349,19 @@ impl core::fmt::Display for KeyInformation {
 }
 
 impl TryFrom<&str> for KeyInformation {
-    type Error = &'static str;
+    type Error = ParseError;
 
     fn try_from(s: &str) -> Result<Self, Self::Error> {
         if s.is_empty() {
-            return Err("Empty string");
+            return Err(ParseError::EmptyInput);
         }
         let (origin_info, pubkey_pos) = if s.starts_with('[') {
-            let end = s.find(']').ok_or("Failed to parse xpub")?;
+            let end = s.find(']').ok_or(ParseError::InvalidKey)?;
             (Some(KeyOrigin::try_from(&s[1..end])?), end + 1)
         } else {
             (None, 0)
         };
-        let pubkey = Xpub::from_str(&s[pubkey_pos..]).map_err(|_| "Failed to parse xpub")?;
+        let pubkey = Xpub::from_str(&s[pubkey_pos..]).map_err(|_| ParseError::InvalidKey)?;
         Ok(KeyInformation {
             pubkey,
             origin_info,
@@ -339,39 +375,41 @@ pub trait ToDescriptor {
         key_information: &[KeyInformation],
         is_change: bool,
         address_index: u32,
-    ) -> Result<String, &'static str>;
+    ) -> Result<String, ParseError>;
 }
 
 // Return type for all hand-rolled parser functions: (remaining_input, parsed_value)
-type ParseResult<'a, T> = Result<(&'a str, T), &'static str>;
+type ParseResult<'a, T> = Result<(&'a str, T), ParseError>;
 
 // Parses a decimal u32 (no leading zeros unless "0"), value <= max.
 fn parse_number_up_to(input: &str, max: u32) -> ParseResult<'_, u32> {
     if input.is_empty() || !input.starts_with(|c: char| c.is_ascii_digit()) {
-        return Err("expected digit");
+        return Err(ParseError::InvalidSyntax);
     }
     // reject leading zeros on multi-digit numbers
     if input.starts_with('0') && input.len() > 1 && input.as_bytes()[1].is_ascii_digit() {
-        return Err("leading zeros not allowed");
+        return Err(ParseError::NumberOutOfRange);
     }
     let end = input
         .bytes()
         .position(|b| !b.is_ascii_digit())
         .unwrap_or(input.len());
-    let num: u32 = input[..end].parse().map_err(|_| "number out of range")?;
+    let num: u32 = input[..end]
+        .parse()
+        .map_err(|_| ParseError::NumberOutOfRange)?;
     if num > max {
-        return Err("number exceeds maximum");
+        return Err(ParseError::NumberOutOfRange);
     }
     Ok((&input[end..], num))
 }
 
 // Entry-point: parse a complete descriptor template string.
-fn parse_descriptor_template(input: &str) -> Result<DescriptorTemplate, &'static str> {
+fn parse_descriptor_template(input: &str) -> Result<DescriptorTemplate, ParseError> {
     let (rest, descriptor) = parse_descriptor(input)?;
     if rest.is_empty() {
         Ok(descriptor)
     } else {
-        Err("Failed to parse descriptor template: extra input remaining")
+        Err(ParseError::TrailingInput)
     }
 }
 
@@ -388,11 +426,11 @@ fn parse_derivation_step_number(input: &str) -> ParseResult<'_, u32> {
 // Parses a key placeholder: @N/** or @N/<num1;num2>/*
 fn parse_key_placeholder(input: &str) -> ParseResult<'_, KeyPlaceholder> {
     if !input.starts_with('@') {
-        return Err("expected '@'");
+        return Err(ParseError::InvalidSyntax);
     }
     let (rest, key_index) = parse_number_up_to(&input[1..], u32::MAX)?;
     if !rest.starts_with('/') {
-        return Err("expected '/'");
+        return Err(ParseError::InvalidSyntax);
     }
     let rest = &rest[1..];
 
@@ -402,15 +440,15 @@ fn parse_key_placeholder(input: &str) -> ParseResult<'_, KeyPlaceholder> {
         let rest = &rest[1..];
         let (rest, num1) = parse_derivation_step_number(rest)?;
         if !rest.starts_with(';') {
-            return Err("expected ';'");
+            return Err(ParseError::InvalidSyntax);
         }
         let (rest, num2) = parse_derivation_step_number(&rest[1..])?;
         if !rest.starts_with(">/*") {
-            return Err("expected '>/*'");
+            return Err(ParseError::InvalidSyntax);
         }
         (&rest[3..], (num1, num2))
     } else {
-        return Err("expected '**' or '<num;num>/*'");
+        return Err(ParseError::InvalidSyntax);
     };
 
     Ok((
@@ -454,7 +492,7 @@ fn parse_descriptor(input: &str) -> ParseResult<'_, DescriptorTemplate> {
             'n' => DescriptorTemplate::N(Box::new(result)),
             'l' => DescriptorTemplate::L(Box::new(result)),
             'u' => DescriptorTemplate::U(Box::new(result)),
-            _ => return Err("invalid wrapper character"),
+            _ => return Err(ParseError::InvalidSyntax),
         };
     }
     Ok((input, result))
@@ -587,7 +625,7 @@ fn parse_inner_descriptor(input: &str) -> ParseResult<'_, DescriptorTemplate> {
     if input.starts_with('1') {
         return Ok((&input[1..], DescriptorTemplate::One));
     }
-    Err("unrecognized descriptor fragment")
+    Err(ParseError::UnrecognizedFragment)
 }
 
 // Parses a named fragment that wraps a single key placeholder: name(@...)
@@ -599,7 +637,7 @@ fn parse_kp_fragment<'a>(
     let rest = &input[name.len()..]; // caller already checked starts_with(name)
     let (rest, kp) = parse_key_placeholder(&rest[1..])?; // skip '('
     if !rest.starts_with(')') {
-        return Err("expected ')'");
+        return Err(ParseError::InvalidSyntax);
     }
     Ok((&rest[1..], constructor(kp)))
 }
@@ -614,7 +652,7 @@ fn parse_num_fragment<'a>(
     let rest = &input[name.len()..]; // caller already checked starts_with(name)
     let (rest, num) = parse_number_up_to(&rest[1..], max)?; // skip '('
     if !rest.starts_with(')') {
-        return Err("expected ')'");
+        return Err(ParseError::InvalidSyntax);
     }
     Ok((&rest[1..], constructor(num)))
 }
@@ -627,12 +665,12 @@ fn parse_hex20_fragment<'a>(
 ) -> ParseResult<'a, DescriptorTemplate> {
     let rest = &input[name.len() + 1..]; // skip name and '('
     if rest.len() < 40 {
-        return Err("not enough hex chars");
+        return Err(ParseError::InvalidLength);
     }
-    let bytes = <[u8; 20]>::from_hex(&rest[..40]).map_err(|_| "invalid hex")?;
+    let bytes = <[u8; 20]>::from_hex(&rest[..40]).map_err(|_| ParseError::InvalidHex)?;
     let rest = &rest[40..];
     if !rest.starts_with(')') {
-        return Err("expected ')'");
+        return Err(ParseError::InvalidSyntax);
     }
     Ok((&rest[1..], constructor(bytes)))
 }
@@ -645,12 +683,12 @@ fn parse_hex32_fragment<'a>(
 ) -> ParseResult<'a, DescriptorTemplate> {
     let rest = &input[name.len() + 1..]; // skip name and '('
     if rest.len() < 64 {
-        return Err("not enough hex chars");
+        return Err(ParseError::InvalidLength);
     }
-    let bytes = <[u8; 32]>::from_hex(&rest[..64]).map_err(|_| "invalid hex")?;
+    let bytes = <[u8; 32]>::from_hex(&rest[..64]).map_err(|_| ParseError::InvalidHex)?;
     let rest = &rest[64..];
     if !rest.starts_with(')') {
-        return Err("expected ')'");
+        return Err(ParseError::InvalidSyntax);
     }
     Ok((&rest[1..], constructor(bytes)))
 }
@@ -680,10 +718,10 @@ fn parse_threshold_kp_fragment<'a>(
         }
     }
     if keys.len() < 2 {
-        return Err("expected at least 2 key placeholders");
+        return Err(ParseError::TooFewKeyPlaceholders);
     }
     if !rest.starts_with(')') {
-        return Err("expected ')'");
+        return Err(ParseError::InvalidSyntax);
     }
     Ok((&rest[1..], constructor(threshold, keys)))
 }
@@ -699,13 +737,13 @@ fn parse_n_subscripts(input: &str, n: usize) -> ParseResult<'_, Vec<DescriptorTe
         rest = r;
         if i + 1 < n {
             if !rest.starts_with(',') {
-                return Err("expected ','");
+                return Err(ParseError::InvalidSyntax);
             }
             rest = &rest[1..];
         }
     }
     if !rest.starts_with(')') {
-        return Err("expected ')'");
+        return Err(ParseError::InvalidSyntax);
     }
     Ok((&rest[1..], scripts))
 }
@@ -713,7 +751,7 @@ fn parse_n_subscripts(input: &str, n: usize) -> ParseResult<'_, Vec<DescriptorTe
 #[cfg(test)]
 fn parse_wsh(input: &str) -> ParseResult<'_, DescriptorTemplate> {
     if !input.starts_with("wsh(") {
-        return Err("expected 'wsh('");
+        return Err(ParseError::InvalidSyntax);
     }
     let (rest, scripts) = parse_n_subscripts(&input[4..], 1)?;
     Ok((
@@ -731,7 +769,7 @@ fn parse_thresh(input: &str) -> ParseResult<'_, DescriptorTemplate> {
     // input starts with "thresh("
     let (rest, k) = parse_number_up_to(&input[7..], u32::MAX)?;
     if !rest.starts_with(',') {
-        return Err("expected ',' after threshold");
+        return Err(ParseError::InvalidSyntax);
     }
     // parse first script (mandatory)
     let (rest, first) = parse_descriptor(&rest[1..])?;
@@ -750,10 +788,10 @@ fn parse_thresh(input: &str) -> ParseResult<'_, DescriptorTemplate> {
         }
     }
     if (k as usize) > scripts.len() {
-        return Err("thresh: k exceeds number of sub-scripts");
+        return Err(ParseError::ThreshExceedsScripts);
     }
     if !rest.starts_with(')') {
-        return Err("expected ')'");
+        return Err(ParseError::InvalidSyntax);
     }
     Ok((&rest[1..], DescriptorTemplate::Thresh(k, scripts)))
 }
@@ -768,7 +806,7 @@ fn parse_tr(input: &str) -> ParseResult<'_, DescriptorTemplate> {
         (rest, None)
     };
     if !rest.starts_with(')') {
-        return Err("expected ')'");
+        return Err(ParseError::InvalidSyntax);
     }
     Ok((&rest[1..], DescriptorTemplate::Tr(key_placeholder, tree)))
 }
@@ -777,11 +815,11 @@ fn parse_tap_tree(input: &str) -> ParseResult<'_, TapTree> {
     if input.starts_with('{') {
         let (rest, left) = parse_tap_tree(&input[1..])?;
         if !rest.starts_with(',') {
-            return Err("expected ','");
+            return Err(ParseError::InvalidSyntax);
         }
         let (rest, right) = parse_tap_tree(&rest[1..])?;
         if !rest.starts_with('}') {
-            return Err("expected '}'");
+            return Err(ParseError::InvalidSyntax);
         }
         Ok((&rest[1..], TapTree::Branch(Box::new(left), Box::new(right))))
     } else {
@@ -791,7 +829,7 @@ fn parse_tap_tree(input: &str) -> ParseResult<'_, TapTree> {
 }
 
 impl FromStr for DescriptorTemplate {
-    type Err = &'static str;
+    type Err = ParseError;
 
     fn from_str(input: &str) -> Result<Self, Self::Err> {
         parse_descriptor_template(input)
@@ -823,9 +861,8 @@ impl WalletPolicy {
     pub fn new(
         descriptor_template_str: &str,
         key_information: Vec<KeyInformation>,
-    ) -> Result<Self, &'static str> {
-        let descriptor_template = DescriptorTemplate::from_str(descriptor_template_str)
-            .map_err(|_| "Failed to parse descriptor template")?;
+    ) -> Result<Self, ParseError> {
+        let descriptor_template = DescriptorTemplate::from_str(descriptor_template_str)?;
 
         Ok(Self {
             descriptor_template,
@@ -938,7 +975,7 @@ impl WalletPolicy {
         )
     }
 
-    pub fn get_segwit_version(&self) -> Result<SegwitVersion, &'static str> {
+    pub fn get_segwit_version(&self) -> Result<SegwitVersion, ParseError> {
         match &self.descriptor_template {
             DescriptorTemplate::Tr(_, _) => Ok(SegwitVersion::Taproot),
             DescriptorTemplate::Pkh(_) => Ok(SegwitVersion::Legacy),
@@ -949,7 +986,7 @@ impl WalletPolicy {
                 }
                 _ => Ok(SegwitVersion::Legacy),
             },
-            _ => Err("Invalid top-level policy"),
+            _ => Err(ParseError::InvalidTopLevelPolicy),
         }
     }
 
@@ -1026,13 +1063,13 @@ fn write_key_placeholder(
     kp: &KeyPlaceholder,
     is_change: bool,
     address_index: u32,
-) -> Result<(), &'static str> {
+) -> Result<(), ParseError> {
     use core::fmt::Write;
     let key_info = key_information
         .get(kp.key_index as usize)
-        .ok_or("Invalid key index")?;
+        .ok_or(ParseError::InvalidKeyIndex)?;
     let change_step = if is_change { kp.num2 } else { kp.num1 };
-    write!(w, "{}/{}/{}", key_info, change_step, address_index).map_err(|_| "Format error")
+    write!(w, "{}/{}/{}", key_info, change_step, address_index).map_err(|_| ParseError::FormatError)
 }
 
 // Writes a comma-separated list of key placeholders to a buffer.
@@ -1042,7 +1079,7 @@ fn write_key_placeholders(
     kps: &[KeyPlaceholder],
     is_change: bool,
     address_index: u32,
-) -> Result<(), &'static str> {
+) -> Result<(), ParseError> {
     for (i, kp) in kps.iter().enumerate() {
         if i > 0 {
             w.push(',');
@@ -1060,7 +1097,7 @@ fn write_wrapper(
     key_information: &[KeyInformation],
     is_change: bool,
     address_index: u32,
-) -> Result<(), &'static str> {
+) -> Result<(), ParseError> {
     w.push_str(name);
     if !inner.is_wrapper() {
         w.push(':');
@@ -1075,7 +1112,7 @@ impl TapTree {
         key_information: &[KeyInformation],
         is_change: bool,
         address_index: u32,
-    ) -> Result<(), &'static str> {
+    ) -> Result<(), ParseError> {
         match self {
             TapTree::Script(desc) => desc.write_to(w, key_information, is_change, address_index),
             TapTree::Branch(left, right) => {
@@ -1097,7 +1134,7 @@ impl DescriptorTemplate {
         key_information: &[KeyInformation],
         is_change: bool,
         address_index: u32,
-    ) -> Result<(), &'static str> {
+    ) -> Result<(), ParseError> {
         use core::fmt::Write;
 
         match self {
@@ -1122,12 +1159,12 @@ impl DescriptorTemplate {
                 w.push(')');
             }
             DescriptorTemplate::Sortedmulti(threshold, kps) => {
-                write!(w, "sortedmulti({}, ", threshold).map_err(|_| "Format error")?;
+                write!(w, "sortedmulti({}, ", threshold).map_err(|_| ParseError::FormatError)?;
                 write_key_placeholders(w, key_information, kps, is_change, address_index)?;
                 w.push(')');
             }
             DescriptorTemplate::Sortedmulti_a(threshold, kps) => {
-                write!(w, "sortedmulti_a({}, ", threshold).map_err(|_| "Format error")?;
+                write!(w, "sortedmulti_a({}, ", threshold).map_err(|_| ParseError::FormatError)?;
                 write_key_placeholders(w, key_information, kps, is_change, address_index)?;
                 w.push(')');
             }
@@ -1158,10 +1195,10 @@ impl DescriptorTemplate {
                 w.push(')');
             }
             DescriptorTemplate::Older(n) => {
-                write!(w, "older({})", n).map_err(|_| "Format error")?;
+                write!(w, "older({})", n).map_err(|_| ParseError::FormatError)?;
             }
             DescriptorTemplate::After(n) => {
-                write!(w, "after({})", n).map_err(|_| "Format error")?;
+                write!(w, "after({})", n).map_err(|_| ParseError::FormatError)?;
             }
             DescriptorTemplate::Sha256(hash) => {
                 w.push_str("sha256(");
@@ -1242,7 +1279,7 @@ impl DescriptorTemplate {
                 w.push(')');
             }
             DescriptorTemplate::Thresh(k, sub_templates) => {
-                write!(w, "thresh({},[", k).map_err(|_| "Format error")?;
+                write!(w, "thresh({},[", k).map_err(|_| ParseError::FormatError)?;
                 for (i, template) in sub_templates.iter().enumerate() {
                     if i > 0 {
                         w.push(',');
@@ -1252,12 +1289,12 @@ impl DescriptorTemplate {
                 w.push_str("])");
             }
             DescriptorTemplate::Multi(threshold, kps) => {
-                write!(w, "multi({}, ", threshold).map_err(|_| "Format error")?;
+                write!(w, "multi({}, ", threshold).map_err(|_| ParseError::FormatError)?;
                 write_key_placeholders(w, key_information, kps, is_change, address_index)?;
                 w.push(')');
             }
             DescriptorTemplate::Multi_a(threshold, kps) => {
-                write!(w, "multi_a({}, ", threshold).map_err(|_| "Format error")?;
+                write!(w, "multi_a({}, ", threshold).map_err(|_| ParseError::FormatError)?;
                 write_key_placeholders(w, key_information, kps, is_change, address_index)?;
                 w.push(')');
             }
@@ -1302,7 +1339,7 @@ impl ToDescriptor for TapTree {
         key_information: &[KeyInformation],
         is_change: bool,
         address_index: u32,
-    ) -> Result<String, &'static str> {
+    ) -> Result<String, ParseError> {
         let mut result = String::new();
         self.write_to(&mut result, key_information, is_change, address_index)?;
         Ok(result)
@@ -1315,7 +1352,7 @@ impl ToDescriptor for DescriptorTemplate {
         key_information: &[KeyInformation],
         is_change: bool,
         address_index: u32,
-    ) -> Result<String, &'static str> {
+    ) -> Result<String, ParseError> {
         let mut result = String::new();
         self.write_to(&mut result, key_information, is_change, address_index)?;
         Ok(result)

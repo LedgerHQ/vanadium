@@ -54,9 +54,9 @@ impl IdentityKey {
     /// Creates a new `IdentityKey` from a 33-byte compressed public key.
     ///
     /// Returns `Err` if the first byte is not `0x02` or `0x03`.
-    pub fn new(compressed: [u8; 33]) -> Result<Self, &'static str> {
+    pub fn new(compressed: [u8; 33]) -> Result<Self, Error> {
         if compressed[0] != 0x02 && compressed[0] != 0x03 {
-            return Err("Invalid compressed key prefix");
+            return Err(Error::InvalidKey);
         }
         Ok(Self(compressed))
     }

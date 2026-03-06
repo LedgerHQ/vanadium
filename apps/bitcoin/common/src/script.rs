@@ -7,6 +7,7 @@ use bitcoin::opcodes::{all::*, OP_0};
 use bitcoin::script::Builder;
 use bitcoin::{PubkeyHash, ScriptBuf, ScriptHash, TapNodeHash, WPubkeyHash, WScriptHash};
 
+use crate::errors::Error;
 use crate::taproot::GetTapTreeHash;
 
 // Simple generic bubble sort implementation for Vec<[u8; N]>.
@@ -41,7 +42,7 @@ const MAX_PUBKEYS_PER_MULTISIG: usize = 20;
 const MAX_PUBKEYS_PER_MULTI_A: usize = 999;
 
 pub trait ToScript {
-    fn to_script(&self, is_change: bool, address_index: u32) -> Result<ScriptBuf, &'static str>;
+    fn to_script(&self, is_change: bool, address_index: u32) -> Result<ScriptBuf, Error>;
 }
 
 pub trait ToScriptWithKeyInfo {
@@ -51,7 +52,7 @@ pub trait ToScriptWithKeyInfo {
         is_change: bool,
         address_index: u32,
         ctx: ScriptContext,
-    ) -> Result<ScriptBuf, &'static str>;
+    ) -> Result<ScriptBuf, Error>;
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
@@ -71,7 +72,7 @@ trait ToScriptWithKeyInfoInner {
         address_index: u32,
         builder: Builder,
         ctx: ScriptContext,
-    ) -> Result<Builder, &'static str>;
+    ) -> Result<Builder, Error>;
 }
 
 trait CanPushInnerScript {
@@ -82,7 +83,7 @@ trait CanPushInnerScript {
         is_change: bool,
         address_index: u32,
         ctx: ScriptContext,
-    ) -> Result<Builder, &'static str>;
+    ) -> Result<Builder, Error>;
 }
 
 impl CanPushInnerScript for Builder {
@@ -93,7 +94,7 @@ impl CanPushInnerScript for Builder {
         is_change: bool,
         address_index: u32,
         ctx: ScriptContext,
-    ) -> Result<Builder, &'static str> {
+    ) -> Result<Builder, Error> {
         desc.to_script_inner(key_information, is_change, address_index, self, ctx)
     }
 }
@@ -106,26 +107,26 @@ impl ToScriptWithKeyInfoInner for DescriptorTemplate {
         address_index: u32,
         mut builder: Builder,
         ctx: ScriptContext,
-    ) -> Result<Builder, &'static str> {
-        let derive = |kp: &KeyPlaceholder| -> Result<Xpub, &'static str> {
+    ) -> Result<Builder, Error> {
+        let derive = |kp: &KeyPlaceholder| -> Result<Xpub, Error> {
             let change_step = ChildNumber::from(if is_change { kp.num2 } else { kp.num1 });
 
             let key_info = key_information
                 .get(kp.key_index as usize)
-                .ok_or("Invalid key index")?;
+                .ok_or(Error::InvalidKeyIndex)?;
 
             let root_pubkey = &key_info.pubkey;
 
             let secp = bitcoin::secp256k1::Secp256k1::new();
             root_pubkey
                 .derive_pub(&secp, &vec![change_step, ChildNumber::from(address_index)])
-                .map_err(|_| "Failed to produce derived key")
+                .map_err(|_| Error::InvalidKey)
         };
 
         builder = match self {
             DescriptorTemplate::Sh(inner) => {
                 if ctx != ScriptContext::None && ctx != ScriptContext::Wsh {
-                    return Err("sh can only be used top-level or inside wsh");
+                    return Err(Error::InvalidScriptContext);
                 }
 
                 let mut inner_builder = Builder::new();
@@ -147,7 +148,7 @@ impl ToScriptWithKeyInfoInner for DescriptorTemplate {
             }
             DescriptorTemplate::Wsh(inner) => {
                 if ctx != ScriptContext::None {
-                    return Err("wsh can only be used top-level");
+                    return Err(Error::InvalidScriptContext);
                 }
 
                 let mut inner_builder = Builder::new();
@@ -181,7 +182,7 @@ impl ToScriptWithKeyInfoInner for DescriptorTemplate {
             }
             DescriptorTemplate::Wpkh(kp) => {
                 if ctx != ScriptContext::None && ctx != ScriptContext::Sh {
-                    return Err("wpkh can only be used top-level or inside sh");
+                    return Err(Error::InvalidScriptContext);
                 }
 
                 let pubkey = derive(kp)?.public_key.serialize();
@@ -190,14 +191,14 @@ impl ToScriptWithKeyInfoInner for DescriptorTemplate {
             }
             DescriptorTemplate::Sortedmulti(k, kps) | DescriptorTemplate::Multi(k, kps) => {
                 if ctx == ScriptContext::Tr {
-                    return Err("multi and sortedmulti are not valid on taproot");
+                    return Err(Error::InvalidScriptContext);
                 }
 
                 if kps.len() > MAX_PUBKEYS_PER_MULTISIG {
-                    return Err("Too many keys for multisig");
+                    return Err(Error::TooManyKeys);
                 }
                 if *k == 0 || (*k as usize) > kps.len() {
-                    return Err("Invalig multisig quorum");
+                    return Err(Error::InvalidMultisigQuorum);
                 }
 
                 builder = builder.push_int(*k as i64);
@@ -209,7 +210,7 @@ impl ToScriptWithKeyInfoInner for DescriptorTemplate {
                         derived_key_result
                             .map(|extended_pub_key| extended_pub_key.to_pub().to_bytes())
                     })
-                    .collect::<Result<Vec<[u8; 33]>, &'static str>>()?;
+                    .collect::<Result<Vec<[u8; 33]>, Error>>()?;
 
                 if matches!(self, DescriptorTemplate::Sortedmulti(_, _)) {
                     // O(n^2) sorting, better for small arrays
@@ -226,14 +227,14 @@ impl ToScriptWithKeyInfoInner for DescriptorTemplate {
             }
             DescriptorTemplate::Sortedmulti_a(k, kps) | DescriptorTemplate::Multi_a(k, kps) => {
                 if ctx != ScriptContext::Tr {
-                    return Err("multi_a and sortedmulti_a are only valid on taproot");
+                    return Err(Error::InvalidScriptContext);
                 }
 
                 if kps.len() > MAX_PUBKEYS_PER_MULTI_A {
-                    return Err("Too many keys for multisig");
+                    return Err(Error::TooManyKeys);
                 }
                 if *k == 0 || (*k as usize) > kps.len() {
-                    return Err("Invalig multisig quorum");
+                    return Err(Error::InvalidMultisigQuorum);
                 }
 
                 let mut keys = kps
@@ -248,7 +249,7 @@ impl ToScriptWithKeyInfoInner for DescriptorTemplate {
                                 .serialize()
                         })
                     })
-                    .collect::<Result<Vec<[u8; 32]>, &'static str>>()?;
+                    .collect::<Result<Vec<[u8; 32]>, Error>>()?;
 
                 if matches!(self, DescriptorTemplate::Sortedmulti_a(_, _)) {
                     // O(n^2) sorting, better for small arrays
@@ -276,7 +277,7 @@ impl ToScriptWithKeyInfoInner for DescriptorTemplate {
                     .map(|t| {
                         t.get_taptree_hash(key_information, is_change, address_index)
                             .map(|t| TapNodeHash::from_byte_array(t))
-                            .map_err(|_| "Failed to compute taptree hash")
+                            .map_err(|_| Error::InvalidKey)
                     })
                     .transpose()?;
 
@@ -464,7 +465,7 @@ impl ToScriptWithKeyInfo for DescriptorTemplate {
         is_change: bool,
         address_index: u32,
         ctx: ScriptContext,
-    ) -> Result<ScriptBuf, &'static str> {
+    ) -> Result<ScriptBuf, Error> {
         let builder = Builder::new();
         Ok(self
             .to_script_inner(key_information, is_change, address_index, builder, ctx)?
@@ -474,7 +475,7 @@ impl ToScriptWithKeyInfo for DescriptorTemplate {
 }
 
 impl ToScript for WalletPolicy {
-    fn to_script(&self, is_change: bool, address_index: u32) -> Result<ScriptBuf, &'static str> {
+    fn to_script(&self, is_change: bool, address_index: u32) -> Result<ScriptBuf, Error> {
         self.descriptor_template.to_script(
             &self.key_information,
             is_change,

@@ -237,7 +237,9 @@ fn prepare_prompt_for_clap(line: &str) -> Result<Vec<String>, String> {
 }
 
 // parse the keys_info arg in the format "key_info1, key_info2, ..."
-fn parse_keys_info(keys_info: &str) -> Result<Vec<common::bip388::KeyInformation>, &'static str> {
+fn parse_keys_info(
+    keys_info: &str,
+) -> Result<Vec<common::bip388::KeyInformation>, common::bip388::ParseError> {
     let keys_info = keys_info
         .split(',')
         .map(|ki| ki.trim()) // tolerate extra spaces
@@ -250,7 +252,7 @@ fn parse_keys_info(keys_info: &str) -> Result<Vec<common::bip388::KeyInformation
 fn parse_wallet_policy(
     descriptor_template: &str,
     keys_info: &str,
-) -> Result<common::message::WalletPolicy, &'static str> {
+) -> Result<common::message::WalletPolicy, common::bip388::ParseError> {
     let keys_info = parse_keys_info(keys_info)?;
     let wallet_policy_msg = common::message::WalletPolicy {
         template: descriptor_template.to_string(),

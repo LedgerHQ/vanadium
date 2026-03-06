@@ -27,7 +27,8 @@ pub fn parse_keys_info(
         .split(',')
         .map(|ki| ki.trim()) // tolerate extra spaces
         .map(|ki| common::bip388::KeyInformation::try_from(ki))
-        .collect::<Result<Vec<_>, _>>()?;
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| "failed to parse key information")?;
 
     Ok(keys_info)
 }
