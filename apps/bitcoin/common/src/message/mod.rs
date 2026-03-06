@@ -68,6 +68,17 @@ pub struct IdentitySignature {
     pub signature: Vec<u8>,
 }
 
+/// An identity key registration entry used to authenticate cosigner xpubs during
+/// account registration.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct RegisteredIdentityEntry {
+    /// 33-byte compressed secp256k1 public key of the identity key.
+    pub pubkey: Vec<u8>,
+    pub name: String,
+    /// 32-byte proof-of-registration HMAC for this identity key.
+    pub por: Vec<u8>,
+}
+
 // Request types
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub enum Request {
@@ -84,6 +95,12 @@ pub enum Request {
     RegisterAccount {
         name: String,
         account: Account,
+        /// Optional list of registered identity keys (with their proofs of registration)
+        /// used to authenticate cosigner xpubs.
+        registered_identities: Option<Vec<RegisteredIdentityEntry>>,
+        /// Optional per-key Schnorr signatures over the cosigner xpubs.
+        /// `key_signatures[i]` covers `keys_info[i]`; `None` means unsigned.
+        key_signatures: Option<Vec<Option<IdentitySignature>>>,
     },
     GetAddress {
         display: bool,

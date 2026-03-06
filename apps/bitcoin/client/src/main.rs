@@ -329,9 +329,13 @@ async fn handle_cli_command(
                 name, descriptor_template, keys_info
             );
 
+            // TODO: passing registered identities and key signatures is not yet supported in the CLI
+
             let wallet_policy_msg = parse_wallet_policy(descriptor_template, keys_info)?;
             let account = common::message::Account::WalletPolicy(wallet_policy_msg);
-            let (account_id, hmac) = bitcoin_client.register_account(name, &account).await?;
+            let (account_id, hmac) = bitcoin_client
+                .register_account(name, &account, None, None)
+                .await?;
             println!(
                 "Account {} registered.\nAccount ID: {}\nHMAC: {}",
                 name,

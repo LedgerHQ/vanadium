@@ -1,10 +1,6 @@
 use alloc::{format, vec::Vec};
 
-use common::{
-    errors::Error,
-    identity,
-    message::{IdentitySignature, Response},
-};
+use common::{errors::Error, identity, message::Response};
 use sdk::{
     curve::{Curve, EcfpPrivateKey, EcfpPublicKey, Secp256k1, ToPublicKey},
     hash::{Hasher, Ripemd160, Sha256},

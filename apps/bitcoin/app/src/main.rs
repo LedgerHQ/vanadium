@@ -32,8 +32,20 @@ async fn handle_request(
         Request::GetResidentPubkey { index, display } => {
             handle_get_resident_pubkey(app, *index, *display).await
         }
-        Request::RegisterAccount { name, account } => {
-            handle_register_account(app, name, account).await
+        Request::RegisterAccount {
+            name,
+            account,
+            registered_identities,
+            key_signatures,
+        } => {
+            handle_register_account(
+                app,
+                name,
+                account,
+                registered_identities.as_deref(),
+                key_signatures.as_deref(),
+            )
+            .await
         }
         Request::RegisterIdentityKey { name, pubkey } => {
             handle_register_identity_key(app, name, pubkey).await
