@@ -111,11 +111,11 @@ pub trait PsbtOutputAuthRead: OutputHasProprietaryFields {
             }
             // key must be: [auth_tag (1 byte), pubkey (33 bytes)]
             if entry.key.len() != 34 {
-                continue;
+                return Err(PsbtIdAuthError::MalformedEntry);
             }
             let auth_tag = entry.key[0];
             if entry.value.len() != 64 {
-                continue; // malformed — skip
+                return Err(PsbtIdAuthError::MalformedEntry);
             }
             match auth_tag {
                 PSBT_IDAUTH_TAG_IDENTITY => {
@@ -125,7 +125,7 @@ pub trait PsbtOutputAuthRead: OutputHasProprietaryFields {
                     sig.copy_from_slice(entry.value);
                     proofs.push(OutputAuthProof::IdentitySignature { pubkey, sig });
                 }
-                _ => continue, // unknown auth_tag — skip
+                _ => return Err(PsbtIdAuthError::MalformedEntry), // unknown auth_tag — error
             }
         }
         Ok(proofs)
@@ -308,7 +308,7 @@ mod tests {
     }
 
     #[test]
-    fn test_output_auth_malformed_value_skipped() {
+    fn test_output_auth_malformed_value_returns_error() {
         let mut output = psbt::Output::default();
         // Manually insert a malformed entry (wrong signature length)
         let mut key_bytes = Vec::with_capacity(34);
@@ -321,7 +321,7 @@ mod tests {
         };
         output.proprietary.insert(key, vec![0x11u8; 32]); // wrong: 32 bytes instead of 64
 
-        let proofs = output.get_auth_proofs().unwrap();
-        assert_eq!(proofs.len(), 0); // malformed entry is skipped
+        let proofs = output.get_auth_proofs();
+        assert_eq!(proofs, Err(PsbtIdAuthError::MalformedEntry));
     }
 }
