@@ -501,7 +501,8 @@ fn analyze_transaction(
                         let ecfp_pubkey =
                             EcfpPublicKey::<sdk::curve::Secp256k1, 32>::from_compressed(&pubkey)
                                 .map_err(|_| Error::InvalidIdentitySignature)?;
-                        let msg = build_identity_message(MSG_TYPE_OUTPUT, &out_script_bytes);
+                        let msg = build_identity_message(MSG_TYPE_OUTPUT, &out_script_bytes)
+                            .map_err(|_| Error::InvalidIdentitySignature)?;
                         ecfp_pubkey
                             .schnorr_verify(&msg, &sig)
                             .map_err(|_| Error::InvalidIdentitySignature)?;

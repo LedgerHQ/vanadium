@@ -62,6 +62,10 @@ pub async fn handle_register_identity_key(
 ) -> Result<Response, Error> {
     use alloc::{format, string::String};
 
+    if name.is_empty() || name.len() > u8::MAX as usize {
+        return Err(Error::InvalidRequest);
+    }
+
     let compressed: [u8; 33] = pubkey.try_into().map_err(|_| Error::InvalidKey)?;
     let identity_key = IdentityKey::new(compressed).map_err(|_| Error::InvalidKey)?;
 

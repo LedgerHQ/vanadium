@@ -81,7 +81,7 @@ impl PsbtIdAuthGlobalRead for Psbt {
             let mut pubkey = [0u8; 33];
             pubkey.copy_from_slice(&key.key);
 
-            // value: <compact size name length> <name> <32-byte por>
+            // value: <1-byte> <name> <32-byte por>
             if value.len() < 1 + 1 + 32 {
                 return Err("Malformed identity key entry: value too short");
             }
@@ -399,7 +399,7 @@ impl<'a> PsbtOutputAuthRead for crate::fastpsbt::Output<'a> {
             }
             let auth_tag = kd[1 + prefix_len + 1];
             if value.len() != 64 {
-                continue; // malformed — skip
+                return Err("invalid signature length");
             }
             match auth_tag {
                 PSBT_IDAUTH_TAG_IDENTITY => {

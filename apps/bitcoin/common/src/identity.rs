@@ -1,5 +1,6 @@
 use alloc::vec::Vec;
 
+use crate::errors::Error;
 use crate::por::{Registerable, RegistrationId};
 use sdk::hash::{Hasher, Sha256};
 
@@ -94,15 +95,22 @@ impl Registerable for IdentityKey {
 ///
 /// Format: `SIGN_MAGIC || length(msg_type) || msg_type || length(object) || object`
 ///
-/// Lengths are encoded as a single byte (u8).
-pub fn build_identity_message(msg_type: &[u8], object: &[u8]) -> Vec<u8> {
+/// Lengths are encoded as a single byte (u8), so each field must be at most 255 bytes.
+/// Returns `Err(Error::IdentityMessageFieldTooLong)` if either field exceeds 255 bytes.
+pub fn build_identity_message(msg_type: &[u8], object: &[u8]) -> Result<Vec<u8>, Error> {
+    if msg_type.len() > 255 {
+        return Err(Error::IdentityMessageFieldTooLong);
+    }
+    if object.len() > 255 {
+        return Err(Error::IdentityMessageFieldTooLong);
+    }
     let mut msg = Vec::with_capacity(SIGN_MAGIC.len() + 1 + msg_type.len() + 1 + object.len());
     msg.extend_from_slice(SIGN_MAGIC);
     msg.push(msg_type.len() as u8);
     msg.extend_from_slice(msg_type);
     msg.push(object.len() as u8);
     msg.extend_from_slice(object);
-    msg
+    Ok(msg)
 }
 
 #[cfg(test)]
@@ -153,11 +161,23 @@ mod tests {
 
     #[test]
     fn test_build_identity_message() {
-        let msg = build_identity_message(b"XPUB", &[0xAA; 78]);
+        let msg = build_identity_message(b"XPUB", &[0xAA; 78]).unwrap();
         assert_eq!(&msg[..SIGN_MAGIC.len()], SIGN_MAGIC);
         assert_eq!(msg[SIGN_MAGIC.len()], 4); // length of "XPUB"
         assert_eq!(&msg[SIGN_MAGIC.len() + 1..SIGN_MAGIC.len() + 5], b"XPUB");
         assert_eq!(msg[SIGN_MAGIC.len() + 5], 78); // length of object
         assert_eq!(&msg[SIGN_MAGIC.len() + 6..], &[0xAA; 78]);
+    }
+
+    #[test]
+    fn test_build_identity_message_too_long() {
+        assert_eq!(
+            build_identity_message(&[0u8; 256], b"object"),
+            Err(Error::IdentityMessageFieldTooLong)
+        );
+        assert_eq!(
+            build_identity_message(b"XPUB", &[0u8; 256]),
+            Err(Error::IdentityMessageFieldTooLong)
+        );
     }
 }

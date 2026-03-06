@@ -20,7 +20,7 @@ pub(crate) fn compute_identity_signature(
     compressed_pubkey.push(id_pubkey_bytes[64] % 2 + 0x02);
     compressed_pubkey.extend_from_slice(&id_pubkey_bytes[1..33]);
 
-    let msg = identity::build_identity_message(msg_type, object);
+    let msg = identity::build_identity_message(msg_type, object)?;
     let signature = id_privkey
         .schnorr_sign(&msg, None)
         .map_err(|_| Error::SigningFailed)?;

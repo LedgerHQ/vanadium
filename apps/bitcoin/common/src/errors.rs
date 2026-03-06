@@ -48,6 +48,7 @@ pub enum Error {
 
     // Identity authentication
     InvalidIdentitySignature,
+    IdentityMessageFieldTooLong,
 
     // Unexpected states
     UnexpectedTaprootPolicy,
@@ -115,6 +116,7 @@ impl fmt::Display for Error {
             AddressFromScriptFailed => write!(f, "Failed to convert script to address"),
 
             InvalidIdentitySignature => write!(f, "Invalid identity signature on output"),
+            IdentityMessageFieldTooLong => write!(f, "Identity message field exceeds maximum length of 255 bytes"),
 
             UnexpectedTaprootPolicy => write!(f, "Unexpected state: should be a Taproot wallet policy"),
             UnexpectedSegwitVersion => write!(f, "Unexpected state: should be SegwitV0 or Taproot"),
