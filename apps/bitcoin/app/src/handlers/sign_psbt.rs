@@ -8,12 +8,12 @@ use alloc::{
 use common::{
     bip388::{DescriptorTemplate, SegwitVersion},
     errors::Error,
-    identity::{build_identity_message, MSG_TYPE_OUTPUT},
+    identity::{build_identity_message, IdentityKey, MSG_TYPE_OUTPUT},
     message::{PartialSignature, Response},
     por::{ProofOfRegistration, Registerable},
     psbt::{
         PsbtAccount, PsbtAccountCoordinates, PsbtAccountGlobalRead, PsbtAccountInputRead,
-        PsbtAccountOutputRead, PsbtOutputAuthRead,
+        PsbtAccountOutputRead, PsbtIdAuthGlobalRead, PsbtOutputAuthRead,
     },
     script::ToScript,
     taproot::{GetTapLeafHash, GetTapTreeHash},
@@ -258,9 +258,9 @@ struct TransactionSummary {
     input_coordinates: Vec<(u32, PsbtAccountCoordinates)>,
     account_spent_amounts: Vec<i64>,
     external_outputs_indexes: Vec<usize>,
-    /// Parallel to `external_outputs_indexes`: `Some(pubkey)` if the output carries a valid
-    /// id_auth proof, `None` otherwise.
-    external_output_auth_pubkeys: Vec<Option<[u8; 33]>>,
+    /// Parallel to `external_outputs_indexes`: `Some(name)` if the output carries a valid
+    /// id_auth proof from a registered identity key, `None` otherwise.
+    external_output_auth_names: Vec<Option<String>>,
     inputs_total_amount: u64,
     outputs_total_amount: u64,
     warn_unverified_inputs: bool,
@@ -314,9 +314,26 @@ fn analyze_transaction(
         account_proofs.push(por);
     }
 
+    // Retrieve registered identity keys from the global PSBT section and verify their
+    // proof of registration.  Build a lookup map from compressed pubkey to name.
+    let registered_identity_keys = psbt
+        .get_registered_identity_keys()
+        .map_err(|_| Error::InvalidIdentitySignature)?;
+    let mut identity_key_names: Vec<([u8; 33], String)> =
+        Vec::with_capacity(registered_identity_keys.len());
+    for rik in &registered_identity_keys {
+        let ik = IdentityKey::new(rik.pubkey).map_err(|_| Error::InvalidIdentitySignature)?;
+        let expected_por = ProofOfRegistration::<IdentityKey>::new(&ik.registration_id(&rik.name));
+        let actual_por = ProofOfRegistration::<IdentityKey>::from_bytes(rik.por);
+        if actual_por != expected_por {
+            return Err(Error::InvalidProofOfRegistration);
+        }
+        identity_key_names.push((rik.pubkey, rik.name.clone()));
+    }
+
     let mut account_spent_amounts: Vec<i64> = vec![0; accounts.len()];
     let mut external_outputs_indexes = Vec::new();
-    let mut external_output_auth_pubkeys: Vec<Option<[u8; 33]>> = Vec::new();
+    let mut external_output_auth_names: Vec<Option<String>> = Vec::new();
     let mut inputs_total_amount: u64 = 0;
     let mut outputs_total_amount: u64 = 0;
     let mut warn_unverified_inputs = false;
@@ -475,7 +492,7 @@ fn analyze_transaction(
             let proofs = output
                 .get_auth_proofs()
                 .map_err(|_| Error::InvalidIdentitySignature)?;
-            let mut first_pubkey: Option<[u8; 33]> = None;
+            let mut first_auth_name: Option<String> = None;
             let out_script_bytes = output.script.ok_or(Error::OutputScriptMissing)?.to_vec();
             for proof in proofs {
                 match proof {
@@ -488,14 +505,18 @@ fn analyze_transaction(
                         ecfp_pubkey
                             .schnorr_verify(&msg, &sig)
                             .map_err(|_| Error::InvalidIdentitySignature)?;
-                        if first_pubkey.is_none() {
-                            first_pubkey = Some(pubkey);
+                        // Look up the registered name for this pubkey
+                        if first_auth_name.is_none() {
+                            first_auth_name = identity_key_names
+                                .iter()
+                                .find(|(pk, _)| *pk == pubkey)
+                                .map(|(_, name)| name.clone());
                         }
                     }
                 }
             }
             external_outputs_indexes.push(output_index);
-            external_output_auth_pubkeys.push(first_pubkey);
+            external_output_auth_names.push(first_auth_name);
         };
 
         outputs_total_amount += amount;
@@ -511,7 +532,7 @@ fn analyze_transaction(
         input_coordinates,
         account_spent_amounts,
         external_outputs_indexes,
-        external_output_auth_pubkeys,
+        external_output_auth_names,
         inputs_total_amount,
         outputs_total_amount,
         warn_unverified_inputs,
@@ -612,7 +633,7 @@ fn build_display_pairs(
         }
     }
 
-    // External outputs (show address, prefixed with identity pubkey if auth proof present)
+    // External outputs (show address, prefixed with identity key name if auth proof present)
     for (i, &output_index) in summary.external_outputs_indexes.iter().enumerate() {
         let output = &psbt.outputs[output_index];
         let out_script_pubkey = output.script.ok_or(Error::OutputScriptMissing)?;
@@ -621,9 +642,13 @@ fn build_display_pairs(
         let address = Address::from_script(&out_script_pubkey, bitcoin::Network::Testnet)
             .map_err(|_| Error::AddressFromScriptFailed)?;
 
-        let address_value = if let Some(ref pk) = summary.external_output_auth_pubkeys[i] {
-            let hex: String = pk.iter().map(|b| format!("{:02x}", b)).collect();
-            format!("{}:{}", hex, address)
+        let address_value = if let Some(ref name) = summary.external_output_auth_names[i] {
+            if sdk::ux::has_page_api() {
+                // on large screens, go to a new line for the address
+                format!("{}\n\n{}", name, address)
+            } else {
+                format!("{}:{}", name, address)
+            }
         } else {
             format!("{}", address)
         };
@@ -1038,5 +1063,38 @@ mod tests {
 
         assert_eq!(partial_signatures[1].input_index, 1);
         assert_eq!(partial_signatures[1].pubkey, expected_pubkey1);
+    }
+
+    #[test]
+    fn test_handle_sign_psbt_identity_key_failures() {
+        // Case 1: wrong PoR, valid output signature ==> rejected with InvalidProofOfRegistration.
+        let psbt_b64 = "cHNidP8BALICAAAAApcjbJiptnVfVZ8u5lEDOmwWO4ApbFXQk50KhPXeVqToAAAAAAAAAAAAEJQv9ZdQMi/KhGbkBskfsaZyegiwfV/RH6oVl8cepNsAAAAAAAAAAAACmDoAAAAAAAAiUSDcH+P34kHoc+fctxVKmO/RlrwtgevDkXfwxtAqCZC8tZc6AAAAAAAAIlEggbusbuk6g0dnZIj5nEgvlGnGQVr4D4co77xvtNkr8LsAAAAATwEENYfPBKvvuwaAAAACOY8+nsIJJTr+nBUK0w+kGCzGKmiDRLGAxsafRuEXptYDZ6wvQTRA5DwRKy2x9lLQtiisFFZKuk1+qQFl+B1SdgoU9azC/TAAAIABAACAAAAAgAIAAIAO/AdBQ0NPVU5UAAAAAABwAAl0cihAMC8qKikBAfWswv0EMAAAgAEAAIAAAACAAgAAgAQ1h88Eq++7BoAAAAI5jz6ewgklOv6cFQrTD6QYLMYqaINEsYDGxp9G4Rem1gNnrC9BNEDkPBErLbH2UtC2KKwUVkq6TX6pAWX4HVJ2Cg78B0FDQ09VTlQBAAAAAAxUZXN0IGFjY291bnQO/AdBQ0NPVU5UAgAAAAAgTWldX2utrybjCRhpakIzoHUrVchEgs+aWCRAhe2qRVsq/AZJREFVVEgAAtCUts85qNnC53vT1fTs3ax/bTfvwlYvRYIqTtecWjV0MRBTYXRvc2hpIE5ha2Ftb3RvAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAQErECcAAAAAAAAiUSA1AkRxB/U8hQVW+E3Rw5yQDdY00QZ3TGdCwzwyEpy1RCEWCFne76qAVgdNCn1scuOxZQlP4K4FV9Zy4yrf+wkueaYdAPWswv0wAACAAQAAgAAAAIACAACAAAAAAAESAAABFyAIWd7vqoBWB00KfWxy47FlCU/grgVX1nLjKt/7CS55pgr8B0FDQ09VTlQABwAAAAESAAAAAQErIE4AAAAAAAAiUSA5DqSH1RNHbf/kpCTKALEGzw4iUkyo7SIz62lJA2gY5yEWUD3ScUW1Ylc9FIKs8E46QWstkJTux5wf4mQ1eb7Y3v8dAPWswv0wAACAAQAAgAAAAIACAACAAQAAAGMMAAABFyBQPdJxRbViVz0UgqzwTjpBay2QlO7HnB/iZDV5vtje/wr8B0FDQ09VTlQABwAAAWMMAAAAK/wGSURBVVRIAAAC0JS2zzmo2cLne9PV9OzdrH9tN+/CVi9FgipO15xaNXRAJqgrDKRos0I/UumLXE7d5tvVkt7zHndvnarnKUN1Ge9HJhmQuQMoaf/vKtO65UgQ455M/uN77Q1CWn7Wb9AfsQABBSADwo/+2nrTysZIeuSJ6nFcsooKPHueSPFCWAvjS977NSEHA8KP/tp608rGSHrkiepxXLKKCjx7nkjxQlgL40ve+zUdAPWswv0wAACAAQAAgAAAAIACAACAAQAAADIgAAAK/AdBQ0NPVU5UAAcAAAEyIAAAAA==";
+        let psbt = Psbt::deserialize(&STANDARD.decode(psbt_b64).unwrap()).unwrap();
+        let result = sdk::executor::block_on(handle_sign_psbt(
+            &mut sdk::App::singleton(),
+            &serialize_as_psbtv2(&psbt),
+        ));
+        assert_eq!(result, Err(Error::InvalidProofOfRegistration));
+
+        // Case 2: valid PoR, but the Schnorr signature over the output script is invalid ==> rejected with InvalidIdentitySignature.
+        let psbt_b64 = "cHNidP8BALICAAAAApcjbJiptnVfVZ8u5lEDOmwWO4ApbFXQk50KhPXeVqToAAAAAAAAAAAAEJQv9ZdQMi/KhGbkBskfsaZyegiwfV/RH6oVl8cepNsAAAAAAAAAAAACmDoAAAAAAAAiUSDcH+P34kHoc+fctxVKmO/RlrwtgevDkXfwxtAqCZC8tZc6AAAAAAAAIlEggbusbuk6g0dnZIj5nEgvlGnGQVr4D4co77xvtNkr8LsAAAAATwEENYfPBKvvuwaAAAACOY8+nsIJJTr+nBUK0w+kGCzGKmiDRLGAxsafRuEXptYDZ6wvQTRA5DwRKy2x9lLQtiisFFZKuk1+qQFl+B1SdgoU9azC/TAAAIABAACAAAAAgAIAAIAO/AdBQ0NPVU5UAAAAAABwAAl0cihAMC8qKikBAfWswv0EMAAAgAEAAIAAAACAAgAAgAQ1h88Eq++7BoAAAAI5jz6ewgklOv6cFQrTD6QYLMYqaINEsYDGxp9G4Rem1gNnrC9BNEDkPBErLbH2UtC2KKwUVkq6TX6pAWX4HVJ2Cg78B0FDQ09VTlQBAAAAAAxUZXN0IGFjY291bnQO/AdBQ0NPVU5UAgAAAAAgTWldX2utrybjCRhpakIzoHUrVchEgs+aWCRAhe2qRVsq/AZJREFVVEgAAtCUts85qNnC53vT1fTs3ax/bTfvwlYvRYIqTtecWjV0MRBTYXRvc2hpIE5ha2Ftb3RvuFIxVHknuLpQ/zP3rTZie8gIyZjCHfUXcOEGSDcFFboAAQErECcAAAAAAAAiUSA1AkRxB/U8hQVW+E3Rw5yQDdY00QZ3TGdCwzwyEpy1RCEWCFne76qAVgdNCn1scuOxZQlP4K4FV9Zy4yrf+wkueaYdAPWswv0wAACAAQAAgAAAAIACAACAAAAAAAESAAABFyAIWd7vqoBWB00KfWxy47FlCU/grgVX1nLjKt/7CS55pgr8B0FDQ09VTlQABwAAAAESAAAAAQErIE4AAAAAAAAiUSA5DqSH1RNHbf/kpCTKALEGzw4iUkyo7SIz62lJA2gY5yEWUD3ScUW1Ylc9FIKs8E46QWstkJTux5wf4mQ1eb7Y3v8dAPWswv0wAACAAQAAgAAAAIACAACAAQAAAGMMAAABFyBQPdJxRbViVz0UgqzwTjpBay2QlO7HnB/iZDV5vtje/wr8B0FDQ09VTlQABwAAAWMMAAAAK/wGSURBVVRIAAAC0JS2zzmo2cLne9PV9OzdrH9tN+/CVi9FgipO15xaNXRAEREREREREREREREREREREREREREREREREREREREREREREREREREREREREREREREREREREREREREREREREREREQABBSADwo/+2nrTysZIeuSJ6nFcsooKPHueSPFCWAvjS977NSEHA8KP/tp608rGSHrkiepxXLKKCjx7nkjxQlgL40ve+zUdAPWswv0wAACAAQAAgAAAAIACAACAAQAAADIgAAAK/AdBQ0NPVU5UAAcAAAEyIAAAAA==";
+        let psbt = Psbt::deserialize(&STANDARD.decode(psbt_b64).unwrap()).unwrap();
+        let result = sdk::executor::block_on(handle_sign_psbt(
+            &mut sdk::App::singleton(),
+            &serialize_as_psbtv2(&psbt),
+        ));
+        assert_eq!(result, Err(Error::InvalidIdentitySignature));
+    }
+
+    #[test]
+    fn test_handle_sign_psbt_identity_key_success() {
+        let psbt_b64 = "cHNidP8BALICAAAAApcjbJiptnVfVZ8u5lEDOmwWO4ApbFXQk50KhPXeVqToAAAAAAAAAAAAEJQv9ZdQMi/KhGbkBskfsaZyegiwfV/RH6oVl8cepNsAAAAAAAAAAAACmDoAAAAAAAAiUSDcH+P34kHoc+fctxVKmO/RlrwtgevDkXfwxtAqCZC8tZc6AAAAAAAAIlEggbusbuk6g0dnZIj5nEgvlGnGQVr4D4co77xvtNkr8LsAAAAATwEENYfPBKvvuwaAAAACOY8+nsIJJTr+nBUK0w+kGCzGKmiDRLGAxsafRuEXptYDZ6wvQTRA5DwRKy2x9lLQtiisFFZKuk1+qQFl+B1SdgoU9azC/TAAAIABAACAAAAAgAIAAIAO/AdBQ0NPVU5UAAAAAABwAAl0cihAMC8qKikBAfWswv0EMAAAgAEAAIAAAACAAgAAgAQ1h88Eq++7BoAAAAI5jz6ewgklOv6cFQrTD6QYLMYqaINEsYDGxp9G4Rem1gNnrC9BNEDkPBErLbH2UtC2KKwUVkq6TX6pAWX4HVJ2Cg78B0FDQ09VTlQBAAAAAAxUZXN0IGFjY291bnQO/AdBQ0NPVU5UAgAAAAAgTWldX2utrybjCRhpakIzoHUrVchEgs+aWCRAhe2qRVsq/AZJREFVVEgAAtCUts85qNnC53vT1fTs3ax/bTfvwlYvRYIqTtecWjV0MRBTYXRvc2hpIE5ha2Ftb3RvuFIxVHknuLpQ/zP3rTZie8gIyZjCHfUXcOEGSDcFFboAAQErECcAAAAAAAAiUSA1AkRxB/U8hQVW+E3Rw5yQDdY00QZ3TGdCwzwyEpy1RCEWCFne76qAVgdNCn1scuOxZQlP4K4FV9Zy4yrf+wkueaYdAPWswv0wAACAAQAAgAAAAIACAACAAAAAAAESAAABFyAIWd7vqoBWB00KfWxy47FlCU/grgVX1nLjKt/7CS55pgr8B0FDQ09VTlQABwAAAAESAAAAAQErIE4AAAAAAAAiUSA5DqSH1RNHbf/kpCTKALEGzw4iUkyo7SIz62lJA2gY5yEWUD3ScUW1Ylc9FIKs8E46QWstkJTux5wf4mQ1eb7Y3v8dAPWswv0wAACAAQAAgAAAAIACAACAAQAAAGMMAAABFyBQPdJxRbViVz0UgqzwTjpBay2QlO7HnB/iZDV5vtje/wr8B0FDQ09VTlQABwAAAWMMAAAAK/wGSURBVVRIAAAC0JS2zzmo2cLne9PV9OzdrH9tN+/CVi9FgipO15xaNXRAR5l6X7yUsuUpkyekIKx81HNmEE3mnqVB7/5A1UpjtZuvx0c2N93OOf6HvpNKpvounBUpNoOYTRJvVhKqqrl/KgABBSADwo/+2nrTysZIeuSJ6nFcsooKPHueSPFCWAvjS977NSEHA8KP/tp608rGSHrkiepxXLKKCjx7nkjxQlgL40ve+zUdAPWswv0wAACAAQAAgAAAAIACAACAAQAAADIgAAAK/AdBQ0NPVU5UAAcAAAEyIAAAAA==";
+        let psbt = Psbt::deserialize(&STANDARD.decode(psbt_b64).unwrap()).unwrap();
+        let result = sdk::executor::block_on(handle_sign_psbt(
+            &mut sdk::App::singleton(),
+            &serialize_as_psbtv2(&psbt),
+        ));
+
+        assert!(result.is_ok(), "Expected Ok result, got {:?}", result);
     }
 }
