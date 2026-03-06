@@ -11,6 +11,8 @@ use bitcoin::{
     TapLeafHash,
 };
 
+use super::{GlobalHasProprietaryFields, InputHasProprietaryFields, OutputHasProprietaryFields};
+
 /// Proprietary key prefix for account-related data in PSBT fields
 pub const PSBT_ACCOUNT_PROPRIETARY_IDENTIFIER: [u8; 7] = *b"ACCOUNT";
 
@@ -55,12 +57,83 @@ pub enum PsbtAccountCoordinates {
     // coordinates for other account types will be added here
 }
 
-pub trait PsbtAccountGlobalRead {
-    fn get_accounts(&self) -> Result<Vec<PsbtAccount>, PsbtAccountError>;
-    fn get_account(&self, id: u32) -> Result<Option<PsbtAccount>, PsbtAccountError>;
-    fn get_account_name(&self, id: u32) -> Result<Option<String>, PsbtAccountError>;
-    fn get_account_proof_of_registration(&self, id: u32) -> Result<Option<Vec<u8>>, PsbtAccountError>;
+pub trait PsbtAccountGlobalRead: GlobalHasProprietaryFields {
+    fn get_accounts(&self) -> Result<Vec<PsbtAccount>, PsbtAccountError> {
+        let mut id = 0u32;
+        let mut res = Vec::new();
+        loop {
+            match self.get_account(id)? {
+                Some(account) => {
+                    res.push(account);
+                    id += 1;
+                }
+                None => break,
+            }
+        }
+        Ok(res)
+    }
+    fn get_account(&self, id: u32) -> Result<Option<PsbtAccount>, PsbtAccountError> {
+        let mut id_raw = Vec::with_capacity(1);
+        let _ = id.consensus_encode(&mut id_raw).unwrap();
+        for entry in self.iter_proprietary() {
+            if entry.prefix == PSBT_ACCOUNT_PROPRIETARY_IDENTIFIER
+                && entry.subtype == PSBT_ACCOUNT_GLOBAL_ACCOUNT_DESCRIPTOR
+                && entry.key == id_raw.as_slice()
+            {
+                let value = entry.value;
+                if value.is_empty() {
+                    return Err(PsbtAccountError::EmptyValue);
+                }
+                return match value[0] {
+                    0 => {
+                        let wp = WalletPolicy::deserialize(&mut &value[1..])
+                            .map_err(|_| PsbtAccountError::DeserializeError)?;
+                        Ok(Some(PsbtAccount::WalletPolicy(wp)))
+                    }
+                    _ => Err(PsbtAccountError::UnknownAccountType),
+                };
+            }
+        }
+        Ok(None)
+    }
+    fn get_account_name(&self, id: u32) -> Result<Option<String>, PsbtAccountError> {
+        let mut id_raw = Vec::with_capacity(1);
+        let _ = id.consensus_encode(&mut id_raw).unwrap();
+        for entry in self.iter_proprietary() {
+            if entry.prefix == PSBT_ACCOUNT_PROPRIETARY_IDENTIFIER
+                && entry.subtype == PSBT_ACCOUNT_GLOBAL_ACCOUNT_NAME
+                && entry.key == id_raw.as_slice()
+            {
+                if !is_valid_account_name(entry.value) {
+                    return Err(PsbtAccountError::InvalidAccountName);
+                }
+                return Ok(Some(String::from_utf8(entry.value.to_vec()).unwrap()));
+            }
+        }
+        Ok(None)
+    }
+    fn get_account_proof_of_registration(
+        &self,
+        id: u32,
+    ) -> Result<Option<Vec<u8>>, PsbtAccountError> {
+        let mut id_raw = Vec::with_capacity(1);
+        let _ = id.consensus_encode(&mut id_raw).unwrap();
+        for entry in self.iter_proprietary() {
+            if entry.prefix == PSBT_ACCOUNT_PROPRIETARY_IDENTIFIER
+                && entry.subtype == PSBT_ACCOUNT_GLOBAL_ACCOUNT_POR
+                && entry.key == id_raw.as_slice()
+            {
+                if entry.value.is_empty() {
+                    return Err(PsbtAccountError::EmptyValue);
+                }
+                return Ok(Some(entry.value.to_vec()));
+            }
+        }
+        Ok(None)
+    }
 }
+
+impl<T: GlobalHasProprietaryFields> PsbtAccountGlobalRead for T {}
 
 pub trait PsbtAccountGlobalWrite {
     fn set_account(&mut self, id: u32, account: PsbtAccount) -> Result<(), PsbtAccountError>;
@@ -78,11 +151,77 @@ pub trait PsbtAccountGlobalWrite {
     ) -> Result<(), PsbtAccountError>;
 }
 
-pub trait PsbtAccountInputRead {
+pub trait PsbtAccountInputRead: InputHasProprietaryFields {
     fn get_account_coordinates(
         &self,
-    ) -> Result<Option<(u32, PsbtAccountCoordinates)>, PsbtAccountError>;
+    ) -> Result<Option<(u32, PsbtAccountCoordinates)>, PsbtAccountError> {
+        for entry in self.iter_proprietary() {
+            if entry.prefix == PSBT_ACCOUNT_PROPRIETARY_IDENTIFIER
+                && entry.subtype == PSBT_ACCOUNT_IN_COORDINATES
+                && entry.key.is_empty()
+            {
+                let value = entry.value;
+                if value.len() < 3 {
+                    return Err(PsbtAccountError::InvalidValue);
+                }
+                let account_id = value[0] as u32;
+                if account_id > MAX_SINGLE_BYTE_COMPACTSIZE as u32 {
+                    return Err(PsbtAccountError::AccountIdTooLarge);
+                }
+                match value[1] {
+                    0 => {
+                        let coords = AccountCoordinates::deserialize(&mut &value[2..])
+                            .map_err(|_| PsbtAccountError::DeserializeError)?;
+                        return Ok(Some((
+                            account_id,
+                            PsbtAccountCoordinates::WalletPolicy(coords),
+                        )));
+                    }
+                    _ => return Err(PsbtAccountError::UnknownAccountType),
+                }
+            }
+        }
+        Ok(None)
+    }
 }
+
+impl<T: InputHasProprietaryFields> PsbtAccountInputRead for T {}
+
+pub trait PsbtAccountOutputRead: OutputHasProprietaryFields {
+    fn get_account_coordinates(
+        &self,
+    ) -> Result<Option<(u32, PsbtAccountCoordinates)>, PsbtAccountError> {
+        for entry in self.iter_proprietary() {
+            if entry.prefix == PSBT_ACCOUNT_PROPRIETARY_IDENTIFIER
+                && entry.subtype == PSBT_ACCOUNT_OUT_COORDINATES
+                && entry.key.is_empty()
+            {
+                let value = entry.value;
+                if value.len() < 3 {
+                    return Err(PsbtAccountError::InvalidValue);
+                }
+                let account_id = value[0] as u32;
+                if account_id > MAX_SINGLE_BYTE_COMPACTSIZE as u32 {
+                    return Err(PsbtAccountError::AccountIdTooLarge);
+                }
+                match value[1] {
+                    0 => {
+                        let coords = AccountCoordinates::deserialize(&mut &value[2..])
+                            .map_err(|_| PsbtAccountError::DeserializeError)?;
+                        return Ok(Some((
+                            account_id,
+                            PsbtAccountCoordinates::WalletPolicy(coords),
+                        )));
+                    }
+                    _ => return Err(PsbtAccountError::UnknownAccountType),
+                }
+            }
+        }
+        Ok(None)
+    }
+}
+
+impl<T: OutputHasProprietaryFields> PsbtAccountOutputRead for T {}
 
 pub trait PsbtAccountInputWrite {
     fn set_account_coordinates(
@@ -92,107 +231,12 @@ pub trait PsbtAccountInputWrite {
     ) -> Result<(), PsbtAccountError>;
 }
 
-pub trait PsbtAccountOutputRead {
-    fn get_account_coordinates(
-        &self,
-    ) -> Result<Option<(u32, PsbtAccountCoordinates)>, PsbtAccountError>;
-}
-
 pub trait PsbtAccountOutputWrite {
     fn set_account_coordinates(
         &mut self,
         id: u32,
         coordinates: PsbtAccountCoordinates,
     ) -> Result<(), PsbtAccountError>;
-}
-
-impl PsbtAccountGlobalRead for Psbt {
-    // Get all accounts from the global section of the PSBT.
-    // Unknown account types are ignored.
-    fn get_accounts(&self) -> Result<Vec<PsbtAccount>, PsbtAccountError> {
-        let mut id = 0u32;
-        let mut res = Vec::new();
-
-        // Keep trying to get accounts with increasing IDs until we find none
-        loop {
-            match self.get_account(id)? {
-                Some(account) => {
-                    res.push(account);
-                    id += 1;
-                }
-                None => break, // No more accounts at this ID
-            }
-        }
-
-        Ok(res)
-    }
-
-    // Get the account with the specific id. Returns None if not found
-    // Unknown account types are ignored.
-    fn get_account(&self, id: u32) -> Result<Option<PsbtAccount>, PsbtAccountError> {
-        let mut id_raw = Vec::with_capacity(1); // unlikely to be more than 1 byte
-        let _ = id.consensus_encode(&mut id_raw).unwrap();
-        let key = ProprietaryKey {
-            prefix: PSBT_ACCOUNT_PROPRIETARY_IDENTIFIER.to_vec(),
-            subtype: PSBT_ACCOUNT_GLOBAL_ACCOUNT_DESCRIPTOR,
-            key: id_raw,
-        };
-
-        if let Some(value) = self.proprietary.get(&key) {
-            if value.is_empty() {
-                return Err(PsbtAccountError::EmptyValue);
-            }
-            match value[0] {
-                0 => {
-                    let wp = WalletPolicy::deserialize(&mut &value[1..])
-                        .map_err(|_| PsbtAccountError::DeserializeError)?;
-                    Ok(Some(PsbtAccount::WalletPolicy(wp)))
-                }
-                _ => Err(PsbtAccountError::UnknownAccountType),
-            }
-        } else {
-            Ok(None)
-        }
-    }
-
-    fn get_account_name(&self, id: u32) -> Result<Option<String>, PsbtAccountError> {
-        let mut id_raw = Vec::with_capacity(1); // unlikely to be more than 1 byte
-        let _ = id.consensus_encode(&mut id_raw).unwrap();
-        let key = ProprietaryKey {
-            prefix: PSBT_ACCOUNT_PROPRIETARY_IDENTIFIER.to_vec(),
-            subtype: PSBT_ACCOUNT_GLOBAL_ACCOUNT_NAME,
-            key: id_raw,
-        };
-
-        if let Some(value) = self.proprietary.get(&key) {
-            if !is_valid_account_name(&value) {
-                return Err(PsbtAccountError::InvalidAccountName);
-            }
-
-            Ok(Some(String::from_utf8(value.to_vec()).unwrap()))
-        } else {
-            Ok(None)
-        }
-    }
-
-    fn get_account_proof_of_registration(&self, id: u32) -> Result<Option<Vec<u8>>, PsbtAccountError> {
-        let mut id_raw = Vec::with_capacity(1); // unlikely to be more than 1 byte
-        let _ = id.consensus_encode(&mut id_raw).unwrap();
-        let key = ProprietaryKey {
-            prefix: PSBT_ACCOUNT_PROPRIETARY_IDENTIFIER.to_vec(),
-            subtype: PSBT_ACCOUNT_GLOBAL_ACCOUNT_POR,
-            key: id_raw,
-        };
-
-        if let Some(value) = self.proprietary.get(&key) {
-            if value.is_empty() {
-                return Err(PsbtAccountError::EmptyValue);
-            }
-            Ok(Some(value.to_vec()))
-        } else {
-            Ok(None)
-        }
-    }
 }
 
 impl PsbtAccountGlobalWrite for Psbt {
@@ -258,38 +302,6 @@ impl PsbtAccountGlobalWrite for Psbt {
     }
 }
 
-impl PsbtAccountInputRead for psbt::Input {
-    fn get_account_coordinates(
-        &self,
-    ) -> Result<Option<(u32, PsbtAccountCoordinates)>, PsbtAccountError> {
-        for (key, value) in &self.proprietary {
-            if key.prefix == PSBT_ACCOUNT_PROPRIETARY_IDENTIFIER
-                && key.subtype == PSBT_ACCOUNT_IN_COORDINATES
-            {
-                if value.len() < 3 {
-                    return Err(PsbtAccountError::InvalidValue);
-                }
-                let account_id = value[0] as u32;
-                if account_id > MAX_SINGLE_BYTE_COMPACTSIZE as u32 {
-                    return Err(PsbtAccountError::AccountIdTooLarge);
-                }
-                match value[1] {
-                    0 => {
-                        let coords = AccountCoordinates::deserialize(&mut &value[2..])
-                            .map_err(|_| PsbtAccountError::DeserializeError)?;
-                        return Ok(Some((
-                            account_id,
-                            PsbtAccountCoordinates::WalletPolicy(coords),
-                        )));
-                    }
-                    _ => return Err(PsbtAccountError::UnknownAccountType),
-                }
-            }
-        }
-        Ok(None)
-    }
-}
-
 impl PsbtAccountInputWrite for psbt::Input {
     fn set_account_coordinates(
         &mut self,
@@ -317,39 +329,6 @@ impl PsbtAccountInputWrite for psbt::Input {
         }
 
         Ok(())
-    }
-}
-
-impl PsbtAccountOutputRead for psbt::Output {
-    fn get_account_coordinates(
-        &self,
-    ) -> Result<Option<(u32, PsbtAccountCoordinates)>, PsbtAccountError> {
-        for (key, value) in &self.proprietary {
-            if key.prefix == PSBT_ACCOUNT_PROPRIETARY_IDENTIFIER
-                && key.subtype == PSBT_ACCOUNT_OUT_COORDINATES
-            {
-                if value.len() < 3 {
-                    return Err(PsbtAccountError::InvalidValue);
-                }
-                let account_id = value[0] as u32;
-                if account_id > MAX_SINGLE_BYTE_COMPACTSIZE as u32 {
-                    // specs would want a compact size, but we use 1 byte for simplicity
-                    return Err(PsbtAccountError::TooManyAccounts);
-                }
-                match value[1] {
-                    0 => {
-                        let coords = AccountCoordinates::deserialize(&mut &value[2..])
-                            .map_err(|_| PsbtAccountError::DeserializeError)?;
-                        return Ok(Some((
-                            account_id,
-                            PsbtAccountCoordinates::WalletPolicy(coords),
-                        )));
-                    }
-                    _ => return Err(PsbtAccountError::UnknownAccountType),
-                }
-            }
-        }
-        Ok(None)
     }
 }
 
@@ -381,195 +360,6 @@ impl PsbtAccountOutputWrite for psbt::Output {
         }
 
         Ok(())
-    }
-}
-
-impl<'a> PsbtAccountGlobalRead for crate::fastpsbt::Psbt<'a> {
-    fn get_accounts(&self) -> Result<Vec<PsbtAccount>, PsbtAccountError> {
-        let mut id = 0u32;
-        let mut res = Vec::new();
-        loop {
-            match self.get_account(id)? {
-                Some(account) => {
-                    res.push(account);
-                    id += 1;
-                }
-                None => break,
-            }
-        }
-        Ok(res)
-    }
-
-    fn get_account(&self, id: u32) -> Result<Option<PsbtAccount>, PsbtAccountError> {
-        // Build proprietary key_data: <len(prefix)=7><prefix><subtype><key=id_le_u32>
-        let mut id_raw = Vec::with_capacity(1);
-        let _ = id.consensus_encode(&mut id_raw).unwrap();
-        let mut key_data =
-            Vec::with_capacity(1 + PSBT_ACCOUNT_PROPRIETARY_IDENTIFIER.len() + 1 + id_raw.len());
-        key_data.push(PSBT_ACCOUNT_PROPRIETARY_IDENTIFIER.len() as u8);
-        key_data.extend_from_slice(&PSBT_ACCOUNT_PROPRIETARY_IDENTIFIER);
-        key_data.push(PSBT_ACCOUNT_GLOBAL_ACCOUNT_DESCRIPTOR);
-        key_data.extend_from_slice(&id_raw);
-
-        // 0xFC == PSBT_GLOBAL_PROPRIETARY
-        for (kd, value) in self.iter_keys(0xFC) {
-            if kd == key_data.as_slice() {
-                if value.is_empty() {
-                    return Err(PsbtAccountError::EmptyValue);
-                }
-                return match value[0] {
-                    0 => {
-                        let wp = WalletPolicy::deserialize(&mut &value[1..])
-                            .map_err(|_| PsbtAccountError::DeserializeError)?;
-                        Ok(Some(PsbtAccount::WalletPolicy(wp)))
-                    }
-                    _ => Err(PsbtAccountError::UnknownAccountType),
-                };
-            }
-        }
-        Ok(None)
-    }
-
-    fn get_account_name(&self, id: u32) -> Result<Option<String>, PsbtAccountError> {
-        let mut id_raw = Vec::with_capacity(1);
-        let _ = id.consensus_encode(&mut id_raw).unwrap();
-        let mut key_data =
-            Vec::with_capacity(1 + PSBT_ACCOUNT_PROPRIETARY_IDENTIFIER.len() + 1 + id_raw.len());
-        key_data.push(PSBT_ACCOUNT_PROPRIETARY_IDENTIFIER.len() as u8);
-        key_data.extend_from_slice(&PSBT_ACCOUNT_PROPRIETARY_IDENTIFIER);
-        key_data.push(PSBT_ACCOUNT_GLOBAL_ACCOUNT_NAME);
-        key_data.extend_from_slice(&id_raw);
-
-        for (kd, value) in self.iter_keys(0xFC) {
-            if kd == key_data.as_slice() {
-                if !is_valid_account_name(value) {
-                    return Err(PsbtAccountError::InvalidAccountName);
-                }
-                return Ok(Some(String::from_utf8(value.to_vec()).unwrap()));
-            }
-        }
-        Ok(None)
-    }
-
-    fn get_account_proof_of_registration(&self, id: u32) -> Result<Option<Vec<u8>>, PsbtAccountError> {
-        let mut id_raw = Vec::with_capacity(1);
-        let _ = id.consensus_encode(&mut id_raw).unwrap();
-        let mut key_data =
-            Vec::with_capacity(1 + PSBT_ACCOUNT_PROPRIETARY_IDENTIFIER.len() + 1 + id_raw.len());
-        key_data.push(PSBT_ACCOUNT_PROPRIETARY_IDENTIFIER.len() as u8);
-        key_data.extend_from_slice(&PSBT_ACCOUNT_PROPRIETARY_IDENTIFIER);
-        key_data.push(PSBT_ACCOUNT_GLOBAL_ACCOUNT_POR);
-        key_data.extend_from_slice(&id_raw);
-
-        for (kd, value) in self.iter_keys(0xFC) {
-            if kd == key_data.as_slice() {
-                if value.is_empty() {
-                    return Err(PsbtAccountError::EmptyValue);
-                }
-                return Ok(Some(value.to_vec()));
-            }
-        }
-        Ok(None)
-    }
-}
-
-impl<'a> PsbtAccountInputRead for crate::fastpsbt::Input<'a> {
-    fn get_account_coordinates(
-        &self,
-    ) -> Result<Option<(u32, PsbtAccountCoordinates)>, PsbtAccountError> {
-        // 0xFC == PSBT_IN_PROPRIETARY
-        for (kd, value) in self.iter_keys(0xFC) {
-            // proprietary key_data: <len(prefix) as CompactSize><prefix><subtype><key-bytes>
-            // expect prefix="ACCOUNT", subtype=PSBT_ACCOUNT_IN_COORDINATES, empty key-bytes
-            if kd.len() < 1 + PSBT_ACCOUNT_PROPRIETARY_IDENTIFIER.len() + 1 {
-                continue;
-            }
-            let prefix_len = kd[0] as usize;
-            if prefix_len != PSBT_ACCOUNT_PROPRIETARY_IDENTIFIER.len() {
-                continue;
-            }
-            let prefix = &kd[1..1 + prefix_len];
-            if prefix != PSBT_ACCOUNT_PROPRIETARY_IDENTIFIER {
-                continue;
-            }
-            let subtype = kd[1 + prefix_len];
-            if subtype != PSBT_ACCOUNT_IN_COORDINATES {
-                continue;
-            }
-            // require empty key bytes
-            if kd.len() != 1 + prefix_len + 1 {
-                continue;
-            }
-
-            if value.len() < 3 {
-                return Err(PsbtAccountError::InvalidValue);
-            }
-            let account_id = value[0] as u32;
-            if account_id > MAX_SINGLE_BYTE_COMPACTSIZE as u32 {
-                return Err(PsbtAccountError::AccountIdTooLarge);
-            }
-            match value[1] {
-                0 => {
-                    let coords = AccountCoordinates::deserialize(&mut &value[2..])
-                        .map_err(|_| PsbtAccountError::DeserializeError)?;
-                    return Ok(Some((
-                        account_id,
-                        PsbtAccountCoordinates::WalletPolicy(coords),
-                    )));
-                }
-                _ => return Err(PsbtAccountError::UnknownAccountType),
-            }
-        }
-        Ok(None)
-    }
-}
-
-impl<'a> PsbtAccountOutputRead for crate::fastpsbt::Output<'a> {
-    fn get_account_coordinates(
-        &self,
-    ) -> Result<Option<(u32, PsbtAccountCoordinates)>, PsbtAccountError> {
-        // 0xFC == PSBT_OUT_PROPRIETARY
-        for (kd, value) in self.iter_keys(0xFC) {
-            if kd.len() < 1 + PSBT_ACCOUNT_PROPRIETARY_IDENTIFIER.len() + 1 {
-                continue;
-            }
-            let prefix_len = kd[0] as usize;
-            if prefix_len != PSBT_ACCOUNT_PROPRIETARY_IDENTIFIER.len() {
-                continue;
-            }
-            let prefix = &kd[1..1 + prefix_len];
-            if prefix != PSBT_ACCOUNT_PROPRIETARY_IDENTIFIER {
-                continue;
-            }
-            let subtype = kd[1 + prefix_len];
-            if subtype != PSBT_ACCOUNT_OUT_COORDINATES {
-                continue;
-            }
-            // require empty key bytes
-            if kd.len() != 1 + prefix_len + 1 {
-                continue;
-            }
-
-            if value.len() < 3 {
-                return Err(PsbtAccountError::InvalidValue);
-            }
-            let account_id = value[0] as u32;
-            if account_id > MAX_SINGLE_BYTE_COMPACTSIZE as u32 {
-                return Err(PsbtAccountError::TooManyAccounts);
-            }
-            match value[1] {
-                0 => {
-                    let coords = AccountCoordinates::deserialize(&mut &value[2..])
-                        .map_err(|_| PsbtAccountError::DeserializeError)?;
-                    return Ok(Some((
-                        account_id,
-                        PsbtAccountCoordinates::WalletPolicy(coords),
-                    )));
-                }
-                _ => return Err(PsbtAccountError::UnknownAccountType),
-            }
-        }
-        Ok(None)
     }
 }
 

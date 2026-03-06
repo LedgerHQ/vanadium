@@ -304,7 +304,7 @@ impl<'a> ParsedMap<'a> {
     }
 
     /// Iterate over all pairs with the given key_type, in-order.
-    fn iter_keys(&'a self, key_type: u8) -> core::slice::Iter<'a, MapPair<'a>> {
+    fn iter_keys(&self, key_type: u8) -> core::slice::Iter<'_, MapPair<'a>> {
         let start = self.pairs.partition_point(|p| p.key_type < key_type);
         let end = start + self.pairs[start..].partition_point(|p| p.key_type == key_type);
         self.pairs[start..end].iter()
@@ -429,7 +429,7 @@ impl<'a> Psbt<'a> {
     }
 
     /// Iterate global map entries with a given key_type.
-    pub fn iter_keys(&'a self, key_type: u8) -> impl Iterator<Item = (&'a [u8], &'a [u8])> + 'a {
+    pub fn iter_keys(&self, key_type: u8) -> impl Iterator<Item = (&'a [u8], &'a [u8])> + '_ {
         self.global_map
             .iter_keys(key_type)
             .map(|p| (p.key_data, p.value))
@@ -757,11 +757,11 @@ impl<'a> Input<'a> {
     }
 
     /// Iterate this input's map entries with a given key_type.
-    pub fn iter_keys(&'a self, key_type: u8) -> impl Iterator<Item = (&'a [u8], &'a [u8])> + 'a {
+    pub fn iter_keys(&self, key_type: u8) -> impl Iterator<Item = (&'a [u8], &'a [u8])> + '_ {
         self.map.iter_keys(key_type).map(|p| (p.key_data, p.value))
     }
 
-    pub fn bip32_derivations(&'a self) -> impl Iterator<Item = (&'a [u8], &'a [u8])> + 'a {
+    pub fn bip32_derivations(&self) -> impl Iterator<Item = (&'a [u8], &'a [u8])> + '_ {
         self.iter_keys(PSBT_IN_BIP32_DERIVATION)
     }
 
@@ -866,11 +866,11 @@ impl<'a> Output<'a> {
     }
 
     /// Iterate this output's map entries with a given key_type.
-    pub fn iter_keys(&'a self, key_type: u8) -> impl Iterator<Item = (&'a [u8], &'a [u8])> + 'a {
+    pub fn iter_keys(&self, key_type: u8) -> impl Iterator<Item = (&'a [u8], &'a [u8])> + '_ {
         self.map.iter_keys(key_type).map(|p| (p.key_data, p.value))
     }
 
-    pub fn bip32_derivations(&'a self) -> impl Iterator<Item = (&'a [u8], &'a [u8])> + 'a {
+    pub fn bip32_derivations(&self) -> impl Iterator<Item = (&'a [u8], &'a [u8])> + '_ {
         self.iter_keys(PSBT_OUT_BIP32_DERIVATION)
     }
 }

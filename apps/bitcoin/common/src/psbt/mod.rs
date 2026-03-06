@@ -4,6 +4,101 @@ pub mod id_auth;
 pub use account::*;
 pub use id_auth::*;
 
+use bitcoin::psbt;
+
+/// A single proprietary key-value entry from a PSBT map section.
+pub struct ProprietaryEntry<'a> {
+    pub prefix: &'a [u8],
+    pub subtype: u8,
+    pub key: &'a [u8],
+    pub value: &'a [u8],
+}
+
+fn parse_proprietary_key_data<'a>(kd: &'a [u8], value: &'a [u8]) -> Option<ProprietaryEntry<'a>> {
+    if kd.len() < 2 {
+        return None;
+    }
+    let prefix_len = kd[0] as usize;
+    if kd.len() < 1 + prefix_len + 1 {
+        return None;
+    }
+    Some(ProprietaryEntry {
+        prefix: &kd[1..1 + prefix_len],
+        subtype: kd[1 + prefix_len],
+        key: &kd[1 + prefix_len + 1..],
+        value,
+    })
+}
+
+/// Trait for types that expose PSBT global proprietary key-value fields.
+pub trait GlobalHasProprietaryFields {
+    fn iter_proprietary(&self) -> impl Iterator<Item = ProprietaryEntry<'_>> + '_;
+}
+
+/// Trait for types that expose PSBT per-input proprietary key-value fields.
+pub trait InputHasProprietaryFields {
+    fn iter_proprietary(&self) -> impl Iterator<Item = ProprietaryEntry<'_>> + '_;
+}
+
+/// Trait for types that expose PSBT per-output proprietary key-value fields.
+pub trait OutputHasProprietaryFields {
+    fn iter_proprietary(&self) -> impl Iterator<Item = ProprietaryEntry<'_>> + '_;
+}
+
+impl GlobalHasProprietaryFields for psbt::Psbt {
+    fn iter_proprietary(&self) -> impl Iterator<Item = ProprietaryEntry<'_>> + '_ {
+        self.proprietary.iter().map(|(k, v)| ProprietaryEntry {
+            prefix: &k.prefix,
+            subtype: k.subtype,
+            key: &k.key,
+            value: v,
+        })
+    }
+}
+
+impl InputHasProprietaryFields for psbt::Input {
+    fn iter_proprietary(&self) -> impl Iterator<Item = ProprietaryEntry<'_>> + '_ {
+        self.proprietary.iter().map(|(k, v)| ProprietaryEntry {
+            prefix: &k.prefix,
+            subtype: k.subtype,
+            key: &k.key,
+            value: v,
+        })
+    }
+}
+
+impl OutputHasProprietaryFields for psbt::Output {
+    fn iter_proprietary(&self) -> impl Iterator<Item = ProprietaryEntry<'_>> + '_ {
+        self.proprietary.iter().map(|(k, v)| ProprietaryEntry {
+            prefix: &k.prefix,
+            subtype: k.subtype,
+            key: &k.key,
+            value: v,
+        })
+    }
+}
+
+impl<'a> GlobalHasProprietaryFields for crate::fastpsbt::Psbt<'a> {
+    fn iter_proprietary(&self) -> impl Iterator<Item = ProprietaryEntry<'_>> + '_ {
+        self.iter_keys(0xFC)
+            .filter_map(|(kd, value)| parse_proprietary_key_data(kd, value))
+    }
+}
+
+impl<'a> InputHasProprietaryFields for crate::fastpsbt::Input<'a> {
+    fn iter_proprietary(&self) -> impl Iterator<Item = ProprietaryEntry<'_>> + '_ {
+        self.iter_keys(0xFC)
+            .filter_map(|(kd, value)| parse_proprietary_key_data(kd, value))
+    }
+}
+
+impl<'a> OutputHasProprietaryFields for crate::fastpsbt::Output<'a> {
+    fn iter_proprietary(&self) -> impl Iterator<Item = ProprietaryEntry<'_>> + '_ {
+        self.iter_keys(0xFC)
+            .filter_map(|(kd, value)| parse_proprietary_key_data(kd, value))
+    }
+}
+
 mod convert_v0_to_v2 {
     // This module provides a minimal conversion code from psbtv0 to psbtv2, directly in binary format.
     // It performs very little validation, so it should only be used to convert a serialized PSBTv0 to PSBTv2

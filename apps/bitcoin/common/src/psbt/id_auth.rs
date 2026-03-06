@@ -1,6 +1,8 @@
 use alloc::{string::String, vec::Vec};
 use bitcoin::psbt::{self, raw::ProprietaryKey, Psbt};
 
+use super::{GlobalHasProprietaryFields, OutputHasProprietaryFields};
+
 /// Proprietary key prefix for output authentication data in PSBT fields
 pub const PSBT_IDAUTH_PROPRIETARY_IDENTIFIER: [u8; 6] = *b"IDAUTH";
 
@@ -45,51 +47,25 @@ pub enum OutputAuthProof {
     // other auth types will be added here
 }
 
-pub trait PsbtIdAuthGlobalRead {
+pub trait PsbtIdAuthGlobalRead: GlobalHasProprietaryFields {
     /// Returns all well-formed registered identity key entries from the global PSBT map.
     /// Malformed entries return an error.
-    fn get_registered_identity_keys(&self) -> Result<Vec<RegisteredIdentityKey>, PsbtIdAuthError>;
-}
-
-pub trait PsbtIdAuthGlobalWrite {
-    /// Adds a registered identity key entry to the global PSBT map.
-    fn add_registered_identity_key(
-        &mut self,
-        entry: &RegisteredIdentityKey,
-    ) -> Result<(), PsbtIdAuthError>;
-}
-
-pub trait PsbtOutputAuthRead {
-    /// Returns all well-formed output authentication proofs for this output.
-    /// Unknown auth_tag values and malformed entries are silently skipped.
-    fn get_auth_proofs(&self) -> Result<Vec<OutputAuthProof>, PsbtIdAuthError>;
-}
-
-pub trait PsbtOutputAuthWrite {
-    /// Adds an output authentication proof to this output.
-    /// The proprietary key is `(PSBT_IDAUTH_OUT_SIGNATURE, [auth_tag, pubkey])` and the
-    /// value is the 64-byte Schnorr signature.
-    fn add_auth_proof(&mut self, proof: &OutputAuthProof) -> Result<(), PsbtIdAuthError>;
-}
-
-impl PsbtIdAuthGlobalRead for Psbt {
     fn get_registered_identity_keys(&self) -> Result<Vec<RegisteredIdentityKey>, PsbtIdAuthError> {
         let mut entries = Vec::new();
-        for (key, value) in &self.proprietary {
-            if key.prefix != PSBT_IDAUTH_PROPRIETARY_IDENTIFIER.to_vec() {
+        for entry in self.iter_proprietary() {
+            if entry.prefix != PSBT_IDAUTH_PROPRIETARY_IDENTIFIER {
                 continue;
             }
-            if key.subtype != PSBT_IDAUTH_GLOBAL_REGISTERED_IDENTITY_KEY {
+            if entry.subtype != PSBT_IDAUTH_GLOBAL_REGISTERED_IDENTITY_KEY {
                 continue;
             }
-            // subkeydata must be exactly 33 bytes (the compressed pubkey)
-            if key.key.len() != 33 {
+            if entry.key.len() != 33 {
                 return Err(PsbtIdAuthError::MalformedEntry);
             }
             let mut pubkey = [0u8; 33];
-            pubkey.copy_from_slice(&key.key);
+            pubkey.copy_from_slice(entry.key);
 
-            // value: <1-byte> <name> <32-byte por>
+            let value = entry.value;
             if value.len() < 1 + 1 + 32 {
                 return Err(PsbtIdAuthError::MalformedEntry);
             }
@@ -109,6 +85,60 @@ impl PsbtIdAuthGlobalRead for Psbt {
         }
         Ok(entries)
     }
+}
+
+impl<T: GlobalHasProprietaryFields> PsbtIdAuthGlobalRead for T {}
+
+pub trait PsbtIdAuthGlobalWrite {
+    /// Adds a registered identity key entry to the global PSBT map.
+    fn add_registered_identity_key(
+        &mut self,
+        entry: &RegisteredIdentityKey,
+    ) -> Result<(), PsbtIdAuthError>;
+}
+
+pub trait PsbtOutputAuthRead: OutputHasProprietaryFields {
+    /// Returns all well-formed output authentication proofs for this output.
+    /// Unknown auth_tag values and malformed entries are silently skipped.
+    fn get_auth_proofs(&self) -> Result<Vec<OutputAuthProof>, PsbtIdAuthError> {
+        let mut proofs = Vec::new();
+        for entry in self.iter_proprietary() {
+            if entry.prefix != PSBT_IDAUTH_PROPRIETARY_IDENTIFIER {
+                continue;
+            }
+            if entry.subtype != PSBT_IDAUTH_OUT_SIGNATURE {
+                continue;
+            }
+            // key must be: [auth_tag (1 byte), pubkey (33 bytes)]
+            if entry.key.len() != 34 {
+                continue;
+            }
+            let auth_tag = entry.key[0];
+            if entry.value.len() != 64 {
+                continue; // malformed — skip
+            }
+            match auth_tag {
+                PSBT_IDAUTH_TAG_IDENTITY => {
+                    let mut pubkey = [0u8; 33];
+                    pubkey.copy_from_slice(&entry.key[1..34]);
+                    let mut sig = [0u8; 64];
+                    sig.copy_from_slice(entry.value);
+                    proofs.push(OutputAuthProof::IdentitySignature { pubkey, sig });
+                }
+                _ => continue, // unknown auth_tag — skip
+            }
+        }
+        Ok(proofs)
+    }
+}
+
+impl<T: OutputHasProprietaryFields> PsbtOutputAuthRead for T {}
+
+pub trait PsbtOutputAuthWrite {
+    /// Adds an output authentication proof to this output.
+    /// The proprietary key is `(PSBT_IDAUTH_OUT_SIGNATURE, [auth_tag, pubkey])` and the
+    /// value is the 64-byte Schnorr signature.
+    fn add_auth_proof(&mut self, proof: &OutputAuthProof) -> Result<(), PsbtIdAuthError>;
 }
 
 impl PsbtIdAuthGlobalWrite for Psbt {
@@ -132,40 +162,6 @@ impl PsbtIdAuthGlobalWrite for Psbt {
         value.extend_from_slice(&entry.por);
         self.proprietary.insert(key, value);
         Ok(())
-    }
-}
-
-impl PsbtOutputAuthRead for psbt::Output {
-    fn get_auth_proofs(&self) -> Result<Vec<OutputAuthProof>, PsbtIdAuthError> {
-        let mut proofs = Vec::new();
-        for (key, value) in &self.proprietary {
-            if key.prefix != PSBT_IDAUTH_PROPRIETARY_IDENTIFIER.to_vec() {
-                continue;
-            }
-            if key.subtype != PSBT_IDAUTH_OUT_SIGNATURE {
-                continue;
-            }
-            // key.key must be: [auth_tag (1 byte), pubkey (33 bytes)]
-            if key.key.len() != 34 {
-                continue; // malformed — skip
-            }
-            let auth_tag = key.key[0];
-            // value must be exactly 64 bytes
-            if value.len() != 64 {
-                continue; // malformed — skip
-            }
-            match auth_tag {
-                PSBT_IDAUTH_TAG_IDENTITY => {
-                    let mut pubkey = [0u8; 33];
-                    pubkey.copy_from_slice(&key.key[1..34]);
-                    let mut sig = [0u8; 64];
-                    sig.copy_from_slice(&value[..64]);
-                    proofs.push(OutputAuthProof::IdentitySignature { pubkey, sig });
-                }
-                _ => continue, // unknown auth_tag — skip
-            }
-        }
-        Ok(proofs)
     }
 }
 
@@ -327,99 +323,5 @@ mod tests {
 
         let proofs = output.get_auth_proofs().unwrap();
         assert_eq!(proofs.len(), 0); // malformed entry is skipped
-    }
-}
-
-impl<'a> PsbtIdAuthGlobalRead for crate::fastpsbt::Psbt<'a> {
-    fn get_registered_identity_keys(&self) -> Result<Vec<RegisteredIdentityKey>, PsbtIdAuthError> {
-        // key_data format for PSBT_GLOBAL_PROPRIETARY (0xFC):
-        // [prefix_len (1 byte)][prefix (prefix_len bytes)][subtype (1 byte)][key_bytes (33 bytes)]
-        // For identity keys: prefix = "IDAUTH" (6 bytes), subtype = 0x00, key_bytes = 33-byte pubkey
-        // Total key_data length: 1 + 6 + 1 + 33 = 41
-        const EXPECTED_KD_LEN: usize = 1 + PSBT_IDAUTH_PROPRIETARY_IDENTIFIER.len() + 1 + 33;
-
-        let mut entries = Vec::new();
-        for (kd, value) in self.iter_keys(0xFC) {
-            if kd.len() != EXPECTED_KD_LEN {
-                continue;
-            }
-            let prefix_len = kd[0] as usize;
-            if prefix_len != PSBT_IDAUTH_PROPRIETARY_IDENTIFIER.len() {
-                continue;
-            }
-            let prefix = &kd[1..1 + prefix_len];
-            if prefix != PSBT_IDAUTH_PROPRIETARY_IDENTIFIER {
-                continue;
-            }
-            let subtype = kd[1 + prefix_len];
-            if subtype != PSBT_IDAUTH_GLOBAL_REGISTERED_IDENTITY_KEY {
-                continue;
-            }
-            let mut pubkey = [0u8; 33];
-            pubkey.copy_from_slice(&kd[1 + prefix_len + 1..]);
-
-            // value: <name_len (1 byte)> <name> <32-byte por>
-            if value.len() < 1 + 1 + 32 {
-                return Err(PsbtIdAuthError::MalformedEntry);
-            }
-            let name_len = value[0] as usize;
-            if name_len == 0 {
-                return Err(PsbtIdAuthError::MalformedEntry);
-            }
-            if value.len() != 1 + name_len + 32 {
-                return Err(PsbtIdAuthError::MalformedEntry);
-            }
-            let name = String::from_utf8(value[1..1 + name_len].to_vec())
-                .map_err(|_| PsbtIdAuthError::InvalidUtf8)?;
-            let mut por = [0u8; 32];
-            por.copy_from_slice(&value[1 + name_len..1 + name_len + 32]);
-
-            entries.push(RegisteredIdentityKey { pubkey, name, por });
-        }
-        Ok(entries)
-    }
-}
-
-impl<'a> PsbtOutputAuthRead for crate::fastpsbt::Output<'a> {
-    fn get_auth_proofs(&self) -> Result<Vec<OutputAuthProof>, PsbtIdAuthError> {
-        // key_data format for PSBT_OUT_PROPRIETARY (0xFC):
-        // [prefix_len (1 byte)][prefix (prefix_len bytes)][subtype (1 byte)][auth_tag (1 byte)][pubkey (33 bytes)]
-        // For identity sigs: prefix = "IDAUTH" (6 bytes), subtype = 0x00, auth_tag = 0x00, pubkey = 33 bytes
-        // Total key_data length: 1 + 6 + 1 + 1 + 33 = 42
-        const EXPECTED_KD_LEN: usize = 1 + PSBT_IDAUTH_PROPRIETARY_IDENTIFIER.len() + 1 + 1 + 33;
-
-        let mut proofs = Vec::new();
-        for (kd, value) in self.iter_keys(0xFC) {
-            if kd.len() != EXPECTED_KD_LEN {
-                continue;
-            }
-            let prefix_len = kd[0] as usize;
-            if prefix_len != PSBT_IDAUTH_PROPRIETARY_IDENTIFIER.len() {
-                continue;
-            }
-            let prefix = &kd[1..1 + prefix_len];
-            if prefix != PSBT_IDAUTH_PROPRIETARY_IDENTIFIER {
-                continue;
-            }
-            let subtype = kd[1 + prefix_len];
-            if subtype != PSBT_IDAUTH_OUT_SIGNATURE {
-                continue;
-            }
-            let auth_tag = kd[1 + prefix_len + 1];
-            if value.len() != 64 {
-                return Err(PsbtIdAuthError::InvalidSignatureLength);
-            }
-            match auth_tag {
-                PSBT_IDAUTH_TAG_IDENTITY => {
-                    let mut pubkey = [0u8; 33];
-                    pubkey.copy_from_slice(&kd[1 + prefix_len + 2..1 + prefix_len + 2 + 33]);
-                    let mut sig = [0u8; 64];
-                    sig.copy_from_slice(value);
-                    proofs.push(OutputAuthProof::IdentitySignature { pubkey, sig });
-                }
-                _ => continue, // unknown auth_tag — skip
-            }
-        }
-        Ok(proofs)
     }
 }
