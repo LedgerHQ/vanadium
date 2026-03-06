@@ -228,6 +228,8 @@ impl<'a> BitcoinClient {
         &mut self,
         name: &str,
         account: &message::Account,
+        registered_identities: Option<Vec<message::RegisteredIdentityEntry>>,
+        key_signatures: Option<Vec<Option<message::IdentitySignature>>>,
     ) -> Result<
         (
             RegistrationId<common::bip388::WalletPolicy>,
@@ -238,6 +240,8 @@ impl<'a> BitcoinClient {
         let msg = postcard::to_allocvec(&Request::RegisterAccount {
             name: name.into(),
             account: account.clone(),
+            registered_identities,
+            key_signatures,
         })
         .map_err(|_| {
             BitcoinClientError::GenericError(

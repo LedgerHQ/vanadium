@@ -104,7 +104,12 @@ async fn test_e2e_sign_transaction() {
 
     let account_name = "My taproot account #0";
     let (_, por) = client
-        .register_account(account_name, &Account::WalletPolicy(wallet_policy_msg))
+        .register_account(
+            account_name,
+            &Account::WalletPolicy(wallet_policy_msg),
+            None,
+            None,
+        )
         .await
         .unwrap();
     println!("Registered account, got POR: {:?}", por);
