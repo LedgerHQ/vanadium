@@ -163,7 +163,7 @@ pub enum Response {
 // Conversions between messages and other internal types
 
 impl TryFrom<&Account> for crate::bip388::WalletPolicy {
-    type Error = &'static str;
+    type Error = crate::errors::Error;
     fn try_from(acc: &Account) -> Result<Self, Self::Error> {
         match acc {
             Account::WalletPolicy(wallet_policy) => {
@@ -172,7 +172,7 @@ impl TryFrom<&Account> for crate::bip388::WalletPolicy {
                     .iter()
                     .map(|info| {
                         let pubkey = bitcoin::bip32::Xpub::decode(&info.pubkey)
-                            .map_err(|_| "Failed to decode pubkey")?;
+                            .map_err(|_| crate::errors::Error::InvalidKey)?;
                         let origin_info =
                             info.origin.as_ref().map(|origin| crate::bip388::KeyOrigin {
                                 fingerprint: origin.fingerprint,
@@ -191,9 +191,10 @@ impl TryFrom<&Account> for crate::bip388::WalletPolicy {
                     })
                     .collect::<Result<Vec<_>, _>>()?;
                 crate::bip388::WalletPolicy::new(&wallet_policy.template, keys)
+                    .map_err(|_| crate::errors::Error::InvalidKey)
             }
             #[allow(unreachable_patterns)] // more patterns will be allowed in the future
-            _ => Err("Unsupported account variant"),
+            _ => Err(crate::errors::Error::InvalidKey),
         }
     }
 }

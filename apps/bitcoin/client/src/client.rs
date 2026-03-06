@@ -34,6 +34,12 @@ impl From<&'static str> for BitcoinClientError {
     }
 }
 
+impl From<common::bip388::ParseError> for BitcoinClientError {
+    fn from(e: common::bip388::ParseError) -> Self {
+        Self::GenericError(format!("{:?}", e))
+    }
+}
+
 impl From<String> for BitcoinClientError {
     fn from(e: String) -> Self {
         Self::GenericError(e)

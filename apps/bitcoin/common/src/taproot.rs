@@ -5,6 +5,7 @@ use bitcoin::{TapLeafHash, TapNodeHash};
 
 use crate::{
     account::{DescriptorTemplate, KeyInformation, TapTree},
+    errors::Error,
     script::{ScriptContext, ToScriptWithKeyInfo},
 };
 
@@ -14,7 +15,7 @@ pub trait GetTapTreeHash {
         key_information: &[KeyInformation],
         is_change: bool,
         address_index: u32,
-    ) -> Result<[u8; 32], &'static str>;
+    ) -> Result<[u8; 32], Error>;
 }
 
 impl GetTapTreeHash for TapTree {
@@ -23,7 +24,7 @@ impl GetTapTreeHash for TapTree {
         key_information: &[KeyInformation],
         is_change: bool,
         address_index: u32,
-    ) -> Result<[u8; 32], &'static str> {
+    ) -> Result<[u8; 32], Error> {
         match self {
             TapTree::Script(leaf_desc) => Ok(leaf_desc
                 .get_tapleaf_hash(key_information, is_change, address_index)?
@@ -32,8 +33,8 @@ impl GetTapTreeHash for TapTree {
             TapTree::Branch(l, r) => {
                 let l_bytes = l.get_taptree_hash(key_information, is_change, address_index)?;
                 let r_bytes = r.get_taptree_hash(key_information, is_change, address_index)?;
-                let l_hash = TapNodeHash::from_slice(&l_bytes).map_err(|_| "Invalid hash")?;
-                let r_hash = TapNodeHash::from_slice(&r_bytes).map_err(|_| "Invalid hash")?;
+                let l_hash = TapNodeHash::from_slice(&l_bytes).map_err(|_| Error::InvalidKey)?;
+                let r_hash = TapNodeHash::from_slice(&r_bytes).map_err(|_| Error::InvalidKey)?;
 
                 Ok(TapNodeHash::from_node_hashes(l_hash, r_hash)
                     .as_raw_hash()
@@ -49,7 +50,7 @@ pub trait GetTapLeafHash {
         key_information: &[KeyInformation],
         is_change: bool,
         address_index: u32,
-    ) -> Result<TapLeafHash, &'static str>;
+    ) -> Result<TapLeafHash, Error>;
 }
 
 impl GetTapLeafHash for DescriptorTemplate {
@@ -58,7 +59,7 @@ impl GetTapLeafHash for DescriptorTemplate {
         key_information: &[KeyInformation],
         is_change: bool,
         address_index: u32,
-    ) -> Result<TapLeafHash, &'static str> {
+    ) -> Result<TapLeafHash, Error> {
         let script =
             self.to_script(key_information, is_change, address_index, ScriptContext::Tr)?;
         Ok(TapLeafHash::from_script(

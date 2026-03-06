@@ -13,6 +13,10 @@ pub enum Error {
     InvalidProofOfRegistrationLength,
     InvalidProofOfRegistration,
     InvalidAccountId,
+    InvalidKeyIndex,
+    InvalidScriptContext,
+    TooManyKeys,
+    InvalidMultisigQuorum,
 
     // Derivation / crypto
     DerivationPathTooLong,
@@ -74,6 +78,10 @@ impl fmt::Display for Error {
             }
             InvalidProofOfRegistration => write!(f, "Invalid proof of registration"),
             InvalidAccountId => write!(f, "Invalid account ID"),
+            InvalidKeyIndex => write!(f, "Invalid key index"),
+            InvalidScriptContext => write!(f, "Invalid script context"),
+            TooManyKeys => write!(f, "Too many keys"),
+            InvalidMultisigQuorum => write!(f, "Invalid multisig quorum"),
 
             DerivationPathTooLong => write!(f, "Derivation path is too long"),
             KeyDerivationFailed => write!(f, "Failed to derive key for the given path"),

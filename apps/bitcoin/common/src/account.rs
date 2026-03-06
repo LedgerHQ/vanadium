@@ -14,6 +14,7 @@ pub use crate::bip388::{
 use crate::por::{Registerable, RegistrationId};
 use bitcoin::{params::Params, Address};
 
+use crate::errors::Error;
 use crate::script::ToScript;
 
 // TODO: maybe we can modify the serialize() methods to use bitcoin::io::Write instead
@@ -54,7 +55,7 @@ pub trait Account: Sized {
     fn serialize(&self) -> Vec<u8>; // TODO: avoid Vec
     fn deserialize<R: Read + ?Sized>(bytes: &mut R) -> Result<Self, encode::Error>;
 
-    fn get_address(&self, coords: &Self::Coordinates) -> Result<String, &'static str>;
+    fn get_address(&self, coords: &Self::Coordinates) -> Result<String, Error>;
 
     /// Returns a unique identifier for the named account.
     ///
@@ -103,13 +104,11 @@ impl Account for WalletPolicy {
         WalletPolicy::deserialize(r)
     }
 
-    fn get_address(&self, coords: &WalletPolicyCoordinates) -> Result<String, &'static str> {
-        let script = self
-            .to_script(coords.is_change, coords.address_index)
-            .map_err(|_| "Failed to derive script")?;
+    fn get_address(&self, coords: &WalletPolicyCoordinates) -> Result<String, Error> {
+        let script = self.to_script(coords.is_change, coords.address_index)?;
         Address::from_script(&script, Params::TESTNET4)
             .map(|address| address.to_string())
-            .map_err(|_| "Failed to derive address")
+            .map_err(|_| Error::AddressFromScriptFailed)
     }
 }
 
