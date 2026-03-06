@@ -23,12 +23,12 @@ If a hardware signing device is used to manage the HD seed, then:
 
 ## Signing for objects
 
-The general format for the signing various objects using an identity key is:
+The general format for signing various objects using an identity key is:
 
     msg = SIGN_MAGIC || length(MSG_TYPE_PREFIX) || MSG_TYPE_PREFIX || length(object) || object
 
 where:
-- `SIGN/MAGIC` is the fixed byte sequence `\x09IDEN/SIGN`;
+- `SIGN_MAGIC` is the fixed byte sequence `\x09IDEN/SIGN`;
 - `MSG_TYPE_PREFIX` depends on the kind of object that is being signed;
 - `object` is in the binary format specified for that kind of item
 
@@ -45,7 +45,7 @@ where:
 - `version` is a single byte, set to `0x00` for future extensibility;
 - `pubkey` is the 33-byte compressed public key of the user identity key used for signing;
 - `msg` is the full content of the signed message (as defined in the "Signing for objects" section);
-- `signature` is the 64-byte Schnorr signature over `msg`. TODO: specify signature details.
+- `signature` is a 64-byte [BIP-340](https://github.com/bitcoin/bips/blob/master/bip-0340.mediawiki)-compliant Schnorr signature over `msg`.
 
 ## Message types
 
