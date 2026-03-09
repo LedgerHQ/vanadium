@@ -21,6 +21,18 @@ If a hardware signing device is used to manage the HD seed, then:
 - exporting the root identity public key, or any user identity key, should only be done after the user's specific approval.
 - the keys should only be used to sign specific messages, as prescribed by the standard.
 
+### Trusted Identity Keys
+
+Signing devices might chose to adapt or simplify the UX when asking the user to inspect elements (addresses, xpubs, etc.) that are signed with an identity key, but they should clearly identify the reason that key is trusted.
+
+There are many possible ways of establishing that a key is trusted:
+- Direct key exchange and registration on the device (only approach currently implemented in this app)
+- DNSSEC-based proof, similar to [BIP-353](https://github.com/bitcoin/bips/blob/master/bip-0353.mediawiki)
+- Public Key Infrastructure
+- Web of trust
+
+The device should make it clear what is the source of trust for this key, or lack thereof.
+
 ## Signing for objects
 
 The general format for signing various objects using an identity key is:
