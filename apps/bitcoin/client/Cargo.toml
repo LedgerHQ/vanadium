@@ -17,7 +17,7 @@ hashes   = { package = "bitcoin_hashes", version = "0.14", default-features = fa
 secp256k1 = { package = "secp256k1", version = "0.29", default-features = false }
 base58   = { package = "base58ck", version = "0.1", default-features = false }
 
-common = { package = "vnd-bitcoin-common", path = "../common"}
+common = { package = "vnd-bitcoin-common", path = "../common", default-features = false, features = ["target_native"]}
 hex = "0.4.3"
 hidapi = "2.6.3"
 sdk = { package = "vanadium-client-sdk", path = "../../../client-sdk" }
@@ -48,12 +48,3 @@ path = "src/main.rs"
 
 
 [workspace]
-
-[patch.crates-io.bitcoin_hashes]
-path = "../../../libs/bitcoin_hashes"
-[patch.crates-io.secp256k1]
-path = "../../../libs/secp256k1"
-[patch.crates-io.base58ck]
-path = "../../../libs/base58"
-[patch.crates-io.getrandom]
-path = "../../../libs/getrandom"
