@@ -216,6 +216,10 @@ struct Args {
     /// Use the native interface
     #[arg(long, group = "interface")]
     native: bool,
+
+    /// Connect to a standalone vapp-server instance
+    #[arg(long, group = "interface")]
+    standalone: bool,
 }
 
 // a bit of a hack: we convert the prompt in a format that clap can parse
@@ -455,6 +459,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ClientType::Hid
     } else if args.native {
         ClientType::Native
+    } else if args.standalone {
+        ClientType::Standalone
     } else if args.sym {
         ClientType::Tcp
     } else {
