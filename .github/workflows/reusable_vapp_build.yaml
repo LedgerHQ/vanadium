@@ -64,7 +64,7 @@ jobs:
       - name: Install riscv64-unknown-elf-objcopy (cargo-vnd prerequisite)
         run: |
           sudo apt-get update && \
-          sudo apt-get install -y binutils-riscv64-unknown-elf
+          sudo apt-get install -y libudev-dev pkg-config binutils-riscv64-unknown-elf
       - name: Install cargo-vnd
         run: |
           cargo install --path ./cargo-vnd
