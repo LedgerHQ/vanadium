@@ -1908,6 +1908,65 @@ impl VAppTransport for NativeAppClient {
     }
 }
 
+/// Client that connects to a standalone V-App server over a simple length-prefixed TCP stream.
+///
+/// Unlike [`NativeAppClient`] which speaks the native V-App protocol (with `BufferType` tags),
+/// this client uses a minimal protocol: each message is a 4-byte big-endian length followed by
+/// the payload, in both directions. Print and panic handling is done server-side.
+///
+/// This is intended for use with a standalone server binary (e.g., `cargo-vnd serve`) that manages
+/// the full Vanadium client stack and exposes this simple TCP interface.
+pub struct StandaloneAppClient {
+    stream: TcpStream,
+}
+
+impl StandaloneAppClient {
+    /// Connect to a standalone V-App server at the given address (e.g., `"127.0.0.1:12167"`).
+    pub async fn new(addr: &str) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+        let stream = TcpStream::connect(addr).await?;
+        stream.set_nodelay(true)?;
+        Ok(Self { stream })
+    }
+
+    fn map_err(e: std::io::Error) -> VAppExecutionError {
+        use std::io::ErrorKind::*;
+        match e.kind() {
+            UnexpectedEof | ConnectionReset | BrokenPipe => VAppExecutionError::AppExited(-1),
+            _ => VAppExecutionError::Other(Box::new(e)),
+        }
+    }
+}
+
+#[async_trait]
+impl VAppTransport for StandaloneAppClient {
+    async fn send_message(&mut self, msg: &[u8]) -> Result<Vec<u8>, VAppExecutionError> {
+        // ---------- WRITE: 4-byte BE length + payload ----------
+        let len = msg.len() as u32;
+        self.stream
+            .write_all(&len.to_be_bytes())
+            .await
+            .map_err(Self::map_err)?;
+        self.stream.write_all(msg).await.map_err(Self::map_err)?;
+        self.stream.flush().await.map_err(Self::map_err)?;
+
+        // ---------- READ: 4-byte BE length + payload ----------
+        let mut len_buf = [0u8; 4];
+        self.stream
+            .read_exact(&mut len_buf)
+            .await
+            .map_err(Self::map_err)?;
+        let resp_len = u32::from_be_bytes(len_buf) as usize;
+
+        let mut resp = vec![0u8; resp_len];
+        self.stream
+            .read_exact(&mut resp)
+            .await
+            .map_err(Self::map_err)?;
+
+        Ok(resp)
+    }
+}
+
 /// Utility functions to simplify client creation
 ///
 /// This module provides convenient functions to create different types of VApp clients
@@ -1944,11 +2003,14 @@ pub mod client_utils {
         TcpTransportFailed(String),
         /// Failed to create HID transport
         HidTransportFailed(String),
-        /// Hid, Tcp and Native interfaces all failed
+        /// Failed to connect to standalone server
+        StandaloneConnectionFailed(String),
+        /// Hid, Tcp, Native and Standalone interfaces all failed
         AllInterfacesFailed {
             hid_error: Box<ClientUtilsError>,
             tcp_error: Box<ClientUtilsError>,
             native_error: Box<ClientUtilsError>,
+            standalone_error: Box<ClientUtilsError>,
         },
         /// Failed to create Vanadium app client
         VanadiumClientFailed(String),
@@ -1966,17 +2028,22 @@ pub mod client_utils {
                 ClientUtilsError::HidTransportFailed(msg) => {
                     write!(f, "HID transport failed: {}", msg)
                 }
+                ClientUtilsError::StandaloneConnectionFailed(msg) => {
+                    write!(f, "Standalone server connection failed: {}", msg)
+                }
                 ClientUtilsError::AllInterfacesFailed {
                     hid_error,
                     tcp_error,
                     native_error,
+                    standalone_error,
                 } => write!(
                     f,
                     "Failed to connect to a device or speculos running vanadium, or the native app.\n\
                     HID error: {}\n\
                     TCP error: {}\n\
-                    Native error: {}",
-                    hid_error, tcp_error, native_error
+                    Native error: {}\n\
+                    Standalone error: {}",
+                    hid_error, tcp_error, native_error, standalone_error
                 ),
                 ClientUtilsError::VanadiumClientFailed(msg) => {
                     write!(f, "Vanadium client failed: {}", msg)
@@ -1999,6 +2066,20 @@ pub mod client_utils {
         let client = NativeAppClient::new(addr, print_writer)
             .await
             .map_err(|e| ClientUtilsError::NativeConnectionFailed(e.to_string()))?;
+        Ok(Box::new(client))
+    }
+
+    /// Creates a client that connects to a standalone V-App server (e.g., `vapp-server`).
+    ///
+    /// The server is expected to be already running and listening on the given TCP address.
+    /// Uses a simple length-prefixed protocol without `BufferType` tags.
+    pub async fn create_standalone_client(
+        tcp_addr: Option<&str>,
+    ) -> Result<Box<dyn VAppTransport + Send>, ClientUtilsError> {
+        let addr = tcp_addr.unwrap_or("127.0.0.1:12167");
+        let client = StandaloneAppClient::new(addr)
+            .await
+            .map_err(|e| ClientUtilsError::StandaloneConnectionFailed(e.to_string()))?;
         Ok(Box::new(client))
     }
 
@@ -2054,10 +2135,12 @@ pub mod client_utils {
     }
 
     pub enum ClientType {
-        /// Try in sequence Hid, Tcp (Speculos), then native
+        /// Try in sequence Standalone, Hid, Tcp (Speculos), then Native
         Any,
         /// Native client using TCP transport
         Native,
+        /// Standalone client connecting to a vapp-server via TCP
+        Standalone,
         /// Vanadium client using TCP transport (for Speculos)
         Tcp,
         /// Vanadium client using HID transport (for real device)
@@ -2088,6 +2171,8 @@ pub mod client_utils {
         );
 
         let tcp_addr = std::env::var("VAPP_ADDRESS").unwrap_or_else(|_| "127.0.0.1:2323".into());
+        let standalone_addr =
+            std::env::var("VANADIUM_SERVER_ADDRESS").unwrap_or_else(|_| "127.0.0.1:12167".into());
 
         let shared_writer = print_writer.map(|w| std::sync::Arc::new(std::sync::Mutex::new(w)));
 
@@ -2099,25 +2184,50 @@ pub mod client_utils {
 
         match client_type {
             ClientType::Any => {
+                // Try standalone first: it's a lightweight TCP connect (no ELF upload),
+                // so it fails fast if no server is running. This avoids accidentally
+                // connecting to Speculos when a standalone vapp-server is intended.
+                let standalone_error = match create_standalone_client(Some(&standalone_addr)).await
+                {
+                    Ok(client) => {
+                        eprintln!(
+                            "Connected via TCP to the standalone server ({})",
+                            standalone_addr
+                        );
+                        return Ok(client);
+                    }
+                    Err(e) => e,
+                };
                 let hid_error = match create_hid_client(&vapp_path, get_writer(), use_hmacs).await {
-                    Ok(client) => return Ok(client),
+                    Ok(client) => {
+                        eprintln!("Connected via HID (real device)");
+                        return Ok(client);
+                    }
                     Err(e) => e,
                 };
                 let tcp_error = match create_tcp_client(&vapp_path, get_writer(), use_hmacs).await {
-                    Ok(client) => return Ok(client),
+                    Ok(client) => {
+                        eprintln!("Connected via TCP (Speculos)");
+                        return Ok(client);
+                    }
                     Err(e) => e,
                 };
                 let native_error = match create_native_client(Some(&tcp_addr), get_writer()).await {
-                    Ok(client) => return Ok(client),
+                    Ok(client) => {
+                        eprintln!("Connected via TCP to the native app ({})", tcp_addr);
+                        return Ok(client);
+                    }
                     Err(e) => e,
                 };
                 Err(ClientUtilsError::AllInterfacesFailed {
                     hid_error: Box::new(hid_error),
                     tcp_error: Box::new(tcp_error),
                     native_error: Box::new(native_error),
+                    standalone_error: Box::new(standalone_error),
                 })
             }
             ClientType::Native => create_native_client(Some(&tcp_addr), get_writer()).await,
+            ClientType::Standalone => create_standalone_client(Some(&standalone_addr)).await,
             ClientType::Tcp => create_tcp_client(&vapp_path, get_writer(), use_hmacs).await,
             ClientType::Hid => create_hid_client(&vapp_path, get_writer(), use_hmacs).await,
         }

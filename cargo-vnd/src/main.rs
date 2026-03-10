@@ -7,12 +7,15 @@ Usage:
 It can be called with no arguments if called from the folder containing the Cargo.toml file of th V-App.
 */
 
+mod serve;
+
 use anyhow::{Context, Result};
 use cargo_generate::{GenerateArgs, TemplatePath};
 use clap::{Parser, Subcommand};
 use client_sdk::elf::{VAppElfFile, get_vapp_metadata};
 use client_sdk::hash::Sha256;
 use client_sdk::memory::MemorySegment;
+use client_sdk::vanadium_client::client_utils::ClientType;
 use common::constants;
 use common::manifest::Manifest;
 use std::path::PathBuf;
@@ -53,6 +56,31 @@ enum Commands {
         /// Path to a local template directory (optional, defaults to fetching from GitHub)
         #[arg(long, value_name = "PATH")]
         template_path: Option<PathBuf>,
+    },
+    /// Run a V-App and expose it over a simple TCP interface
+    Serve {
+        /// Path to the V-App ELF binary
+        elf_path: String,
+
+        /// TCP port to listen on for client connections
+        #[arg(long, default_value = "12167")]
+        port: u16,
+
+        /// Connect to a real device via HID
+        #[arg(long, group = "device")]
+        hid: bool,
+
+        /// Connect to Speculos emulator instead of a real device
+        #[arg(long, group = "device")]
+        speculos: bool,
+
+        /// Connect to a natively-compiled V-App (the ELF binary is already running)
+        #[arg(long, group = "device")]
+        native: bool,
+
+        /// Disable HMAC-based proofs for code loading (HMACs are used by default)
+        #[arg(long)]
+        no_hmacs: bool,
     },
 }
 
@@ -153,6 +181,25 @@ fn main() -> Result<()> {
                 ..Default::default()
             };
             cargo_generate::generate(args)?;
+        }
+        Commands::Serve {
+            elf_path,
+            port,
+            hid,
+            speculos,
+            native,
+            no_hmacs,
+        } => {
+            let client_type = if hid {
+                ClientType::Hid
+            } else if speculos {
+                ClientType::Tcp
+            } else if native {
+                ClientType::Native
+            } else {
+                ClientType::Any
+            };
+            serve::run(elf_path, port, client_type, !no_hmacs)?;
         }
     }
     Ok(())
