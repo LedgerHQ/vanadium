@@ -168,6 +168,8 @@ pub async fn handle_get_extended_pubkey(
 
     let parent_fpr: u32 = if bip32_path.0.is_empty() {
         0
+    } else if bip32_path.0.len() == 1 {
+        sdk::curve::Secp256k1::get_master_fingerprint()
     } else {
         let hd_node =
             sdk::curve::Secp256k1::derive_hd_node(&bip32_path.0[..bip32_path.0.len() - 1])
