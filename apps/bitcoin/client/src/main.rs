@@ -61,6 +61,10 @@ enum CliCommand {
         descriptor_template: String,
         #[clap(long)]
         keys_info: String,
+        /// If set, show a human-readable cleartext description of the descriptor
+        /// template on screen (when its complexity score is at most MAX_CONFUSION_SCORE).
+        #[clap(long, default_missing_value = "true", num_args = 0..=1)]
+        show_cleartext: bool,
     },
     RegisterIdentityKey {
         #[clap(long)]
@@ -329,6 +333,7 @@ async fn handle_cli_command(
             name,
             descriptor_template,
             keys_info,
+            show_cleartext,
         } => {
             println!(
                 "Executing register_account for {:?} account: {:?} {:?}",
@@ -340,7 +345,7 @@ async fn handle_cli_command(
             let wallet_policy_msg = parse_wallet_policy(descriptor_template, keys_info)?;
             let account = common::message::Account::WalletPolicy(wallet_policy_msg);
             let (account_id, hmac) = bitcoin_client
-                .register_account(name, &account, None, None)
+                .register_account(name, &account, None, None, *show_cleartext)
                 .await?;
             println!(
                 "Account {} registered.\nAccount ID: {}\nHMAC: {}",

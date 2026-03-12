@@ -236,6 +236,7 @@ impl<'a> BitcoinClient {
         account: &message::Account,
         registered_identities: Option<Vec<message::RegisteredIdentityEntry>>,
         key_signatures: Option<Vec<Option<message::IdentitySignature>>>,
+        show_cleartext: bool,
     ) -> Result<
         (
             RegistrationId<common::bip388::WalletPolicy>,
@@ -248,6 +249,7 @@ impl<'a> BitcoinClient {
             account: account.clone(),
             registered_identities,
             key_signatures,
+            show_cleartext,
         })
         .map_err(|_| {
             BitcoinClientError::GenericError(
