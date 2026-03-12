@@ -3,6 +3,10 @@
 // - add malleability checks
 // - add stack limits and other safety checks
 
+mod cleartext;
+
+pub use cleartext::*;
+
 use alloc::{boxed::Box, string::String, vec, vec::Vec};
 
 #[cfg(test)]
