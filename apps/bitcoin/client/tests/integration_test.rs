@@ -110,6 +110,7 @@ async fn test_e2e_sign_transaction() {
             &Account::WalletPolicy(wallet_policy_msg),
             None,
             None,
+            false,
         )
         .await
         .unwrap();

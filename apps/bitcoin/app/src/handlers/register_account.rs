@@ -14,8 +14,10 @@ async fn display_wallet_policy(
     name: &str,
     wallet_policy: &bip388::WalletPolicy,
     key_auth_names: &[Option<String>],
+    show_cleartext: bool,
 ) -> bool {
     use alloc::{format, string::ToString, vec::Vec};
+    use common::bip388::{ClearText, MAX_CONFUSION_SCORE};
     use sdk::ux::{Icon, TagValue};
 
     let mut pairs = Vec::with_capacity(2 + wallet_policy.key_information.len());
@@ -24,10 +26,29 @@ async fn display_wallet_policy(
         tag: "Account".into(),
         value: name.into(),
     });
-    pairs.push(TagValue {
-        tag: "Descriptor template".into(),
-        value: wallet_policy.descriptor_template_raw().to_string(),
-    });
+
+    let use_cleartext = show_cleartext
+        && wallet_policy.descriptor_template.confusion_score() <= MAX_CONFUSION_SCORE;
+
+    if use_cleartext {
+        let (descriptions, _all_have_cleartext) = wallet_policy.descriptor_template.to_cleartext();
+        for (i, desc) in descriptions.iter().enumerate() {
+            let tag = if i == 0 {
+                "Spending policy".into()
+            } else {
+                format!("Spending path #{}", i)
+            };
+            pairs.push(TagValue {
+                tag,
+                value: desc.clone(),
+            });
+        }
+    } else {
+        pairs.push(TagValue {
+            tag: "Descriptor template".into(),
+            value: wallet_policy.descriptor_template_raw().to_string(),
+        });
+    }
 
     for (i, key_info) in wallet_policy.key_information.iter().enumerate() {
         let tag = match key_auth_names.get(i).and_then(Option::as_ref) {
@@ -71,6 +92,7 @@ async fn display_wallet_policy(
     _name: &str,
     _wallet_policy: &bip388::WalletPolicy,
     _key_auth_names: &[Option<String>],
+    _show_cleartext: bool,
 ) -> bool {
     true
 }
@@ -81,6 +103,7 @@ pub async fn handle_register_account(
     account: &message::Account,
     registered_identities: Option<&[message::RegisteredIdentityEntry]>,
     key_signatures: Option<&[Option<message::IdentitySignature>]>,
+    show_cleartext: bool,
 ) -> Result<Response, Error> {
     use alloc::{string::String, vec::Vec};
 
@@ -159,7 +182,7 @@ pub async fn handle_register_account(
     // TODO:
     // distinguish internal keys (after checking the derivation is correct) and external ones
     // We should also clearly mark any resident key among the internal keys
-    if !display_wallet_policy(app, name, &wallet_policy, &key_auth_names).await {
+    if !display_wallet_policy(app, name, &wallet_policy, &key_auth_names, show_cleartext).await {
         return Err(Error::UserRejected);
     }
 
@@ -220,6 +243,7 @@ mod tests {
             &account,
             None,
             None,
+            false,
         ));
 
         assert_eq!(

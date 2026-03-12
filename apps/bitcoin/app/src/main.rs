@@ -37,6 +37,7 @@ async fn handle_request(
             account,
             registered_identities,
             key_signatures,
+            show_cleartext,
         } => {
             handle_register_account(
                 app,
@@ -44,6 +45,7 @@ async fn handle_request(
                 account,
                 registered_identities.as_deref(),
                 key_signatures.as_deref(),
+                *show_cleartext,
             )
             .await
         }
