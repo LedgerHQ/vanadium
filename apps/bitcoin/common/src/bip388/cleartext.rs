@@ -1,6 +1,9 @@
-use alloc::{format, string::String, vec, vec::Vec};
+use alloc::{format, string::String, string::ToString, vec, vec::Vec};
 
 use super::{DescriptorTemplate, KeyPlaceholder};
+
+// Maximum confusion score for which cleartext descriptions are shown instead of the raw descriptor template.
+pub const MAX_CONFUSION_SCORE: u64 = 3600;
 
 // Private intermediate representations used to centralise the single match over
 // DescriptorTemplate variants. Both `confusion_score` and `to_cleartext` match
@@ -152,8 +155,10 @@ impl ClearText for DescriptorTemplate {
 
                 // Multiply by the number of rearrangements of the tree.
                 // T(n) = (2n - 3)!! = 1 * 3 * 5 * ... * (2n - 3) for n > 1, and T(1) = 1.
-                for i in (1..=(2 * n_leaves - 3)).step_by(2) {
-                    score = score.saturating_mul(i as u64);
+                if n_leaves > 1 {
+                    for i in (1..=(2 * n_leaves - 3)).step_by(2) {
+                        score = score.saturating_mul(i as u64);
+                    }
                 }
 
                 score
@@ -227,7 +232,7 @@ impl ClearText for DescriptorTemplate {
                 }
                 (descriptions, all_leaves_have_cleartext)
             }
-            DescriptorClass::Other => todo!(),
+            DescriptorClass::Other => (vec![self.to_string()], false),
         }
     }
 }
