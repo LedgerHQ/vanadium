@@ -101,6 +101,10 @@ pub enum Request {
         /// Optional per-key Schnorr signatures over the cosigner xpubs.
         /// `key_signatures[i]` covers `keys_info[i]`; `None` means unsigned.
         key_signatures: Option<Vec<Option<IdentitySignature>>>,
+        /// If true and the descriptor template's complexity score is at most
+        /// `MAX_CONFUSION_SCORE`, show a human-readable cleartext description
+        /// of the descriptor template on screen.
+        show_cleartext: bool,
     },
     GetAddress {
         display: bool,

@@ -3,6 +3,10 @@
 // - add malleability checks
 // - add stack limits and other safety checks
 
+mod cleartext;
+
+pub use cleartext::*;
+
 use alloc::{boxed::Box, string::String, vec, vec::Vec};
 
 #[cfg(test)]
@@ -304,6 +308,15 @@ impl<'a> Iterator for TapleavesIter<'a> {
     }
 }
 
+impl core::fmt::Display for TapTree {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            TapTree::Script(desc) => write!(f, "{}", desc),
+            TapTree::Branch(left, right) => write!(f, "{{{},{}}}", left, right),
+        }
+    }
+}
+
 impl core::fmt::Display for KeyOrigin {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(f, "{:08x}", self.fingerprint)?;
@@ -344,6 +357,16 @@ impl core::fmt::Display for KeyInformation {
         match &self.origin_info {
             Some(origin_info) => write!(f, "[{}]{}", origin_info, self.pubkey),
             None => write!(f, "{}", self.pubkey),
+        }
+    }
+}
+
+impl core::fmt::Display for KeyPlaceholder {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        if self.num1 == 0 && self.num2 == 1 {
+            write!(f, "@{}/**", self.key_index)
+        } else {
+            write!(f, "@{}/<{};{}>/*", self.key_index, self.num1, self.num2)
         }
     }
 }
@@ -833,6 +856,95 @@ impl FromStr for DescriptorTemplate {
 
     fn from_str(input: &str) -> Result<Self, Self::Err> {
         parse_descriptor_template(input)
+    }
+}
+
+fn write_display_wrapper(
+    f: &mut core::fmt::Formatter<'_>,
+    ch: char,
+    inner: &DescriptorTemplate,
+) -> core::fmt::Result {
+    write!(f, "{}", ch)?;
+    if !inner.is_wrapper() {
+        write!(f, ":")?;
+    }
+    write!(f, "{}", inner)
+}
+
+impl core::fmt::Display for DescriptorTemplate {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            DescriptorTemplate::Sh(inner) => write!(f, "sh({})", inner),
+            DescriptorTemplate::Wsh(inner) => write!(f, "wsh({})", inner),
+            DescriptorTemplate::Pkh(kp) => write!(f, "pkh({})", kp),
+            DescriptorTemplate::Wpkh(kp) => write!(f, "wpkh({})", kp),
+            DescriptorTemplate::Sortedmulti(k, kps) => {
+                write!(f, "sortedmulti({}", k)?;
+                for kp in kps {
+                    write!(f, ",{}", kp)?;
+                }
+                write!(f, ")")
+            }
+            DescriptorTemplate::Sortedmulti_a(k, kps) => {
+                write!(f, "sortedmulti_a({}", k)?;
+                for kp in kps {
+                    write!(f, ",{}", kp)?;
+                }
+                write!(f, ")")
+            }
+            DescriptorTemplate::Tr(kp, None) => write!(f, "tr({})", kp),
+            DescriptorTemplate::Tr(kp, Some(tree)) => write!(f, "tr({},{})", kp, tree),
+            DescriptorTemplate::Zero => write!(f, "0"),
+            DescriptorTemplate::One => write!(f, "1"),
+            DescriptorTemplate::Pk(kp) => write!(f, "pk({})", kp),
+            DescriptorTemplate::Pk_k(kp) => write!(f, "pk_k({})", kp),
+            DescriptorTemplate::Pk_h(kp) => write!(f, "pk_h({})", kp),
+            DescriptorTemplate::Older(n) => write!(f, "older({})", n),
+            DescriptorTemplate::After(n) => write!(f, "after({})", n),
+            DescriptorTemplate::Sha256(hash) => write!(f, "sha256({})", hex::encode(hash)),
+            DescriptorTemplate::Ripemd160(hash) => write!(f, "ripemd160({})", hex::encode(hash)),
+            DescriptorTemplate::Hash256(hash) => write!(f, "hash256({})", hex::encode(hash)),
+            DescriptorTemplate::Hash160(hash) => write!(f, "hash160({})", hex::encode(hash)),
+            DescriptorTemplate::Andor(x, y, z) => write!(f, "andor({},{},{})", x, y, z),
+            DescriptorTemplate::And_v(x, y) => write!(f, "and_v({},{})", x, y),
+            DescriptorTemplate::And_b(x, y) => write!(f, "and_b({},{})", x, y),
+            DescriptorTemplate::And_n(x, y) => write!(f, "and_n({},{})", x, y),
+            DescriptorTemplate::Or_b(x, y) => write!(f, "or_b({},{})", x, y),
+            DescriptorTemplate::Or_c(x, y) => write!(f, "or_c({},{})", x, y),
+            DescriptorTemplate::Or_d(x, y) => write!(f, "or_d({},{})", x, y),
+            DescriptorTemplate::Or_i(x, y) => write!(f, "or_i({},{})", x, y),
+            DescriptorTemplate::Thresh(k, descs) => {
+                write!(f, "thresh({}", k)?;
+                for desc in descs {
+                    write!(f, ",{}", desc)?;
+                }
+                write!(f, ")")
+            }
+            DescriptorTemplate::Multi(k, kps) => {
+                write!(f, "multi({}", k)?;
+                for kp in kps {
+                    write!(f, ",{}", kp)?;
+                }
+                write!(f, ")")
+            }
+            DescriptorTemplate::Multi_a(k, kps) => {
+                write!(f, "multi_a({}", k)?;
+                for kp in kps {
+                    write!(f, ",{}", kp)?;
+                }
+                write!(f, ")")
+            }
+            DescriptorTemplate::A(inner) => write_display_wrapper(f, 'a', inner),
+            DescriptorTemplate::S(inner) => write_display_wrapper(f, 's', inner),
+            DescriptorTemplate::C(inner) => write_display_wrapper(f, 'c', inner),
+            DescriptorTemplate::T(inner) => write_display_wrapper(f, 't', inner),
+            DescriptorTemplate::D(inner) => write_display_wrapper(f, 'd', inner),
+            DescriptorTemplate::V(inner) => write_display_wrapper(f, 'v', inner),
+            DescriptorTemplate::J(inner) => write_display_wrapper(f, 'j', inner),
+            DescriptorTemplate::N(inner) => write_display_wrapper(f, 'n', inner),
+            DescriptorTemplate::L(inner) => write_display_wrapper(f, 'l', inner),
+            DescriptorTemplate::U(inner) => write_display_wrapper(f, 'u', inner),
+        }
     }
 }
 
@@ -1835,6 +1947,42 @@ mod tests {
             let results: Vec<_> = iter.map(|(k, _)| format_kp(k)).collect();
 
             assert_eq!(results, case.expected);
+        }
+    }
+
+    #[test]
+    fn test_display_roundtrip() {
+        let cases = vec![
+            "0",
+            "1",
+            "pkh(@0/**)",
+            "wpkh(@0/**)",
+            "wpkh(@0/<11;67>/*)",
+            "wsh(sortedmulti(2,@0/**,@1/**))",
+            "sh(wsh(sortedmulti(2,@0/**,@1/**)))",
+            "wsh(c:pk_k(@0/**))",
+            "wsh(or_d(pk(@0/**),pkh(@1/**)))",
+            "wsh(thresh(3,pk(@0/**),s:pk(@1/**),s:pk(@2/**),sln:older(12960)))",
+            "sln:older(12960)",
+            "tr(@0/**)",
+            "tr(@0/**,pkh(@1/**))",
+            "tr(@0/<2;1>/*,{pkh(@1/<2;7>/*),sh(wpkh(@2/**))})",
+            "after(12345)",
+            "older(65535)",
+            "sha256(aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa)",
+            "ripemd160(aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa)",
+            "hash256(bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb)",
+            "hash160(bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb)",
+            "wsh(andor(pk(@0/**),older(1),pk(@1/**)))",
+            "wsh(or_i(and_v(v:pkh(@4/<3;7>/*),older(65535)),or_d(multi(2,@0/**,@3/**),and_v(v:thresh(1,pkh(@5/<99;101>/*),a:pkh(@1/**)),older(64231)))))",
+            "tr(@0/**,{sortedmulti_a(1,@1/**,@2/**),or_b(pk(@3/**),s:pk(@4/**))})",
+        ];
+
+        for s in cases {
+            let parsed = DescriptorTemplate::from_str(s)
+                .unwrap_or_else(|e| panic!("parse failed for {:?}: {:?}", s, e));
+            let displayed = parsed.to_string();
+            assert_eq!(displayed, s, "roundtrip failed for {:?}", s);
         }
     }
 }

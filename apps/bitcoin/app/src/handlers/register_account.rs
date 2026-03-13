@@ -1,4 +1,4 @@
-use alloc::string::String;
+use alloc::{string::String, vec::Vec};
 use common::{
     bip388,
     errors::Error,
@@ -8,14 +8,15 @@ use common::{
 };
 use sdk::curve::{EcfpPublicKey, Secp256k1};
 
-#[cfg(not(any(test, feature = "autoapprove")))]
 async fn display_wallet_policy(
     app: &mut sdk::App,
     name: &str,
     wallet_policy: &bip388::WalletPolicy,
     key_auth_names: &[Option<String>],
+    show_cleartext: bool,
 ) -> bool {
     use alloc::{format, string::ToString, vec::Vec};
+    use common::bip388::{ClearText, MAX_CONFUSION_SCORE};
     use sdk::ux::{Icon, TagValue};
 
     let mut pairs = Vec::with_capacity(2 + wallet_policy.key_information.len());
@@ -24,15 +25,34 @@ async fn display_wallet_policy(
         tag: "Account".into(),
         value: name.into(),
     });
-    pairs.push(TagValue {
-        tag: "Descriptor template".into(),
-        value: wallet_policy.descriptor_template_raw().to_string(),
-    });
+
+    let use_cleartext = show_cleartext
+        && wallet_policy.descriptor_template.confusion_score() <= MAX_CONFUSION_SCORE;
+
+    if use_cleartext {
+        let (descriptions, _all_have_cleartext) = wallet_policy.descriptor_template.to_cleartext();
+        for (i, desc) in descriptions.iter().enumerate() {
+            let tag = if i == 0 {
+                "Spending policy".into()
+            } else {
+                format!("Spending path #{}", i)
+            };
+            pairs.push(TagValue {
+                tag,
+                value: desc.clone(),
+            });
+        }
+    } else {
+        pairs.push(TagValue {
+            tag: "Descriptor template".into(),
+            value: wallet_policy.descriptor_template_raw().to_string(),
+        });
+    }
 
     for (i, key_info) in wallet_policy.key_information.iter().enumerate() {
         let tag = match key_auth_names.get(i).and_then(Option::as_ref) {
-            Some(signer) => format!("Key #{} ({})", i, signer),
-            None => format!("Key #{}", i),
+            Some(signer) => format!("Key @{} ({})", i, signer),
+            None => format!("Key @{}", i),
         };
         pairs.push(TagValue {
             tag,
@@ -40,39 +60,41 @@ async fn display_wallet_policy(
         });
     }
 
-    let (intro_text, intro_subtext) = if sdk::ux::has_page_api() {
-        ("Register Bitcoin\naccount", "")
-    } else {
-        ("Register Bitcoin", "account")
-    };
-    let approved = app
-        .review_pairs(
-            intro_text,
-            intro_subtext,
-            &pairs,
-            "Confirm registration",
-            "Register",
-            false,
-        )
-        .await;
+    let approved: bool;
 
-    if approved {
-        app.show_info(Icon::Success, "Account registered");
-    } else {
-        app.show_info(Icon::Failure, "Registration cancelled");
+    #[cfg(not(any(test, feature = "autoapprove")))]
+    {
+        let (intro_text, intro_subtext) = if sdk::ux::has_page_api() {
+            ("Register Bitcoin\naccount", "")
+        } else {
+            ("Register Bitcoin", "account")
+        };
+
+        approved = app
+            .review_pairs(
+                intro_text,
+                intro_subtext,
+                &pairs,
+                "Confirm registration",
+                "Register",
+                false,
+            )
+            .await;
+
+        if approved {
+            app.show_info(Icon::Success, "Account registered");
+        } else {
+            app.show_info(Icon::Failure, "Registration cancelled");
+        }
+    }
+
+    #[cfg(any(test, feature = "autoapprove"))]
+    {
+        let _ = app;
+        approved = true;
     }
 
     approved
-}
-
-#[cfg(any(test, feature = "autoapprove"))]
-async fn display_wallet_policy(
-    _app: &mut sdk::App,
-    _name: &str,
-    _wallet_policy: &bip388::WalletPolicy,
-    _key_auth_names: &[Option<String>],
-) -> bool {
-    true
 }
 
 pub async fn handle_register_account(
@@ -81,8 +103,9 @@ pub async fn handle_register_account(
     account: &message::Account,
     registered_identities: Option<&[message::RegisteredIdentityEntry]>,
     key_signatures: Option<&[Option<message::IdentitySignature>]>,
+    show_cleartext: bool,
 ) -> Result<Response, Error> {
-    use alloc::{string::String, vec::Vec};
+    app.show_spinner("Processing...");
 
     let wallet_policy: bip388::WalletPolicy =
         account.try_into().map_err(|_| Error::InvalidWalletPolicy)?;
@@ -159,7 +182,7 @@ pub async fn handle_register_account(
     // TODO:
     // distinguish internal keys (after checking the derivation is correct) and external ones
     // We should also clearly mark any resident key among the internal keys
-    if !display_wallet_policy(app, name, &wallet_policy, &key_auth_names).await {
+    if !display_wallet_policy(app, name, &wallet_policy, &key_auth_names, show_cleartext).await {
         return Err(Error::UserRejected);
     }
 
@@ -220,6 +243,74 @@ mod tests {
             &account,
             None,
             None,
+            false,
+        ));
+
+        assert_eq!(
+            resp,
+            Ok(Response::AccountRegistered {
+                account_id: *expected_account_id.as_bytes(),
+                // can't really test the hmac here, so we duplicate the app's logic
+                hmac: ProofOfRegistration::new(&expected_account_id).dangerous_as_bytes(),
+            })
+        );
+    }
+
+    #[test]
+    fn test_register_account_simple_inheritance() {
+        let account_name = "Simple inheritance";
+        let account = message::Account::WalletPolicy(message::WalletPolicy {
+            template: "tr(@0/<0;1>/*,and_v(v:pk(@1/<0;1>/*),older(52596)))".into(),
+            keys_info: vec![
+                ki("[f5acc2fd/48'/1'/0'/2']tpubDFAqEGNyad35aBCKUAXbQGDjdVhNueno5ZZVEn3sQbW5ci457gLR7HyTmHBg93oourBssgUxuWz1jX5uhc1qaqFo9VsybY1J5FuedLfm4dK"),
+                ki("[d5365b22/48'/1'/0'/2']tpubDFWK5mCX28dt6hfy74Bc51jjbWrimXow1bTxCMpJrWqesK3AeZiYn8tcLFW3VoBiHhM9FjKdLWaC3GZVVX5PfGNG3zfbM14bMb1SLym36nN")
+            ],
+        });
+
+        let wallet_policy: bip388::WalletPolicy = (&account).try_into().unwrap();
+        let expected_account_id = wallet_policy.registration_id(account_name);
+
+        let resp = sdk::executor::block_on(handle_register_account(
+            &mut sdk::App::singleton(),
+            account_name,
+            &account,
+            None,
+            None,
+            false,
+        ));
+
+        assert_eq!(
+            resp,
+            Ok(Response::AccountRegistered {
+                account_id: *expected_account_id.as_bytes(),
+                // can't really test the hmac here, so we duplicate the app's logic
+                hmac: ProofOfRegistration::new(&expected_account_id).dangerous_as_bytes(),
+            })
+        );
+    }
+
+    #[test]
+    fn test_register_account_simple_inheritance2() {
+        let account_name = "Simple inheritance";
+        let account = message::Account::WalletPolicy(message::WalletPolicy {
+            template: "tr(@0/<0;1>/*,{and_v(v:pk(@1/<2;3>/*),older(4383)),and_v(v:pk(@2/<0;1>/*),pk(@1/<0;1>/*))})".into(),
+            keys_info: vec![
+                ki("tpubD6NzVbkrYhZ4XUBKWaWfdn2icbaEDfaUgkCCbKPm31LTLRfaaEJRDAF3XXbvTaKLHATytZPGoWpVxnMnrRbn4519fP6nhZDDFtJimcZWBGC"),
+                ki("[41e8dfb4/48'/1'/0'/2']tpubDE6DKS5H4uEZwjGqvSujs1GMKY3PZKuEvsVFbvCStYs3yNjo93aeVqEGT3gsFtAPHdj19oTZCjoKarMz1Ve6bKdzh6gNaFsfH1FudHTxGrB"),
+                ki("[f5acc2fd/48'/1'/0'/2']tpubDFAqEGNyad35aBCKUAXbQGDjdVhNueno5ZZVEn3sQbW5ci457gLR7HyTmHBg93oourBssgUxuWz1jX5uhc1qaqFo9VsybY1J5FuedLfm4dK"),
+            ],
+        });
+
+        let wallet_policy: bip388::WalletPolicy = (&account).try_into().unwrap();
+        let expected_account_id = wallet_policy.registration_id(account_name);
+
+        let resp = sdk::executor::block_on(handle_register_account(
+            &mut sdk::App::singleton(),
+            account_name,
+            &account,
+            None,
+            None,
+            true,
         ));
 
         assert_eq!(
