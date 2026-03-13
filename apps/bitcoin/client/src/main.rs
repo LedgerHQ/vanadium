@@ -535,7 +535,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     rl.save_history("history.txt")?;
 
-    if !with_unrecoverable_error {
+    // TODO: we shouldn't exit even if args.standalone isn't set, if we started with the standalone client.
+    //       create_default_client doesn't currently return the type of client it created.
+    if !with_unrecoverable_error && !args.standalone {
         // close the client gracefully
         let exit_status = bitcoin_client.exit().await?;
         if exit_status != 0 {
