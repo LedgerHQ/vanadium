@@ -20,6 +20,7 @@ base58   = { package = "base58ck", version = "0.1", default-features = false }
 
 base64 = { version = "0.22.1", default-features = false, features = ["alloc"] }
 hex = { version = "0.4.3", default-features = false, features = ["alloc"] }
+macros = { package = "vnd-bitcoin-macros", path = "../macros" }
 sdk = { package = "vanadium-app-sdk", path = "../../../app-sdk", default-features = false }
 serde = { version = "1.0.219", default-features = false, features = ["alloc"] }
 subtle = { version="2.6.1", default-features = false }

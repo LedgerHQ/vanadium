@@ -1,5 +1,7 @@
 use alloc::{format, string::String, string::ToString, vec, vec::Vec};
 
+use macros::descriptor_match;
+
 use super::{DescriptorTemplate, KeyPlaceholder};
 
 // Maximum confusion score for which cleartext descriptions are shown instead of the raw descriptor template.
@@ -82,49 +84,24 @@ impl DescriptorTemplate {
     }
 
     fn classify_as_tapleaf(&self) -> TapleafClass {
-        match self {
-            // non-miniscript patterns
-            DescriptorTemplate::Sortedmulti_a(k, keys) => TapleafClass::SortedMultisig {
-                threshold: *k,
-                key_indices: keys.iter().map(|kp| kp.key_index).collect(),
+        descriptor_match!(self, {
+            sortedmulti_a(threshold, key_indices) => {
+                TapleafClass::SortedMultisig { threshold, key_indices }
             },
-            // miniscript patterns
-            DescriptorTemplate::Pk(kp) | DescriptorTemplate::Pkh(kp) => TapleafClass::SingleSig {
-                key_index: kp.key_index,
+            pk(key_index) | pkh(key_index) => {
+                TapleafClass::SingleSig { key_index }
             },
-            // non-miniscript patterns
-            DescriptorTemplate::Multi(k, keys) => TapleafClass::SortedMultisig {
-                threshold: *k,
-                key_indices: keys.iter().map(|kp| kp.key_index).collect(),
+            multi(threshold, key_indices) => {
+                TapleafClass::SortedMultisig { threshold, key_indices }
             },
-            DescriptorTemplate::And_v(sub1, sub2) => match (sub1.as_ref(), sub2.as_ref()) {
-                // and_v(v:pk(@x), older(n)) pattern for relative timelocks on single-sig leaves
-                (DescriptorTemplate::V(inner), DescriptorTemplate::Older(n))
-                    if *n >= 1 && *n < 65536 =>
-                {
-                    match inner.as_ref() {
-                        DescriptorTemplate::Pk(kp) => TapleafClass::RelativeHeightlockSingleSig {
-                            key_index: kp.key_index,
-                            blocks: *n,
-                        },
-                        _ => TapleafClass::Other,
-                    }
-                }
-                // and_v(v:pk(@x), pk(@y)) pattern for "both must sign" conditions
-                (DescriptorTemplate::V(inner), DescriptorTemplate::Pk(kp2)) => match inner.as_ref()
-                {
-                    DescriptorTemplate::Pk(kp1) => TapleafClass::BothMustSign {
-                        key_index1: kp1.key_index,
-                        key_index2: kp2.key_index,
-                    },
-                    _ => TapleafClass::Other,
-                },
-                _ => TapleafClass::Other,
+            and_v(v:pk(key_index), older(blocks)) if blocks >= 1 && blocks < 65536 => {
+                TapleafClass::RelativeHeightlockSingleSig { key_index, blocks }
             },
-
-            // anything else that we don't match, which won't have a cleartext description
-            _ => TapleafClass::Other,
-        }
+            and_v(v:pk(key_index1), pk(key_index2)) => {
+                TapleafClass::BothMustSign { key_index1, key_index2 }
+            },
+            _ => { TapleafClass::Other },
+        })
     }
 }
 
