@@ -52,8 +52,8 @@ async fn display_wallet_policy(
 
     for (i, key_info) in wallet_policy.key_information.iter().enumerate() {
         let tag = match key_auth_names.get(i).and_then(Option::as_ref) {
-            Some(signer) => format!("Key #{} ({})", i, signer),
-            None => format!("Key #{}", i),
+            Some(signer) => format!("Key @{} ({})", i, signer),
+            None => format!("Key @{}", i),
         };
         pairs.push(TagValue {
             tag,
@@ -232,6 +232,39 @@ mod tests {
             keys_info: vec![ki(
                 "[f5acc2fd/84'/1'/0']tpubDCtKfsNyRhULjZ9XMS4VKKtVcPdVDi8MKUbcSD9MJDyjRu1A2ND5MiipozyyspBT9bg8upEp7a8EAgFxNxXn1d7QkdbL52Ty5jiSLcxPt1P",
             )],
+        });
+
+        let wallet_policy: bip388::WalletPolicy = (&account).try_into().unwrap();
+        let expected_account_id = wallet_policy.registration_id(account_name);
+
+        let resp = sdk::executor::block_on(handle_register_account(
+            &mut sdk::App::singleton(),
+            account_name,
+            &account,
+            None,
+            None,
+            false,
+        ));
+
+        assert_eq!(
+            resp,
+            Ok(Response::AccountRegistered {
+                account_id: *expected_account_id.as_bytes(),
+                // can't really test the hmac here, so we duplicate the app's logic
+                hmac: ProofOfRegistration::new(&expected_account_id).dangerous_as_bytes(),
+            })
+        );
+    }
+
+    #[test]
+    fn test_register_account_simple_inheritance() {
+        let account_name = "Simple inheritance";
+        let account = message::Account::WalletPolicy(message::WalletPolicy {
+            template: "tr(@0/<0;1>/*,and_v(v:pk(@1/<0;1>/*),older(52596)))".into(),
+            keys_info: vec![
+                ki("[f5acc2fd/48'/1'/0'/2']tpubDFAqEGNyad35aBCKUAXbQGDjdVhNueno5ZZVEn3sQbW5ci457gLR7HyTmHBg93oourBssgUxuWz1jX5uhc1qaqFo9VsybY1J5FuedLfm4dK"),
+                ki("[d5365b22/48'/1'/0'/2']tpubDFWK5mCX28dt6hfy74Bc51jjbWrimXow1bTxCMpJrWqesK3AeZiYn8tcLFW3VoBiHhM9FjKdLWaC3GZVVX5PfGNG3zfbM14bMb1SLym36nN")
+            ],
         });
 
         let wallet_policy: bip388::WalletPolicy = (&account).try_into().unwrap();
