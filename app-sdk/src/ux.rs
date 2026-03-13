@@ -1,4 +1,4 @@
-use core::panic;
+use core::{ops::Range, panic};
 
 use crate::{
     ecalls,
@@ -29,6 +29,89 @@ pub fn has_page_api() -> bool {
         0x2c970050 => false, // Ledger Nano S+
         _ => panic!("Unsupported device"),
     }
+}
+
+// Per-device layout metrics used for height-aware pair packing in review_pairs.
+struct PageLayoutMetrics {
+    // Approximate number of characters that fit on one line for the tag (bold, smaller font).
+    tag_chars_per_line: usize,
+    // Height in pixels of one wrapped tag line.
+    tag_line_height_px: u32,
+    // Approximate number of characters that fit on one line for the value (regular font).
+    value_chars_per_line: usize,
+    // Height in pixels of one wrapped value line.
+    value_line_height_px: u32,
+    // Vertical padding added below each pair in pixels.
+    pair_padding_px: u32,
+    // Usable content area height in pixels (screen height minus navigation bar).
+    content_height_px: u32,
+}
+
+// TODO: these metrics will need to be fine-tuned
+fn get_page_layout_metrics() -> PageLayoutMetrics {
+    match ecalls::get_device_property(DEVICE_PROPERTY_ID) {
+        // Native target: not a real device, use Stax values as a sensible default.
+        0 | 0x2c970060 => PageLayoutMetrics {
+            tag_chars_per_line: 30,
+            tag_line_height_px: 28,
+            value_chars_per_line: 27,
+            value_line_height_px: 36,
+            pair_padding_px: 20,
+            content_height_px: 488,
+        },
+        0x2c970070 => PageLayoutMetrics {
+            tag_chars_per_line: 36,
+            tag_line_height_px: 28,
+            value_chars_per_line: 32,
+            value_line_height_px: 36,
+            pair_padding_px: 20,
+            content_height_px: 416,
+        },
+        0x2c970080 => PageLayoutMetrics {
+            tag_chars_per_line: 22,
+            tag_line_height_px: 28,
+            value_chars_per_line: 19,
+            value_line_height_px: 36,
+            pair_padding_px: 16,
+            content_height_px: 264,
+        },
+        _ => panic!("Unsupported device"),
+    }
+}
+
+// Estimates the rendered height in pixels of a single TagValue pair.
+fn estimate_pair_height(metrics: &PageLayoutMetrics, pair: &TagValue) -> u32 {
+    let tag_lines = ((pair.tag.len() + metrics.tag_chars_per_line - 1) / metrics.tag_chars_per_line)
+        .max(1) as u32;
+    let value_lines = ((pair.value.len() + metrics.value_chars_per_line - 1)
+        / metrics.value_chars_per_line)
+        .max(1) as u32;
+    tag_lines * metrics.tag_line_height_px
+        + value_lines * metrics.value_line_height_px
+        + metrics.pair_padding_px
+}
+
+// Greedily packs pairs into pages, returning a list of index ranges (one per page).
+// At least one pair is always placed on a page, even if its estimated height exceeds
+// content_height_px, to prevent an infinite loop on very long single values.
+fn compute_pair_page_ranges(metrics: &PageLayoutMetrics, pairs: &[TagValue]) -> Vec<Range<usize>> {
+    let mut ranges = Vec::new();
+    let mut start = 0;
+    while start < pairs.len() {
+        let mut end = start + 1; // always include at least one pair
+        let mut height = estimate_pair_height(metrics, &pairs[start]);
+        while end < pairs.len() {
+            let next_height = estimate_pair_height(metrics, &pairs[end]);
+            if height + next_height > metrics.content_height_px {
+                break;
+            }
+            height += next_height;
+            end += 1;
+        }
+        ranges.push(start..end);
+        start = end;
+    }
+    ranges
 }
 
 #[inline(always)]
@@ -107,8 +190,10 @@ async fn __page_review_pairs(
     // While we're computing the page, we're not able to listen to touch events, so it will currently miss
     // user touches something before the precomputation of the next page is completed.
 
-    // Calculate total number of pages
-    let n_pair_pages = ((pairs.len() + 1) / 2) as u32;
+    // Calculate total number of pages using height-aware pair packing.
+    let metrics = get_page_layout_metrics();
+    let pair_page_ranges = compute_pair_page_ranges(&metrics, pairs);
+    let n_pair_pages = pair_page_ranges.len() as u32;
     let n_pages = 2 + n_pair_pages; // intro + pair pages + final
 
     // Initialize with capacity, but start empty
@@ -151,7 +236,7 @@ async fn __page_review_pairs(
             } else {
                 // Pair page (indices 1 to n_pair_pages)
                 let chunk_index = next_page_index - 1;
-                let pair_chunk = pairs.chunks(2).nth(chunk_index as usize).unwrap();
+                let pair_chunk = &pairs[pair_page_ranges[chunk_index].clone()];
                 make_page_review_pairs_content(next_page_index as u32, n_pages, pair_chunk)
             };
             serialized_pages.push(next_page);
