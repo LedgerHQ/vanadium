@@ -37,6 +37,10 @@ enum TapleafClass {
     SingleSig {
         key_index: u32,
     }, // pk and pkh
+    BothMustSign {
+        key_index1: u32,
+        key_index2: u32,
+    },
     Multisig {
         threshold: u32,
         key_indices: Vec<u32>,
@@ -88,7 +92,13 @@ impl DescriptorTemplate {
             DescriptorTemplate::Pk(kp) | DescriptorTemplate::Pkh(kp) => TapleafClass::SingleSig {
                 key_index: kp.key_index,
             },
+            // non-miniscript patterns
+            DescriptorTemplate::Multi(k, keys) => TapleafClass::SortedMultisig {
+                threshold: *k,
+                key_indices: keys.iter().map(|kp| kp.key_index).collect(),
+            },
             DescriptorTemplate::And_v(sub1, sub2) => match (sub1.as_ref(), sub2.as_ref()) {
+                // and_v(v:pk(@x), older(n)) pattern for relative timelocks on single-sig leaves
                 (DescriptorTemplate::V(inner), DescriptorTemplate::Older(n))
                     if *n >= 1 && *n < 65536 =>
                 {
@@ -100,8 +110,19 @@ impl DescriptorTemplate {
                         _ => TapleafClass::Other,
                     }
                 }
+                // and_v(v:pk(@x), pk(@y)) pattern for "both must sign" conditions
+                (DescriptorTemplate::V(inner), DescriptorTemplate::Pk(kp2)) => match inner.as_ref()
+                {
+                    DescriptorTemplate::Pk(kp1) => TapleafClass::BothMustSign {
+                        key_index1: kp1.key_index,
+                        key_index2: kp2.key_index,
+                    },
+                    _ => TapleafClass::Other,
+                },
                 _ => TapleafClass::Other,
             },
+
+            // anything else that we don't match, which won't have a cleartext description
             _ => TapleafClass::Other,
         }
     }
@@ -147,6 +168,7 @@ impl ClearText for DescriptorTemplate {
                         TapleafClass::SingleSig { .. } => 2,
                         TapleafClass::SortedMultisig { .. } => 1,
                         TapleafClass::Multisig { .. } => 1,
+                        TapleafClass::BothMustSign { .. } => 1,
                         TapleafClass::RelativeHeightlockSingleSig { .. } => 1,
                         TapleafClass::Other => 1,
                     };
@@ -210,6 +232,16 @@ impl ClearText for DescriptorTemplate {
                             )],
                             true,
                         ),
+                        TapleafClass::BothMustSign {
+                            key_index1,
+                            key_index2,
+                        } => (
+                            vec![format!(
+                                "Both @{} and @{} must sign",
+                                key_index1, key_index2
+                            )],
+                            true,
+                        ),
                         TapleafClass::Multisig {
                             threshold,
                             key_indices,
@@ -225,7 +257,7 @@ impl ClearText for DescriptorTemplate {
                             vec![format!("@{} after {} blocks", key_index, blocks)],
                             true,
                         ),
-                        TapleafClass::Other => todo!(),
+                        TapleafClass::Other => (vec![self.to_string()], false),
                     };
                     descriptions.extend(leaf_descriptions);
                     all_leaves_have_cleartext &= leaf_has_cleartext;
