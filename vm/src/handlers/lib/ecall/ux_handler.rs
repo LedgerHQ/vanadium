@@ -136,6 +136,8 @@ pub struct UxHandler {
     cur_page: u8,
     #[cfg(any(target_os = "stax", target_os = "flex", target_os = "apex_p"))]
     page_handle: *mut sys::nbgl_page_t, // handle returned by nbgl when drawing a page; should be freed before drawing a new page
+    #[cfg(any(target_os = "stax", target_os = "flex", target_os = "apex_p"))]
+    tag_value_list: Vec<sys::nbgl_contentTagValue_t>,
 }
 
 // Global static variable to hold the singleton instance
@@ -197,11 +199,14 @@ impl UxHandler {
             cstrings: Vec::new(),
             cur_page: 0,
             page_handle: core::ptr::null_mut(),
+            tag_value_list: Vec::new(),
         };
     }
 
     pub fn clear_cstrings(&mut self) {
         self.cstrings.clear();
+        #[cfg(any(target_os = "stax", target_os = "flex", target_os = "apex_p"))]
+        self.tag_value_list.clear();
     }
 
     #[inline(always)]
@@ -249,8 +254,8 @@ impl UxHandler {
                 self.page_handle = sys::nbgl_pageDrawSpinner(self.alloc_cstring(Some(text))?, 0);
             },
             common::ux::Page::Info { icon, text } => unsafe {
-                self.clear_cstrings();
                 self.release_handle();
+                self.clear_cstrings();
 
                 let ticker_config = sys::nbgl_screenTickerConfiguration_t {
                     tickerCallback: None, // we could put a callback here if we had a timer
@@ -295,8 +300,8 @@ impl UxHandler {
                 confirm,
                 reject,
             } => unsafe {
-                self.clear_cstrings();
                 self.release_handle();
+                self.clear_cstrings();
 
                 let page_confirmation_description = sys::nbgl_pageConfirmationDescription_s {
                     centeredInfo: sys::nbgl_contentCenteredInfo_t {
@@ -324,8 +329,8 @@ impl UxHandler {
                 navigation_info,
                 page_content_info,
             } => unsafe {
-                self.clear_cstrings();
                 self.release_handle();
+                self.clear_cstrings();
 
                 let nav_info = navigation_info
                     .as_ref()
@@ -399,7 +404,7 @@ impl UxHandler {
                         );
                     }
                     common::ux::PageContent::TagValueList { list } => {
-                        let tag_value_list = list
+                        self.tag_value_list = list
                             .iter()
                             .map(|t| {
                                 let mut res = sys::nbgl_contentTagValue_t::default();
@@ -409,11 +414,15 @@ impl UxHandler {
                             })
                             .collect::<Result<Vec<_>, CommEcallError>>()?;
 
+                        let pairs_ptr = self.tag_value_list.as_ptr();
+                        let nb_pairs = self.tag_value_list.len() as u8;
+                        let title_ptr = self.alloc_cstring(page_content_info.title.as_ref())?;
+
                         self.page_handle = sys::nbgl_pageDrawGenericContent(
                             Some(layout_touch_callback),
                             navigation_info,
                             &mut sys::nbgl_pageContent_t {
-                                title: self.alloc_cstring(page_content_info.title.as_ref())?,
+                                title: title_ptr,
                                 isTouchableTitle: false, // unused in nbgl
                                 titleToken: TOKEN_TITLE,
                                 tuneId: 0,
@@ -422,9 +431,9 @@ impl UxHandler {
                                 type_: sys::TAG_VALUE_LIST,
                                 __bindgen_anon_1: sys::nbgl_pageContent_s__bindgen_ty_1 {
                                     tagValueList: sys::nbgl_contentTagValueList_t {
-                                        pairs: tag_value_list.as_ptr(),
+                                        pairs: pairs_ptr,
                                         callback: None,
-                                        nbPairs: tag_value_list.len() as u8,
+                                        nbPairs: nb_pairs,
                                         startIndex: 0, // unused if no callback
                                         nbMaxLinesForValue: 0,
                                         token: 255,
@@ -491,8 +500,8 @@ impl UxHandler {
                 };
             },
             common::ux::Page::Home { description } => unsafe {
-                self.clear_cstrings();
                 self.release_handle();
+                self.clear_cstrings();
 
                 let ticker_config = sys::nbgl_screenTickerConfiguration_t {
                     tickerCallback: None, // we could put a callback here if we had a timer
@@ -553,8 +562,8 @@ impl UxHandler {
                 subtext,
                 style,
             } => {
-                self.clear_cstrings();
                 self.release_handle();
+                self.clear_cstrings();
                 unsafe {
                     self.step_handle = sys::nbgl_stepDrawText(
                         *pos,
@@ -576,8 +585,8 @@ impl UxHandler {
                 icon,
                 style,
             } => {
-                self.clear_cstrings();
                 self.release_handle();
+                self.clear_cstrings();
 
                 unsafe {
                     self.step_handle = sys::nbgl_stepDrawCenteredInfo(
