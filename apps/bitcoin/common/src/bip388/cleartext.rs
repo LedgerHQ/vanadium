@@ -3,7 +3,7 @@ use alloc::{format, string::String, string::ToString, vec, vec::Vec};
 use macros::descriptor_match;
 
 use super::time::{format_seconds, format_utc_date};
-use super::{DescriptorTemplate, KeyPlaceholder};
+use super::DescriptorTemplate;
 
 // Maximum confusion score for which cleartext descriptions are shown instead of the raw descriptor template.
 pub const MAX_CONFUSION_SCORE: u64 = 3600;
@@ -14,7 +14,7 @@ const SEQUENCE_LOCKTIME_TYPE_FLAG: u32 = 1 << 22;
 // DescriptorTemplate variants. Both `confusion_score` and `to_cleartext` match
 // on these types, so their case coverage is structurally identical and
 // compiler-enforced.
-enum DescriptorClass<'a> {
+enum DescriptorClass {
     LegacySingleSig {
         key_index: u32,
     },
@@ -26,7 +26,7 @@ enum DescriptorClass<'a> {
         key_indices: Vec<u32>,
     },
     Taproot {
-        internal_key: &'a KeyPlaceholder,
+        internal_key_index: u32,
         leaves: Vec<TapleafClass>,
     },
     Other,
@@ -100,8 +100,176 @@ enum TapleafClass {
     Other(String),
 }
 
+impl TapleafClass {
+    /// Returns a numeric key that defines the canonical visualization order for
+    /// taptree leaves:
+    ///   - simpler conditions come first
+    ///   - relative before absolute
+    ///   - heightlocks before timelocks
+    ///   - `Other` is last
+    fn order(&self) -> u32 {
+        match self {
+            TapleafClass::SingleSig { .. } => 0,
+            TapleafClass::BothMustSign { .. } => 1,
+            TapleafClass::SortedMultisig { .. } => 2,
+            TapleafClass::Multisig { .. } => 3,
+            TapleafClass::RelativeHeightlockSingleSig { .. } => 4,
+            TapleafClass::RelativeHeightlockMultiSig { .. } => 5,
+            TapleafClass::RelativeTimelockSingleSig { .. } => 6,
+            TapleafClass::RelativeTimelockMultiSig { .. } => 7,
+            TapleafClass::AbsoluteHeightlockSingleSig { .. } => 8,
+            TapleafClass::AbsoluteHeightlockMultiSig { .. } => 9,
+            TapleafClass::AbsoluteTimelockSingleSig { .. } => 10,
+            TapleafClass::AbsoluteTimelockMultiSig { .. } => 11,
+            TapleafClass::Other(_) => 12,
+        }
+    }
+
+    /// Full canonical display order. Within each category, ties are broken by:
+    /// - `SingleSig`: key_index
+    /// - `BothMustSign`: key_index1, then key_index2
+    /// - `SortedMultisig` / `Multisig`: number of keys, then threshold
+    /// - `*SingleSig` lock variants: key_index, then lock value
+    /// - `*MultiSig` lock variants: number of keys, then threshold, then lock value
+    /// - `Other`: lexicographic by descriptor string
+    fn display_cmp(&self, other: &Self) -> core::cmp::Ordering {
+        use core::cmp::Ordering;
+        let cat = self.order().cmp(&other.order());
+        if cat != Ordering::Equal {
+            return cat;
+        }
+        match (self, other) {
+            (
+                TapleafClass::SingleSig { key_index: k1 },
+                TapleafClass::SingleSig { key_index: k2 },
+            ) => k1.cmp(k2),
+            (
+                TapleafClass::BothMustSign {
+                    key_index1: a1,
+                    key_index2: b1,
+                },
+                TapleafClass::BothMustSign {
+                    key_index1: a2,
+                    key_index2: b2,
+                },
+            ) => a1.cmp(a2).then(b1.cmp(b2)),
+            (
+                TapleafClass::SortedMultisig {
+                    threshold: t1,
+                    key_indices: k1,
+                },
+                TapleafClass::SortedMultisig {
+                    threshold: t2,
+                    key_indices: k2,
+                },
+            ) => k1.len().cmp(&k2.len()).then(t1.cmp(t2)),
+            (
+                TapleafClass::Multisig {
+                    threshold: t1,
+                    key_indices: k1,
+                },
+                TapleafClass::Multisig {
+                    threshold: t2,
+                    key_indices: k2,
+                },
+            ) => k1.len().cmp(&k2.len()).then(t1.cmp(t2)),
+            (
+                TapleafClass::RelativeHeightlockSingleSig {
+                    key_index: k1,
+                    blocks: b1,
+                },
+                TapleafClass::RelativeHeightlockSingleSig {
+                    key_index: k2,
+                    blocks: b2,
+                },
+            ) => k1.cmp(k2).then(b1.cmp(b2)),
+            (
+                TapleafClass::RelativeHeightlockMultiSig {
+                    threshold: t1,
+                    key_indices: k1,
+                    blocks: b1,
+                },
+                TapleafClass::RelativeHeightlockMultiSig {
+                    threshold: t2,
+                    key_indices: k2,
+                    blocks: b2,
+                },
+            ) => k1.len().cmp(&k2.len()).then(t1.cmp(t2)).then(b1.cmp(b2)),
+            (
+                TapleafClass::RelativeTimelockSingleSig {
+                    key_index: k1,
+                    time: t1,
+                },
+                TapleafClass::RelativeTimelockSingleSig {
+                    key_index: k2,
+                    time: t2,
+                },
+            ) => k1.cmp(k2).then(t1.cmp(t2)),
+            (
+                TapleafClass::RelativeTimelockMultiSig {
+                    threshold: t1,
+                    key_indices: k1,
+                    time: tm1,
+                },
+                TapleafClass::RelativeTimelockMultiSig {
+                    threshold: t2,
+                    key_indices: k2,
+                    time: tm2,
+                },
+            ) => k1.len().cmp(&k2.len()).then(t1.cmp(t2)).then(tm1.cmp(tm2)),
+            (
+                TapleafClass::AbsoluteHeightlockSingleSig {
+                    key_index: k1,
+                    block_height: h1,
+                },
+                TapleafClass::AbsoluteHeightlockSingleSig {
+                    key_index: k2,
+                    block_height: h2,
+                },
+            ) => k1.cmp(k2).then(h1.cmp(h2)),
+            (
+                TapleafClass::AbsoluteHeightlockMultiSig {
+                    threshold: t1,
+                    key_indices: k1,
+                    block_height: h1,
+                },
+                TapleafClass::AbsoluteHeightlockMultiSig {
+                    threshold: t2,
+                    key_indices: k2,
+                    block_height: h2,
+                },
+            ) => k1.len().cmp(&k2.len()).then(t1.cmp(t2)).then(h1.cmp(h2)),
+            (
+                TapleafClass::AbsoluteTimelockSingleSig {
+                    key_index: k1,
+                    timestamp: ts1,
+                },
+                TapleafClass::AbsoluteTimelockSingleSig {
+                    key_index: k2,
+                    timestamp: ts2,
+                },
+            ) => k1.cmp(k2).then(ts1.cmp(ts2)),
+            (
+                TapleafClass::AbsoluteTimelockMultiSig {
+                    threshold: t1,
+                    key_indices: k1,
+                    timestamp: ts1,
+                },
+                TapleafClass::AbsoluteTimelockMultiSig {
+                    threshold: t2,
+                    key_indices: k2,
+                    timestamp: ts2,
+                },
+            ) => k1.len().cmp(&k2.len()).then(t1.cmp(t2)).then(ts1.cmp(ts2)),
+            (TapleafClass::Other(s1), TapleafClass::Other(s2)) => s1.cmp(s2),
+            // Same order() value implies same variant; this arm is unreachable.
+            _ => Ordering::Equal,
+        }
+    }
+}
+
 impl DescriptorTemplate {
-    fn classify(&self) -> DescriptorClass<'_> {
+    fn classify(&self) -> DescriptorClass {
         descriptor_match!(self, {
             pkh(key_index) => {
                 DescriptorClass::LegacySingleSig { key_index }
@@ -116,7 +284,7 @@ impl DescriptorTemplate {
             },
             tr(internal_key, tree) => {
                 DescriptorClass::Taproot {
-                    internal_key,
+                    internal_key_index: internal_key.key_index,
                     leaves: tree
                         .as_ref()
                         .map(|t| t.tapleaves().map(|l| l.classify_as_tapleaf()).collect())
@@ -260,10 +428,11 @@ impl ClearText for DescriptorTemplate {
                 true,
             ),
             DescriptorClass::Taproot {
-                internal_key,
-                leaves,
+                internal_key_index,
+                mut leaves,
             } => {
-                let mut descriptions = vec![format!("Primary path: @{}", internal_key.key_index)];
+                leaves.sort_by(|a, b| a.display_cmp(b));
+                let mut descriptions = vec![format!("Primary path: @{}", internal_key_index)];
                 let mut all_leaves_have_cleartext = true;
                 for leaf in leaves {
                     let (leaf_descriptions, leaf_has_cleartext) = match leaf {
@@ -556,13 +725,13 @@ mod tests {
                 ],
                 true,
             ),
-            // Taproot: SortedMultisig leaf + SingleSig leaf
+            // Taproot: SortedMultisig leaf + SingleSig leaf (SingleSig sorts first)
             (
                 "tr(@0/**,{sortedmulti_a(2,@1/**,@2/**),pk(@3/**)})",
                 &[
                     "Primary path: @0",
-                    "2 of @1 and @2 (sorted)",
                     "Single-signature (@3)",
+                    "2 of @1 and @2 (sorted)",
                 ],
                 true,
             ),
@@ -660,6 +829,36 @@ mod tests {
                     "t:or_c(pk(@2/**),and_v(v:pk(@3/**),or_c(pk(@4/**),v:ripemd160(907cd521fff981ce4063a4dc43c6f3fd28e08995))))",
                 ],
                 false,
+            ),
+            // Tie-break: two SingleSig leaves given in reverse key_index order → sorted by key_index
+            (
+                "tr(@0/**,{pk(@2/**),pk(@1/**)})",
+                &[
+                    "Primary path: @0",
+                    "Single-signature (@1)",
+                    "Single-signature (@2)",
+                ],
+                true,
+            ),
+            // Tie-break: two RelativeHeightlockSingleSig → sorted by key_index, then blocks
+            (
+                "tr(@0/**,{and_v(v:pk(@2/<0;1>/*),older(2000)),and_v(v:pk(@1/<0;1>/*),older(1000))})",
+                &[
+                    "Primary path: @0",
+                    "@1 after 1000 blocks",
+                    "@2 after 2000 blocks",
+                ],
+                true,
+            ),
+            // Tie-break: two Multisig leaves → fewer keys first, then smaller threshold
+            (
+                "tr(@0/**,{multi_a(2,@1/**,@2/**,@3/**),multi_a(2,@4/**,@5/**)})",
+                &[
+                    "Primary path: @0",
+                    "2 of @4 and @5",
+                    "2 of @1, @2 and @3",
+                ],
+                true,
             ),
         ];
 
