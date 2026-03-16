@@ -7,6 +7,8 @@ use super::{DescriptorTemplate, KeyPlaceholder};
 // Maximum confusion score for which cleartext descriptions are shown instead of the raw descriptor template.
 pub const MAX_CONFUSION_SCORE: u64 = 3600;
 
+const SEQUENCE_LOCKTIME_TYPE_FLAG: u32 = 1 << 22;
+
 // Private intermediate representations used to centralise the single match over
 // DescriptorTemplate variants. Both `confusion_score` and `to_cleartext` match
 // on these types, so their case coverage is structurally identical and
@@ -18,7 +20,7 @@ enum DescriptorClass<'a> {
     SegwitSingleSig {
         key_index: u32,
     },
-    Multisig {
+    SegwitMultisig {
         threshold: u32,
         key_indices: Vec<u32>,
     },
@@ -32,25 +34,68 @@ enum DescriptorClass<'a> {
 enum TapleafClass {
     // non-miniscript patterns
     SortedMultisig {
+        // sortedmulti_a
         threshold: u32,
         key_indices: Vec<u32>,
-    }, // sortedmulti_a
+    },
     // miniscript patterns
     SingleSig {
+        // pk and pkh
         key_index: u32,
-    }, // pk and pkh
+    },
     BothMustSign {
         key_index1: u32,
         key_index2: u32,
     },
     Multisig {
+        // multi_a
         threshold: u32,
         key_indices: Vec<u32>,
-    }, // multi_a
+    },
     RelativeHeightlockSingleSig {
+        // and_v(v:pk(@x), older(n)), with n >= 1 && n < 65536
         key_index: u32,
         blocks: u32,
-    }, // and_v(v:pk(@x), older(n))
+    },
+    RelativeHeightlockMultiSig {
+        // and_v(v:multi_a(threshold, key_indices...), older(n)), with n >= 1 && n < 65536
+        threshold: u32,
+        key_indices: Vec<u32>,
+        blocks: u32,
+    },
+    RelativeTimelockSingleSig {
+        // and_v(v:pk(@x), older(n)) with n >= 4194305 && n < 4259840
+        key_index: u32,
+        time: u32,
+    },
+    RelativeTimelockMultiSig {
+        // and_v(v:multi_a(threshold, key_indices...), older(n)) with n >= 4194305 && n < 4259840
+        threshold: u32,
+        key_indices: Vec<u32>,
+        time: u32,
+    },
+    AbsoluteHeightlockSingleSig {
+        // and_v(v:pk(@x), after(n)) with n < 500000000
+        key_index: u32,
+        block_height: u32,
+    },
+    AbsoluteHeightlockMultiSig {
+        // and_v(v:multi_a(threshold, key_indices...), after(n)) with n < 500000000
+        threshold: u32,
+        key_indices: Vec<u32>,
+        block_height: u32,
+    },
+    AbsoluteTimelockSingleSig {
+        // and_v(v:pk(@x), after(n)) with n >= 500000000
+        key_index: u32,
+        timestamp: u32,
+    },
+    AbsoluteTimelockMultiSig {
+        // and_v(v:multi_a(threshold, key_indices...), after(n)) with n >= 500000000
+        threshold: u32,
+        key_indices: Vec<u32>,
+        timestamp: u32,
+    },
     Other,
 }
 
@@ -60,11 +105,13 @@ impl DescriptorTemplate {
             pkh(key_index) => {
                 DescriptorClass::LegacySingleSig { key_index }
             },
-            wpkh(key_index) => {
+            // normal or wrapped
+            wpkh(key_index) | sh(wpkh(key_index)) => {
                 DescriptorClass::SegwitSingleSig { key_index }
             },
-            wsh(multi(threshold, key_indices)) | wsh(sortedmulti(threshold, key_indices)) => {
-                DescriptorClass::Multisig { threshold, key_indices }
+            // 4 combinations: multi/sortedmulti; normal/wrapped
+            wsh(multi(threshold, key_indices)) | wsh(sortedmulti(threshold, key_indices)) | sh(wsh(multi(threshold, key_indices))) | sh(wsh(sortedmulti(threshold, key_indices))) => {
+                DescriptorClass::SegwitMultisig { threshold, key_indices }
             },
             tr(internal_key, tree) => {
                 DescriptorClass::Taproot {
@@ -87,17 +134,88 @@ impl DescriptorTemplate {
             pk(key_index) | pkh(key_index) => {
                 TapleafClass::SingleSig { key_index }
             },
-            multi(threshold, key_indices) => {
-                TapleafClass::SortedMultisig { threshold, key_indices }
+            multi_a(threshold, key_indices) => {
+                TapleafClass::Multisig { threshold, key_indices }
             },
             and_v(v:pk(key_index), older(blocks)) if blocks >= 1 && blocks < 65536 => {
                 TapleafClass::RelativeHeightlockSingleSig { key_index, blocks }
+            },
+            and_v(v:multi_a(threshold, key_indices), older(blocks)) if blocks >= 1 && blocks < 65536 => {
+                TapleafClass::RelativeHeightlockMultiSig { threshold, key_indices, blocks }
+            },
+            and_v(v:pk(key_index), older(time)) if time >= 4194305 && time < 4259840 => {
+                TapleafClass::RelativeTimelockSingleSig { key_index, time }
+            },
+            and_v(v:multi_a(threshold, key_indices), older(time)) if time >= 4194305 && time < 4259840 => {
+                TapleafClass::RelativeTimelockMultiSig { threshold, key_indices, time }
+            },
+            and_v(v:pk(key_index), after(block_height)) if block_height >= 1 && block_height < 500000000 => {
+                TapleafClass::AbsoluteHeightlockSingleSig { key_index, block_height }
+            },
+            and_v(v:multi_a(threshold, key_indices), after(block_height)) if block_height >= 1 && block_height < 500000000 => {
+                TapleafClass::AbsoluteHeightlockMultiSig { threshold, key_indices, block_height }
+            },
+            and_v(v:pk(key_index), after(timestamp)) if timestamp >= 500000000 => {
+                TapleafClass::AbsoluteTimelockSingleSig { key_index, timestamp }
+            },
+            and_v(v:multi_a(threshold, key_indices), after(timestamp)) if timestamp >= 500000000 => {
+                TapleafClass::AbsoluteTimelockMultiSig { threshold, key_indices, timestamp }
             },
             and_v(v:pk(key_index1), pk(key_index2)) => {
                 TapleafClass::BothMustSign { key_index1, key_index2 }
             },
             _ => { TapleafClass::Other },
         })
+    }
+}
+
+fn format_utc_date(timestamp: u32) -> String {
+    // Compute the calendar date (and optional time) from a Unix timestamp
+    // using Howard Hinnant's civil-from-days algorithm.
+    let days = timestamp / 86400;
+    let time_of_day = timestamp % 86400;
+    let z = days as i64 + 719468;
+    let era = if z >= 0 { z } else { z - 146096 } / 146097;
+    let doe = (z - era * 146097) as u32;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let y = yoe as i64 + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+    if time_of_day == 0 {
+        format!("{:04}-{:02}-{:02}", y, m, d)
+    } else {
+        let h = time_of_day / 3600;
+        let min = (time_of_day % 3600) / 60;
+        let sec = time_of_day % 60;
+        format!("{:04}-{:02}-{:02} {:02}:{:02}:{:02}", y, m, d, h, min, sec)
+    }
+}
+
+fn format_seconds(secs: u32) -> String {
+    let days = secs / 86400;
+    let hours = (secs % 86400) / 3600;
+    let minutes = (secs % 3600) / 60;
+    let seconds = secs % 60;
+    let mut parts: Vec<String> = Vec::new();
+    if days > 0 {
+        parts.push(format!("{}d", days));
+    }
+    if hours > 0 {
+        parts.push(format!("{}h", hours));
+    }
+    if minutes > 0 {
+        parts.push(format!("{}m", minutes));
+    }
+    if seconds > 0 {
+        parts.push(format!("{}s", seconds));
+    }
+    if parts.is_empty() {
+        "0s".to_string()
+    } else {
+        parts.join(" ")
     }
 }
 
@@ -129,8 +247,8 @@ impl ClearText for DescriptorTemplate {
     fn confusion_score(&self) -> u64 {
         match self.classify() {
             DescriptorClass::LegacySingleSig { .. } => 1,
-            DescriptorClass::SegwitSingleSig { .. } => 1,
-            DescriptorClass::Multisig { .. } => 1,
+            DescriptorClass::SegwitSingleSig { .. } => 2, // wpkh and sh(wpkh)
+            DescriptorClass::SegwitMultisig { .. } => 4,  // multi or sortdmulti / normal or wrapped
             DescriptorClass::Taproot { leaves, .. } => {
                 // The confusion score of a taproot descriptor is the product of the confusion scores of the internal key and all the leaves,
                 // multiplied by the number T(n) of rearrangements of the tree.
@@ -143,6 +261,13 @@ impl ClearText for DescriptorTemplate {
                         TapleafClass::Multisig { .. } => 1,
                         TapleafClass::BothMustSign { .. } => 1,
                         TapleafClass::RelativeHeightlockSingleSig { .. } => 1,
+                        TapleafClass::RelativeHeightlockMultiSig { .. } => 1,
+                        TapleafClass::RelativeTimelockSingleSig { .. } => 1,
+                        TapleafClass::RelativeTimelockMultiSig { .. } => 1,
+                        TapleafClass::AbsoluteHeightlockSingleSig { .. } => 1,
+                        TapleafClass::AbsoluteHeightlockMultiSig { .. } => 1,
+                        TapleafClass::AbsoluteTimelockSingleSig { .. } => 1,
+                        TapleafClass::AbsoluteTimelockMultiSig { .. } => 1,
                         TapleafClass::Other => 1,
                     };
                     score = score.saturating_mul(leaf_score);
@@ -172,12 +297,12 @@ impl ClearText for DescriptorTemplate {
                 vec![format!("Segwit single-signature (@{})", key_index)],
                 true,
             ),
-            DescriptorClass::Multisig {
+            DescriptorClass::SegwitMultisig {
                 threshold,
                 key_indices,
             } => (
                 vec![format!(
-                    "{} of {}",
+                    "{} of {} (SegWit)",
                     threshold,
                     format_key_indices(&key_indices)
                 )],
@@ -230,6 +355,88 @@ impl ClearText for DescriptorTemplate {
                             vec![format!("@{} after {} blocks", key_index, blocks)],
                             true,
                         ),
+                        TapleafClass::RelativeHeightlockMultiSig {
+                            threshold,
+                            key_indices,
+                            blocks,
+                        } => (
+                            vec![format!(
+                                "{} of {} after {} blocks",
+                                threshold,
+                                format_key_indices(&key_indices),
+                                blocks
+                            )],
+                            true,
+                        ),
+                        TapleafClass::RelativeTimelockSingleSig { key_index, time } => (
+                            vec![format!(
+                                "@{} after {}",
+                                key_index,
+                                format_seconds((time & !SEQUENCE_LOCKTIME_TYPE_FLAG) * 512)
+                            )],
+                            true,
+                        ),
+                        TapleafClass::RelativeTimelockMultiSig {
+                            threshold,
+                            key_indices,
+                            time,
+                        } => (
+                            vec![format!(
+                                "{} of {} after {}",
+                                threshold,
+                                format_key_indices(&key_indices),
+                                format_seconds((time & !SEQUENCE_LOCKTIME_TYPE_FLAG) * 512)
+                            )],
+                            true,
+                        ),
+
+                        TapleafClass::AbsoluteHeightlockSingleSig {
+                            key_index,
+                            block_height,
+                        } => (
+                            vec![format!(
+                                "@{} after block height {}",
+                                key_index, block_height
+                            )],
+                            true,
+                        ),
+                        TapleafClass::AbsoluteHeightlockMultiSig {
+                            threshold,
+                            key_indices,
+                            block_height,
+                        } => (
+                            vec![format!(
+                                "{} of {} after block height {}",
+                                threshold,
+                                format_key_indices(&key_indices),
+                                block_height
+                            )],
+                            true,
+                        ),
+                        TapleafClass::AbsoluteTimelockSingleSig {
+                            key_index,
+                            timestamp,
+                        } => (
+                            vec![format!(
+                                "@{} after date {}",
+                                key_index,
+                                format_utc_date(timestamp)
+                            )],
+                            true,
+                        ),
+                        TapleafClass::AbsoluteTimelockMultiSig {
+                            threshold,
+                            key_indices,
+                            timestamp,
+                        } => (
+                            vec![format!(
+                                "{} of {} after date {}",
+                                threshold,
+                                format_key_indices(&key_indices),
+                                format_utc_date(timestamp)
+                            )],
+                            true,
+                        ),
                         TapleafClass::Other => (vec![self.to_string()], false),
                     };
                     descriptions.extend(leaf_descriptions);
@@ -268,12 +475,17 @@ mod tests {
             // Legacy single-sig
             ("pkh(@0/**)", 1),
             // Segwit single-sig
-            ("wpkh(@0/**)", 1),
-            // Multisig (wsh + sortedmulti / multi)
-            ("wsh(sortedmulti(2,@0/**,@1/**))", 1),
-            ("wsh(sortedmulti(2,@0/**,@1/**,@2/**))", 1),
-            ("wsh(sortedmulti(3,@0/**,@1/**,@2/**))", 1),
-            ("wsh(multi(2,@0/**,@1/**))", 1),
+            ("wpkh(@0/**)", 2),
+            ("sh(wpkh(@0/**))", 2), // wrapped
+            // Segwit multi-sig (wsh + sortedmulti / multi)
+            ("wsh(sortedmulti(2,@0/**,@1/**))", 4),
+            ("wsh(sortedmulti(2,@0/**,@1/**,@2/**))", 4),
+            ("wsh(sortedmulti(3,@0/**,@1/**,@2/**))", 4),
+            ("wsh(multi(2,@0/**,@1/**))", 4),
+            ("sh(wsh(multi(2,@0/**,@1/**)))", 4), // wrapped
+            ("sh(wsh(sortedmulti(2,@0/**,@1/**)))", 4), // wrapped
+            ("sh(wsh(multi(2,@0/**,@1/**,@2/**)))", 4), // wrapped
+            ("sh(wsh(sortedmulti(3,@0/**,@1/**,@2/**)))", 4), // wrapped
             // Taproot with 2 leaves: both SingleSig (score 2 each), T(2)=1 → 2×2×1=4
             ("tr(@0/**,{pk(@1/**),pkh(@2/**)})", 4),
             // Taproot with 2 leaves: SortedMultisig (score 1) + SingleSig (score 2), T(2)=1 → 1×2×1=2
@@ -283,6 +495,16 @@ mod tests {
             // Taproot with 2 leaves: RelativeHeightlockSingleSig (score 1) + SingleSig (score 2), T(2)=1 → 2
             (
                 "tr(@0/**,{pk(@1/**),and_v(v:pk(@2/<0;1>/*),older(52560))})",
+                2,
+            ),
+            // Taproot with 2 leaves: RelativeTimelockSingleSig (score 1) + SingleSig (score 2), T(2)=1 → 2
+            (
+                "tr(@0/**,{pk(@1/**),and_v(v:pk(@2/<0;1>/*),older(4194305))})",
+                2,
+            ),
+            // Taproot with 2 leaves: RelativeTimelockMultiSig (score 1) + SingleSig (score 2), T(2)=1 → 2
+            (
+                "tr(@0/**,{pk(@1/**),and_v(v:multi_a(2,@2/<0;1>/*,@3/<0;1>/*),older(4194484))})",
                 2,
             ),
         ];
@@ -298,6 +520,42 @@ mod tests {
     }
 
     #[test]
+    fn test_has_cleartext() {
+        // list of descriptor templates that should have a cleartext description
+        let cases = &[
+            "pkh(@0/**)",
+            "wpkh(@0/**)",
+            "wsh(sortedmulti(2,@0/**,@1/**))",
+            "wsh(sortedmulti(2,@0/**,@1/**,@2/**))",
+            "wsh(sortedmulti(3,@0/**,@1/**,@2/**))",
+            "wsh(multi(2,@0/**,@1/**))",
+            "tr(@0/**)",
+            "tr(@0/**,pkh(@1/**))",
+            "tr(@0/**,{pk(@1/**),pkh(@2/**)})",
+            "tr(@0/**,{sortedmulti_a(2,@1/**,@2/**),pk(@3/**)})",
+            "tr(@0/**,{{pk(@1/**),pk(@2/**)},pk(@3/**)})",
+            "tr(@0/**,and_v(v:pk(@1/<0;1>/*),older(52560)))",
+            "tr(@0/**,{pk(@1/**),and_v(v:pk(@2/<0;1>/*),older(1008))})",
+            "tr(@0/<0;1>/*,{and_v(v:pk(@1/<2;3>/*),older(4383)),and_v(v:pk(@2/<0;1>/*),pk(@1/<0;1>/*))})",
+            "tr(@0/<0;1>/*,{and_v(v:multi_a(2,@1/<2;3>/*,@2/<0;1>/*,@3/<0;1>/*),older(144)),and_v(v:pk(@1/<0;1>/*),pk(@2/<0;1>/*))})",
+            "tr(@0/**,and_v(v:pk(@1/<0;1>/*),older(4194305)))",
+            "tr(@0/**,{pk(@1/**),and_v(v:pk(@2/<0;1>/*),older(4194484))})",
+            "tr(@0/**,{pk(@1/**),and_v(v:multi_a(2,@2/<0;1>/*,@3/<0;1>/*),older(4194484))})",
+            "tr(@0/**,and_v(v:pk(@1/<0;1>/*),after(840000)))",
+            "tr(@0/**,{pk(@1/**),and_v(v:multi_a(2,@2/<0;1>/*,@3/<0;1>/*),after(840000))})",
+            "tr(@0/**,and_v(v:pk(@1/<0;1>/*),after(500000000)))",
+            "tr(@0/**,{pk(@1/**),and_v(v:multi_a(2,@2/<0;1>/*,@3/<0;1>/*),after(1700000000))})",
+        ];
+        for &desc_str in cases {
+            assert!(
+                dt(desc_str).to_cleartext().1,
+                "expected to have cleartext description: {:?}",
+                desc_str
+            );
+        }
+    }
+
+    #[test]
     fn test_to_cleartext() {
         // (descriptor_template, expected_descriptions, expected_all_have_cleartext)
         let cases: &[(&str, &[&str], bool)] = &[
@@ -306,21 +564,29 @@ mod tests {
             // Segwit single-sig
             ("wpkh(@0/**)", &["Segwit single-signature (@0)"], true),
             // Multisig: 2-of-2 sortedmulti
-            ("wsh(sortedmulti(2,@0/**,@1/**))", &["2 of @0 and @1"], true),
+            (
+                "wsh(sortedmulti(2,@0/**,@1/**))",
+                &["2 of @0 and @1 (SegWit)"],
+                true,
+            ),
             // Multisig: 2-of-3 sortedmulti (format_key_indices with 3 keys)
             (
                 "wsh(sortedmulti(2,@0/**,@1/**,@2/**))",
-                &["2 of @0, @1 and @2"],
+                &["2 of @0, @1 and @2 (SegWit)"],
                 true,
             ),
             // Multisig: 3-of-3 sortedmulti
             (
                 "wsh(sortedmulti(3,@0/**,@1/**,@2/**))",
-                &["3 of @0, @1 and @2"],
+                &["3 of @0, @1 and @2 (SegWit)"],
                 true,
             ),
             // Multisig: multi (non-sorted)
-            ("wsh(multi(2,@0/**,@1/**))", &["2 of @0 and @1"], true),
+            (
+                "wsh(multi(2,@0/**,@1/**))",
+                &["2 of @0 and @1 (SegWit)"],
+                true,
+            ),
             // Taproot: key-path only (no leaves)
             ("tr(@0/**)", &["Primary path: @0"], true),
             // Taproot: single pkh leaf
@@ -373,6 +639,64 @@ mod tests {
                     "Primary path: @0",
                     "Single-signature (@1)",
                     "@2 after 1008 blocks",
+                ],
+                true,
+            ),
+            // Taproot: relative time-lock single-sig (1 unit = 512s = 8m 32s)
+            (
+                "tr(@0/**,and_v(v:pk(@1/<0;1>/*),older(4194305)))",
+                &["Primary path: @0", "@1 after 8m 32s"],
+                true,
+            ),
+            // Taproot: relative time-lock single-sig (180 units = 92160s = 1d 1h 36m)
+            (
+                "tr(@0/**,{pk(@1/**),and_v(v:pk(@2/<0;1>/*),older(4194484))})",
+                &[
+                    "Primary path: @0",
+                    "Single-signature (@1)",
+                    "@2 after 1d 1h 36m",
+                ],
+                true,
+            ),
+            // Taproot: relative time-lock multisig (180 units = 92160s = 1d 1h 36m)
+            (
+                "tr(@0/**,{pk(@1/**),and_v(v:multi_a(2,@2/<0;1>/*,@3/<0;1>/*),older(4194484))})",
+                &[
+                    "Primary path: @0",
+                    "Single-signature (@1)",
+                    "2 of @2 and @3 after 1d 1h 36m",
+                ],
+                true,
+            ),
+            // Taproot: absolute heightlock single-sig (block height 840000)
+            (
+                "tr(@0/**,and_v(v:pk(@1/<0;1>/*),after(840000)))",
+                &["Primary path: @0", "@1 after block height 840000"],
+                true,
+            ),
+            // Taproot: absolute heightlock multisig alongside a plain single-sig
+            (
+                "tr(@0/**,{pk(@1/**),and_v(v:multi_a(2,@2/<0;1>/*,@3/<0;1>/*),after(840000))})",
+                &[
+                    "Primary path: @0",
+                    "Single-signature (@1)",
+                    "2 of @2 and @3 after block height 840000",
+                ],
+                true,
+            ),
+            // Taproot: absolute timelock single-sig (timestamp 500000000 = 1985-11-05T00:53:20)
+            (
+                "tr(@0/**,and_v(v:pk(@1/<0;1>/*),after(500000000)))",
+                &["Primary path: @0", "@1 after date 1985-11-05 00:53:20"],
+                true,
+            ),
+            // Taproot: absolute timelock multisig (timestamp 1700000000 = 2023-11-14 22:13:20)
+            (
+                "tr(@0/**,{pk(@1/**),and_v(v:multi_a(2,@2/<0;1>/*,@3/<0;1>/*),after(1700000000))})",
+                &[
+                    "Primary path: @0",
+                    "Single-signature (@1)",
+                    "2 of @2 and @3 after date 2023-11-14 22:13:20",
                 ],
                 true,
             ),
