@@ -97,7 +97,7 @@ enum TapleafClass {
         key_indices: Vec<u32>,
         timestamp: u32,
     },
-    Other,
+    Other(String),
 }
 
 impl DescriptorTemplate {
@@ -165,7 +165,7 @@ impl DescriptorTemplate {
             and_v(v:pk(key_index1), pk(key_index2)) => {
                 TapleafClass::BothMustSign { key_index1, key_index2 }
             },
-            _ => { TapleafClass::Other },
+            _ => { TapleafClass::Other(self.to_string()) },
         })
     }
 }
@@ -219,7 +219,7 @@ impl ClearText for DescriptorTemplate {
                         TapleafClass::AbsoluteHeightlockMultiSig { .. } => 1,
                         TapleafClass::AbsoluteTimelockSingleSig { .. } => 1,
                         TapleafClass::AbsoluteTimelockMultiSig { .. } => 1,
-                        TapleafClass::Other => 1,
+                        TapleafClass::Other(_) => 1,
                     };
                     score = score.saturating_mul(leaf_score);
                 }
@@ -388,7 +388,7 @@ impl ClearText for DescriptorTemplate {
                             )],
                             true,
                         ),
-                        TapleafClass::Other => (vec![self.to_string()], false),
+                        TapleafClass::Other(s) => (vec![s], false),
                     };
                     descriptions.extend(leaf_descriptions);
                     all_leaves_have_cleartext &= leaf_has_cleartext;
@@ -650,6 +650,16 @@ mod tests {
                     "2 of @2 and @3 after date 2023-11-14 22:13:20",
                 ],
                 true,
+            ),
+            // Taproot: first leaf recognized (heightlock single-sig), second leaf unrecognized (complex miniscript)
+            (
+                "tr(@0/**,{and_v(v:pk(@1/**),older(960)),t:or_c(pk(@2/**),and_v(v:pk(@3/**),or_c(pk(@4/**),v:ripemd160(907cd521fff981ce4063a4dc43c6f3fd28e08995))))})",
+                &[
+                    "Primary path: @0",
+                    "@1 after 960 blocks",
+                    "t:or_c(pk(@2/**),and_v(v:pk(@3/**),or_c(pk(@4/**),v:ripemd160(907cd521fff981ce4063a4dc43c6f3fd28e08995))))",
+                ],
+                false,
             ),
         ];
 
