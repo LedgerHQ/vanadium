@@ -4,6 +4,7 @@
 // - add stack limits and other safety checks
 
 mod cleartext;
+mod time;
 
 pub use cleartext::*;
 
