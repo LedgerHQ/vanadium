@@ -30,7 +30,7 @@ pub(super) fn format_utc_date(timestamp: u32) -> String {
 /// Parses a UTC date/datetime string as produced by [`format_utc_date`].
 /// Accepts `"YYYY-MM-DD"` (midnight UTC) and `"YYYY-MM-DD HH:MM:SS"`.
 /// Returns `None` if the string is malformed or the timestamp does not fit in `u32`.
-#[cfg(test)]
+#[cfg(any(test, feature = "cleartext-decode"))]
 pub(super) fn parse_utc_date_to_timestamp(s: &str) -> Option<u32> {
     let (date_str, time_str) = match s.find(' ') {
         Some(pos) => (&s[..pos], Some(&s[pos + 1..])),
@@ -104,7 +104,7 @@ pub(super) fn format_seconds(secs: u32) -> String {
 /// Accepts strings like `"0s"`, `"1d 2h 3m 4s"`, `"1h 30m"`, etc.
 /// Parts must appear in decreasing order (d, h, m, s) without duplicates.
 /// Returns `None` if the string is malformed or the total would overflow `u32`.
-#[cfg(test)]
+#[cfg(any(test, feature = "cleartext-decode"))]
 pub(super) fn parse_relative_time_to_seconds(s: &str) -> Option<u32> {
     if s.is_empty() {
         return None;
@@ -145,7 +145,7 @@ pub(super) fn parse_relative_time_to_seconds(s: &str) -> Option<u32> {
 
 /// Inverse of the civil-from-days algorithm: given a (year, month, day) triple,
 /// returns the number of days since the Unix epoch (1970-01-01).
-#[cfg(test)]
+#[cfg(any(test, feature = "cleartext-decode"))]
 fn days_from_civil(y: i64, m: u32, d: u32) -> i64 {
     let y = if m <= 2 { y - 1 } else { y };
     let era = if y >= 0 { y } else { y - 399 } / 400;
