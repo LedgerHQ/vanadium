@@ -5,10 +5,26 @@ use macros::descriptor_match;
 use super::time::{format_seconds, format_utc_date};
 use super::DescriptorTemplate;
 
+#[cfg(any(test, feature = "cleartext-decode"))]
+use super::time::{parse_relative_time_to_seconds, parse_utc_date_to_timestamp};
+#[cfg(any(test, feature = "cleartext-decode"))]
+use super::{KeyPlaceholder, TapTree};
+#[cfg(any(test, feature = "cleartext-decode"))]
+use alloc::rc::Rc;
+#[cfg(any(test, feature = "cleartext-decode"))]
+use core::str::FromStr;
+
 // Maximum confusion score for which cleartext descriptions are shown instead of the raw descriptor template.
 pub const MAX_CONFUSION_SCORE: u64 = 3600;
 
 const SEQUENCE_LOCKTIME_TYPE_FLAG: u32 = 1 << 22;
+
+/// Error type for `from_cleartext`.
+#[derive(Debug)]
+pub enum CleartextError {
+    /// The cleartext string could not be parsed.
+    ParseError(String),
+}
 
 // Private intermediate representations used to centralise the single match over
 // DescriptorTemplate variants. Both `confusion_score` and `to_cleartext` match
@@ -360,6 +376,17 @@ pub trait ClearText {
     /// Any spending condition that doesn't have a cleartext description is shown as the
     /// unchanged descriptor template, with a confusion score of 1.
     fn to_cleartext(&self) -> (Vec<String>, bool);
+
+    /// Given cleartext descriptions (as produced by `to_cleartext`), returns a
+    /// lazy iterator over all structurally distinct instances that would produce
+    /// the same cleartext output. The number of yielded instances equals
+    /// `confusion_score()`.
+    #[cfg(any(test, feature = "cleartext-decode"))]
+    fn from_cleartext(
+        descriptions: &[&str],
+    ) -> Result<Box<dyn Iterator<Item = Self>>, CleartextError>
+    where
+        Self: Sized;
 }
 
 impl ClearText for DescriptorTemplate {
@@ -566,6 +593,508 @@ impl ClearText for DescriptorTemplate {
             }
             DescriptorClass::Other => (vec![self.to_string()], false),
         }
+    }
+
+    #[cfg(any(test, feature = "cleartext-decode"))]
+    fn from_cleartext(
+        descriptions: &[&str],
+    ) -> Result<Box<dyn Iterator<Item = Self>>, CleartextError> {
+        let class = parse_top_level(descriptions)?;
+        top_level_variants(class)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// from_cleartext helpers (feature-gated)
+// ---------------------------------------------------------------------------
+#[cfg(any(test, feature = "cleartext-decode"))]
+fn kp(key_index: u32) -> KeyPlaceholder {
+    KeyPlaceholder {
+        key_index,
+        num1: 0,
+        num2: 1,
+    }
+}
+
+#[cfg(any(test, feature = "cleartext-decode"))]
+fn parse_key_index(s: &str) -> Option<u32> {
+    s.strip_prefix('@')?.parse().ok()
+}
+
+#[cfg(any(test, feature = "cleartext-decode"))]
+fn parse_key_indices(s: &str) -> Option<Vec<u32>> {
+    // Formats: "@A", "@A and @B", "@A, @B and @C", "@A, @B, @C and @D", ...
+    if let Some((init, last)) = s.rsplit_once(" and ") {
+        let last_idx = parse_key_index(last.trim())?;
+        let mut indices: Vec<u32> = Vec::new();
+        for part in init.split(", ") {
+            indices.push(parse_key_index(part.trim())?);
+        }
+        indices.push(last_idx);
+        Some(indices)
+    } else {
+        // Single key: "@A"
+        Some(vec![parse_key_index(s.trim())?])
+    }
+}
+
+#[cfg(any(test, feature = "cleartext-decode"))]
+fn parse_leaf_description(s: &str) -> Result<TapleafClass, CleartextError> {
+    let err = || CleartextError::ParseError(format!("unrecognized leaf: {:?}", s));
+
+    // "Single-signature (@N)"
+    if let Some(rest) = s.strip_prefix("Single-signature (") {
+        let key_str = rest.strip_suffix(')').ok_or_else(err)?;
+        let key_index = parse_key_index(key_str).ok_or_else(err)?;
+        return Ok(TapleafClass::SingleSig { key_index });
+    }
+
+    // "Both @A and @B must sign"
+    if let Some(rest) = s.strip_prefix("Both ") {
+        let rest = rest.strip_suffix(" must sign").ok_or_else(err)?;
+        let (a, b) = rest.split_once(" and ").ok_or_else(err)?;
+        let key_index1 = parse_key_index(a.trim()).ok_or_else(err)?;
+        let key_index2 = parse_key_index(b.trim()).ok_or_else(err)?;
+        return Ok(TapleafClass::BothMustSign {
+            key_index1,
+            key_index2,
+        });
+    }
+
+    // Patterns starting with "@N after ..."
+    if s.starts_with('@') {
+        if let Some((key_part, after_part)) = s.split_once(" after ") {
+            let key_index = parse_key_index(key_part).ok_or_else(err)?;
+            return parse_single_sig_lock(key_index, after_part).ok_or_else(err);
+        }
+    }
+
+    // Patterns starting with "K of ..."
+    if let Some(of_pos) = s.find(" of ") {
+        let threshold: u32 = s[..of_pos].parse().map_err(|_| err())?;
+        let rest = &s[of_pos + 4..];
+
+        // "K of key_list (sorted)"
+        if let Some(keys_str) = rest.strip_suffix(" (sorted)") {
+            let key_indices = parse_key_indices(keys_str).ok_or_else(err)?;
+            return Ok(TapleafClass::SortedMultisig {
+                threshold,
+                key_indices,
+            });
+        }
+
+        // "K of key_list after ..."
+        if let Some(after_pos) = rest.find(" after ") {
+            let keys_str = &rest[..after_pos];
+            let after_part = &rest[after_pos + 7..];
+            let key_indices = parse_key_indices(keys_str).ok_or_else(err)?;
+            return parse_multi_sig_lock(threshold, key_indices, after_part).ok_or_else(err);
+        }
+
+        // "K of key_list" (plain multisig)
+        let key_indices = parse_key_indices(rest).ok_or_else(err)?;
+        return Ok(TapleafClass::Multisig {
+            threshold,
+            key_indices,
+        });
+    }
+
+    // Unrecognized → Other (parse as raw descriptor)
+    Ok(TapleafClass::Other(s.to_string()))
+}
+
+#[cfg(any(test, feature = "cleartext-decode"))]
+fn parse_single_sig_lock(key_index: u32, after_part: &str) -> Option<TapleafClass> {
+    // "@N after M blocks"
+    if let Some(blocks_str) = after_part.strip_suffix(" blocks") {
+        let blocks: u32 = blocks_str.parse().ok()?;
+        return Some(TapleafClass::RelativeHeightlockSingleSig { key_index, blocks });
+    }
+    // "@N after block height H"
+    if let Some(h_str) = after_part.strip_prefix("block height ") {
+        let block_height: u32 = h_str.parse().ok()?;
+        return Some(TapleafClass::AbsoluteHeightlockSingleSig {
+            key_index,
+            block_height,
+        });
+    }
+    // "@N after date D"
+    if let Some(d_str) = after_part.strip_prefix("date ") {
+        let timestamp = parse_utc_date_to_timestamp(d_str)?;
+        return Some(TapleafClass::AbsoluteTimelockSingleSig {
+            key_index,
+            timestamp,
+        });
+    }
+    // "@N after <duration>" (relative timelock)
+    let secs = parse_relative_time_to_seconds(after_part)?;
+    let time = secs / 512 | SEQUENCE_LOCKTIME_TYPE_FLAG;
+    Some(TapleafClass::RelativeTimelockSingleSig { key_index, time })
+}
+
+#[cfg(any(test, feature = "cleartext-decode"))]
+fn parse_multi_sig_lock(
+    threshold: u32,
+    key_indices: Vec<u32>,
+    after_part: &str,
+) -> Option<TapleafClass> {
+    // "... after M blocks"
+    if let Some(blocks_str) = after_part.strip_suffix(" blocks") {
+        let blocks: u32 = blocks_str.parse().ok()?;
+        return Some(TapleafClass::RelativeHeightlockMultiSig {
+            threshold,
+            key_indices,
+            blocks,
+        });
+    }
+    // "... after block height H"
+    if let Some(h_str) = after_part.strip_prefix("block height ") {
+        let block_height: u32 = h_str.parse().ok()?;
+        return Some(TapleafClass::AbsoluteHeightlockMultiSig {
+            threshold,
+            key_indices,
+            block_height,
+        });
+    }
+    // "... after date D"
+    if let Some(d_str) = after_part.strip_prefix("date ") {
+        let timestamp = parse_utc_date_to_timestamp(d_str)?;
+        return Some(TapleafClass::AbsoluteTimelockMultiSig {
+            threshold,
+            key_indices,
+            timestamp,
+        });
+    }
+    // "... after <duration>" (relative timelock)
+    let secs = parse_relative_time_to_seconds(after_part)?;
+    let time = secs / 512 | SEQUENCE_LOCKTIME_TYPE_FLAG;
+    Some(TapleafClass::RelativeTimelockMultiSig {
+        threshold,
+        key_indices,
+        time,
+    })
+}
+
+#[cfg(any(test, feature = "cleartext-decode"))]
+fn parse_top_level(descriptions: &[&str]) -> Result<DescriptorClass, CleartextError> {
+    let err = || CleartextError::ParseError("unrecognized cleartext".into());
+    match descriptions {
+        [] => Err(CleartextError::ParseError("empty descriptions".into())),
+        [single] => {
+            // "Legacy single-signature (@N)"
+            if let Some(rest) = single.strip_prefix("Legacy single-signature (") {
+                let key_str = rest.strip_suffix(')').ok_or_else(err)?;
+                let key_index = parse_key_index(key_str).ok_or_else(err)?;
+                return Ok(DescriptorClass::LegacySingleSig { key_index });
+            }
+            // "Segwit single-signature (@N)"
+            if let Some(rest) = single.strip_prefix("Segwit single-signature (") {
+                let key_str = rest.strip_suffix(')').ok_or_else(err)?;
+                let key_index = parse_key_index(key_str).ok_or_else(err)?;
+                return Ok(DescriptorClass::SegwitSingleSig { key_index });
+            }
+            // "K of key_list (SegWit)"
+            if single.ends_with(" (SegWit)") {
+                let core_str = single.strip_suffix(" (SegWit)").unwrap();
+                if let Some(of_pos) = core_str.find(" of ") {
+                    let threshold: u32 = core_str[..of_pos].parse().map_err(|_| err())?;
+                    let key_indices = parse_key_indices(&core_str[of_pos + 4..]).ok_or_else(err)?;
+                    return Ok(DescriptorClass::SegwitMultisig {
+                        threshold,
+                        key_indices,
+                    });
+                }
+            }
+            // "Primary path: @N" (taproot with no leaves)
+            if let Some(key_str) = single.strip_prefix("Primary path: ") {
+                let internal_key_index = parse_key_index(key_str).ok_or_else(err)?;
+                return Ok(DescriptorClass::Taproot {
+                    internal_key_index,
+                    leaves: Vec::new(),
+                });
+            }
+            // Unrecognized single description → Other
+            Ok(DescriptorClass::Other)
+        }
+        [first, rest @ ..] => {
+            // "Primary path: @N" + leaf descriptions
+            if let Some(key_str) = first.strip_prefix("Primary path: ") {
+                let internal_key_index = parse_key_index(key_str).ok_or_else(err)?;
+                let mut leaves = Vec::new();
+                for &leaf_str in rest {
+                    leaves.push(parse_leaf_description(leaf_str)?);
+                }
+                return Ok(DescriptorClass::Taproot {
+                    internal_key_index,
+                    leaves,
+                });
+            }
+            Err(err())
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Variant generators
+// ---------------------------------------------------------------------------
+
+#[cfg(any(test, feature = "cleartext-decode"))]
+fn tapleaf_to_descriptors(leaf: &TapleafClass) -> Result<Vec<DescriptorTemplate>, CleartextError> {
+    let kps = |indices: &[u32]| -> Vec<KeyPlaceholder> { indices.iter().map(|&i| kp(i)).collect() };
+    match leaf {
+        TapleafClass::SingleSig { key_index } => {
+            let k = kp(*key_index);
+            Ok(vec![DescriptorTemplate::Pk(k), DescriptorTemplate::Pkh(k)])
+        }
+        TapleafClass::BothMustSign {
+            key_index1,
+            key_index2,
+        } => Ok(vec![DescriptorTemplate::And_v(
+            Box::new(DescriptorTemplate::V(Box::new(DescriptorTemplate::Pk(kp(
+                *key_index1,
+            ))))),
+            Box::new(DescriptorTemplate::Pk(kp(*key_index2))),
+        )]),
+        TapleafClass::SortedMultisig {
+            threshold,
+            key_indices,
+        } => Ok(vec![DescriptorTemplate::Sortedmulti_a(
+            *threshold,
+            kps(key_indices),
+        )]),
+        TapleafClass::Multisig {
+            threshold,
+            key_indices,
+        } => Ok(vec![DescriptorTemplate::Multi_a(
+            *threshold,
+            kps(key_indices),
+        )]),
+        TapleafClass::RelativeHeightlockSingleSig { key_index, blocks } => {
+            Ok(vec![DescriptorTemplate::And_v(
+                Box::new(DescriptorTemplate::V(Box::new(DescriptorTemplate::Pk(kp(
+                    *key_index,
+                ))))),
+                Box::new(DescriptorTemplate::Older(*blocks)),
+            )])
+        }
+        TapleafClass::RelativeHeightlockMultiSig {
+            threshold,
+            key_indices,
+            blocks,
+        } => Ok(vec![DescriptorTemplate::And_v(
+            Box::new(DescriptorTemplate::V(Box::new(
+                DescriptorTemplate::Multi_a(*threshold, kps(key_indices)),
+            ))),
+            Box::new(DescriptorTemplate::Older(*blocks)),
+        )]),
+        TapleafClass::RelativeTimelockSingleSig { key_index, time } => {
+            Ok(vec![DescriptorTemplate::And_v(
+                Box::new(DescriptorTemplate::V(Box::new(DescriptorTemplate::Pk(kp(
+                    *key_index,
+                ))))),
+                Box::new(DescriptorTemplate::Older(*time)),
+            )])
+        }
+        TapleafClass::RelativeTimelockMultiSig {
+            threshold,
+            key_indices,
+            time,
+        } => Ok(vec![DescriptorTemplate::And_v(
+            Box::new(DescriptorTemplate::V(Box::new(
+                DescriptorTemplate::Multi_a(*threshold, kps(key_indices)),
+            ))),
+            Box::new(DescriptorTemplate::Older(*time)),
+        )]),
+        TapleafClass::AbsoluteHeightlockSingleSig {
+            key_index,
+            block_height,
+        } => Ok(vec![DescriptorTemplate::And_v(
+            Box::new(DescriptorTemplate::V(Box::new(DescriptorTemplate::Pk(kp(
+                *key_index,
+            ))))),
+            Box::new(DescriptorTemplate::After(*block_height)),
+        )]),
+        TapleafClass::AbsoluteHeightlockMultiSig {
+            threshold,
+            key_indices,
+            block_height,
+        } => Ok(vec![DescriptorTemplate::And_v(
+            Box::new(DescriptorTemplate::V(Box::new(
+                DescriptorTemplate::Multi_a(*threshold, kps(key_indices)),
+            ))),
+            Box::new(DescriptorTemplate::After(*block_height)),
+        )]),
+        TapleafClass::AbsoluteTimelockSingleSig {
+            key_index,
+            timestamp,
+        } => Ok(vec![DescriptorTemplate::And_v(
+            Box::new(DescriptorTemplate::V(Box::new(DescriptorTemplate::Pk(kp(
+                *key_index,
+            ))))),
+            Box::new(DescriptorTemplate::After(*timestamp)),
+        )]),
+        TapleafClass::AbsoluteTimelockMultiSig {
+            threshold,
+            key_indices,
+            timestamp,
+        } => Ok(vec![DescriptorTemplate::And_v(
+            Box::new(DescriptorTemplate::V(Box::new(
+                DescriptorTemplate::Multi_a(*threshold, kps(key_indices)),
+            ))),
+            Box::new(DescriptorTemplate::After(*timestamp)),
+        )]),
+        TapleafClass::Other(s) => {
+            let dt = DescriptorTemplate::from_str(s)
+                .map_err(|e| CleartextError::ParseError(format!("{:?}", e)))?;
+            Ok(vec![dt])
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tree enumeration
+// ---------------------------------------------------------------------------
+
+/// Enumerate all distinct unordered binary tree topologies for `n` leaves
+/// and return a lazy iterator over every combination of leaf variant assignments.
+///
+/// A binary tree with `n` leaves has `T(n)` distinct unordered shapes where
+/// `T(n) = (2n - 3)!! = 1 * 3 * 5 * ... * (2n - 3)` for `n > 1`, and `T(1) = 1`.
+///
+/// `leaf_variants[i]` is the set of `DescriptorTemplate` alternatives for leaf `i`.
+#[cfg(any(test, feature = "cleartext-decode"))]
+fn enumerate_taptrees(
+    leaf_variants: Vec<Vec<DescriptorTemplate>>,
+) -> Box<dyn Iterator<Item = TapTree>> {
+    assert!(!leaf_variants.is_empty());
+    if leaf_variants.len() == 1 {
+        let variants = leaf_variants.into_iter().next().unwrap();
+        return Box::new(variants.into_iter().map(|d| TapTree::Script(Box::new(d))));
+    }
+    let indices: Vec<usize> = (0..leaf_variants.len()).collect();
+    enumerate_taptrees_indices(indices, Rc::new(leaf_variants))
+}
+
+/// Recursively enumerate unordered binary trees over the given subset of leaf indices,
+/// returning a lazy iterator.
+///
+/// To avoid counting mirror-image trees twice (since swapping the two children
+/// of any internal node produces an identical Merkle root), we fix the smallest
+/// leaf index in the left subtree.
+#[cfg(any(test, feature = "cleartext-decode"))]
+fn enumerate_taptrees_indices(
+    indices: Vec<usize>,
+    leaf_variants: Rc<Vec<Vec<DescriptorTemplate>>>,
+) -> Box<dyn Iterator<Item = TapTree>> {
+    if indices.len() == 1 {
+        let variants = leaf_variants[indices[0]].clone();
+        return Box::new(variants.into_iter().map(|d| TapTree::Script(Box::new(d))));
+    }
+    // Pin the smallest index in the left subtree to canonicalise.
+    // Partition the remaining indices between left and right.
+    let first = indices[0];
+    let rest: Vec<usize> = indices[1..].to_vec();
+    let n_rest = rest.len();
+    // left_extra_mask: bitmask over `rest` — bits set → go to left subtree
+    // left_extra_mask = 0 means left subtree = {first}, right subtree = rest (all)
+    // left_extra_mask = (1 << n_rest) - 1 is invalid (right subtree empty)
+    Box::new(
+        (0..(1u64 << n_rest))
+            .filter(move |&mask| n_rest > mask.count_ones() as usize)
+            .flat_map(
+                move |left_extra_mask| -> Box<dyn Iterator<Item = TapTree>> {
+                    let mut left_indices = vec![first];
+                    let mut right_indices = Vec::new();
+                    for (bit, &idx) in rest.iter().enumerate() {
+                        if left_extra_mask & (1u64 << bit) != 0 {
+                            left_indices.push(idx);
+                        } else {
+                            right_indices.push(idx);
+                        }
+                    }
+                    // Collect right subtree (iterated multiple times in the Cartesian product).
+                    let right_trees: Rc<Vec<TapTree>> = Rc::new(
+                        enumerate_taptrees_indices(right_indices, Rc::clone(&leaf_variants))
+                            .collect(),
+                    );
+                    let left_trees =
+                        enumerate_taptrees_indices(left_indices, Rc::clone(&leaf_variants));
+                    Box::new(left_trees.flat_map(move |lt| {
+                        let right = Rc::clone(&right_trees);
+                        (0..right.len()).map(move |i| {
+                            TapTree::Branch(Box::new(lt.clone()), Box::new(right[i].clone()))
+                        })
+                    }))
+                },
+            ),
+    )
+}
+
+/// Generate a lazy iterator over all `DescriptorTemplate` variants for a given `DescriptorClass`.
+#[cfg(any(test, feature = "cleartext-decode"))]
+fn top_level_variants(
+    class: DescriptorClass,
+) -> Result<Box<dyn Iterator<Item = DescriptorTemplate>>, CleartextError> {
+    let kps = |indices: &[u32]| -> Vec<KeyPlaceholder> { indices.iter().map(|&i| kp(i)).collect() };
+    match class {
+        DescriptorClass::LegacySingleSig { key_index } => Ok(Box::new(core::iter::once(
+            DescriptorTemplate::Pkh(kp(key_index)),
+        ))),
+        DescriptorClass::SegwitSingleSig { key_index } => {
+            let k = kp(key_index);
+            Ok(Box::new(
+                vec![
+                    DescriptorTemplate::Wpkh(k),
+                    DescriptorTemplate::Sh(Box::new(DescriptorTemplate::Wpkh(k))),
+                ]
+                .into_iter(),
+            ))
+        }
+        DescriptorClass::SegwitMultisig {
+            threshold,
+            key_indices,
+        } => {
+            let keys = kps(&key_indices);
+            Ok(Box::new(
+                vec![
+                    DescriptorTemplate::Wsh(Box::new(DescriptorTemplate::Multi(
+                        threshold,
+                        keys.clone(),
+                    ))),
+                    DescriptorTemplate::Wsh(Box::new(DescriptorTemplate::Sortedmulti(
+                        threshold,
+                        keys.clone(),
+                    ))),
+                    DescriptorTemplate::Sh(Box::new(DescriptorTemplate::Wsh(Box::new(
+                        DescriptorTemplate::Multi(threshold, keys.clone()),
+                    )))),
+                    DescriptorTemplate::Sh(Box::new(DescriptorTemplate::Wsh(Box::new(
+                        DescriptorTemplate::Sortedmulti(threshold, keys),
+                    )))),
+                ]
+                .into_iter(),
+            ))
+        }
+        DescriptorClass::Taproot {
+            internal_key_index,
+            leaves,
+        } => {
+            let ik = kp(internal_key_index);
+            if leaves.is_empty() {
+                return Ok(Box::new(core::iter::once(DescriptorTemplate::Tr(ik, None))));
+            }
+            let mut per_leaf_variants = Vec::new();
+            for leaf in &leaves {
+                per_leaf_variants.push(tapleaf_to_descriptors(leaf)?);
+            }
+            let trees = enumerate_taptrees(per_leaf_variants);
+            Ok(Box::new(
+                trees.map(move |t| DescriptorTemplate::Tr(ik, Some(t))),
+            ))
+        }
+        DescriptorClass::Other => Err(CleartextError::ParseError(
+            "cannot enumerate variants for unrecognized descriptor class".into(),
+        )),
     }
 }
 
@@ -875,6 +1404,94 @@ mod tests {
                 "cleartext flag mismatch for {:?}",
                 desc_str
             );
+        }
+    }
+
+    #[test]
+    fn test_from_cleartext_roundtrip() {
+        // All descriptors from test_to_cleartext and test_confusion_score that
+        // have a cleartext representation (has_cleartext == true).
+        let cases: &[&str] = &[
+            // Legacy single-sig
+            "pkh(@0/**)",
+            // Segwit single-sig
+            "wpkh(@0/**)",
+            // Multisig variants
+            "wsh(sortedmulti(2,@0/**,@1/**))",
+            "wsh(sortedmulti(2,@0/**,@1/**,@2/**))",
+            "wsh(sortedmulti(3,@0/**,@1/**,@2/**))",
+            "wsh(multi(2,@0/**,@1/**))",
+            // Taproot: key-path only
+            "tr(@0/**)",
+            // Taproot: single leaf
+            "tr(@0/**,pkh(@1/**))",
+            // Taproot: two leaves
+            "tr(@0/**,{pk(@1/**),pkh(@2/**)})",
+            "tr(@0/**,{sortedmulti_a(2,@1/**,@2/**),pk(@3/**)})",
+            // Taproot: three leaves
+            "tr(@0/**,{{pk(@1/**),pk(@2/**)},pk(@3/**)})",
+            // Taproot: relative heightlock
+            "tr(@0/**,and_v(v:pk(@1/<0;1>/*),older(52560)))",
+            "tr(@0/**,{pk(@1/**),and_v(v:pk(@2/<0;1>/*),older(1008))})",
+            // Taproot: relative timelock
+            "tr(@0/**,and_v(v:pk(@1/<0;1>/*),older(4194305)))",
+            "tr(@0/**,{pk(@1/**),and_v(v:pk(@2/<0;1>/*),older(4194484))})",
+            "tr(@0/**,{pk(@1/**),and_v(v:multi_a(2,@2/<0;1>/*,@3/<0;1>/*),older(4194484))})",
+            // Taproot: absolute heightlock
+            "tr(@0/**,and_v(v:pk(@1/<0;1>/*),after(840000)))",
+            "tr(@0/**,{pk(@1/**),and_v(v:multi_a(2,@2/<0;1>/*,@3/<0;1>/*),after(840000))})",
+            // Taproot: absolute timelock
+            "tr(@0/**,and_v(v:pk(@1/<0;1>/*),after(500000000)))",
+            "tr(@0/**,{pk(@1/**),and_v(v:multi_a(2,@2/<0;1>/*,@3/<0;1>/*),after(1700000000))})",
+            // Taproot: BothMustSign
+            "tr(@0/<0;1>/*,{and_v(v:pk(@1/<2;3>/*),older(4383)),and_v(v:pk(@2/<0;1>/*),pk(@1/<0;1>/*))})",
+            "tr(@0/<0;1>/*,{and_v(v:multi_a(2,@1/<2;3>/*,@2/<0;1>/*,@3/<0;1>/*),older(144)),and_v(v:pk(@1/<0;1>/*),pk(@2/<0;1>/*))})",
+        ];
+
+        for &desc_str in cases {
+            let original = dt(desc_str);
+            let (cleartext, has_cleartext) = original.to_cleartext();
+            if !has_cleartext {
+                continue;
+            }
+            let cleartext_refs: Vec<&str> = cleartext.iter().map(|s| s.as_str()).collect();
+            let variants: Vec<_> = DescriptorTemplate::from_cleartext(&cleartext_refs)
+                .unwrap_or_else(|e| panic!("from_cleartext failed for {:?}: {:?}", desc_str, e))
+                .collect();
+
+            // Number of variants must equal confusion_score
+            assert_eq!(
+                variants.len() as u64,
+                original.confusion_score(),
+                "variant count != confusion_score for {:?}",
+                desc_str
+            );
+
+            // Every variant must produce the same cleartext
+            for variant in &variants {
+                let (variant_ct, variant_clear) = variant.to_cleartext();
+                assert_eq!(
+                    variant_ct, cleartext,
+                    "variant {:?} produces different cleartext for original {:?}",
+                    variant, desc_str
+                );
+                assert_eq!(
+                    variant_clear, has_cleartext,
+                    "variant {:?} has different cleartext flag for original {:?}",
+                    variant, desc_str
+                );
+            }
+
+            // All variants must be distinct
+            for i in 0..variants.len() {
+                for j in (i + 1)..variants.len() {
+                    assert_ne!(
+                        variants[i], variants[j],
+                        "duplicate variants at indices {} and {} for {:?}",
+                        i, j, desc_str
+                    );
+                }
+            }
         }
     }
 }

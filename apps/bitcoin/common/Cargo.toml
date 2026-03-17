@@ -11,6 +11,7 @@ target_native = [
 target_vanadium_ledger = [
     "sdk/target_vanadium_ledger",
 ]
+cleartext-decode = []
 
 [dependencies]
 bitcoin = { version = "0.32.0", features = ["serde"], default-features = false }
