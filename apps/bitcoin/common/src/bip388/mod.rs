@@ -248,6 +248,141 @@ impl<'a> Iterator for DescriptorTemplateIter<'a> {
     }
 }
 
+/// Mutable iterator over the key placeholders of a [`DescriptorTemplate`].
+///
+/// Yields `&mut KeyPlaceholder` in the same traversal order as
+/// [`DescriptorTemplateIter`] (the immutable counterpart), so that in-place
+/// mutations preserve the canonical ordering expected by
+/// `are_key_derivations_canonical`.
+///
+/// Uses raw pointers internally to satisfy Rust's aliasing rules while still
+/// providing a safe interface through the `placeholders_mut` method.
+pub struct DescriptorTemplateIterMut<'a> {
+    fragments: Vec<*mut DescriptorTemplate>,
+    placeholders: Vec<*mut KeyPlaceholder>,
+    _marker: core::marker::PhantomData<&'a mut DescriptorTemplate>,
+}
+
+impl<'a> Iterator for DescriptorTemplateIterMut<'a> {
+    type Item = &'a mut KeyPlaceholder;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            if let Some(ptr) = self.placeholders.pop() {
+                // SAFETY: ptr was derived from a uniquely-borrowed &mut KeyPlaceholder
+                // that lives for 'a; no other reference to it exists.
+                return Some(unsafe { &mut *ptr });
+            }
+
+            let frag_ptr = self.fragments.pop()?;
+            // SAFETY: ptr was derived from a uniquely-borrowed &mut DescriptorTemplate
+            // that lives for 'a; we create only one &mut at a time per pointer.
+            let frag = unsafe { &mut *frag_ptr };
+
+            match frag {
+                DescriptorTemplate::Sh(sub)
+                | DescriptorTemplate::Wsh(sub)
+                | DescriptorTemplate::A(sub)
+                | DescriptorTemplate::S(sub)
+                | DescriptorTemplate::C(sub)
+                | DescriptorTemplate::T(sub)
+                | DescriptorTemplate::D(sub)
+                | DescriptorTemplate::V(sub)
+                | DescriptorTemplate::J(sub)
+                | DescriptorTemplate::N(sub)
+                | DescriptorTemplate::L(sub)
+                | DescriptorTemplate::U(sub) => {
+                    self.fragments.push(sub.as_mut() as *mut DescriptorTemplate);
+                }
+
+                DescriptorTemplate::Andor(sub1, sub2, sub3) => {
+                    self.fragments
+                        .push(sub3.as_mut() as *mut DescriptorTemplate);
+                    self.fragments
+                        .push(sub2.as_mut() as *mut DescriptorTemplate);
+                    self.fragments
+                        .push(sub1.as_mut() as *mut DescriptorTemplate);
+                }
+
+                DescriptorTemplate::Or_b(sub1, sub2)
+                | DescriptorTemplate::Or_c(sub1, sub2)
+                | DescriptorTemplate::Or_d(sub1, sub2)
+                | DescriptorTemplate::Or_i(sub1, sub2)
+                | DescriptorTemplate::And_v(sub1, sub2)
+                | DescriptorTemplate::And_b(sub1, sub2)
+                | DescriptorTemplate::And_n(sub1, sub2) => {
+                    self.fragments
+                        .push(sub2.as_mut() as *mut DescriptorTemplate);
+                    self.fragments
+                        .push(sub1.as_mut() as *mut DescriptorTemplate);
+                }
+
+                DescriptorTemplate::Tr(key, tree) => {
+                    self.placeholders.push(key as *mut KeyPlaceholder);
+                    if let Some(t) = tree {
+                        // Traverse the TapTree to collect mutable pointers to all
+                        // leaves in left-to-right order (matching TapleavesIter),
+                        // then reverse so we pop them in the correct order.
+                        let mut leaf_ptrs: Vec<*mut DescriptorTemplate> = Vec::new();
+                        let mut stack: Vec<*mut TapTree> = vec![t as *mut TapTree];
+                        while let Some(node_ptr) = stack.pop() {
+                            // SAFETY: node_ptr is derived from a valid &mut TapTree
+                            // that lives for 'a; each node is visited exactly once.
+                            let node = unsafe { &mut *node_ptr };
+                            match node {
+                                TapTree::Script(dt) => {
+                                    leaf_ptrs.push(dt.as_mut() as *mut DescriptorTemplate);
+                                }
+                                TapTree::Branch(left, right) => {
+                                    stack.push(&mut **right as *mut TapTree);
+                                    stack.push(&mut **left as *mut TapTree);
+                                }
+                            }
+                        }
+                        leaf_ptrs.reverse();
+                        self.fragments.extend(leaf_ptrs);
+                    }
+                }
+
+                DescriptorTemplate::Pkh(key)
+                | DescriptorTemplate::Wpkh(key)
+                | DescriptorTemplate::Pk(key)
+                | DescriptorTemplate::Pk_k(key)
+                | DescriptorTemplate::Pk_h(key) => {
+                    // SAFETY: key is a field of frag which is valid for 'a.
+                    return Some(unsafe { &mut *(key as *mut KeyPlaceholder) });
+                }
+
+                DescriptorTemplate::Sortedmulti(_, keys)
+                | DescriptorTemplate::Sortedmulti_a(_, keys)
+                | DescriptorTemplate::Multi(_, keys)
+                | DescriptorTemplate::Multi_a(_, keys) => {
+                    for key in keys.iter_mut().rev() {
+                        self.placeholders.push(key as *mut KeyPlaceholder);
+                    }
+                }
+
+                DescriptorTemplate::Thresh(_, descs) => {
+                    for desc in descs.iter_mut().rev() {
+                        self.fragments.push(desc as *mut DescriptorTemplate);
+                    }
+                }
+
+                DescriptorTemplate::Zero
+                | DescriptorTemplate::One
+                | DescriptorTemplate::Older(_)
+                | DescriptorTemplate::After(_)
+                | DescriptorTemplate::Sha256(_)
+                | DescriptorTemplate::Ripemd160(_)
+                | DescriptorTemplate::Hash256(_)
+                | DescriptorTemplate::Hash160(_) => {
+                    // no key placeholders in terminal fragments
+                }
+            }
+        }
+    }
+}
+
 impl DescriptorTemplate {
     /// Determines if root fragment is a wrapper.
     fn is_wrapper(&self) -> bool {
@@ -267,6 +402,13 @@ impl DescriptorTemplate {
     }
     pub fn placeholders(&self) -> DescriptorTemplateIter<'_> {
         DescriptorTemplateIter::from(self)
+    }
+    pub fn placeholders_mut(&mut self) -> DescriptorTemplateIterMut<'_> {
+        DescriptorTemplateIterMut {
+            fragments: vec![self as *mut DescriptorTemplate],
+            placeholders: Vec::new(),
+            _marker: core::marker::PhantomData,
+        }
     }
 }
 

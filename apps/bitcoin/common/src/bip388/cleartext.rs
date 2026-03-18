@@ -31,12 +31,12 @@ use alloc::{format, string::String, string::ToString, vec, vec::Vec};
 use macros::descriptor_match;
 
 use super::time::{format_seconds, format_utc_date};
-use super::DescriptorTemplate;
+use super::{DescriptorTemplate, KeyPlaceholder};
 
 #[cfg(any(test, feature = "cleartext-decode"))]
 use super::time::{parse_relative_time_to_seconds, parse_utc_date_to_timestamp};
 #[cfg(any(test, feature = "cleartext-decode"))]
-use super::{KeyPlaceholder, TapTree};
+use super::TapTree;
 #[cfg(any(test, feature = "cleartext-decode"))]
 use alloc::rc::Rc;
 #[cfg(any(test, feature = "cleartext-decode"))]
@@ -60,17 +60,17 @@ pub enum CleartextError {
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum DescriptorClass {
     LegacySingleSig {
-        key_index: u32,
+        key: KeyPlaceholder,
     },
     SegwitSingleSig {
-        key_index: u32,
+        key: KeyPlaceholder,
     },
     SegwitMultisig {
         threshold: u32,
-        key_indices: Vec<u32>,
+        keys: Vec<KeyPlaceholder>,
     },
     Taproot {
-        internal_key_index: u32,
+        internal_key: KeyPlaceholder,
         leaves: Vec<TapleafClass>,
     },
     Other,
@@ -84,64 +84,64 @@ enum TapleafClass {
     SortedMultisig {
         // sortedmulti_a
         threshold: u32,
-        key_indices: Vec<u32>,
+        keys: Vec<KeyPlaceholder>,
     },
     // miniscript patterns
     SingleSig {
         // pk and pkh
-        key_index: u32,
+        key: KeyPlaceholder,
     },
     BothMustSign {
-        key_index1: u32,
-        key_index2: u32,
+        key1: KeyPlaceholder,
+        key2: KeyPlaceholder,
     },
     Multisig {
         // multi_a
         threshold: u32,
-        key_indices: Vec<u32>,
+        keys: Vec<KeyPlaceholder>,
     },
     RelativeHeightlockSingleSig {
         // and_v(v:pk(@x), older(n)), with n >= 1 && n < 65536
-        key_index: u32,
+        key: KeyPlaceholder,
         blocks: u32,
     },
     RelativeHeightlockMultiSig {
         // and_v(v:multi_a(threshold, key_indices...), older(n)), with n >= 1 && n < 65536
         threshold: u32,
-        key_indices: Vec<u32>,
+        keys: Vec<KeyPlaceholder>,
         blocks: u32,
     },
     RelativeTimelockSingleSig {
         // and_v(v:pk(@x), older(n)) with n >= 4194305 && n < 4259840
-        key_index: u32,
+        key: KeyPlaceholder,
         time: u32,
     },
     RelativeTimelockMultiSig {
         // and_v(v:multi_a(threshold, key_indices...), older(n)) with n >= 4194305 && n < 4259840
         threshold: u32,
-        key_indices: Vec<u32>,
+        keys: Vec<KeyPlaceholder>,
         time: u32,
     },
     AbsoluteHeightlockSingleSig {
         // and_v(v:pk(@x), after(n)) with n < 500000000
-        key_index: u32,
+        key: KeyPlaceholder,
         block_height: u32,
     },
     AbsoluteHeightlockMultiSig {
         // and_v(v:multi_a(threshold, key_indices...), after(n)) with n < 500000000
         threshold: u32,
-        key_indices: Vec<u32>,
+        keys: Vec<KeyPlaceholder>,
         block_height: u32,
     },
     AbsoluteTimelockSingleSig {
         // and_v(v:pk(@x), after(n)) with n >= 500000000
-        key_index: u32,
+        key: KeyPlaceholder,
         timestamp: u32,
     },
     AbsoluteTimelockMultiSig {
         // and_v(v:multi_a(threshold, key_indices...), after(n)) with n >= 500000000
         threshold: u32,
-        key_indices: Vec<u32>,
+        keys: Vec<KeyPlaceholder>,
         timestamp: u32,
     },
     Other(String),
@@ -169,8 +169,8 @@ struct CleartextSpec<K> {
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum CleartextValue {
     Threshold(u32),
-    KeyIndex(u32),
-    KeyIndices(Vec<u32>),
+    KeyIndex(KeyPlaceholder),
+    KeyIndices(Vec<KeyPlaceholder>),
     Blocks(u32),
     RelativeTime(u32),
     BlockHeight(u32),
@@ -342,52 +342,52 @@ impl TapleafClass {
         }
         match (self, other) {
             (
-                TC::SingleSig { key_index: k1 },
-                TC::SingleSig { key_index: k2 },
-            ) => k1.cmp(k2),
+                TC::SingleSig { key: k1 },
+                TC::SingleSig { key: k2 },
+            ) => k1.key_index.cmp(&k2.key_index),
             (
-                TC::BothMustSign { key_index1: a1, key_index2: b1 },
-                TC::BothMustSign { key_index1: a2, key_index2: b2 },
-            ) => a1.cmp(a2).then(b1.cmp(b2)),
+                TC::BothMustSign { key1: a1, key2: b1 },
+                TC::BothMustSign { key1: a2, key2: b2 },
+            ) => a1.key_index.cmp(&a2.key_index).then(b1.key_index.cmp(&b2.key_index)),
             (
-                TC::SortedMultisig { threshold: t1, key_indices: k1 },
-                TC::SortedMultisig { threshold: t2, key_indices: k2 },
+                TC::SortedMultisig { threshold: t1, keys: k1 },
+                TC::SortedMultisig { threshold: t2, keys: k2 },
             ) => k1.len().cmp(&k2.len()).then(t1.cmp(t2)),
             (
-                TC::Multisig { threshold: t1, key_indices: k1 },
-                TC::Multisig { threshold: t2, key_indices: k2 },
+                TC::Multisig { threshold: t1, keys: k1 },
+                TC::Multisig { threshold: t2, keys: k2 },
             ) => k1.len().cmp(&k2.len()).then(t1.cmp(t2)),
             (
-                TC::RelativeHeightlockSingleSig { key_index: k1, blocks: b1 },
-                TC::RelativeHeightlockSingleSig { key_index: k2, blocks: b2 },
-            ) => k1.cmp(k2).then(b1.cmp(b2)),
+                TC::RelativeHeightlockSingleSig { key: k1, blocks: b1 },
+                TC::RelativeHeightlockSingleSig { key: k2, blocks: b2 },
+            ) => k1.key_index.cmp(&k2.key_index).then(b1.cmp(b2)),
             (
-                TC::RelativeHeightlockMultiSig { threshold: t1, key_indices: k1, blocks: b1 },
-                TC::RelativeHeightlockMultiSig { threshold: t2, key_indices: k2, blocks: b2 },
+                TC::RelativeHeightlockMultiSig { threshold: t1, keys: k1, blocks: b1 },
+                TC::RelativeHeightlockMultiSig { threshold: t2, keys: k2, blocks: b2 },
             ) => k1.len().cmp(&k2.len()).then(t1.cmp(t2)).then(b1.cmp(b2)),
             (
-                TC::RelativeTimelockSingleSig { key_index: k1, time: t1 },
-                TC::RelativeTimelockSingleSig { key_index: k2, time: t2 },
-            ) => k1.cmp(k2).then(t1.cmp(t2)),
+                TC::RelativeTimelockSingleSig { key: k1, time: t1 },
+                TC::RelativeTimelockSingleSig { key: k2, time: t2 },
+            ) => k1.key_index.cmp(&k2.key_index).then(t1.cmp(t2)),
             (
-                TC::RelativeTimelockMultiSig { threshold: t1, key_indices: k1, time: tm1 },
-                TC::RelativeTimelockMultiSig { threshold: t2, key_indices: k2, time: tm2 },
+                TC::RelativeTimelockMultiSig { threshold: t1, keys: k1, time: tm1 },
+                TC::RelativeTimelockMultiSig { threshold: t2, keys: k2, time: tm2 },
             ) => k1.len().cmp(&k2.len()).then(t1.cmp(t2)).then(tm1.cmp(tm2)),
             (
-                TC::AbsoluteHeightlockSingleSig { key_index: k1, block_height: h1 },
-                TC::AbsoluteHeightlockSingleSig { key_index: k2, block_height: h2 },
-            ) => k1.cmp(k2).then(h1.cmp(h2)),
+                TC::AbsoluteHeightlockSingleSig { key: k1, block_height: h1 },
+                TC::AbsoluteHeightlockSingleSig { key: k2, block_height: h2 },
+            ) => k1.key_index.cmp(&k2.key_index).then(h1.cmp(h2)),
             (
-                TC::AbsoluteHeightlockMultiSig { threshold: t1, key_indices: k1, block_height: h1 },
-                TC::AbsoluteHeightlockMultiSig { threshold: t2, key_indices: k2, block_height: h2 },
+                TC::AbsoluteHeightlockMultiSig { threshold: t1, keys: k1, block_height: h1 },
+                TC::AbsoluteHeightlockMultiSig { threshold: t2, keys: k2, block_height: h2 },
             ) => k1.len().cmp(&k2.len()).then(t1.cmp(t2)).then(h1.cmp(h2)),
             (
-                TC::AbsoluteTimelockSingleSig { key_index: k1, timestamp: ts1 },
-                TC::AbsoluteTimelockSingleSig { key_index: k2, timestamp: ts2 },
-            ) => k1.cmp(k2).then(ts1.cmp(ts2)),
+                TC::AbsoluteTimelockSingleSig { key: k1, timestamp: ts1 },
+                TC::AbsoluteTimelockSingleSig { key: k2, timestamp: ts2 },
+            ) => k1.key_index.cmp(&k2.key_index).then(ts1.cmp(ts2)),
             (
-                TC::AbsoluteTimelockMultiSig { threshold: t1, key_indices: k1, timestamp: ts1 },
-                TC::AbsoluteTimelockMultiSig { threshold: t2, key_indices: k2, timestamp: ts2 },
+                TC::AbsoluteTimelockMultiSig { threshold: t1, keys: k1, timestamp: ts1 },
+                TC::AbsoluteTimelockMultiSig { threshold: t2, keys: k2, timestamp: ts2 },
             ) => k1.len().cmp(&k2.len()).then(t1.cmp(t2)).then(ts1.cmp(ts2)),
             (TC::Other(s1), TC::Other(s2)) => s1.cmp(s2),
             // Same order() value implies same variant; this arm is unreachable.
@@ -399,20 +399,23 @@ impl TapleafClass {
 impl DescriptorTemplate {
     fn classify(&self) -> DescriptorClass {
         descriptor_match!(self, {
-            pkh(key_index) => {
-                DescriptorClass::LegacySingleSig { key_index }
+            pkh(_key_index) => {
+                let key = self.placeholders().next().map(|(kp, _)| *kp).unwrap();
+                DescriptorClass::LegacySingleSig { key }
             },
             // normal or wrapped
-            wpkh(key_index) | sh(wpkh(key_index)) => {
-                DescriptorClass::SegwitSingleSig { key_index }
+            wpkh(_key_index) | sh(wpkh(_key_index)) => {
+                let key = self.placeholders().next().map(|(kp, _)| *kp).unwrap();
+                DescriptorClass::SegwitSingleSig { key }
             },
             // 4 combinations: multi/sortedmulti; normal/wrapped
-            wsh(multi(threshold, key_indices)) | wsh(sortedmulti(threshold, key_indices)) | sh(wsh(multi(threshold, key_indices))) | sh(wsh(sortedmulti(threshold, key_indices))) => {
-                DescriptorClass::SegwitMultisig { threshold, key_indices }
+            wsh(multi(threshold, _key_indices)) | wsh(sortedmulti(threshold, _key_indices)) | sh(wsh(multi(threshold, _key_indices))) | sh(wsh(sortedmulti(threshold, _key_indices))) => {
+                let keys: Vec<KeyPlaceholder> = self.placeholders().map(|(kp, _)| *kp).collect();
+                DescriptorClass::SegwitMultisig { threshold, keys }
             },
             tr(internal_key, tree) => {
                 DescriptorClass::Taproot {
-                    internal_key_index: internal_key.key_index,
+                    internal_key: *internal_key,
                     leaves: tree
                         .as_ref()
                         .map(|t| t.tapleaves().map(|l| l.classify_as_tapleaf()).collect())
@@ -425,54 +428,76 @@ impl DescriptorTemplate {
 
     fn classify_as_tapleaf(&self) -> TapleafClass {
         descriptor_match!(self, {
-            sortedmulti_a(threshold, key_indices) => {
-                TapleafClass::SortedMultisig { threshold, key_indices }
+            sortedmulti_a(threshold, _key_indices) => {
+                let keys: Vec<KeyPlaceholder> = self.placeholders().map(|(kp, _)| *kp).collect();
+                TapleafClass::SortedMultisig { threshold, keys }
             },
-            pk(key_index) | pkh(key_index) => {
-                TapleafClass::SingleSig { key_index }
+            pk(_key_index) | pkh(_key_index) => {
+                let key = self.placeholders().next().map(|(kp, _)| *kp).unwrap();
+                TapleafClass::SingleSig { key }
             },
-            multi_a(threshold, key_indices) => {
-                TapleafClass::Multisig { threshold, key_indices }
+            multi_a(threshold, _key_indices) => {
+                let keys: Vec<KeyPlaceholder> = self.placeholders().map(|(kp, _)| *kp).collect();
+                TapleafClass::Multisig { threshold, keys }
             },
-            and_v(v:pk(key_index), older(blocks)) if blocks >= 1 && blocks < 65536 => {
-                TapleafClass::RelativeHeightlockSingleSig { key_index, blocks }
+            and_v(v:pk(_key_index), older(blocks)) if blocks >= 1 && blocks < 65536 => {
+                let key = self.placeholders().next().map(|(kp, _)| *kp).unwrap();
+                TapleafClass::RelativeHeightlockSingleSig { key, blocks }
             },
-            and_v(v:multi_a(threshold, key_indices), older(blocks)) if blocks >= 1 && blocks < 65536 => {
-                TapleafClass::RelativeHeightlockMultiSig { threshold, key_indices, blocks }
+            and_v(v:multi_a(threshold, _key_indices), older(blocks)) if blocks >= 1 && blocks < 65536 => {
+                let keys: Vec<KeyPlaceholder> = self.placeholders().map(|(kp, _)| *kp).collect();
+                TapleafClass::RelativeHeightlockMultiSig { threshold, keys, blocks }
             },
-            and_v(v:pk(key_index), older(time)) if time >= 4194305 && time < 4259840 => {
-                TapleafClass::RelativeTimelockSingleSig { key_index, time }
+            and_v(v:pk(_key_index), older(time)) if time >= 4194305 && time < 4259840 => {
+                let key = self.placeholders().next().map(|(kp, _)| *kp).unwrap();
+                TapleafClass::RelativeTimelockSingleSig { key, time }
             },
-            and_v(v:multi_a(threshold, key_indices), older(time)) if time >= 4194305 && time < 4259840 => {
-                TapleafClass::RelativeTimelockMultiSig { threshold, key_indices, time }
+            and_v(v:multi_a(threshold, _key_indices), older(time)) if time >= 4194305 && time < 4259840 => {
+                let keys: Vec<KeyPlaceholder> = self.placeholders().map(|(kp, _)| *kp).collect();
+                TapleafClass::RelativeTimelockMultiSig { threshold, keys, time }
             },
-            and_v(v:pk(key_index), after(block_height)) if block_height >= 1 && block_height < 500000000 => {
-                TapleafClass::AbsoluteHeightlockSingleSig { key_index, block_height }
+            and_v(v:pk(_key_index), after(block_height)) if block_height >= 1 && block_height < 500000000 => {
+                let key = self.placeholders().next().map(|(kp, _)| *kp).unwrap();
+                TapleafClass::AbsoluteHeightlockSingleSig { key, block_height }
             },
-            and_v(v:multi_a(threshold, key_indices), after(block_height)) if block_height >= 1 && block_height < 500000000 => {
-                TapleafClass::AbsoluteHeightlockMultiSig { threshold, key_indices, block_height }
+            and_v(v:multi_a(threshold, _key_indices), after(block_height)) if block_height >= 1 && block_height < 500000000 => {
+                let keys: Vec<KeyPlaceholder> = self.placeholders().map(|(kp, _)| *kp).collect();
+                TapleafClass::AbsoluteHeightlockMultiSig { threshold, keys, block_height }
             },
-            and_v(v:pk(key_index), after(timestamp)) if timestamp >= 500000000 => {
-                TapleafClass::AbsoluteTimelockSingleSig { key_index, timestamp }
+            and_v(v:pk(_key_index), after(timestamp)) if timestamp >= 500000000 => {
+                let key = self.placeholders().next().map(|(kp, _)| *kp).unwrap();
+                TapleafClass::AbsoluteTimelockSingleSig { key, timestamp }
             },
-            and_v(v:multi_a(threshold, key_indices), after(timestamp)) if timestamp >= 500000000 => {
-                TapleafClass::AbsoluteTimelockMultiSig { threshold, key_indices, timestamp }
+            and_v(v:multi_a(threshold, _key_indices), after(timestamp)) if timestamp >= 500000000 => {
+                let keys: Vec<KeyPlaceholder> = self.placeholders().map(|(kp, _)| *kp).collect();
+                TapleafClass::AbsoluteTimelockMultiSig { threshold, keys, timestamp }
             },
-            and_v(v:pk(key_index1), pk(key_index2)) => {
-                TapleafClass::BothMustSign { key_index1, key_index2 }
+            and_v(v:pk(_key_index1), pk(_key_index2)) => {
+                let mut phs = self.placeholders().map(|(kp, _)| *kp);
+                let key1 = phs.next().unwrap();
+                let key2 = phs.next().unwrap();
+                TapleafClass::BothMustSign { key1, key2 }
             },
             _ => { TapleafClass::Other(self.to_string()) },
         })
     }
 }
 
-fn format_key_indices(key_indices: &[u32]) -> String {
-    match key_indices {
+fn format_key(kp: KeyPlaceholder, canonical: bool) -> String {
+    if canonical {
+        format!("@{}", kp.key_index)
+    } else {
+        format!("@{}/<{};{}>/*", kp.key_index, kp.num1, kp.num2)
+    }
+}
+
+fn format_key_indices(keys: &[KeyPlaceholder], canonical: bool) -> String {
+    match keys {
         [] => String::new(),
-        [single] => format!("@{}", single),
+        [single] => format_key(*single, canonical),
         [init @ .., last] => {
-            let parts: Vec<String> = init.iter().map(|i| format!("@{}", i)).collect();
-            format!("{} and @{}", parts.join(", "), last)
+            let parts: Vec<String> = init.iter().map(|k| format_key(*k, canonical)).collect();
+            format!("{} and {}", parts.join(", "), format_key(*last, canonical))
         }
     }
 }
@@ -491,16 +516,18 @@ fn cleartext_spec<K: Copy + Eq>(
         .expect("missing cleartext spec")
 }
 
-fn format_cleartext_value(part: CleartextPart, value: &CleartextValue) -> Option<String> {
+fn format_cleartext_value(
+    part: CleartextPart,
+    value: &CleartextValue,
+    canonical: bool,
+) -> Option<String> {
     match (part, value) {
         (CleartextPart::Threshold, CleartextValue::Threshold(threshold)) => {
             Some(threshold.to_string())
         }
-        (CleartextPart::KeyIndex, CleartextValue::KeyIndex(key_index)) => {
-            Some(format!("@{}", key_index))
-        }
-        (CleartextPart::KeyIndices, CleartextValue::KeyIndices(key_indices)) => {
-            Some(format_key_indices(key_indices))
+        (CleartextPart::KeyIndex, CleartextValue::KeyIndex(kp)) => Some(format_key(*kp, canonical)),
+        (CleartextPart::KeyIndices, CleartextValue::KeyIndices(keys)) => {
+            Some(format_key_indices(keys, canonical))
         }
         (CleartextPart::Blocks, CleartextValue::Blocks(blocks)) => Some(blocks.to_string()),
         (CleartextPart::RelativeTime, CleartextValue::RelativeTime(time)) => {
@@ -517,7 +544,11 @@ fn format_cleartext_value(part: CleartextPart, value: &CleartextValue) -> Option
     }
 }
 
-fn format_with_spec<K>(spec: &CleartextSpec<K>, values: &[CleartextValue]) -> String {
+fn format_with_spec<K>(
+    spec: &CleartextSpec<K>,
+    values: &[CleartextValue],
+    canonical: bool,
+) -> String {
     let mut result = String::new();
     let mut values = values.iter();
     for part in spec.parts {
@@ -526,7 +557,8 @@ fn format_with_spec<K>(spec: &CleartextSpec<K>, values: &[CleartextValue]) -> St
             field => {
                 let value = values.next().expect("missing cleartext value");
                 result.push_str(
-                    &format_cleartext_value(field, value).expect("invalid cleartext value"),
+                    &format_cleartext_value(field, value, canonical)
+                        .expect("invalid cleartext value"),
                 );
             }
         }
@@ -538,39 +570,35 @@ fn format_with_spec<K>(spec: &CleartextSpec<K>, values: &[CleartextValue]) -> St
 impl DescriptorClass {
     fn cleartext_pattern(&self) -> Option<(TopLevelPattern, Vec<CleartextValue>)> {
         match self {
-            DescriptorClass::LegacySingleSig { key_index } => Some((
+            DescriptorClass::LegacySingleSig { key } => Some((
                 TopLevelPattern::LegacySingleSig,
-                vec![CleartextValue::KeyIndex(*key_index)],
+                vec![CleartextValue::KeyIndex(*key)],
             )),
-            DescriptorClass::SegwitSingleSig { key_index } => Some((
+            DescriptorClass::SegwitSingleSig { key } => Some((
                 TopLevelPattern::SegwitSingleSig,
-                vec![CleartextValue::KeyIndex(*key_index)],
+                vec![CleartextValue::KeyIndex(*key)],
             )),
-            DescriptorClass::SegwitMultisig {
-                threshold,
-                key_indices,
-            } => Some((
+            DescriptorClass::SegwitMultisig { threshold, keys } => Some((
                 TopLevelPattern::SegwitMultisig,
                 vec![
                     CleartextValue::Threshold(*threshold),
-                    CleartextValue::KeyIndices(key_indices.clone()),
+                    CleartextValue::KeyIndices(keys.clone()),
                 ],
             )),
-            DescriptorClass::Taproot {
-                internal_key_index, ..
-            } => Some((
+            DescriptorClass::Taproot { internal_key, .. } => Some((
                 TopLevelPattern::Taproot,
-                vec![CleartextValue::KeyIndex(*internal_key_index)],
+                vec![CleartextValue::KeyIndex(*internal_key)],
             )),
             DescriptorClass::Other => None,
         }
     }
 
-    fn to_cleartext_string(&self) -> Option<String> {
+    fn to_cleartext_string(&self, canonical: bool) -> Option<String> {
         let (kind, values) = self.cleartext_pattern()?;
         Some(format_with_spec(
             cleartext_spec(TOP_LEVEL_SPECS, kind),
             &values,
+            canonical,
         ))
     }
 }
@@ -578,119 +606,104 @@ impl DescriptorClass {
 impl TapleafClass {
     fn cleartext_pattern(&self) -> Option<(TapleafPattern, Vec<CleartextValue>)> {
         match self {
-            TapleafClass::SingleSig { key_index } => Some((
+            TapleafClass::SingleSig { key } => Some((
                 TapleafPattern::SingleSig,
-                vec![CleartextValue::KeyIndex(*key_index)],
+                vec![CleartextValue::KeyIndex(*key)],
             )),
-            TapleafClass::SortedMultisig {
-                threshold,
-                key_indices,
-            } => Some((
+            TapleafClass::SortedMultisig { threshold, keys } => Some((
                 TapleafPattern::SortedMultisig,
                 vec![
                     CleartextValue::Threshold(*threshold),
-                    CleartextValue::KeyIndices(key_indices.clone()),
+                    CleartextValue::KeyIndices(keys.clone()),
                 ],
             )),
-            TapleafClass::BothMustSign {
-                key_index1,
-                key_index2,
-            } => Some((
+            TapleafClass::BothMustSign { key1, key2 } => Some((
                 TapleafPattern::BothMustSign,
                 vec![
-                    CleartextValue::KeyIndex(*key_index1),
-                    CleartextValue::KeyIndex(*key_index2),
+                    CleartextValue::KeyIndex(*key1),
+                    CleartextValue::KeyIndex(*key2),
                 ],
             )),
-            TapleafClass::Multisig {
-                threshold,
-                key_indices,
-            } => Some((
+            TapleafClass::Multisig { threshold, keys } => Some((
                 TapleafPattern::Multisig,
                 vec![
                     CleartextValue::Threshold(*threshold),
-                    CleartextValue::KeyIndices(key_indices.clone()),
+                    CleartextValue::KeyIndices(keys.clone()),
                 ],
             )),
-            TapleafClass::RelativeHeightlockSingleSig { key_index, blocks } => Some((
+            TapleafClass::RelativeHeightlockSingleSig { key, blocks } => Some((
                 TapleafPattern::RelativeHeightlockSingleSig,
                 vec![
-                    CleartextValue::KeyIndex(*key_index),
+                    CleartextValue::KeyIndex(*key),
                     CleartextValue::Blocks(*blocks),
                 ],
             )),
             TapleafClass::RelativeHeightlockMultiSig {
                 threshold,
-                key_indices,
+                keys,
                 blocks,
             } => Some((
                 TapleafPattern::RelativeHeightlockMultiSig,
                 vec![
                     CleartextValue::Threshold(*threshold),
-                    CleartextValue::KeyIndices(key_indices.clone()),
+                    CleartextValue::KeyIndices(keys.clone()),
                     CleartextValue::Blocks(*blocks),
                 ],
             )),
-            TapleafClass::RelativeTimelockSingleSig { key_index, time } => Some((
+            TapleafClass::RelativeTimelockSingleSig { key, time } => Some((
                 TapleafPattern::RelativeTimelockSingleSig,
                 vec![
-                    CleartextValue::KeyIndex(*key_index),
+                    CleartextValue::KeyIndex(*key),
                     CleartextValue::RelativeTime(*time),
                 ],
             )),
             TapleafClass::RelativeTimelockMultiSig {
                 threshold,
-                key_indices,
+                keys,
                 time,
             } => Some((
                 TapleafPattern::RelativeTimelockMultiSig,
                 vec![
                     CleartextValue::Threshold(*threshold),
-                    CleartextValue::KeyIndices(key_indices.clone()),
+                    CleartextValue::KeyIndices(keys.clone()),
                     CleartextValue::RelativeTime(*time),
                 ],
             )),
-            TapleafClass::AbsoluteHeightlockSingleSig {
-                key_index,
-                block_height,
-            } => Some((
+            TapleafClass::AbsoluteHeightlockSingleSig { key, block_height } => Some((
                 TapleafPattern::AbsoluteHeightlockSingleSig,
                 vec![
-                    CleartextValue::KeyIndex(*key_index),
+                    CleartextValue::KeyIndex(*key),
                     CleartextValue::BlockHeight(*block_height),
                 ],
             )),
             TapleafClass::AbsoluteHeightlockMultiSig {
                 threshold,
-                key_indices,
+                keys,
                 block_height,
             } => Some((
                 TapleafPattern::AbsoluteHeightlockMultiSig,
                 vec![
                     CleartextValue::Threshold(*threshold),
-                    CleartextValue::KeyIndices(key_indices.clone()),
+                    CleartextValue::KeyIndices(keys.clone()),
                     CleartextValue::BlockHeight(*block_height),
                 ],
             )),
-            TapleafClass::AbsoluteTimelockSingleSig {
-                key_index,
-                timestamp,
-            } => Some((
+            TapleafClass::AbsoluteTimelockSingleSig { key, timestamp } => Some((
                 TapleafPattern::AbsoluteTimelockSingleSig,
                 vec![
-                    CleartextValue::KeyIndex(*key_index),
+                    CleartextValue::KeyIndex(*key),
                     CleartextValue::Timestamp(*timestamp),
                 ],
             )),
             TapleafClass::AbsoluteTimelockMultiSig {
                 threshold,
-                key_indices,
+                keys,
                 timestamp,
             } => Some((
                 TapleafPattern::AbsoluteTimelockMultiSig,
                 vec![
                     CleartextValue::Threshold(*threshold),
-                    CleartextValue::KeyIndices(key_indices.clone()),
+                    CleartextValue::KeyIndices(keys.clone()),
                     CleartextValue::Timestamp(*timestamp),
                 ],
             )),
@@ -698,11 +711,12 @@ impl TapleafClass {
         }
     }
 
-    fn to_cleartext_string(&self) -> Option<String> {
+    fn to_cleartext_string(&self, canonical: bool) -> Option<String> {
         let (kind, values) = self.cleartext_pattern()?;
         Some(format_with_spec(
             cleartext_spec(TAPLEAF_SPECS, kind),
             &values,
+            canonical,
         ))
     }
 }
@@ -729,6 +743,26 @@ pub trait ClearText {
     ) -> Result<Box<dyn Iterator<Item = Self>>, CleartextError>
     where
         Self: Sized;
+}
+
+impl DescriptorTemplate {
+    // Verify that for each key index that appears multiple times in placeholders, the derivations are <0;1>/*,
+    // then <2;3>/*, etc. This guarantees that no information on the derivations is lost when omitting this part
+    // in the cleartext representation.
+    fn are_key_derivations_canonical(&self) -> bool {
+        let mut next_num1_per_key: alloc::collections::BTreeMap<u32, u64> =
+            alloc::collections::BTreeMap::new();
+
+        for (kp, _) in self.placeholders() {
+            let next_num1 = next_num1_per_key.entry(kp.key_index).or_insert(0);
+            if kp.num1 as u64 != *next_num1 || kp.num2 as u64 != *next_num1 + 1 {
+                return false;
+            }
+            *next_num1 += 2;
+        }
+
+        true
+    }
 }
 
 impl ClearText for DescriptorTemplate {
@@ -776,23 +810,28 @@ impl ClearText for DescriptorTemplate {
     }
 
     fn to_cleartext(&self) -> (Vec<String>, bool) {
+        let canonical = self.are_key_derivations_canonical();
         match self.classify() {
             class @ DescriptorClass::LegacySingleSig { .. }
             | class @ DescriptorClass::SegwitSingleSig { .. }
             | class @ DescriptorClass::SegwitMultisig { .. } => (
-                vec![class.to_cleartext_string().expect("missing cleartext")],
-                true,
+                vec![class
+                    .to_cleartext_string(canonical)
+                    .expect("missing cleartext")],
+                canonical,
             ),
             class @ DescriptorClass::Taproot { .. } => {
-                let primary_path = class.to_cleartext_string().expect("missing cleartext");
+                let primary_path = class
+                    .to_cleartext_string(canonical)
+                    .expect("missing cleartext");
                 let DescriptorClass::Taproot { mut leaves, .. } = class else {
                     unreachable!();
                 };
                 leaves.sort_by(|a, b| a.display_cmp(b));
                 let mut descriptions = vec![primary_path];
-                let mut all_leaves_have_cleartext = true;
+                let mut all_leaves_have_cleartext = canonical;
                 for leaf in leaves {
-                    if let Some(description) = leaf.to_cleartext_string() {
+                    if let Some(description) = leaf.to_cleartext_string(canonical) {
                         descriptions.push(description);
                     } else {
                         let TapleafClass::Other(raw) = leaf else {
@@ -826,30 +865,43 @@ impl ClearText for DescriptorTemplate {
 // from_cleartext helpers (feature-gated)
 // ---------------------------------------------------------------------------
 #[cfg(any(test, feature = "cleartext-decode"))]
-fn kp(key_index: u32) -> KeyPlaceholder {
-    KeyPlaceholder {
-        key_index,
-        num1: 0,
-        num2: 1,
+fn parse_key_index(s: &str) -> Option<KeyPlaceholder> {
+    let rest = s.strip_prefix('@')?;
+    if let Ok(idx) = rest.parse::<u32>() {
+        // "@N" canonical format
+        Some(KeyPlaceholder {
+            key_index: idx,
+            num1: 0,
+            num2: 1,
+        })
+    } else if let Some((idx_str, deriv)) = rest.split_once('/') {
+        // "@N/<M;K>/*" explicit derivation format
+        let key_index = idx_str.parse().ok()?;
+        let deriv = deriv.strip_prefix('<')?.strip_suffix(">/*")?;
+        let (m, k) = deriv.split_once(';')?;
+        let num1 = m.parse().ok()?;
+        let num2 = k.parse().ok()?;
+        Some(KeyPlaceholder {
+            key_index,
+            num1,
+            num2,
+        })
+    } else {
+        None
     }
 }
 
 #[cfg(any(test, feature = "cleartext-decode"))]
-fn parse_key_index(s: &str) -> Option<u32> {
-    s.strip_prefix('@')?.parse().ok()
-}
-
-#[cfg(any(test, feature = "cleartext-decode"))]
-fn parse_key_indices(s: &str) -> Option<Vec<u32>> {
+fn parse_key_indices(s: &str) -> Option<Vec<KeyPlaceholder>> {
     // Formats: "@A", "@A and @B", "@A, @B and @C", "@A, @B, @C and @D", ...
     if let Some((init, last)) = s.rsplit_once(" and ") {
-        let last_idx = parse_key_index(last.trim())?;
-        let mut indices: Vec<u32> = Vec::new();
+        let last_kp = parse_key_index(last.trim())?;
+        let mut kps: Vec<KeyPlaceholder> = Vec::new();
         for part in init.split(", ") {
-            indices.push(parse_key_index(part.trim())?);
+            kps.push(parse_key_index(part.trim())?);
         }
-        indices.push(last_idx);
-        Some(indices)
+        kps.push(last_kp);
+        Some(kps)
     } else {
         // Single key: "@A"
         Some(vec![parse_key_index(s.trim())?])
@@ -882,14 +934,14 @@ impl CleartextValueCursor {
         }
     }
 
-    fn key_index(&mut self) -> Option<u32> {
+    fn key_index(&mut self) -> Option<KeyPlaceholder> {
         match self.values.next()? {
             CleartextValue::KeyIndex(value) => Some(value),
             _ => None,
         }
     }
 
-    fn key_indices(&mut self) -> Option<Vec<u32>> {
+    fn key_indices(&mut self) -> Option<Vec<KeyPlaceholder>> {
         match self.values.next()? {
             CleartextValue::KeyIndices(value) => Some(value),
             _ => None,
@@ -939,17 +991,17 @@ impl DescriptorClass {
         let mut values = CleartextValueCursor::new(values);
         let result = match kind {
             TopLevelPattern::LegacySingleSig => DescriptorClass::LegacySingleSig {
-                key_index: values.key_index()?,
+                key: values.key_index()?,
             },
             TopLevelPattern::SegwitSingleSig => DescriptorClass::SegwitSingleSig {
-                key_index: values.key_index()?,
+                key: values.key_index()?,
             },
             TopLevelPattern::SegwitMultisig => DescriptorClass::SegwitMultisig {
                 threshold: values.threshold()?,
-                key_indices: values.key_indices()?,
+                keys: values.key_indices()?,
             },
             TopLevelPattern::Taproot => DescriptorClass::Taproot {
-                internal_key_index: values.key_index()?,
+                internal_key: values.key_index()?,
                 leaves: Vec::new(),
             },
         };
@@ -964,62 +1016,62 @@ impl TapleafClass {
         let mut values = CleartextValueCursor::new(values);
         let result = match kind {
             TapleafPattern::SingleSig => TapleafClass::SingleSig {
-                key_index: values.key_index()?,
+                key: values.key_index()?,
             },
             TapleafPattern::SortedMultisig => TapleafClass::SortedMultisig {
                 threshold: values.threshold()?,
-                key_indices: values.key_indices()?,
+                keys: values.key_indices()?,
             },
             TapleafPattern::BothMustSign => TapleafClass::BothMustSign {
-                key_index1: values.key_index()?,
-                key_index2: values.key_index()?,
+                key1: values.key_index()?,
+                key2: values.key_index()?,
             },
             TapleafPattern::Multisig => TapleafClass::Multisig {
                 threshold: values.threshold()?,
-                key_indices: values.key_indices()?,
+                keys: values.key_indices()?,
             },
             TapleafPattern::RelativeHeightlockSingleSig => {
                 TapleafClass::RelativeHeightlockSingleSig {
-                    key_index: values.key_index()?,
+                    key: values.key_index()?,
                     blocks: values.blocks()?,
                 }
             }
             TapleafPattern::RelativeHeightlockMultiSig => {
                 TapleafClass::RelativeHeightlockMultiSig {
                     threshold: values.threshold()?,
-                    key_indices: values.key_indices()?,
+                    keys: values.key_indices()?,
                     blocks: values.blocks()?,
                 }
             }
             TapleafPattern::RelativeTimelockSingleSig => TapleafClass::RelativeTimelockSingleSig {
-                key_index: values.key_index()?,
+                key: values.key_index()?,
                 time: values.relative_time()?,
             },
             TapleafPattern::RelativeTimelockMultiSig => TapleafClass::RelativeTimelockMultiSig {
                 threshold: values.threshold()?,
-                key_indices: values.key_indices()?,
+                keys: values.key_indices()?,
                 time: values.relative_time()?,
             },
             TapleafPattern::AbsoluteHeightlockSingleSig => {
                 TapleafClass::AbsoluteHeightlockSingleSig {
-                    key_index: values.key_index()?,
+                    key: values.key_index()?,
                     block_height: values.block_height()?,
                 }
             }
             TapleafPattern::AbsoluteHeightlockMultiSig => {
                 TapleafClass::AbsoluteHeightlockMultiSig {
                     threshold: values.threshold()?,
-                    key_indices: values.key_indices()?,
+                    keys: values.key_indices()?,
                     block_height: values.block_height()?,
                 }
             }
             TapleafPattern::AbsoluteTimelockSingleSig => TapleafClass::AbsoluteTimelockSingleSig {
-                key_index: values.key_index()?,
+                key: values.key_index()?,
                 timestamp: values.timestamp()?,
             },
             TapleafPattern::AbsoluteTimelockMultiSig => TapleafClass::AbsoluteTimelockMultiSig {
                 threshold: values.threshold()?,
-                key_indices: values.key_indices()?,
+                keys: values.key_indices()?,
                 timestamp: values.timestamp()?,
             },
         };
@@ -1211,10 +1263,7 @@ fn parse_top_level_candidates(
                 }
                 let base_class = DescriptorClass::from_cleartext_pattern(kind, values)
                     .expect("spec/from_cleartext_pattern mismatch: this is a bug");
-                let DescriptorClass::Taproot {
-                    internal_key_index, ..
-                } = base_class
-                else {
+                let DescriptorClass::Taproot { internal_key, .. } = base_class else {
                     continue;
                 };
 
@@ -1222,7 +1271,7 @@ fn parse_top_level_candidates(
                     push_unique(
                         &mut classes,
                         DescriptorClass::Taproot {
-                            internal_key_index,
+                            internal_key,
                             leaves: leaves.clone(),
                         },
                     );
@@ -1244,106 +1293,95 @@ fn parse_top_level_candidates(
 
 #[cfg(any(test, feature = "cleartext-decode"))]
 fn tapleaf_to_descriptors(leaf: &TapleafClass) -> Result<Vec<DescriptorTemplate>, CleartextError> {
-    let kps = |indices: &[u32]| -> Vec<KeyPlaceholder> { indices.iter().map(|&i| kp(i)).collect() };
     match leaf {
-        TapleafClass::SingleSig { key_index } => {
-            let k = kp(*key_index);
-            Ok(vec![DescriptorTemplate::Pk(k), DescriptorTemplate::Pkh(k)])
+        TapleafClass::SingleSig { key } => Ok(vec![
+            DescriptorTemplate::Pk(*key),
+            DescriptorTemplate::Pkh(*key),
+        ]),
+        TapleafClass::BothMustSign { key1, key2 } => Ok(vec![DescriptorTemplate::And_v(
+            Box::new(DescriptorTemplate::V(Box::new(DescriptorTemplate::Pk(
+                *key1,
+            )))),
+            Box::new(DescriptorTemplate::Pk(*key2)),
+        )]),
+        TapleafClass::SortedMultisig { threshold, keys } => {
+            Ok(vec![DescriptorTemplate::Sortedmulti_a(
+                *threshold,
+                keys.clone(),
+            )])
         }
-        TapleafClass::BothMustSign {
-            key_index1,
-            key_index2,
-        } => Ok(vec![DescriptorTemplate::And_v(
-            Box::new(DescriptorTemplate::V(Box::new(DescriptorTemplate::Pk(kp(
-                *key_index1,
-            ))))),
-            Box::new(DescriptorTemplate::Pk(kp(*key_index2))),
-        )]),
-        TapleafClass::SortedMultisig {
-            threshold,
-            key_indices,
-        } => Ok(vec![DescriptorTemplate::Sortedmulti_a(
-            *threshold,
-            kps(key_indices),
-        )]),
-        TapleafClass::Multisig {
-            threshold,
-            key_indices,
-        } => Ok(vec![DescriptorTemplate::Multi_a(
-            *threshold,
-            kps(key_indices),
-        )]),
-        TapleafClass::RelativeHeightlockSingleSig { key_index, blocks } => {
+        TapleafClass::Multisig { threshold, keys } => {
+            Ok(vec![DescriptorTemplate::Multi_a(*threshold, keys.clone())])
+        }
+        TapleafClass::RelativeHeightlockSingleSig { key, blocks } => {
             Ok(vec![DescriptorTemplate::And_v(
-                Box::new(DescriptorTemplate::V(Box::new(DescriptorTemplate::Pk(kp(
-                    *key_index,
-                ))))),
+                Box::new(DescriptorTemplate::V(Box::new(DescriptorTemplate::Pk(
+                    *key,
+                )))),
                 Box::new(DescriptorTemplate::Older(*blocks)),
             )])
         }
         TapleafClass::RelativeHeightlockMultiSig {
             threshold,
-            key_indices,
+            keys,
             blocks,
         } => Ok(vec![DescriptorTemplate::And_v(
             Box::new(DescriptorTemplate::V(Box::new(
-                DescriptorTemplate::Multi_a(*threshold, kps(key_indices)),
+                DescriptorTemplate::Multi_a(*threshold, keys.clone()),
             ))),
             Box::new(DescriptorTemplate::Older(*blocks)),
         )]),
-        TapleafClass::RelativeTimelockSingleSig { key_index, time } => {
+        TapleafClass::RelativeTimelockSingleSig { key, time } => {
             Ok(vec![DescriptorTemplate::And_v(
-                Box::new(DescriptorTemplate::V(Box::new(DescriptorTemplate::Pk(kp(
-                    *key_index,
-                ))))),
+                Box::new(DescriptorTemplate::V(Box::new(DescriptorTemplate::Pk(
+                    *key,
+                )))),
                 Box::new(DescriptorTemplate::Older(*time)),
             )])
         }
         TapleafClass::RelativeTimelockMultiSig {
             threshold,
-            key_indices,
+            keys,
             time,
         } => Ok(vec![DescriptorTemplate::And_v(
             Box::new(DescriptorTemplate::V(Box::new(
-                DescriptorTemplate::Multi_a(*threshold, kps(key_indices)),
+                DescriptorTemplate::Multi_a(*threshold, keys.clone()),
             ))),
             Box::new(DescriptorTemplate::Older(*time)),
         )]),
-        TapleafClass::AbsoluteHeightlockSingleSig {
-            key_index,
-            block_height,
-        } => Ok(vec![DescriptorTemplate::And_v(
-            Box::new(DescriptorTemplate::V(Box::new(DescriptorTemplate::Pk(kp(
-                *key_index,
-            ))))),
-            Box::new(DescriptorTemplate::After(*block_height)),
-        )]),
+        TapleafClass::AbsoluteHeightlockSingleSig { key, block_height } => {
+            Ok(vec![DescriptorTemplate::And_v(
+                Box::new(DescriptorTemplate::V(Box::new(DescriptorTemplate::Pk(
+                    *key,
+                )))),
+                Box::new(DescriptorTemplate::After(*block_height)),
+            )])
+        }
         TapleafClass::AbsoluteHeightlockMultiSig {
             threshold,
-            key_indices,
+            keys,
             block_height,
         } => Ok(vec![DescriptorTemplate::And_v(
             Box::new(DescriptorTemplate::V(Box::new(
-                DescriptorTemplate::Multi_a(*threshold, kps(key_indices)),
+                DescriptorTemplate::Multi_a(*threshold, keys.clone()),
             ))),
             Box::new(DescriptorTemplate::After(*block_height)),
         )]),
-        TapleafClass::AbsoluteTimelockSingleSig {
-            key_index,
-            timestamp,
-        } => Ok(vec![DescriptorTemplate::And_v(
-            Box::new(DescriptorTemplate::V(Box::new(DescriptorTemplate::Pk(kp(
-                *key_index,
-            ))))),
-            Box::new(DescriptorTemplate::After(*timestamp)),
-        )]),
+        TapleafClass::AbsoluteTimelockSingleSig { key, timestamp } => {
+            Ok(vec![DescriptorTemplate::And_v(
+                Box::new(DescriptorTemplate::V(Box::new(DescriptorTemplate::Pk(
+                    *key,
+                )))),
+                Box::new(DescriptorTemplate::After(*timestamp)),
+            )])
+        }
         TapleafClass::AbsoluteTimelockMultiSig {
             threshold,
-            key_indices,
+            keys,
             timestamp,
         } => Ok(vec![DescriptorTemplate::And_v(
             Box::new(DescriptorTemplate::V(Box::new(
-                DescriptorTemplate::Multi_a(*threshold, kps(key_indices)),
+                DescriptorTemplate::Multi_a(*threshold, keys.clone()),
             ))),
             Box::new(DescriptorTemplate::After(*timestamp)),
         )]),
@@ -1439,62 +1477,63 @@ fn enumerate_taptrees_indices(
 fn top_level_variants(
     class: DescriptorClass,
 ) -> Result<Box<dyn Iterator<Item = DescriptorTemplate>>, CleartextError> {
-    let kps = |indices: &[u32]| -> Vec<KeyPlaceholder> { indices.iter().map(|&i| kp(i)).collect() };
     match class {
-        DescriptorClass::LegacySingleSig { key_index } => Ok(Box::new(core::iter::once(
-            DescriptorTemplate::Pkh(kp(key_index)),
-        ))),
-        DescriptorClass::SegwitSingleSig { key_index } => {
-            let k = kp(key_index);
-            Ok(Box::new(
-                vec![
-                    DescriptorTemplate::Wpkh(k),
-                    DescriptorTemplate::Sh(Box::new(DescriptorTemplate::Wpkh(k))),
-                ]
-                .into_iter(),
-            ))
+        DescriptorClass::LegacySingleSig { key } => {
+            Ok(Box::new(core::iter::once(DescriptorTemplate::Pkh(key))))
         }
-        DescriptorClass::SegwitMultisig {
-            threshold,
-            key_indices,
-        } => {
-            let keys = kps(&key_indices);
-            Ok(Box::new(
-                vec![
-                    DescriptorTemplate::Wsh(Box::new(DescriptorTemplate::Multi(
-                        threshold,
-                        keys.clone(),
-                    ))),
-                    DescriptorTemplate::Wsh(Box::new(DescriptorTemplate::Sortedmulti(
-                        threshold,
-                        keys.clone(),
-                    ))),
-                    DescriptorTemplate::Sh(Box::new(DescriptorTemplate::Wsh(Box::new(
-                        DescriptorTemplate::Multi(threshold, keys.clone()),
-                    )))),
-                    DescriptorTemplate::Sh(Box::new(DescriptorTemplate::Wsh(Box::new(
-                        DescriptorTemplate::Sortedmulti(threshold, keys),
-                    )))),
-                ]
-                .into_iter(),
-            ))
-        }
+        DescriptorClass::SegwitSingleSig { key } => Ok(Box::new(
+            vec![
+                DescriptorTemplate::Wpkh(key),
+                DescriptorTemplate::Sh(Box::new(DescriptorTemplate::Wpkh(key))),
+            ]
+            .into_iter(),
+        )),
+        DescriptorClass::SegwitMultisig { threshold, keys } => Ok(Box::new(
+            vec![
+                DescriptorTemplate::Wsh(Box::new(DescriptorTemplate::Multi(
+                    threshold,
+                    keys.clone(),
+                ))),
+                DescriptorTemplate::Wsh(Box::new(DescriptorTemplate::Sortedmulti(
+                    threshold,
+                    keys.clone(),
+                ))),
+                DescriptorTemplate::Sh(Box::new(DescriptorTemplate::Wsh(Box::new(
+                    DescriptorTemplate::Multi(threshold, keys.clone()),
+                )))),
+                DescriptorTemplate::Sh(Box::new(DescriptorTemplate::Wsh(Box::new(
+                    DescriptorTemplate::Sortedmulti(threshold, keys),
+                )))),
+            ]
+            .into_iter(),
+        )),
         DescriptorClass::Taproot {
-            internal_key_index,
+            internal_key,
             leaves,
         } => {
-            let ik = kp(internal_key_index);
             if leaves.is_empty() {
-                return Ok(Box::new(core::iter::once(DescriptorTemplate::Tr(ik, None))));
+                return Ok(Box::new(core::iter::once(DescriptorTemplate::Tr(
+                    internal_key,
+                    None,
+                ))));
             }
             let mut per_leaf_variants = Vec::new();
             for leaf in &leaves {
                 per_leaf_variants.push(tapleaf_to_descriptors(leaf)?);
             }
             let trees = enumerate_taptrees(per_leaf_variants);
-            Ok(Box::new(
-                trees.map(move |t| DescriptorTemplate::Tr(ik, Some(t))),
-            ))
+            Ok(Box::new(trees.map(move |t| {
+                let mut dt = DescriptorTemplate::Tr(internal_key, Some(t));
+                let mut next_per_key: alloc::collections::BTreeMap<u32, u32> =
+                    alloc::collections::BTreeMap::new();
+                for kp in dt.placeholders_mut() {
+                    let next = next_per_key.entry(kp.key_index).or_insert(0);
+                    kp.num1 = *next;
+                    kp.num2 = *next + 1;
+                    *next += 2;
+                }
+                dt
+            })))
         }
         DescriptorClass::Other => Err(CleartextError::ParseError(
             "cannot enumerate variants for unrecognized descriptor class".into(),
@@ -1587,8 +1626,8 @@ mod tests {
             "tr(@0/**,{{pk(@1/**),pk(@2/**)},pk(@3/**)})",
             "tr(@0/**,and_v(v:pk(@1/<0;1>/*),older(52560)))",
             "tr(@0/**,{pk(@1/**),and_v(v:pk(@2/<0;1>/*),older(1008))})",
-            "tr(@0/<0;1>/*,{and_v(v:pk(@1/<2;3>/*),older(4383)),and_v(v:pk(@2/<0;1>/*),pk(@1/<0;1>/*))})",
-            "tr(@0/<0;1>/*,{and_v(v:multi_a(2,@1/<2;3>/*,@2/<0;1>/*,@3/<0;1>/*),older(144)),and_v(v:pk(@1/<0;1>/*),pk(@2/<0;1>/*))})",
+            "tr(@0/<0;1>/*,{and_v(v:pk(@1/<0;1>/*),older(4383)),and_v(v:pk(@2/<0;1>/*),pk(@1/<2;3>/*))})",
+            "tr(@0/<0;1>/*,{and_v(v:multi_a(2,@1/<0;1>/*,@2/<0;1>/*,@3/<0;1>/*),older(144)),and_v(v:pk(@1/<2;3>/*),pk(@2/<2;3>/*))})",
             "tr(@0/**,and_v(v:pk(@1/<0;1>/*),older(4194305)))",
             "tr(@0/**,{pk(@1/**),and_v(v:pk(@2/<0;1>/*),older(4194484))})",
             "tr(@0/**,{pk(@1/**),and_v(v:multi_a(2,@2/<0;1>/*,@3/<0;1>/*),older(4194484))})",
@@ -1791,6 +1830,50 @@ mod tests {
                 ],
                 true,
             ),
+            // --------------------------------------------------------------------------------------
+            // Non-canonical key derivations: cleartext must includes <num1;num2> for all derivations
+            // --------------------------------------------------------------------------------------
+            // Legacy single-sig: num1 is not 0 for the first (and only) occurrence
+            (
+                "pkh(@0/<2;3>/*)",
+                &["Legacy single-signature (@0/<2;3>/*)"],
+                false,
+            ),
+            // Segwit single-sig: num2 is not num1+1
+            (
+                "wpkh(@0/<0;2>/*)",
+                &["Segwit single-signature (@0/<0;2>/*)"],
+                false,
+            ),
+            // 2-of-2 sortedmulti: first key has wrong num1
+            (
+                "wsh(sortedmulti(2,@0/<2;3>/*,@1/**))",
+                &["2 of @0/<2;3>/* and @1/<0;1>/* (SegWit)"],
+                false,
+            ),
+            // Taproot, key-path only: internal key has non-canonical derivation
+            (
+                "tr(@0/<4;5>/*)",
+                &["Primary path: @0/<4;5>/*"],
+                false,
+            ),
+            // Taproot single leaf: internal key canonical, leaf key non-canonical
+            (
+                "tr(@0/**,pk(@1/<2;3>/*))",
+                &["Primary path: @0/<0;1>/*", "Single-signature (@1/<2;3>/*)"],
+                false,
+            ),
+            // Taproot two leaves: same key index appears twice, derivations reversed
+            // (first occurrence has <2;3>, second has <0;1> — both must be shown verbatim)
+            (
+                "tr(@0/**,{pk(@1/<2;3>/*),pk(@1/<0;1>/*)})",
+                &[
+                    "Primary path: @0/<0;1>/*",
+                    "Single-signature (@1/<2;3>/*)",
+                    "Single-signature (@1/<0;1>/*)",
+                ],
+                false,
+            ),
         ];
 
         for &(desc_str, expected_txts, expected_has_cleartext) in cases {
@@ -1845,17 +1928,19 @@ mod tests {
             // Taproot: absolute timelock
             "tr(@0/**,and_v(v:pk(@1/<0;1>/*),after(500000000)))",
             "tr(@0/**,{pk(@1/**),and_v(v:multi_a(2,@2/<0;1>/*,@3/<0;1>/*),after(1700000000))})",
-            // Taproot: BothMustSign
-            "tr(@0/<0;1>/*,{and_v(v:pk(@1/<2;3>/*),older(4383)),and_v(v:pk(@2/<0;1>/*),pk(@1/<0;1>/*))})",
-            "tr(@0/<0;1>/*,{and_v(v:multi_a(2,@1/<2;3>/*,@2/<0;1>/*,@3/<0;1>/*),older(144)),and_v(v:pk(@1/<0;1>/*),pk(@2/<0;1>/*))})",
+            // Taproot: BothMustSign (key repeated across leaves with canonical derivations)
+            "tr(@0/<0;1>/*,{and_v(v:pk(@1/<0;1>/*),older(4383)),and_v(v:pk(@2/<0;1>/*),pk(@1/<2;3>/*))})",
+            "tr(@0/<0;1>/*,{and_v(v:multi_a(2,@1/<0;1>/*,@2/<0;1>/*,@3/<0;1>/*),older(144)),and_v(v:pk(@1/<2;3>/*),pk(@2/<2;3>/*))})",
         ];
 
         for &desc_str in cases {
             let original = dt(desc_str);
             let (cleartext, has_cleartext) = original.to_cleartext();
-            if !has_cleartext {
-                continue;
-            }
+            assert!(
+                has_cleartext,
+                "expected to have cleartext description for {:?}",
+                desc_str
+            );
             let cleartext_refs: Vec<&str> = cleartext.iter().map(|s| s.as_str()).collect();
             let variants: Vec<_> = DescriptorTemplate::from_cleartext(&cleartext_refs)
                 .unwrap_or_else(|e| panic!("from_cleartext failed for {:?}: {:?}", desc_str, e))
