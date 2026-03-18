@@ -181,7 +181,22 @@ fn parse_possibly_wrapped_pattern(input: ParseStream) -> syn::Result<DescPattern
                 }
             }
         } else {
-            return parse_keyword_call_from_ident(ident, &wrappers, input);
+            // Treat multi-letter idents before ':' as groups of wrapper characters,
+            // e.g. `sln:older(x)` -> wrappers 's', 'l', 'n' applied to `older`.
+            for c in s.chars() {
+                match wrapper_to_variant(c) {
+                    Some(v) => {
+                        wrappers.push(v.to_string());
+                    }
+                    None => {
+                        return Err(syn::Error::new(
+                            ident.span(),
+                            format!("unknown wrapper character '{}' in group '{}'", c, s),
+                        ));
+                    }
+                }
+            }
+            input.parse::<Token![:]>()?;
         }
     }
 
@@ -269,11 +284,21 @@ fn parse_possibly_wrapped_sub(input: ParseStream) -> syn::Result<PatternArg> {
                 }
             }
         } else {
-            let inner = parse_keyword_call_from_ident(ident, &[], input)?;
-            return Ok(PatternArg::SubPattern {
-                wrappers,
-                inner: Box::new(inner),
-            });
+            // Treat multi-letter identifiers before ':' as grouped wrappers,
+            // consistent with `parse_possibly_wrapped_pattern`.
+            for c in s.chars() {
+                match wrapper_to_variant(c) {
+                    Some(v) => wrappers.push(v.to_string()),
+                    None => {
+                        return Err(syn::Error::new(
+                            ident.span(),
+                            format!("unknown wrapper '{}'", c),
+                        ));
+                    }
+                }
+            }
+            // Consume the ':' that follows the wrapper group.
+            input.parse::<Token![:]>()?;
         }
     }
 

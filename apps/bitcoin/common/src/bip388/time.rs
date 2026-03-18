@@ -29,7 +29,7 @@ pub(super) fn format_utc_date(timestamp: u32) -> String {
 
 /// Parses a UTC date/datetime string as produced by [`format_utc_date`].
 /// Accepts `"YYYY-MM-DD"` (midnight UTC) and `"YYYY-MM-DD HH:MM:SS"`.
-/// Returns `None` if the string is malformed or the timestamp does not fit in `u32`.
+/// Returns `None` if the string is malformed, not canonical per [`format_utc_date`], or the timestamp does not fit in `u32`.
 #[cfg(any(test, feature = "cleartext-decode"))]
 pub(super) fn parse_utc_date_to_timestamp(s: &str) -> Option<u32> {
     let (date_str, time_str) = match s.find(' ') {
@@ -46,6 +46,7 @@ pub(super) fn parse_utc_date_to_timestamp(s: &str) -> Option<u32> {
     let m: u32 = dp[1].parse().ok()?;
     let d: u32 = dp[2].parse().ok()?;
     if m < 1 || m > 12 || d < 1 || d > 31 {
+        // does not account for days-per-month or leap years
         return None;
     }
 
@@ -69,7 +70,14 @@ pub(super) fn parse_utc_date_to_timestamp(s: &str) -> Option<u32> {
 
     let days = days_from_civil(y, m, d);
     let timestamp = days.checked_mul(86400)?.checked_add(time_of_day)?;
-    u32::try_from(timestamp).ok()
+    let timestamp = u32::try_from(timestamp).ok()?;
+    // Round-trip check: catches invalid calendar dates (e.g. Feb 30) and rejects
+    // inputs that don't exactly match the canonical output of `format_utc_date`
+    // (e.g. "YYYY-MM-DD 00:00:00" is rejected because the canonical form is "YYYY-MM-DD").
+    if format_utc_date(timestamp) != s {
+        return None;
+    }
+    Some(timestamp)
 }
 
 /// Formats a number of seconds as a human-readable duration string.
@@ -182,8 +190,8 @@ mod tests {
             parse_utc_date_to_timestamp("1970-01-01 23:59:59"),
             Some(86399)
         );
-        // explicit midnight time → same as date-only
-        assert_eq!(parse_utc_date_to_timestamp("1970-01-01 00:00:00"), Some(0));
+        // explicit midnight time is not canonical (format_utc_date omits the time for midnight)
+        assert_eq!(parse_utc_date_to_timestamp("1970-01-01 00:00:00"), None);
         assert_eq!(
             parse_utc_date_to_timestamp("1985-11-05 00:53:20"),
             Some(500_000_000)

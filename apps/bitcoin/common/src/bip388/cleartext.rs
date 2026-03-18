@@ -736,7 +736,7 @@ impl ClearText for DescriptorTemplate {
         match self.classify() {
             DescriptorClass::LegacySingleSig { .. } => 1,
             DescriptorClass::SegwitSingleSig { .. } => 2, // wpkh and sh(wpkh)
-            DescriptorClass::SegwitMultisig { .. } => 4,  // multi or sortdmulti / normal or wrapped
+            DescriptorClass::SegwitMultisig { .. } => 4, // multi or sortedmulti / normal or wrapped
             DescriptorClass::Taproot { leaves, .. } => {
                 // The confusion score of a taproot descriptor is the product of the confusion scores of the internal key and all the leaves,
                 // multiplied by the number T(n) of rearrangements of the tree.
@@ -1520,10 +1520,6 @@ mod tests {
     #[test]
     fn test_confusion_score() {
         // (descriptor_template, expected_confusion_score)
-        //
-        // Note: tr with 0 or 1 leaves is not tested here because the confusion-score
-        // formula contains a `usize` subtraction (`2 * n_leaves - 3`) that overflows
-        // for n_leaves < 2 and panics in debug builds.
         let cases: &[(&str, u64)] = &[
             // Legacy single-sig
             ("pkh(@0/**)", 1),
@@ -1539,6 +1535,8 @@ mod tests {
             ("sh(wsh(sortedmulti(2,@0/**,@1/**)))", 4), // wrapped
             ("sh(wsh(multi(2,@0/**,@1/**,@2/**)))", 4), // wrapped
             ("sh(wsh(sortedmulti(3,@0/**,@1/**,@2/**)))", 4), // wrapped
+            // Taproot with 1 SingleSig leaf (score 2)
+            ("tr(@0/**,pk(@1/**))", 2),
             // Taproot with 2 leaves: both SingleSig (score 2 each), T(2)=1 → 2×2×1=4
             ("tr(@0/**,{pk(@1/**),pkh(@2/**)})", 4),
             // Taproot with 2 leaves: SortedMultisig (score 1) + SingleSig (score 2), T(2)=1 → 1×2×1=2
