@@ -778,7 +778,7 @@ impl ClearText for DescriptorTemplate {
                 let n_leaves = leaves.len();
                 for leaf in &leaves {
                     let leaf_score = match leaf {
-                        TapleafClass::SingleSig { .. } => 2,
+                        TapleafClass::SingleSig { .. } => 1,
                         TapleafClass::SortedMultisig { .. } => 1,
                         TapleafClass::Multisig { .. } => 1,
                         TapleafClass::BothMustSign { .. } => 1,
@@ -1294,10 +1294,7 @@ fn parse_top_level_candidates(
 #[cfg(any(test, feature = "cleartext-decode"))]
 fn tapleaf_to_descriptors(leaf: &TapleafClass) -> Result<Vec<DescriptorTemplate>, CleartextError> {
     match leaf {
-        TapleafClass::SingleSig { key } => Ok(vec![
-            DescriptorTemplate::Pk(*key),
-            DescriptorTemplate::Pkh(*key),
-        ]),
+        TapleafClass::SingleSig { key } => Ok(vec![DescriptorTemplate::Pk(*key)]),
         TapleafClass::BothMustSign { key1, key2 } => Ok(vec![DescriptorTemplate::And_v(
             Box::new(DescriptorTemplate::V(Box::new(DescriptorTemplate::Pk(
                 *key1,
@@ -1574,28 +1571,28 @@ mod tests {
             ("sh(wsh(sortedmulti(2,@0/**,@1/**)))", 4), // wrapped
             ("sh(wsh(multi(2,@0/**,@1/**,@2/**)))", 4), // wrapped
             ("sh(wsh(sortedmulti(3,@0/**,@1/**,@2/**)))", 4), // wrapped
-            // Taproot with 1 SingleSig leaf (score 2)
-            ("tr(@0/**,pk(@1/**))", 2),
-            // Taproot with 2 leaves: both SingleSig (score 2 each), T(2)=1 → 2×2×1=4
-            ("tr(@0/**,{pk(@1/**),pkh(@2/**)})", 4),
-            // Taproot with 2 leaves: SortedMultisig (score 1) + SingleSig (score 2), T(2)=1 → 1×2×1=2
-            ("tr(@0/**,{sortedmulti_a(2,@1/**,@2/**),pk(@3/**)})", 2),
-            // Taproot with 3 leaves: 3×SingleSig (2×2×2=8), T(3)=3 → 8×3=24
-            ("tr(@0/**,{{pk(@1/**),pk(@2/**)},pk(@3/**)})", 24),
-            // Taproot with 2 leaves: RelativeHeightlockSingleSig (score 1) + SingleSig (score 2), T(2)=1 → 2
+            // Taproot with 1 SingleSig leaf (score 1)
+            ("tr(@0/**,pk(@1/**))", 1),
+            // Taproot with 2 leaves: both SingleSig (score 1 each), T(2)=1 → 1×1×1=1
+            ("tr(@0/**,{pk(@1/**),pkh(@2/**)})", 1),
+            // Taproot with 2 leaves: SortedMultisig (score 1) + SingleSig (score 1), T(2)=1 → 1×1×1=1
+            ("tr(@0/**,{sortedmulti_a(2,@1/**,@2/**),pk(@3/**)})", 1),
+            // Taproot with 3 leaves: 3×SingleSig (1×1×1=1), T(3)=3 → 1×3=3
+            ("tr(@0/**,{{pk(@1/**),pk(@2/**)},pk(@3/**)})", 3),
+            // Taproot with 2 leaves: RelativeHeightlockSingleSig (score 1) + SingleSig (score 1), T(2)=1 → 1
             (
                 "tr(@0/**,{pk(@1/**),and_v(v:pk(@2/<0;1>/*),older(52560))})",
-                2,
+                1,
             ),
-            // Taproot with 2 leaves: RelativeTimelockSingleSig (score 1) + SingleSig (score 2), T(2)=1 → 2
+            // Taproot with 2 leaves: RelativeTimelockSingleSig (score 1) + SingleSig (score 1), T(2)=1 → 1
             (
                 "tr(@0/**,{pk(@1/**),and_v(v:pk(@2/<0;1>/*),older(4194305))})",
-                2,
+                1,
             ),
-            // Taproot with 2 leaves: RelativeTimelockMultiSig (score 1) + SingleSig (score 2), T(2)=1 → 2
+            // Taproot with 2 leaves: RelativeTimelockMultiSig (score 1) + SingleSig (score 1), T(2)=1 → 1
             (
                 "tr(@0/**,{pk(@1/**),and_v(v:multi_a(2,@2/<0;1>/*,@3/<0;1>/*),older(4194484))})",
-                2,
+                1,
             ),
         ];
 
