@@ -51,27 +51,30 @@ struct PageLayoutMetrics {
 fn get_page_layout_metrics() -> PageLayoutMetrics {
     match ecalls::get_device_property(DEVICE_PROPERTY_ID) {
         // Native target: not a real device, use Stax values as a sensible default.
+        // Stax
         0 | 0x2c970060 => PageLayoutMetrics {
-            tag_chars_per_line: 26,
+            tag_chars_per_line: 20,
             tag_line_height_px: 28,
-            value_chars_per_line: 23,
+            value_chars_per_line: 17,
             value_line_height_px: 36,
             pair_padding_px: 20,
             content_height_px: 488,
         },
+        // Flex
         0x2c970070 => PageLayoutMetrics {
-            tag_chars_per_line: 27, // (480-32)/(28*0.59), SMALL_FONT_HEIGHT=28
-            tag_line_height_px: 32, // SMALL_FONT_HEIGHT(28)+4
-            value_chars_per_line: 28,
+            tag_chars_per_line: 20,
+            tag_line_height_px: 32,
+            value_chars_per_line: 17,
             value_line_height_px: 36,
             pair_padding_px: 20,
             content_height_px: 416,
         },
+        // Apex_p
         0x2c970080 => PageLayoutMetrics {
-            tag_chars_per_line: 25,   // (300-32)/(18*0.59), SMALL_FONT_HEIGHT=18
-            tag_line_height_px: 22,   // SMALL_FONT_HEIGHT(18)+4
-            value_chars_per_line: 17, // (300-32)/(32*0.49), value font ~32px
-            value_line_height_px: 36,
+            tag_chars_per_line: 25,
+            tag_line_height_px: 18,
+            value_chars_per_line: 17,
+            value_line_height_px: 24,
             pair_padding_px: 16,
             content_height_px: 264,
         },
