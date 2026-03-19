@@ -645,6 +645,9 @@ impl EcfpPublicKey<Secp256k1, 32> {
     /// Encodes this public key as a 33-byte compressed SEC1 point.
     pub fn to_compressed(&self) -> [u8; 33] {
         let bytes = self.public_key.to_bytes();
+        if bytes[0] != 0x04 {
+            panic!("Invalid public key");
+        }
         let mut compressed = [0u8; 33];
         compressed[0] = bytes[64] % 2 + 0x02;
         compressed[1..33].copy_from_slice(&bytes[1..33]);
