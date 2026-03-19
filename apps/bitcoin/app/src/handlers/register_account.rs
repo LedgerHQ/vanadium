@@ -17,7 +17,7 @@ async fn display_wallet_policy(
 ) -> bool {
     use alloc::{format, string::ToString, vec::Vec};
     use common::bip388::{ClearText, MAX_CONFUSION_SCORE};
-    use sdk::ux::{Icon, TagValue};
+    use sdk::ux::TagValue;
 
     let mut pairs = Vec::with_capacity(2 + wallet_policy.key_information.len());
 
@@ -32,11 +32,7 @@ async fn display_wallet_policy(
     if use_cleartext {
         let (descriptions, _all_have_cleartext) = wallet_policy.descriptor_template.to_cleartext();
         for (i, desc) in descriptions.iter().enumerate() {
-            let tag = if i == 0 {
-                "Spending policy".into()
-            } else {
-                format!("Spending path #{}", i)
-            };
+            let tag = format!("Spending path #{}", i + 1);
             pairs.push(TagValue {
                 tag,
                 value: desc.clone(),
@@ -82,9 +78,9 @@ async fn display_wallet_policy(
             .await;
 
         if approved {
-            app.show_info(Icon::Success, "Account registered");
+            app.show_info(sdk::ux::Icon::Success, "Account registered");
         } else {
-            app.show_info(Icon::Failure, "Registration cancelled");
+            app.show_info(sdk::ux::Icon::Failure, "Registration cancelled");
         }
     }
 
@@ -298,6 +294,41 @@ mod tests {
                 ki("tpubD6NzVbkrYhZ4XUBKWaWfdn2icbaEDfaUgkCCbKPm31LTLRfaaEJRDAF3XXbvTaKLHATytZPGoWpVxnMnrRbn4519fP6nhZDDFtJimcZWBGC"),
                 ki("[41e8dfb4/48'/1'/0'/2']tpubDE6DKS5H4uEZwjGqvSujs1GMKY3PZKuEvsVFbvCStYs3yNjo93aeVqEGT3gsFtAPHdj19oTZCjoKarMz1Ve6bKdzh6gNaFsfH1FudHTxGrB"),
                 ki("[f5acc2fd/48'/1'/0'/2']tpubDFAqEGNyad35aBCKUAXbQGDjdVhNueno5ZZVEn3sQbW5ci457gLR7HyTmHBg93oourBssgUxuWz1jX5uhc1qaqFo9VsybY1J5FuedLfm4dK"),
+            ],
+        });
+
+        let wallet_policy: bip388::WalletPolicy = (&account).try_into().unwrap();
+        let expected_account_id = wallet_policy.registration_id(account_name);
+
+        let resp = sdk::executor::block_on(handle_register_account(
+            &mut sdk::App::singleton(),
+            account_name,
+            &account,
+            None,
+            None,
+            true,
+        ));
+
+        assert_eq!(
+            resp,
+            Ok(Response::AccountRegistered {
+                account_id: *expected_account_id.as_bytes(),
+                // can't really test the hmac here, so we duplicate the app's logic
+                hmac: ProofOfRegistration::new(&expected_account_id).dangerous_as_bytes(),
+            })
+        );
+    }
+
+    #[test]
+    fn test_register_account_expanding_multisig() {
+        let account_name = "Expanding multisig";
+        let account = message::Account::WalletPolicy(message::WalletPolicy {
+            template: "tr(@0/<0;1>/*,{and_v(v:pk(@1/<2;3>/*),older(4383)),and_v(v:pk(@2/<0;1>/*),pk(@1/<0;1>/*))})".into(),
+            keys_info: vec![
+                ki("tpubD6NzVbkrYhZ4YWFESthNwVXM9BnBbB81mYcR4Y2B1cn7H2877iHruRir4JtbC4h4gDueD7WcHayskdKpHowgWiQs8AQFWgas79gF5Nc2UG7"),
+                ki("[f5acc2fd/48'/1'/0'/2']tpubDFAqEGNyad35aBCKUAXbQGDjdVhNueno5ZZVEn3sQbW5ci457gLR7HyTmHBg93oourBssgUxuWz1jX5uhc1qaqFo9VsybY1J5FuedLfm4dK"),
+                ki("[7a88647b/48'/1'/0'/2']tpubDFfCoyA3T5WhDyLUwiyy1mHm1Kmm1DRTkW3iiGWu9q8Xi3rXNsQdDq6ujG1HzKu87HmS6dimVSAgWsnH2hdeAZ5WV99yg86BiU2RtJcPVHL"),
+                ki("[deadbeef/44'/1'/0']tpubDDHMSwran1vbgn83DkbWX7hrGfzGLD5bd5Dspx7Ss2gZ9S8gT5FetN6TiKj6MvqQmBbnkaJG9zNW1roavxHa3EM3ikGs6BzARMqgRx457fT"),
             ],
         });
 
