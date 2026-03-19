@@ -6,7 +6,9 @@ use common::{
     message::{self, Response},
     por::{ProofOfRegistration, Registerable},
 };
-use sdk::curve::{EcfpPublicKey, Secp256k1};
+use sdk::curve::{Curve, EcfpPrivateKey, EcfpPublicKey, Secp256k1, ToPublicKey};
+
+use crate::constants::NUMS_COMPRESSED_PUBKEY;
 
 async fn display_wallet_policy(
     app: &mut sdk::App,
@@ -173,11 +175,41 @@ pub async fn handle_register_account(
         }
     }
 
-    // TODO: necessary sanity checks on the wallet policy
+    // Label keys as "dummy" or "our key" based on their properties.
+    let master_fpr = Secp256k1::get_master_fingerprint();
+    for (i, key_info) in wallet_policy.key_information.iter().enumerate() {
+        // Skip keys that already have a label from identity signature verification.
+        if key_auth_names[i].is_some() {
+            continue;
+        }
 
-    // TODO:
-    // distinguish internal keys (after checking the derivation is correct) and external ones
-    // We should also clearly mark any resident key among the internal keys
+        let xpub_bytes = key_info.pubkey.encode();
+        let compressed_pubkey = &xpub_bytes[45..78];
+
+        if compressed_pubkey == NUMS_COMPRESSED_PUBKEY {
+            key_auth_names[i] = Some(String::from("dummy"));
+            continue;
+        }
+
+        if let Some(ref origin) = key_info.origin_info {
+            if origin.fingerprint == master_fpr {
+                let path: Vec<u32> = origin
+                    .derivation_path
+                    .iter()
+                    .map(|step| u32::from(*step))
+                    .collect();
+                if let Ok(hd_node) = Secp256k1::derive_hd_node(&path) {
+                    let derived = EcfpPrivateKey::<Secp256k1, 32>::new(*hd_node.privkey)
+                        .to_public_key()
+                        .to_compressed();
+                    if compressed_pubkey == derived && xpub_bytes[13..45] == hd_node.chaincode {
+                        key_auth_names[i] = Some(String::from("our key"));
+                    }
+                }
+            }
+        }
+    }
+
     if !display_wallet_policy(app, name, &wallet_policy, &key_auth_names, show_cleartext).await {
         return Err(Error::UserRejected);
     }
