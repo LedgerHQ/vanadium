@@ -2054,12 +2054,24 @@ pub mod client_utils {
 
     impl std::error::Error for ClientUtilsError {}
 
-    /// Creates a client for a V-App compiled using the native target. Uses TCP for communication
+    /// Creates a client for a V-App compiled using the native target. Uses TCP for communication.
+    ///
+    /// The address is resolved in order:
+    /// 1. `tcp_addr` parameter (if `Some`)
+    /// 2. `VND_NATIVE_CLIENT_ADDR` environment variable
+    /// 3. `"127.0.0.1:2323"` (hardcoded fallback)
     pub async fn create_native_client(
         tcp_addr: Option<&str>,
         print_writer: Option<Box<dyn std::io::Write + Send + Sync>>,
     ) -> Result<Box<dyn VAppTransport + Send>, ClientUtilsError> {
-        let addr = tcp_addr.unwrap_or("127.0.0.1:2323");
+        let addr_owned;
+        let addr: &str = if let Some(a) = tcp_addr {
+            a
+        } else {
+            addr_owned =
+                std::env::var("VND_NATIVE_CLIENT_ADDR").unwrap_or_else(|_| "127.0.0.1:2323".into());
+            &addr_owned
+        };
 
         // if no print_writer is provided, default to Sink
         let print_writer = print_writer.unwrap_or_else(|| Box::new(Sink::default()));
@@ -2073,23 +2085,47 @@ pub mod client_utils {
     ///
     /// The server is expected to be already running and listening on the given TCP address.
     /// Uses a simple length-prefixed protocol without `BufferType` tags.
+    ///
+    /// The address is resolved in order:
+    /// 1. `tcp_addr` parameter (if `Some`)
+    /// 2. `VND_STANDALONE_CLIENT_ADDR` environment variable
+    /// 3. `"127.0.0.1:12167"` (hardcoded fallback)
     pub async fn create_standalone_client(
         tcp_addr: Option<&str>,
     ) -> Result<Box<dyn VAppTransport + Send>, ClientUtilsError> {
-        let addr = tcp_addr.unwrap_or("127.0.0.1:12167");
+        let addr_owned;
+        let addr: &str = if let Some(a) = tcp_addr {
+            a
+        } else {
+            addr_owned = std::env::var("VND_STANDALONE_CLIENT_ADDR")
+                .unwrap_or_else(|_| "127.0.0.1:12167".into());
+            &addr_owned
+        };
         let client = StandaloneAppClient::new(addr)
             .await
             .map_err(|e| ClientUtilsError::StandaloneConnectionFailed(e.to_string()))?;
         Ok(Box::new(client))
     }
 
-    /// Creates a Vanadium client using TCP transport (for Speculos)
+    /// Creates a Vanadium client using TCP transport (for Speculos).
+    ///
+    /// The Speculos address is resolved in order:
+    /// 1. `VND_SPECULOS_ADDR` environment variable (format `<ip>:<port>`)
+    /// 2. `"127.0.0.1:9999"` (hardcoded fallback)
     pub async fn create_tcp_client(
         vapp_path: &str,
         print_writer: Option<Box<dyn std::io::Write + Send + Sync>>,
         use_hmacs: bool,
     ) -> Result<Box<dyn VAppTransport + Send>, ClientUtilsError> {
-        let transport_raw = Arc::new(TransportTcp::new_default().await.map_err(|e| {
+        let addr_str =
+            std::env::var("VND_SPECULOS_ADDR").unwrap_or_else(|_| "127.0.0.1:9999".into());
+        let addr = addr_str.parse::<std::net::SocketAddr>().map_err(|e| {
+            ClientUtilsError::TcpTransportFailed(format!(
+                "Invalid VND_SPECULOS_ADDR '{}': {}",
+                addr_str, e
+            ))
+        })?;
+        let transport_raw = Arc::new(TransportTcp::new(addr).await.map_err(|e| {
             ClientUtilsError::TcpTransportFailed(format!(
                 "Unable to get TCP transport. Is speculos running? {}",
                 e
