@@ -123,7 +123,7 @@ impl fmt::Display for Error {
             FailedUnsignedTransaction => write!(f, "Failed to get unsigned transaction"),
             AddressFromScriptFailed => write!(f, "Failed to convert script to address"),
 
-            InvalidIdentitySignature => write!(f, "Invalid identity signature on output"),
+            InvalidIdentitySignature => write!(f, "Invalid identity signature on output or xpub"),
             IdentityMessageFieldTooLong => write!(f, "Identity message field exceeds maximum length of 255 bytes"),
 
             UnexpectedTaprootPolicy => write!(f, "Unexpected state: should be a Taproot wallet policy"),

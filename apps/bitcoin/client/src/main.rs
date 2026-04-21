@@ -318,7 +318,11 @@ async fn handle_cli_command(
         CliCommand::GetIdentityKey { index, display } => {
             let xpub = bitcoin_client.get_identity_key(*index, *display).await?;
             match bitcoin::bip32::Xpub::decode(&xpub) {
-                Ok(xpub) => println!("{}", xpub),
+                Ok(xpub) => {
+                    println!("{}", xpub);
+                    // print the pubkey in hex as well, since it's more useful for the user of the CLI
+                    println!("Identity key: {}", hex::encode(xpub.public_key.serialize()));
+                }
                 Err(_) => println!("Invalid xpub returned"),
             }
         }
