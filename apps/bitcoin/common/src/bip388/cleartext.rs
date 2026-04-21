@@ -105,6 +105,12 @@ enum TapleafClass {
         key: KeyPlaceholder,
         blocks: u32,
     },
+    RelativeHeightlockBothMustSign {
+        // and_v(v:and_v(v:pk(@x1), pk(@x2)), older(n)), with n >= 1 && n < 65536
+        key1: KeyPlaceholder,
+        key2: KeyPlaceholder,
+        blocks: u32,
+    },
     RelativeHeightlockMultiSig {
         // and_v(v:multi_a(threshold, key_indices...), older(n)), with n >= 1 && n < 65536
         threshold: u32,
@@ -114,6 +120,12 @@ enum TapleafClass {
     RelativeTimelockSingleSig {
         // and_v(v:pk(@x), older(n)) with n >= 4194305 && n < 4259840
         key: KeyPlaceholder,
+        time: u32,
+    },
+    RelativeTimelockBothMustSign {
+        // and_v(v:and_v(v:pk(@x1), pk(@x2)), older(n)), with n >= 4194305 && n < 4259840
+        key1: KeyPlaceholder,
+        key2: KeyPlaceholder,
         time: u32,
     },
     RelativeTimelockMultiSig {
@@ -127,6 +139,12 @@ enum TapleafClass {
         key: KeyPlaceholder,
         block_height: u32,
     },
+    AbsoluteHeightlockBothMustSign {
+        // and_v(v:and_v(v:pk(@x1), pk(@x2)), after(n)), with n < 500000000
+        key1: KeyPlaceholder,
+        key2: KeyPlaceholder,
+        block_height: u32,
+    },
     AbsoluteHeightlockMultiSig {
         // and_v(v:multi_a(threshold, key_indices...), after(n)) with n < 500000000
         threshold: u32,
@@ -136,6 +154,12 @@ enum TapleafClass {
     AbsoluteTimelockSingleSig {
         // and_v(v:pk(@x), after(n)) with n >= 500000000
         key: KeyPlaceholder,
+        timestamp: u32,
+    },
+    AbsoluteTimelockBothMustSign {
+        // and_v(v:and_v(v:pk(@x1), pk(@x2)), after(n)), with n >= 500000000
+        key1: KeyPlaceholder,
+        key2: KeyPlaceholder,
         timestamp: u32,
     },
     AbsoluteTimelockMultiSig {
@@ -192,12 +216,16 @@ enum TapleafPattern {
     BothMustSign,
     Multisig,
     RelativeHeightlockSingleSig,
+    RelativeHeightlockBothMustSign,
     RelativeHeightlockMultiSig,
     RelativeTimelockSingleSig,
+    RelativeTimelockBothMustSign,
     RelativeTimelockMultiSig,
     AbsoluteHeightlockSingleSig,
+    AbsoluteHeightlockBothMustSign,
     AbsoluteHeightlockMultiSig,
     AbsoluteTimelockSingleSig,
+    AbsoluteTimelockBothMustSign,
     AbsoluteTimelockMultiSig,
 }
 
@@ -269,12 +297,20 @@ mod specs {
             parts: &[KeyIndex, lit(" after "), Blocks, lit(" blocks")],
         },
         CleartextSpec {
+            kind: TapleafPattern::RelativeHeightlockBothMustSign,
+            parts: &[lit("Both "), KeyIndex, lit(" and "), KeyIndex, lit(" after "), Blocks, lit(" blocks")],
+        },
+        CleartextSpec {
             kind: TapleafPattern::RelativeHeightlockMultiSig,
             parts: &[Threshold, lit(" of "), KeyIndices, lit(" after "), Blocks, lit(" blocks")],
         },
         CleartextSpec {
             kind: TapleafPattern::RelativeTimelockSingleSig,
             parts: &[KeyIndex, lit(" after "), RelativeTime],
+        },
+        CleartextSpec {
+            kind: TapleafPattern::RelativeTimelockBothMustSign,
+            parts: &[lit("Both "), KeyIndex, lit(" and "), KeyIndex, lit(" after "), RelativeTime],
         },
         CleartextSpec {
             kind: TapleafPattern::RelativeTimelockMultiSig,
@@ -285,12 +321,20 @@ mod specs {
             parts: &[KeyIndex, lit(" after block height "), BlockHeight],
         },
         CleartextSpec {
+            kind: TapleafPattern::AbsoluteHeightlockBothMustSign,
+            parts: &[lit("Both "), KeyIndex, lit(" and "), KeyIndex, lit(" after block height "), BlockHeight],
+        },
+        CleartextSpec {
             kind: TapleafPattern::AbsoluteHeightlockMultiSig,
             parts: &[Threshold, lit(" of "), KeyIndices, lit(" after block height "), BlockHeight]
         },
         CleartextSpec {
             kind: TapleafPattern::AbsoluteTimelockSingleSig,
             parts: &[KeyIndex, lit(" after date "), Timestamp],
+        },
+        CleartextSpec {
+            kind: TapleafPattern::AbsoluteTimelockBothMustSign,
+            parts: &[lit("Both "), KeyIndex, lit(" and "), KeyIndex, lit(" after date "), Timestamp],
         },
         CleartextSpec {
             kind: TapleafPattern::AbsoluteTimelockMultiSig,
@@ -314,14 +358,18 @@ impl TapleafClass {
             TapleafClass::SortedMultisig { .. } => 2,
             TapleafClass::Multisig { .. } => 3,
             TapleafClass::RelativeHeightlockSingleSig { .. } => 4,
-            TapleafClass::RelativeHeightlockMultiSig { .. } => 5,
-            TapleafClass::RelativeTimelockSingleSig { .. } => 6,
-            TapleafClass::RelativeTimelockMultiSig { .. } => 7,
-            TapleafClass::AbsoluteHeightlockSingleSig { .. } => 8,
-            TapleafClass::AbsoluteHeightlockMultiSig { .. } => 9,
-            TapleafClass::AbsoluteTimelockSingleSig { .. } => 10,
-            TapleafClass::AbsoluteTimelockMultiSig { .. } => 11,
-            TapleafClass::Other(_) => 12,
+            TapleafClass::RelativeHeightlockBothMustSign { .. } => 5,
+            TapleafClass::RelativeHeightlockMultiSig { .. } => 6,
+            TapleafClass::RelativeTimelockSingleSig { .. } => 7,
+            TapleafClass::RelativeTimelockBothMustSign { .. } => 8,
+            TapleafClass::RelativeTimelockMultiSig { .. } => 9,
+            TapleafClass::AbsoluteHeightlockSingleSig { .. } => 10,
+            TapleafClass::AbsoluteHeightlockBothMustSign { .. } => 11,
+            TapleafClass::AbsoluteHeightlockMultiSig { .. } => 12,
+            TapleafClass::AbsoluteTimelockSingleSig { .. } => 13,
+            TapleafClass::AbsoluteTimelockBothMustSign { .. } => 14,
+            TapleafClass::AbsoluteTimelockMultiSig { .. } => 15,
+            TapleafClass::Other(_) => 16,
         }
     }
 
@@ -362,6 +410,10 @@ impl TapleafClass {
                 TC::RelativeHeightlockSingleSig { key: k2, blocks: b2 },
             ) => k1.key_index.cmp(&k2.key_index).then(b1.cmp(b2)),
             (
+                TC::RelativeHeightlockBothMustSign { key1: a1, key2: b1, blocks: bl1 },
+                TC::RelativeHeightlockBothMustSign { key1: a2, key2: b2, blocks: bl2 },
+            ) => a1.key_index.cmp(&a2.key_index).then(b1.key_index.cmp(&b2.key_index)).then(bl1.cmp(bl2)),
+            (
                 TC::RelativeHeightlockMultiSig { threshold: t1, keys: k1, blocks: b1 },
                 TC::RelativeHeightlockMultiSig { threshold: t2, keys: k2, blocks: b2 },
             ) => k1.len().cmp(&k2.len()).then(t1.cmp(t2)).then(b1.cmp(b2)),
@@ -369,6 +421,10 @@ impl TapleafClass {
                 TC::RelativeTimelockSingleSig { key: k1, time: t1 },
                 TC::RelativeTimelockSingleSig { key: k2, time: t2 },
             ) => k1.key_index.cmp(&k2.key_index).then(t1.cmp(t2)),
+            (
+                TC::RelativeTimelockBothMustSign { key1: a1, key2: b1, time: t1 },
+                TC::RelativeTimelockBothMustSign { key1: a2, key2: b2, time: t2 },
+            ) => a1.key_index.cmp(&a2.key_index).then(b1.key_index.cmp(&b2.key_index)).then(t1.cmp(t2)),
             (
                 TC::RelativeTimelockMultiSig { threshold: t1, keys: k1, time: tm1 },
                 TC::RelativeTimelockMultiSig { threshold: t2, keys: k2, time: tm2 },
@@ -378,17 +434,25 @@ impl TapleafClass {
                 TC::AbsoluteHeightlockSingleSig { key: k2, block_height: h2 },
             ) => k1.key_index.cmp(&k2.key_index).then(h1.cmp(h2)),
             (
+                TC::AbsoluteHeightlockBothMustSign { key1: a1, key2: b1, block_height: h1 },
+                TC::AbsoluteHeightlockBothMustSign { key1: a2, key2: b2, block_height: h2 },
+            ) => a1.key_index.cmp(&a2.key_index).then(b1.key_index.cmp(&b2.key_index)).then(h1.cmp(&h2)),
+            (
                 TC::AbsoluteHeightlockMultiSig { threshold: t1, keys: k1, block_height: h1 },
                 TC::AbsoluteHeightlockMultiSig { threshold: t2, keys: k2, block_height: h2 },
-            ) => k1.len().cmp(&k2.len()).then(t1.cmp(t2)).then(h1.cmp(h2)),
+            ) => k1.len().cmp(&k2.len()).then(t1.cmp(t2)).then(h1.cmp(&h2)),
             (
                 TC::AbsoluteTimelockSingleSig { key: k1, timestamp: ts1 },
                 TC::AbsoluteTimelockSingleSig { key: k2, timestamp: ts2 },
-            ) => k1.key_index.cmp(&k2.key_index).then(ts1.cmp(ts2)),
+            ) => k1.key_index.cmp(&k2.key_index).then(ts1.cmp(&ts2)),
+            (
+                TC::AbsoluteTimelockBothMustSign { key1: a1, key2: b1, timestamp: ts1 },
+                TC::AbsoluteTimelockBothMustSign { key1: a2, key2: b2, timestamp: ts2 },
+            ) => a1.key_index.cmp(&a2.key_index).then(b1.key_index.cmp(&b2.key_index)).then(ts1.cmp(&ts2)),
             (
                 TC::AbsoluteTimelockMultiSig { threshold: t1, keys: k1, timestamp: ts1 },
                 TC::AbsoluteTimelockMultiSig { threshold: t2, keys: k2, timestamp: ts2 },
-            ) => k1.len().cmp(&k2.len()).then(t1.cmp(t2)).then(ts1.cmp(ts2)),
+            ) => k1.len().cmp(&k2.len()).then(t1.cmp(t2)).then(ts1.cmp(&ts2)),
             (TC::Other(s1), TC::Other(s2)) => s1.cmp(s2),
             // Same order() value implies same variant; this arm is unreachable.
             _ => Ordering::Equal,
@@ -444,6 +508,12 @@ impl DescriptorTemplate {
                 let key = self.placeholders().next().map(|(kp, _)| *kp).unwrap();
                 TapleafClass::RelativeHeightlockSingleSig { key, blocks }
             },
+            and_v(v:and_v(v:pk(_key_index1), pk(_key_index2)), older(blocks)) if blocks >= 1 && blocks < 65536 => {
+                let mut phs = self.placeholders().map(|(kp, _)| *kp);
+                let key1 = phs.next().unwrap();
+                let key2 = phs.next().unwrap();
+                TapleafClass::RelativeHeightlockBothMustSign { key1, key2, blocks }
+            },
             and_v(v:multi_a(threshold, _key_indices), older(blocks)) if blocks >= 1 && blocks < 65536 => {
                 let keys: Vec<KeyPlaceholder> = self.placeholders().map(|(kp, _)| *kp).collect();
                 TapleafClass::RelativeHeightlockMultiSig { threshold, keys, blocks }
@@ -451,6 +521,12 @@ impl DescriptorTemplate {
             and_v(v:pk(_key_index), older(time)) if time >= 4194305 && time < 4259840 => {
                 let key = self.placeholders().next().map(|(kp, _)| *kp).unwrap();
                 TapleafClass::RelativeTimelockSingleSig { key, time }
+            },
+            and_v(v:and_v(v:pk(_key_index1), pk(_key_index2)), older(time)) if time >= 4194305 && time < 4259840 => {
+                let mut phs = self.placeholders().map(|(kp, _)| *kp);
+                let key1 = phs.next().unwrap();
+                let key2 = phs.next().unwrap();
+                TapleafClass::RelativeTimelockBothMustSign { key1, key2, time }
             },
             and_v(v:multi_a(threshold, _key_indices), older(time)) if time >= 4194305 && time < 4259840 => {
                 let keys: Vec<KeyPlaceholder> = self.placeholders().map(|(kp, _)| *kp).collect();
@@ -460,6 +536,12 @@ impl DescriptorTemplate {
                 let key = self.placeholders().next().map(|(kp, _)| *kp).unwrap();
                 TapleafClass::AbsoluteHeightlockSingleSig { key, block_height }
             },
+            and_v(v:and_v(v:pk(_key_index1), pk(_key_index2)), after(block_height)) if block_height >= 1 && block_height < 500000000 => {
+                let mut phs = self.placeholders().map(|(kp, _)| *kp);
+                let key1 = phs.next().unwrap();
+                let key2 = phs.next().unwrap();
+                TapleafClass::AbsoluteHeightlockBothMustSign { key1, key2, block_height }
+            },
             and_v(v:multi_a(threshold, _key_indices), after(block_height)) if block_height >= 1 && block_height < 500000000 => {
                 let keys: Vec<KeyPlaceholder> = self.placeholders().map(|(kp, _)| *kp).collect();
                 TapleafClass::AbsoluteHeightlockMultiSig { threshold, keys, block_height }
@@ -467,6 +549,12 @@ impl DescriptorTemplate {
             and_v(v:pk(_key_index), after(timestamp)) if timestamp >= 500000000 => {
                 let key = self.placeholders().next().map(|(kp, _)| *kp).unwrap();
                 TapleafClass::AbsoluteTimelockSingleSig { key, timestamp }
+            },
+            and_v(v:and_v(v:pk(_key_index1), pk(_key_index2)), after(timestamp)) if timestamp >= 500000000 => {
+                let mut phs = self.placeholders().map(|(kp, _)| *kp);
+                let key1 = phs.next().unwrap();
+                let key2 = phs.next().unwrap();
+                TapleafClass::AbsoluteTimelockBothMustSign { key1, key2, timestamp }
             },
             and_v(v:multi_a(threshold, _key_indices), after(timestamp)) if timestamp >= 500000000 => {
                 let keys: Vec<KeyPlaceholder> = self.placeholders().map(|(kp, _)| *kp).collect();
@@ -638,6 +726,14 @@ impl TapleafClass {
                     CleartextValue::Blocks(*blocks),
                 ],
             )),
+            TapleafClass::RelativeHeightlockBothMustSign { key1, key2, blocks } => Some((
+                TapleafPattern::RelativeHeightlockBothMustSign,
+                vec![
+                    CleartextValue::KeyIndex(*key1),
+                    CleartextValue::KeyIndex(*key2),
+                    CleartextValue::Blocks(*blocks),
+                ],
+            )),
             TapleafClass::RelativeHeightlockMultiSig {
                 threshold,
                 keys,
@@ -654,6 +750,14 @@ impl TapleafClass {
                 TapleafPattern::RelativeTimelockSingleSig,
                 vec![
                     CleartextValue::KeyIndex(*key),
+                    CleartextValue::RelativeTime(*time),
+                ],
+            )),
+            TapleafClass::RelativeTimelockBothMustSign { key1, key2, time } => Some((
+                TapleafPattern::RelativeTimelockBothMustSign,
+                vec![
+                    CleartextValue::KeyIndex(*key1),
+                    CleartextValue::KeyIndex(*key2),
                     CleartextValue::RelativeTime(*time),
                 ],
             )),
@@ -676,6 +780,18 @@ impl TapleafClass {
                     CleartextValue::BlockHeight(*block_height),
                 ],
             )),
+            TapleafClass::AbsoluteHeightlockBothMustSign {
+                key1,
+                key2,
+                block_height,
+            } => Some((
+                TapleafPattern::AbsoluteHeightlockBothMustSign,
+                vec![
+                    CleartextValue::KeyIndex(*key1),
+                    CleartextValue::KeyIndex(*key2),
+                    CleartextValue::BlockHeight(*block_height),
+                ],
+            )),
             TapleafClass::AbsoluteHeightlockMultiSig {
                 threshold,
                 keys,
@@ -692,6 +808,18 @@ impl TapleafClass {
                 TapleafPattern::AbsoluteTimelockSingleSig,
                 vec![
                     CleartextValue::KeyIndex(*key),
+                    CleartextValue::Timestamp(*timestamp),
+                ],
+            )),
+            TapleafClass::AbsoluteTimelockBothMustSign {
+                key1,
+                key2,
+                timestamp,
+            } => Some((
+                TapleafPattern::AbsoluteTimelockBothMustSign,
+                vec![
+                    CleartextValue::KeyIndex(*key1),
+                    CleartextValue::KeyIndex(*key2),
                     CleartextValue::Timestamp(*timestamp),
                 ],
             )),
@@ -783,12 +911,16 @@ impl ClearText for DescriptorTemplate {
                         TapleafClass::Multisig { .. } => 1,
                         TapleafClass::BothMustSign { .. } => 1,
                         TapleafClass::RelativeHeightlockSingleSig { .. } => 1,
+                        TapleafClass::RelativeHeightlockBothMustSign { .. } => 1,
                         TapleafClass::RelativeHeightlockMultiSig { .. } => 1,
                         TapleafClass::RelativeTimelockSingleSig { .. } => 1,
+                        TapleafClass::RelativeTimelockBothMustSign { .. } => 1,
                         TapleafClass::RelativeTimelockMultiSig { .. } => 1,
                         TapleafClass::AbsoluteHeightlockSingleSig { .. } => 1,
+                        TapleafClass::AbsoluteHeightlockBothMustSign { .. } => 1,
                         TapleafClass::AbsoluteHeightlockMultiSig { .. } => 1,
                         TapleafClass::AbsoluteTimelockSingleSig { .. } => 1,
+                        TapleafClass::AbsoluteTimelockBothMustSign { .. } => 1,
                         TapleafClass::AbsoluteTimelockMultiSig { .. } => 1,
                         TapleafClass::Other(_) => 1,
                     };
@@ -1036,6 +1168,13 @@ impl TapleafClass {
                     blocks: values.blocks()?,
                 }
             }
+            TapleafPattern::RelativeHeightlockBothMustSign => {
+                TapleafClass::RelativeHeightlockBothMustSign {
+                    key1: values.key_index()?,
+                    key2: values.key_index()?,
+                    blocks: values.blocks()?,
+                }
+            }
             TapleafPattern::RelativeHeightlockMultiSig => {
                 TapleafClass::RelativeHeightlockMultiSig {
                     threshold: values.threshold()?,
@@ -1047,6 +1186,13 @@ impl TapleafClass {
                 key: values.key_index()?,
                 time: values.relative_time()?,
             },
+            TapleafPattern::RelativeTimelockBothMustSign => {
+                TapleafClass::RelativeTimelockBothMustSign {
+                    key1: values.key_index()?,
+                    key2: values.key_index()?,
+                    time: values.relative_time()?,
+                }
+            }
             TapleafPattern::RelativeTimelockMultiSig => TapleafClass::RelativeTimelockMultiSig {
                 threshold: values.threshold()?,
                 keys: values.key_indices()?,
@@ -1055,6 +1201,13 @@ impl TapleafClass {
             TapleafPattern::AbsoluteHeightlockSingleSig => {
                 TapleafClass::AbsoluteHeightlockSingleSig {
                     key: values.key_index()?,
+                    block_height: values.block_height()?,
+                }
+            }
+            TapleafPattern::AbsoluteHeightlockBothMustSign => {
+                TapleafClass::AbsoluteHeightlockBothMustSign {
+                    key1: values.key_index()?,
+                    key2: values.key_index()?,
                     block_height: values.block_height()?,
                 }
             }
@@ -1069,6 +1222,13 @@ impl TapleafClass {
                 key: values.key_index()?,
                 timestamp: values.timestamp()?,
             },
+            TapleafPattern::AbsoluteTimelockBothMustSign => {
+                TapleafClass::AbsoluteTimelockBothMustSign {
+                    key1: values.key_index()?,
+                    key2: values.key_index()?,
+                    timestamp: values.timestamp()?,
+                }
+            }
             TapleafPattern::AbsoluteTimelockMultiSig => TapleafClass::AbsoluteTimelockMultiSig {
                 threshold: values.threshold()?,
                 keys: values.key_indices()?,
@@ -1318,6 +1478,17 @@ fn tapleaf_to_descriptors(leaf: &TapleafClass) -> Result<Vec<DescriptorTemplate>
                 Box::new(DescriptorTemplate::Older(*blocks)),
             )])
         }
+        TapleafClass::RelativeHeightlockBothMustSign { key1, key2, blocks } => {
+            Ok(vec![DescriptorTemplate::And_v(
+                Box::new(DescriptorTemplate::V(Box::new(DescriptorTemplate::And_v(
+                    Box::new(DescriptorTemplate::V(Box::new(DescriptorTemplate::Pk(
+                        *key1,
+                    )))),
+                    Box::new(DescriptorTemplate::Pk(*key2)),
+                )))),
+                Box::new(DescriptorTemplate::Older(*blocks)),
+            )])
+        }
         TapleafClass::RelativeHeightlockMultiSig {
             threshold,
             keys,
@@ -1332,6 +1503,17 @@ fn tapleaf_to_descriptors(leaf: &TapleafClass) -> Result<Vec<DescriptorTemplate>
             Ok(vec![DescriptorTemplate::And_v(
                 Box::new(DescriptorTemplate::V(Box::new(DescriptorTemplate::Pk(
                     *key,
+                )))),
+                Box::new(DescriptorTemplate::Older(*time)),
+            )])
+        }
+        TapleafClass::RelativeTimelockBothMustSign { key1, key2, time } => {
+            Ok(vec![DescriptorTemplate::And_v(
+                Box::new(DescriptorTemplate::V(Box::new(DescriptorTemplate::And_v(
+                    Box::new(DescriptorTemplate::V(Box::new(DescriptorTemplate::Pk(
+                        *key1,
+                    )))),
+                    Box::new(DescriptorTemplate::Pk(*key2)),
                 )))),
                 Box::new(DescriptorTemplate::Older(*time)),
             )])
@@ -1354,6 +1536,19 @@ fn tapleaf_to_descriptors(leaf: &TapleafClass) -> Result<Vec<DescriptorTemplate>
                 Box::new(DescriptorTemplate::After(*block_height)),
             )])
         }
+        TapleafClass::AbsoluteHeightlockBothMustSign {
+            key1,
+            key2,
+            block_height,
+        } => Ok(vec![DescriptorTemplate::And_v(
+            Box::new(DescriptorTemplate::V(Box::new(DescriptorTemplate::And_v(
+                Box::new(DescriptorTemplate::V(Box::new(DescriptorTemplate::Pk(
+                    *key1,
+                )))),
+                Box::new(DescriptorTemplate::Pk(*key2)),
+            )))),
+            Box::new(DescriptorTemplate::After(*block_height)),
+        )]),
         TapleafClass::AbsoluteHeightlockMultiSig {
             threshold,
             keys,
@@ -1372,6 +1567,19 @@ fn tapleaf_to_descriptors(leaf: &TapleafClass) -> Result<Vec<DescriptorTemplate>
                 Box::new(DescriptorTemplate::After(*timestamp)),
             )])
         }
+        TapleafClass::AbsoluteTimelockBothMustSign {
+            key1,
+            key2,
+            timestamp,
+        } => Ok(vec![DescriptorTemplate::And_v(
+            Box::new(DescriptorTemplate::V(Box::new(DescriptorTemplate::And_v(
+                Box::new(DescriptorTemplate::V(Box::new(DescriptorTemplate::Pk(
+                    *key1,
+                )))),
+                Box::new(DescriptorTemplate::Pk(*key2)),
+            )))),
+            Box::new(DescriptorTemplate::After(*timestamp)),
+        )]),
         TapleafClass::AbsoluteTimelockMultiSig {
             threshold,
             keys,
@@ -1628,6 +1836,10 @@ mod tests {
             "tr(@0/**,and_v(v:pk(@1/<0;1>/*),older(4194305)))",
             "tr(@0/**,{pk(@1/**),and_v(v:pk(@2/<0;1>/*),older(4194484))})",
             "tr(@0/**,{pk(@1/**),and_v(v:multi_a(2,@2/<0;1>/*,@3/<0;1>/*),older(4194484))})",
+            "tr(@0/**,and_v(v:and_v(v:pk(@1/<0;1>/*),pk(@2/<0;1>/*)),older(1008)))",
+            "tr(@0/**,and_v(v:and_v(v:pk(@1/<0;1>/*),pk(@2/<0;1>/*)),older(4194484)))",
+            "tr(@0/**,and_v(v:and_v(v:pk(@1/<0;1>/*),pk(@2/<0;1>/*)),after(840000)))",
+            "tr(@0/**,and_v(v:and_v(v:pk(@1/<0;1>/*),pk(@2/<0;1>/*)),after(1700000000)))",
             "tr(@0/**,and_v(v:pk(@1/<0;1>/*),after(840000)))",
             "tr(@0/**,{pk(@1/**),and_v(v:multi_a(2,@2/<0;1>/*,@3/<0;1>/*),after(840000))})",
             "tr(@0/**,and_v(v:pk(@1/<0;1>/*),after(500000000)))",
@@ -1787,6 +1999,40 @@ mod tests {
                 ],
                 true,
             ),
+            // Taproot: relative heightlock both-must-sign
+            (
+                "tr(@0/**,and_v(v:and_v(v:pk(@1/<0;1>/*),pk(@2/<0;1>/*)),older(1008)))",
+                &["Primary path: @0", "Both @1 and @2 after 1008 blocks"],
+                true,
+            ),
+            // Taproot: relative heightlock both-must-sign alongside a plain single-sig
+            (
+                "tr(@0/**,{pk(@1/**),and_v(v:and_v(v:pk(@2/<0;1>/*),pk(@3/<0;1>/*)),older(1008))})",
+                &[
+                    "Primary path: @0",
+                    "Single-signature (@1)",
+                    "Both @2 and @3 after 1008 blocks",
+                ],
+                true,
+            ),
+            // Taproot: relative timelock both-must-sign (180 units = 92160s = 1d 1h 36m)
+            (
+                "tr(@0/**,and_v(v:and_v(v:pk(@1/<0;1>/*),pk(@2/<0;1>/*)),older(4194484)))",
+                &["Primary path: @0", "Both @1 and @2 after 1d 1h 36m"],
+                true,
+            ),
+            // Taproot: absolute heightlock both-must-sign (block height 840000)
+            (
+                "tr(@0/**,and_v(v:and_v(v:pk(@1/<0;1>/*),pk(@2/<0;1>/*)),after(840000)))",
+                &["Primary path: @0", "Both @1 and @2 after block height 840000"],
+                true,
+            ),
+            // Taproot: absolute timelock both-must-sign (timestamp 1700000000 = 2023-11-14 22:13:20)
+            (
+                "tr(@0/**,and_v(v:and_v(v:pk(@1/<0;1>/*),pk(@2/<0;1>/*)),after(1700000000)))",
+                &["Primary path: @0", "Both @1 and @2 after date 2023-11-14 22:13:20"],
+                true,
+            ),
             // Taproot: first leaf recognized (heightlock single-sig), second leaf unrecognized (complex miniscript)
             (
                 "tr(@0/**,{and_v(v:pk(@1/**),older(960)),t:or_c(pk(@2/**),and_v(v:pk(@3/**),or_c(pk(@4/**),v:ripemd160(907cd521fff981ce4063a4dc43c6f3fd28e08995))))})",
@@ -1925,6 +2171,12 @@ mod tests {
             // Taproot: absolute timelock
             "tr(@0/**,and_v(v:pk(@1/<0;1>/*),after(500000000)))",
             "tr(@0/**,{pk(@1/**),and_v(v:multi_a(2,@2/<0;1>/*,@3/<0;1>/*),after(1700000000))})",
+            // Taproot: BothMustSign + locks
+            "tr(@0/**,and_v(v:and_v(v:pk(@1/<0;1>/*),pk(@2/<0;1>/*)),older(1008)))",
+            "tr(@0/**,{pk(@1/**),and_v(v:and_v(v:pk(@2/<0;1>/*),pk(@3/<0;1>/*)),older(1008))})",
+            "tr(@0/**,and_v(v:and_v(v:pk(@1/<0;1>/*),pk(@2/<0;1>/*)),older(4194484)))",
+            "tr(@0/**,and_v(v:and_v(v:pk(@1/<0;1>/*),pk(@2/<0;1>/*)),after(840000)))",
+            "tr(@0/**,and_v(v:and_v(v:pk(@1/<0;1>/*),pk(@2/<0;1>/*)),after(1700000000)))",
             // Taproot: BothMustSign (key repeated across leaves with canonical derivations)
             "tr(@0/<0;1>/*,{and_v(v:pk(@1/<0;1>/*),older(4383)),and_v(v:pk(@2/<0;1>/*),pk(@1/<2;3>/*))})",
             "tr(@0/<0;1>/*,{and_v(v:multi_a(2,@1/<0;1>/*,@2/<0;1>/*,@3/<0;1>/*),older(144)),and_v(v:pk(@1/<2;3>/*),pk(@2/<2;3>/*))})",
