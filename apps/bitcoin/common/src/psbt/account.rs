@@ -492,11 +492,12 @@ pub fn fill_psbt_with_bip388_coordinates(
 }
 
 // Fills the PSBT with accounts and coordinates.
-// TODO: generalize this to more complex policies with multiple placeholders
 pub fn prepare_psbt(
     psbt: &mut Psbt,
     named_accounts: &[(&WalletPolicy, &str, &[u8; 32])],
 ) -> Result<(), PsbtAccountError> {
+    // TODO: generalize this function to support transactions involving multiple accounts, and accounts of different types.
+    assert!(named_accounts.len() == 1);
     for (wallet_policy, account_name, por) in named_accounts {
         let placeholders: Vec<KeyPlaceholder> = wallet_policy
             .descriptor_template
@@ -504,21 +505,16 @@ pub fn prepare_psbt(
             .map(|(k, _)| k.clone())
             .collect();
 
-        assert!(
-            placeholders.len() == 1,
-            "Only single-placeholder policies are supported"
-        );
-
-        let key_placeholder = placeholders[0];
-
-        fill_psbt_with_bip388_coordinates(
-            psbt,
-            wallet_policy,
-            Some(&account_name),
-            Some(*por),
-            &key_placeholder,
-            0,
-        )?;
+        for key_placeholder in &placeholders {
+            fill_psbt_with_bip388_coordinates(
+                psbt,
+                wallet_policy,
+                Some(&account_name),
+                Some(*por),
+                key_placeholder,
+                0,
+            )?;
+        }
     }
     Ok(())
 }
