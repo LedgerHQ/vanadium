@@ -118,7 +118,7 @@ pub struct KeyInformation {
     pub origin_info: Option<KeyOrigin>,
 }
 
-#[derive(Debug, PartialEq, Eq, Clone)]
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone)]
 pub enum KeyExpressionType {
     PlainKey(u32),
     Musig(Vec<u32>),

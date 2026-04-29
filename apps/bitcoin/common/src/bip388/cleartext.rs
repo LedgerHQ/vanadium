@@ -344,6 +344,24 @@ mod specs {
 }
 use specs::{TAPLEAF_SPECS, TOP_LEVEL_SPECS};
 
+/// Compares two key placeholders for canonical display ordering:
+/// - plain key vs plain key: ordered by key index
+/// - plain key vs musig: plain key comes first
+/// - musig vs musig: ordered by number of keys, then left-to-right by key index
+fn cmp_key(a: &KeyPlaceholder, b: &KeyPlaceholder) -> core::cmp::Ordering {
+    use super::KeyExpressionType;
+    match (&a.key_type, &b.key_type) {
+        (KeyExpressionType::PlainKey(i1), KeyExpressionType::PlainKey(i2)) => i1.cmp(i2),
+        (KeyExpressionType::PlainKey(_), KeyExpressionType::Musig(_)) => core::cmp::Ordering::Less,
+        (KeyExpressionType::Musig(_), KeyExpressionType::PlainKey(_)) => {
+            core::cmp::Ordering::Greater
+        }
+        (KeyExpressionType::Musig(i1), KeyExpressionType::Musig(i2)) => {
+            i1.len().cmp(&i2.len()).then_with(|| i1.cmp(i2))
+        }
+    }
+}
+
 impl TapleafClass {
     /// Returns a numeric key that defines the canonical visualization order for
     /// taptree leaves:
@@ -392,11 +410,11 @@ impl TapleafClass {
             (
                 TC::SingleSig { key: k1 },
                 TC::SingleSig { key: k2 },
-            ) => k1.plain_key_index().unwrap_or(0).cmp(&k2.plain_key_index().unwrap_or(0)),
+            ) => cmp_key(k1, k2),
             (
                 TC::BothMustSign { key1: a1, key2: b1 },
                 TC::BothMustSign { key1: a2, key2: b2 },
-            ) => a1.plain_key_index().unwrap_or(0).cmp(&a2.plain_key_index().unwrap_or(0)).then(b1.plain_key_index().unwrap_or(0).cmp(&b2.plain_key_index().unwrap_or(0))),
+            ) => cmp_key(a1, a2).then(cmp_key(b1, b2)),
             (
                 TC::SortedMultisig { threshold: t1, keys: k1 },
                 TC::SortedMultisig { threshold: t2, keys: k2 },
@@ -408,11 +426,11 @@ impl TapleafClass {
             (
                 TC::RelativeHeightlockSingleSig { key: k1, blocks: b1 },
                 TC::RelativeHeightlockSingleSig { key: k2, blocks: b2 },
-            ) => k1.plain_key_index().unwrap_or(0).cmp(&k2.plain_key_index().unwrap_or(0)).then(b1.cmp(b2)),
+            ) => cmp_key(k1, k2).then(b1.cmp(b2)),
             (
                 TC::RelativeHeightlockBothMustSign { key1: a1, key2: b1, blocks: bl1 },
                 TC::RelativeHeightlockBothMustSign { key1: a2, key2: b2, blocks: bl2 },
-            ) => a1.plain_key_index().unwrap_or(0).cmp(&a2.plain_key_index().unwrap_or(0)).then(b1.plain_key_index().unwrap_or(0).cmp(&b2.plain_key_index().unwrap_or(0))).then(bl1.cmp(bl2)),
+            ) => cmp_key(a1, a2).then(cmp_key(b1, b2)).then(bl1.cmp(bl2)),
             (
                 TC::RelativeHeightlockMultiSig { threshold: t1, keys: k1, blocks: b1 },
                 TC::RelativeHeightlockMultiSig { threshold: t2, keys: k2, blocks: b2 },
@@ -420,11 +438,11 @@ impl TapleafClass {
             (
                 TC::RelativeTimelockSingleSig { key: k1, time: t1 },
                 TC::RelativeTimelockSingleSig { key: k2, time: t2 },
-            ) => k1.plain_key_index().unwrap_or(0).cmp(&k2.plain_key_index().unwrap_or(0)).then(t1.cmp(t2)),
+            ) => cmp_key(k1, k2).then(t1.cmp(t2)),
             (
                 TC::RelativeTimelockBothMustSign { key1: a1, key2: b1, time: t1 },
                 TC::RelativeTimelockBothMustSign { key1: a2, key2: b2, time: t2 },
-            ) => a1.plain_key_index().unwrap_or(0).cmp(&a2.plain_key_index().unwrap_or(0)).then(b1.plain_key_index().unwrap_or(0).cmp(&b2.plain_key_index().unwrap_or(0))).then(t1.cmp(t2)),
+            ) => cmp_key(a1, a2).then(cmp_key(b1, b2)).then(t1.cmp(t2)),
             (
                 TC::RelativeTimelockMultiSig { threshold: t1, keys: k1, time: tm1 },
                 TC::RelativeTimelockMultiSig { threshold: t2, keys: k2, time: tm2 },
@@ -432,27 +450,27 @@ impl TapleafClass {
             (
                 TC::AbsoluteHeightlockSingleSig { key: k1, block_height: h1 },
                 TC::AbsoluteHeightlockSingleSig { key: k2, block_height: h2 },
-            ) => k1.plain_key_index().unwrap_or(0).cmp(&k2.plain_key_index().unwrap_or(0)).then(h1.cmp(h2)),
+            ) => cmp_key(k1, k2).then(h1.cmp(h2)),
             (
                 TC::AbsoluteHeightlockBothMustSign { key1: a1, key2: b1, block_height: h1 },
                 TC::AbsoluteHeightlockBothMustSign { key1: a2, key2: b2, block_height: h2 },
-            ) => a1.plain_key_index().unwrap_or(0).cmp(&a2.plain_key_index().unwrap_or(0)).then(b1.plain_key_index().unwrap_or(0).cmp(&b2.plain_key_index().unwrap_or(0))).then(h1.cmp(&h2)),
+            ) => cmp_key(a1, a2).then(cmp_key(b1, b2)).then(h1.cmp(h2)),
             (
                 TC::AbsoluteHeightlockMultiSig { threshold: t1, keys: k1, block_height: h1 },
                 TC::AbsoluteHeightlockMultiSig { threshold: t2, keys: k2, block_height: h2 },
-            ) => k1.len().cmp(&k2.len()).then(t1.cmp(t2)).then(h1.cmp(&h2)),
+            ) => k1.len().cmp(&k2.len()).then(t1.cmp(t2)).then(h1.cmp(h2)),
             (
                 TC::AbsoluteTimelockSingleSig { key: k1, timestamp: ts1 },
                 TC::AbsoluteTimelockSingleSig { key: k2, timestamp: ts2 },
-            ) => k1.plain_key_index().unwrap_or(0).cmp(&k2.plain_key_index().unwrap_or(0)).then(ts1.cmp(&ts2)),
+            ) => cmp_key(k1, k2).then(ts1.cmp(ts2)),
             (
                 TC::AbsoluteTimelockBothMustSign { key1: a1, key2: b1, timestamp: ts1 },
                 TC::AbsoluteTimelockBothMustSign { key1: a2, key2: b2, timestamp: ts2 },
-            ) => a1.plain_key_index().unwrap_or(0).cmp(&a2.plain_key_index().unwrap_or(0)).then(b1.plain_key_index().unwrap_or(0).cmp(&b2.plain_key_index().unwrap_or(0))).then(ts1.cmp(&ts2)),
+            ) => cmp_key(a1, a2).then(cmp_key(b1, b2)).then(ts1.cmp(ts2)),
             (
                 TC::AbsoluteTimelockMultiSig { threshold: t1, keys: k1, timestamp: ts1 },
                 TC::AbsoluteTimelockMultiSig { threshold: t2, keys: k2, timestamp: ts2 },
-            ) => k1.len().cmp(&k2.len()).then(t1.cmp(t2)).then(ts1.cmp(&ts2)),
+            ) => k1.len().cmp(&k2.len()).then(t1.cmp(t2)).then(ts1.cmp(ts2)),
             (TC::Other(s1), TC::Other(s2)) => s1.cmp(s2),
             // Same order() value implies same variant; this arm is unreachable.
             _ => Ordering::Equal,
@@ -866,13 +884,11 @@ impl DescriptorTemplate {
     // then <2;3>/*, etc. This guarantees that no information on the derivations is lost when omitting this part
     // in the cleartext representation.
     fn are_key_derivations_canonical(&self) -> bool {
-        let mut next_num1_per_key: alloc::collections::BTreeMap<u32, u64> =
+        let mut next_num1_per_key: alloc::collections::BTreeMap<super::KeyExpressionType, u64> =
             alloc::collections::BTreeMap::new();
 
         for (kp, _) in self.placeholders() {
-            let next_num1 = next_num1_per_key
-                .entry(kp.plain_key_index().unwrap_or(0))
-                .or_insert(0);
+            let next_num1 = next_num1_per_key.entry(kp.key_type.clone()).or_insert(0);
             if kp.num1 as u64 != *next_num1 || kp.num2 as u64 != *next_num1 + 1 {
                 return false;
             }
@@ -1711,12 +1727,10 @@ fn top_level_variants(
             let trees = enumerate_taptrees(per_leaf_variants);
             Ok(Box::new(trees.map(move |t| {
                 let mut dt = DescriptorTemplate::Tr(internal_key.clone(), Some(t));
-                let mut next_per_key: alloc::collections::BTreeMap<u32, u32> =
+                let mut next_per_key: alloc::collections::BTreeMap<super::KeyExpressionType, u32> =
                     alloc::collections::BTreeMap::new();
                 for kp in dt.placeholders_mut() {
-                    let next = next_per_key
-                        .entry(kp.plain_key_index().unwrap_or(0))
-                        .or_insert(0);
+                    let next = next_per_key.entry(kp.key_type.clone()).or_insert(0);
                     kp.num1 = *next;
                     kp.num2 = *next + 1;
                     *next += 2;
