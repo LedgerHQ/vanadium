@@ -76,7 +76,7 @@ enum DescriptorClass {
     },
     TaprootMusig {
         // taproot descriptor templates where the internal key is a musig expression
-        keys: Vec<KeyPlaceholder>,
+        internal_key: KeyPlaceholder,
         leaves: Vec<TapleafClass>,
     },
     Other,
@@ -512,13 +512,9 @@ impl DescriptorTemplate {
                         .unwrap_or_default(),
                 }
             },
-            tr(musig(key_indices), tree) => {
-                let keys = key_indices
-                    .iter()
-                    .map(|&idx| KeyPlaceholder::plain(idx, 0, 1))
-                    .collect();
+            tr(musig(musig_key), tree) => {
                 DescriptorClass::TaprootMusig {
-                    keys,
+                    internal_key: musig_key.clone(),
                     leaves: tree
                         .as_ref()
                         .map(|t| t.tapleaves().map(|l| l.classify_as_tapleaf()).collect())
@@ -575,6 +571,46 @@ impl DescriptorTemplate {
             },
             and_v(v:multi_a(threshold, keys), after(timestamp)) if timestamp >= 500000000 => {
                 TapleafClass::AbsoluteTimelockMultiSig { threshold, keys: keys.clone(), timestamp }
+            },
+            pk(musig(musig_key)) | pkh(musig(musig_key)) => {
+                let indices = musig_key.musig_key_indices().unwrap();
+                let keys: Vec<KeyPlaceholder> = indices
+                    .iter()
+                    .map(|&idx| KeyPlaceholder::plain(idx, musig_key.num1, musig_key.num2))
+                    .collect();
+                TapleafClass::Multisig { threshold: keys.len() as u32, keys }
+            },
+            and_v(v:pk(musig(musig_key)), older(blocks)) if blocks >= 1 && blocks < 65536 => {
+                let indices = musig_key.musig_key_indices().unwrap();
+                let keys: Vec<KeyPlaceholder> = indices
+                    .iter()
+                    .map(|&idx| KeyPlaceholder::plain(idx, musig_key.num1, musig_key.num2))
+                    .collect();
+                TapleafClass::RelativeHeightlockMultiSig { threshold: keys.len() as u32, keys, blocks }
+            },
+            and_v(v:pk(musig(musig_key)), older(time)) if time >= 4194305 && time < 4259840 => {
+                let indices = musig_key.musig_key_indices().unwrap();
+                let keys: Vec<KeyPlaceholder> = indices
+                    .iter()
+                    .map(|&idx| KeyPlaceholder::plain(idx, musig_key.num1, musig_key.num2))
+                    .collect();
+                TapleafClass::RelativeTimelockMultiSig { threshold: keys.len() as u32, keys, time }
+            },
+            and_v(v:pk(musig(musig_key)), after(block_height)) if block_height >= 1 && block_height < 500000000 => {
+                let indices = musig_key.musig_key_indices().unwrap();
+                let keys: Vec<KeyPlaceholder> = indices
+                    .iter()
+                    .map(|&idx| KeyPlaceholder::plain(idx, musig_key.num1, musig_key.num2))
+                    .collect();
+                TapleafClass::AbsoluteHeightlockMultiSig { threshold: keys.len() as u32, keys, block_height }
+            },
+            and_v(v:pk(musig(musig_key)), after(timestamp)) if timestamp >= 500000000 => {
+                let indices = musig_key.musig_key_indices().unwrap();
+                let keys: Vec<KeyPlaceholder> = indices
+                    .iter()
+                    .map(|&idx| KeyPlaceholder::plain(idx, musig_key.num1, musig_key.num2))
+                    .collect();
+                TapleafClass::AbsoluteTimelockMultiSig { threshold: keys.len() as u32, keys, timestamp }
             },
             and_v(v:pk(key1), pk(key2)) => {
                 TapleafClass::BothMustSign { key1: key1.clone(), key2: key2.clone() }
@@ -707,13 +743,22 @@ impl DescriptorClass {
                 TopLevelPattern::Taproot,
                 vec![CleartextValue::KeyIndex(internal_key.clone())],
             )),
-            DescriptorClass::TaprootMusig { keys, .. } => Some((
-                TopLevelPattern::TaprootMusig,
-                vec![
-                    CleartextValue::Threshold(keys.len() as u32),
-                    CleartextValue::KeyIndices(keys.clone()),
-                ],
-            )),
+            DescriptorClass::TaprootMusig { internal_key, .. } => {
+                let key_indices = internal_key
+                    .musig_key_indices()
+                    .expect("TaprootMusig internal_key must be musig");
+                let keys: Vec<KeyPlaceholder> = key_indices
+                    .iter()
+                    .map(|&idx| KeyPlaceholder::plain(idx, internal_key.num1, internal_key.num2))
+                    .collect();
+                Some((
+                    TopLevelPattern::TaprootMusig,
+                    vec![
+                        CleartextValue::Threshold(keys.len() as u32),
+                        CleartextValue::KeyIndices(keys),
+                    ],
+                ))
+            }
             DescriptorClass::Other => None,
         }
     }
@@ -946,20 +991,58 @@ impl ClearText for DescriptorTemplate {
                     let leaf_score = match leaf {
                         TapleafClass::SingleSig { .. } => 1,
                         TapleafClass::SortedMultisig { .. } => 1,
-                        TapleafClass::Multisig { .. } => 1,
+                        TapleafClass::Multisig { threshold, keys } => {
+                            if *threshold as usize == keys.len() {
+                                2
+                            } else {
+                                1
+                            }
+                        }
                         TapleafClass::BothMustSign { .. } => 1,
                         TapleafClass::RelativeHeightlockSingleSig { .. } => 1,
                         TapleafClass::RelativeHeightlockBothMustSign { .. } => 1,
-                        TapleafClass::RelativeHeightlockMultiSig { .. } => 1,
+                        TapleafClass::RelativeHeightlockMultiSig {
+                            threshold, keys, ..
+                        } => {
+                            if *threshold as usize == keys.len() {
+                                2
+                            } else {
+                                1
+                            }
+                        }
                         TapleafClass::RelativeTimelockSingleSig { .. } => 1,
                         TapleafClass::RelativeTimelockBothMustSign { .. } => 1,
-                        TapleafClass::RelativeTimelockMultiSig { .. } => 1,
+                        TapleafClass::RelativeTimelockMultiSig {
+                            threshold, keys, ..
+                        } => {
+                            if *threshold as usize == keys.len() {
+                                2
+                            } else {
+                                1
+                            }
+                        }
                         TapleafClass::AbsoluteHeightlockSingleSig { .. } => 1,
                         TapleafClass::AbsoluteHeightlockBothMustSign { .. } => 1,
-                        TapleafClass::AbsoluteHeightlockMultiSig { .. } => 1,
+                        TapleafClass::AbsoluteHeightlockMultiSig {
+                            threshold, keys, ..
+                        } => {
+                            if *threshold as usize == keys.len() {
+                                2
+                            } else {
+                                1
+                            }
+                        }
                         TapleafClass::AbsoluteTimelockSingleSig { .. } => 1,
                         TapleafClass::AbsoluteTimelockBothMustSign { .. } => 1,
-                        TapleafClass::AbsoluteTimelockMultiSig { .. } => 1,
+                        TapleafClass::AbsoluteTimelockMultiSig {
+                            threshold, keys, ..
+                        } => {
+                            if *threshold as usize == keys.len() {
+                                2
+                            } else {
+                                1
+                            }
+                        }
                         TapleafClass::Other(_) => 1,
                     };
                     score = score.saturating_mul(leaf_score);
@@ -1175,8 +1258,15 @@ impl DescriptorClass {
                 if threshold as usize != keys.len() {
                     return None;
                 }
+                let key_indices: Vec<u32> =
+                    keys.iter().filter_map(|k| k.plain_key_index()).collect();
+                if key_indices.len() != keys.len() {
+                    return None;
+                }
+                let num1 = keys.first().map(|k| k.num1).unwrap_or(0);
+                let num2 = keys.first().map(|k| k.num2).unwrap_or(1);
                 DescriptorClass::TaprootMusig {
-                    keys,
+                    internal_key: KeyPlaceholder::musig(key_indices, num1, num2),
                     leaves: Vec::new(),
                 }
             }
@@ -1476,12 +1566,12 @@ fn parse_top_level_candidates(
                             );
                         }
                     }
-                    DescriptorClass::TaprootMusig { keys, .. } => {
+                    DescriptorClass::TaprootMusig { internal_key, .. } => {
                         for leaves in &leaf_combinations {
                             push_unique(
                                 &mut classes,
                                 DescriptorClass::TaprootMusig {
-                                    keys: keys.clone(),
+                                    internal_key: internal_key.clone(),
                                     leaves: leaves.clone(),
                                 },
                             );
@@ -1521,7 +1611,15 @@ fn tapleaf_to_descriptors(leaf: &TapleafClass) -> Result<Vec<DescriptorTemplate>
             )])
         }
         TapleafClass::Multisig { threshold, keys } => {
-            Ok(vec![DescriptorTemplate::Multi_a(*threshold, keys.clone())])
+            let mut variants = vec![DescriptorTemplate::Multi_a(*threshold, keys.clone())];
+            if *threshold as usize == keys.len() {
+                variants.push(DescriptorTemplate::Pk(KeyPlaceholder::musig(
+                    keys.iter().map(|k| k.plain_key_index().unwrap()).collect(),
+                    0,
+                    1,
+                )));
+            }
+            Ok(variants)
         }
         TapleafClass::RelativeHeightlockSingleSig { key, blocks } => {
             Ok(vec![DescriptorTemplate::And_v(
@@ -1546,12 +1644,27 @@ fn tapleaf_to_descriptors(leaf: &TapleafClass) -> Result<Vec<DescriptorTemplate>
             threshold,
             keys,
             blocks,
-        } => Ok(vec![DescriptorTemplate::And_v(
-            Box::new(DescriptorTemplate::V(Box::new(
-                DescriptorTemplate::Multi_a(*threshold, keys.clone()),
-            ))),
-            Box::new(DescriptorTemplate::Older(*blocks)),
-        )]),
+        } => {
+            let mut variants = vec![DescriptorTemplate::And_v(
+                Box::new(DescriptorTemplate::V(Box::new(
+                    DescriptorTemplate::Multi_a(*threshold, keys.clone()),
+                ))),
+                Box::new(DescriptorTemplate::Older(*blocks)),
+            )];
+            if *threshold as usize == keys.len() {
+                variants.push(DescriptorTemplate::And_v(
+                    Box::new(DescriptorTemplate::V(Box::new(DescriptorTemplate::Pk(
+                        KeyPlaceholder::musig(
+                            keys.iter().map(|k| k.plain_key_index().unwrap()).collect(),
+                            0,
+                            1,
+                        ),
+                    )))),
+                    Box::new(DescriptorTemplate::Older(*blocks)),
+                ));
+            }
+            Ok(variants)
+        }
         TapleafClass::RelativeTimelockSingleSig { key, time } => {
             Ok(vec![DescriptorTemplate::And_v(
                 Box::new(DescriptorTemplate::V(Box::new(DescriptorTemplate::Pk(
@@ -1575,12 +1688,27 @@ fn tapleaf_to_descriptors(leaf: &TapleafClass) -> Result<Vec<DescriptorTemplate>
             threshold,
             keys,
             time,
-        } => Ok(vec![DescriptorTemplate::And_v(
-            Box::new(DescriptorTemplate::V(Box::new(
-                DescriptorTemplate::Multi_a(*threshold, keys.clone()),
-            ))),
-            Box::new(DescriptorTemplate::Older(*time)),
-        )]),
+        } => {
+            let mut variants = vec![DescriptorTemplate::And_v(
+                Box::new(DescriptorTemplate::V(Box::new(
+                    DescriptorTemplate::Multi_a(*threshold, keys.clone()),
+                ))),
+                Box::new(DescriptorTemplate::Older(*time)),
+            )];
+            if *threshold as usize == keys.len() {
+                variants.push(DescriptorTemplate::And_v(
+                    Box::new(DescriptorTemplate::V(Box::new(DescriptorTemplate::Pk(
+                        KeyPlaceholder::musig(
+                            keys.iter().map(|k| k.plain_key_index().unwrap()).collect(),
+                            0,
+                            1,
+                        ),
+                    )))),
+                    Box::new(DescriptorTemplate::Older(*time)),
+                ));
+            }
+            Ok(variants)
+        }
         TapleafClass::AbsoluteHeightlockSingleSig { key, block_height } => {
             Ok(vec![DescriptorTemplate::And_v(
                 Box::new(DescriptorTemplate::V(Box::new(DescriptorTemplate::Pk(
@@ -1606,12 +1734,27 @@ fn tapleaf_to_descriptors(leaf: &TapleafClass) -> Result<Vec<DescriptorTemplate>
             threshold,
             keys,
             block_height,
-        } => Ok(vec![DescriptorTemplate::And_v(
-            Box::new(DescriptorTemplate::V(Box::new(
-                DescriptorTemplate::Multi_a(*threshold, keys.clone()),
-            ))),
-            Box::new(DescriptorTemplate::After(*block_height)),
-        )]),
+        } => {
+            let mut variants = vec![DescriptorTemplate::And_v(
+                Box::new(DescriptorTemplate::V(Box::new(
+                    DescriptorTemplate::Multi_a(*threshold, keys.clone()),
+                ))),
+                Box::new(DescriptorTemplate::After(*block_height)),
+            )];
+            if *threshold as usize == keys.len() {
+                variants.push(DescriptorTemplate::And_v(
+                    Box::new(DescriptorTemplate::V(Box::new(DescriptorTemplate::Pk(
+                        KeyPlaceholder::musig(
+                            keys.iter().map(|k| k.plain_key_index().unwrap()).collect(),
+                            0,
+                            1,
+                        ),
+                    )))),
+                    Box::new(DescriptorTemplate::After(*block_height)),
+                ));
+            }
+            Ok(variants)
+        }
         TapleafClass::AbsoluteTimelockSingleSig { key, timestamp } => {
             Ok(vec![DescriptorTemplate::And_v(
                 Box::new(DescriptorTemplate::V(Box::new(DescriptorTemplate::Pk(
@@ -1637,12 +1780,27 @@ fn tapleaf_to_descriptors(leaf: &TapleafClass) -> Result<Vec<DescriptorTemplate>
             threshold,
             keys,
             timestamp,
-        } => Ok(vec![DescriptorTemplate::And_v(
-            Box::new(DescriptorTemplate::V(Box::new(
-                DescriptorTemplate::Multi_a(*threshold, keys.clone()),
-            ))),
-            Box::new(DescriptorTemplate::After(*timestamp)),
-        )]),
+        } => {
+            let mut variants = vec![DescriptorTemplate::And_v(
+                Box::new(DescriptorTemplate::V(Box::new(
+                    DescriptorTemplate::Multi_a(*threshold, keys.clone()),
+                ))),
+                Box::new(DescriptorTemplate::After(*timestamp)),
+            )];
+            if *threshold as usize == keys.len() {
+                variants.push(DescriptorTemplate::And_v(
+                    Box::new(DescriptorTemplate::V(Box::new(DescriptorTemplate::Pk(
+                        KeyPlaceholder::musig(
+                            keys.iter().map(|k| k.plain_key_index().unwrap()).collect(),
+                            0,
+                            1,
+                        ),
+                    )))),
+                    Box::new(DescriptorTemplate::After(*timestamp)),
+                ));
+            }
+            Ok(variants)
+        }
         TapleafClass::Other(s) => {
             let dt = DescriptorTemplate::from_str(s)
                 .map_err(|e| CleartextError::ParseError(format!("{:?}", e)))?;
@@ -1793,17 +1951,10 @@ fn top_level_variants(
                 dt
             })))
         }
-        DescriptorClass::TaprootMusig { keys, leaves } => {
-            let key_indices: Vec<u32> = keys
-                .iter()
-                .map(|k| {
-                    k.plain_key_index()
-                        .expect("TaprootMusig keys must be plain")
-                })
-                .collect();
-            let num1 = keys.first().map(|k| k.num1).unwrap_or(0);
-            let num2 = keys.first().map(|k| k.num2).unwrap_or(1);
-            let internal_key = KeyPlaceholder::musig(key_indices, num1, num2);
+        DescriptorClass::TaprootMusig {
+            internal_key,
+            leaves,
+        } => {
             if leaves.is_empty() {
                 return Ok(Box::new(core::iter::once(DescriptorTemplate::Tr(
                     internal_key,
@@ -1885,10 +2036,10 @@ mod tests {
                 "tr(@0/**,{pk(@1/**),and_v(v:pk(@2/<0;1>/*),older(4194305))})",
                 1,
             ),
-            // Taproot with 2 leaves: RelativeTimelockMultiSig (score 1) + SingleSig (score 1), T(2)=1 → 1
+            // Taproot with 2 leaves: RelativeTimelockMultiSig (score 2, threshold==keys) + SingleSig (score 1), T(2)=1 → 2
             (
                 "tr(@0/**,{pk(@1/**),and_v(v:multi_a(2,@2/<0;1>/*,@3/<0;1>/*),older(4194484))})",
-                1,
+                2,
             ),
             // Taproot with musig internal key: key-path only (score 1)
             ("tr(musig(@0,@1)/**)", 1),
@@ -1900,6 +2051,31 @@ mod tests {
             ("tr(musig(@0,@1)/**,{pk(@2/**),pk(@3/**)})", 1),
             // Taproot with musig internal key + 3 SingleSig leaves: T(3)=3 → 3
             ("tr(musig(@0,@1)/**,{{pk(@2/**),pk(@3/**)},pk(@4/**)})", 3),
+            // --------------------------------------------------------------------------------------
+            // Taproot with musig() tapleaf (pk(musig(...)) maps to Multisig)
+            // --------------------------------------------------------------------------------------
+            // pk(musig) leaf: 2-of-2 (threshold==keys, score 2)
+            ("tr(@0/**,pk(musig(@1,@2)/**))", 2),
+            // pk(musig) leaf: 3-of-3 (threshold==keys, score 2)
+            ("tr(@0/**,pk(musig(@1,@2,@3)/**))", 2),
+            // pk(musig) + relative heightlock (threshold==keys, score 2)
+            ("tr(@0/**,and_v(v:pk(musig(@1,@2)/**),older(1008)))", 2),
+            // pk(musig) + relative timelock (threshold==keys, score 2)
+            ("tr(@0/**,and_v(v:pk(musig(@1,@2)/**),older(4194484)))", 2),
+            // pk(musig) + absolute heightlock (threshold==keys, score 2)
+            ("tr(@0/**,and_v(v:pk(musig(@1,@2)/**),after(840000)))", 2),
+            // pk(musig) + absolute timelock (threshold==keys, score 2)
+            (
+                "tr(@0/**,and_v(v:pk(musig(@1,@2)/**),after(1700000000)))",
+                2,
+            ),
+            // pk(musig) alongside SingleSig: 1*2*T(2)=2
+            ("tr(@0/**,{pk(@1/**),pk(musig(@2,@3)/**)})", 2),
+            // multi_a with threshold < keys.len() alongside pk(musig): 1*2*T(2)=2
+            (
+                "tr(@0/**,{multi_a(2,@1/**,@2/**,@3/**),pk(musig(@4,@5)/**)})",
+                2,
+            ),
         ];
 
         for &(desc_str, expected) in cases {
@@ -1947,6 +2123,13 @@ mod tests {
             "tr(musig(@0,@1,@2)/**)",
             "tr(musig(@0,@1)/**,pk(@2/**))",
             "tr(musig(@0,@1)/**,{pk(@2/**),pk(@3/**)})",
+            // Taproot with musig tapleaf
+            "tr(@0/**,pk(musig(@1,@2)/**))",
+            "tr(@0/**,pk(musig(@1,@2,@3)/**))",
+            "tr(@0/**,and_v(v:pk(musig(@1,@2)/**),older(1008)))",
+            "tr(@0/**,and_v(v:pk(musig(@1,@2)/**),older(4194484)))",
+            "tr(@0/**,and_v(v:pk(musig(@1,@2)/**),after(840000)))",
+            "tr(@0/**,and_v(v:pk(musig(@1,@2)/**),after(1700000000)))",
         ];
         for &desc_str in cases {
             assert!(
@@ -2220,6 +2403,55 @@ mod tests {
                 true,
             ),
             // --------------------------------------------------------------------------------------
+            // Taproot with musig() tapleaf (pk(musig(...)) maps to Multisig)
+            // --------------------------------------------------------------------------------------
+            // pk(musig) leaf: 2-of-2
+            (
+                "tr(@0/**,pk(musig(@1,@2)/**))",
+                &["Primary path: @0", "2 of @1 and @2"],
+                true,
+            ),
+            // pk(musig) leaf: 3-of-3
+            (
+                "tr(@0/**,pk(musig(@1,@2,@3)/**))",
+                &["Primary path: @0", "3 of @1, @2 and @3"],
+                true,
+            ),
+            // pk(musig) + relative heightlock
+            (
+                "tr(@0/**,and_v(v:pk(musig(@1,@2)/**),older(1008)))",
+                &["Primary path: @0", "2 of @1 and @2 after 1008 blocks"],
+                true,
+            ),
+            // pk(musig) + relative timelock (180 units = 92160s = 1d 1h 36m)
+            (
+                "tr(@0/**,and_v(v:pk(musig(@1,@2)/**),older(4194484)))",
+                &["Primary path: @0", "2 of @1 and @2 after 1d 1h 36m"],
+                true,
+            ),
+            // pk(musig) + absolute heightlock (block 840000)
+            (
+                "tr(@0/**,and_v(v:pk(musig(@1,@2)/**),after(840000)))",
+                &["Primary path: @0", "2 of @1 and @2 after block height 840000"],
+                true,
+            ),
+            // pk(musig) + absolute timelock (timestamp 1700000000 = 2023-11-14 22:13:20)
+            (
+                "tr(@0/**,and_v(v:pk(musig(@1,@2)/**),after(1700000000)))",
+                &["Primary path: @0", "2 of @1 and @2 after date 2023-11-14 22:13:20"],
+                true,
+            ),
+            // pk(musig) alongside a plain single-sig
+            (
+                "tr(@0/**,{pk(@1/**),pk(musig(@2,@3)/**)})",
+                &[
+                    "Primary path: @0",
+                    "Single-signature (@1)",
+                    "2 of @2 and @3",
+                ],
+                true,
+            ),
+            // --------------------------------------------------------------------------------------
             // Non-canonical key derivations: cleartext must includes <num1;num2> for all derivations
             // --------------------------------------------------------------------------------------
             // Legacy single-sig: num1 is not 0 for the first (and only) occurrence
@@ -2334,6 +2566,13 @@ mod tests {
             "tr(musig(@0,@1)/**,{pk(@2/**),pk(@3/**)})",
             "tr(musig(@0,@1)/**,and_v(v:pk(@2/<0;1>/*),older(1008)))",
             "tr(musig(@0,@1)/**,{pk(@2/**),and_v(v:pk(@3/<0;1>/*),after(840000))})",
+            // Taproot: musig tapleaf (pk(musig(...)))
+            "tr(@0/**,pk(musig(@1,@2)/**))",
+            "tr(@0/**,pk(musig(@1,@2,@3)/**))",
+            "tr(@0/**,and_v(v:pk(musig(@1,@2)/**),older(1008)))",
+            "tr(@0/**,and_v(v:pk(musig(@1,@2)/**),older(4194484)))",
+            "tr(@0/**,and_v(v:pk(musig(@1,@2)/**),after(840000)))",
+            "tr(@0/**,and_v(v:pk(musig(@1,@2)/**),after(1700000000)))",
         ];
 
         for &desc_str in cases {
@@ -2433,5 +2672,70 @@ mod tests {
                 .collect::<Vec<_>>(),
             "TAPLEAF_SPECS",
         );
+    }
+
+    /// Verify that `descriptor_match!` with musig() preserves the full `KeyExpression`
+    /// (including derivation paths), and that `DescriptorClass::TaprootMusig` stores it
+    /// as a single `internal_key` of type `Musig`.
+    #[test]
+    fn test_musig_classify_preserves_derivations() {
+        use super::{DescriptorClass, KeyPlaceholder};
+        use crate::bip388::KeyExpressionType;
+
+        // musig internal key with non-standard derivation <2;3>
+        let desc = dt("tr(musig(@0,@1)/<2;3>/*,pk(@2/**))");
+        let class = desc.classify();
+        match class {
+            DescriptorClass::TaprootMusig {
+                internal_key,
+                leaves,
+            } => {
+                // The internal_key must be a single musig KeyExpression
+                assert!(internal_key.is_musig());
+                assert_eq!(
+                    internal_key.key_type,
+                    KeyExpressionType::Musig(alloc::vec![0, 1])
+                );
+                // Derivation paths must be preserved (not hardcoded to 0, 1)
+                assert_eq!(internal_key.num1, 2);
+                assert_eq!(internal_key.num2, 3);
+                // Should have one leaf
+                assert_eq!(leaves.len(), 1);
+            }
+            other => panic!("expected TaprootMusig, got {:?}", other),
+        }
+
+        // musig in tapleaf with non-standard derivation <4;5>
+        let desc2 = dt("tr(@0/**,pk(musig(@1,@2)/<4;5>/*))");
+        let class2 = desc2.classify();
+        match class2 {
+            DescriptorClass::Taproot { leaves, .. } => {
+                assert_eq!(leaves.len(), 1);
+                match &leaves[0] {
+                    super::TapleafClass::Multisig { threshold, keys } => {
+                        assert_eq!(*threshold, 2);
+                        assert_eq!(keys.len(), 2);
+                        // The individual key placeholders must carry the derivation from the
+                        // musig expression
+                        for k in keys {
+                            assert_eq!(k.num1, 4);
+                            assert_eq!(k.num2, 5);
+                        }
+                    }
+                    other => panic!("expected Multisig tapleaf, got {:?}", other),
+                }
+            }
+            other => panic!("expected Taproot, got {:?}", other),
+        }
+
+        // Standard derivation musig internal key (sanity check: num1=0, num2=1)
+        let desc3 = dt("tr(musig(@0,@1)/**)");
+        let class3 = desc3.classify();
+        match class3 {
+            DescriptorClass::TaprootMusig { internal_key, .. } => {
+                assert_eq!(internal_key, KeyPlaceholder::musig(alloc::vec![0, 1], 0, 1));
+            }
+            other => panic!("expected TaprootMusig, got {:?}", other),
+        }
     }
 }
