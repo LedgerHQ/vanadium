@@ -399,10 +399,10 @@ fn flatten_pattern(
                 match arg {
                     PatternArg::Binding(ident) => {
                         let extraction = match kind {
-                            ArgKind::Key => quote!(#tv.key_index),
+                            ArgKind::Key => quote!(#tv),
                             ArgKind::Num => quote!(*#tv),
                             ArgKind::KeyList => {
-                                quote!(#tv.iter().map(|__kp| __kp.key_index).collect::<Vec<u32>>())
+                                quote!(#tv)
                             }
                             ArgKind::Sub => quote!(#tv),
                         };

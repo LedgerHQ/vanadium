@@ -56,12 +56,54 @@ pub enum ParseError {
     InvalidTopLevelPolicy,
     /// Writing a descriptor to a `String` buffer failed.
     FormatError,
-    /// `sh`/`wsh`/`wpkh` used in a position that is not allowed by the spec.
+    /// `sh`/`wsh`/`wpkh`/`musig` used in a position that is not allowed by the spec.
     InvalidScriptContext,
     /// Too many keys for a multisig fragment.
     TooManyKeys,
     /// Invalid multisig quorum (threshold).
     InvalidMultisigQuorum,
+}
+
+/// The parsing context, tracking which top-level descriptor we are inside.
+/// This determines which fragments and key expression forms are valid.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ParseContext {
+    /// Top-level: no enclosing descriptor yet.
+    TopLevel,
+    /// Inside a `sh()` descriptor (legacy P2SH).
+    Legacy,
+    /// Inside a top-level `wsh()` descriptor (native segwit).
+    Segwit,
+    /// Inside `sh(wsh())` (wrapped segwit).
+    WrappedSegwit,
+    /// Inside a `tr()` descriptor (BIP-390: musig allowed).
+    Taproot,
+}
+
+impl ParseContext {
+    fn musig_allowed(self) -> bool {
+        matches!(self, ParseContext::Taproot)
+    }
+
+    /// `sh()` is only allowed at the top level.
+    fn sh_allowed(self) -> bool {
+        matches!(self, ParseContext::TopLevel)
+    }
+
+    /// `wpkh()` is only allowed at the top level or inside `sh()`.
+    fn wpkh_allowed(self) -> bool {
+        matches!(self, ParseContext::TopLevel | ParseContext::Legacy)
+    }
+
+    /// `wsh()` is only allowed at the top level or inside `sh()`.
+    fn wsh_allowed(self) -> bool {
+        matches!(self, ParseContext::TopLevel | ParseContext::Legacy)
+    }
+
+    /// `tr()` is only allowed at the top level.
+    fn tr_allowed(self) -> bool {
+        matches!(self, ParseContext::TopLevel)
+    }
 }
 
 #[derive(Debug, PartialEq, Eq, Clone)]
@@ -76,29 +118,69 @@ pub struct KeyInformation {
     pub origin_info: Option<KeyOrigin>,
 }
 
-#[derive(Debug, PartialEq, Eq, Clone, Copy)]
-pub struct KeyPlaceholder {
-    pub key_index: u32,
+#[derive(Debug, PartialEq, Eq, Clone)]
+pub enum KeyExpressionType {
+    PlainKey(u32),
+    Musig(Vec<u32>),
+}
+
+#[derive(Debug, PartialEq, Eq, Clone)]
+pub struct KeyExpression {
+    pub key_type: KeyExpressionType,
     pub num1: u32,
     pub num2: u32,
 }
+
+impl KeyExpression {
+    pub fn plain(key_index: u32, num1: u32, num2: u32) -> Self {
+        KeyExpression {
+            key_type: KeyExpressionType::PlainKey(key_index),
+            num1,
+            num2,
+        }
+    }
+
+    pub fn musig(key_indices: Vec<u32>, num1: u32, num2: u32) -> Self {
+        KeyExpression {
+            key_type: KeyExpressionType::Musig(key_indices),
+            num1,
+            num2,
+        }
+    }
+
+    pub fn is_musig(&self) -> bool {
+        matches!(self.key_type, KeyExpressionType::Musig(_))
+    }
+
+    /// Returns the key index for a plain key expression.
+    /// Returns `None` for musig key expressions.
+    pub fn plain_key_index(&self) -> Option<u32> {
+        match &self.key_type {
+            KeyExpressionType::PlainKey(idx) => Some(*idx),
+            KeyExpressionType::Musig(_) => None,
+        }
+    }
+}
+
+/// Backward-compatible alias.
+pub type KeyPlaceholder = KeyExpression;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[allow(non_camel_case_types)]
 pub enum DescriptorTemplate {
     Sh(Box<DescriptorTemplate>),
     Wsh(Box<DescriptorTemplate>),
-    Pkh(KeyPlaceholder),
-    Wpkh(KeyPlaceholder),
-    Sortedmulti(u32, Vec<KeyPlaceholder>),
-    Sortedmulti_a(u32, Vec<KeyPlaceholder>),
-    Tr(KeyPlaceholder, Option<TapTree>),
+    Pkh(KeyExpression),
+    Wpkh(KeyExpression),
+    Sortedmulti(u32, Vec<KeyExpression>),
+    Sortedmulti_a(u32, Vec<KeyExpression>),
+    Tr(KeyExpression, Option<TapTree>),
 
     Zero,
     One,
-    Pk(KeyPlaceholder),
-    Pk_k(KeyPlaceholder),
-    Pk_h(KeyPlaceholder),
+    Pk(KeyExpression),
+    Pk_k(KeyExpression),
+    Pk_h(KeyExpression),
     Older(u32),
     After(u32),
     Sha256([u8; 32]),
@@ -118,8 +200,8 @@ pub enum DescriptorTemplate {
     Or_d(Box<DescriptorTemplate>, Box<DescriptorTemplate>),
     Or_i(Box<DescriptorTemplate>, Box<DescriptorTemplate>),
     Thresh(u32, Vec<DescriptorTemplate>),
-    Multi(u32, Vec<KeyPlaceholder>),
-    Multi_a(u32, Vec<KeyPlaceholder>),
+    Multi(u32, Vec<KeyExpression>),
+    Multi_a(u32, Vec<KeyExpression>),
 
     // wrappers
     A(Box<DescriptorTemplate>),
@@ -136,7 +218,7 @@ pub enum DescriptorTemplate {
 
 pub struct DescriptorTemplateIter<'a> {
     fragments: Vec<(&'a DescriptorTemplate, Option<&'a DescriptorTemplate>)>, // Store DescriptorTemplate and its associated leaf context
-    placeholders: Vec<(&'a KeyPlaceholder, Option<&'a DescriptorTemplate>)>, // Placeholders also carry the leaf context
+    placeholders: Vec<(&'a KeyExpression, Option<&'a DescriptorTemplate>)>, // Placeholders also carry the leaf context
 }
 
 impl<'a> From<&'a DescriptorTemplate> for DescriptorTemplateIter<'a> {
@@ -149,7 +231,7 @@ impl<'a> From<&'a DescriptorTemplate> for DescriptorTemplateIter<'a> {
 }
 
 impl<'a> Iterator for DescriptorTemplateIter<'a> {
-    type Item = (&'a KeyPlaceholder, Option<&'a DescriptorTemplate>);
+    type Item = (&'a KeyExpression, Option<&'a DescriptorTemplate>);
 
     fn next(&mut self) -> Option<Self::Item> {
         while self.placeholders.len() > 0 || self.fragments.len() > 0 {
@@ -259,12 +341,12 @@ impl<'a> Iterator for DescriptorTemplateIter<'a> {
 /// providing a safe interface through the `placeholders_mut` method.
 pub struct DescriptorTemplateIterMut<'a> {
     fragments: Vec<*mut DescriptorTemplate>,
-    placeholders: Vec<*mut KeyPlaceholder>,
+    placeholders: Vec<*mut KeyExpression>,
     _marker: core::marker::PhantomData<&'a mut DescriptorTemplate>,
 }
 
 impl<'a> Iterator for DescriptorTemplateIterMut<'a> {
-    type Item = &'a mut KeyPlaceholder;
+    type Item = &'a mut KeyExpression;
 
     fn next(&mut self) -> Option<Self::Item> {
         loop {
@@ -318,7 +400,7 @@ impl<'a> Iterator for DescriptorTemplateIterMut<'a> {
                 }
 
                 DescriptorTemplate::Tr(key, tree) => {
-                    self.placeholders.push(key as *mut KeyPlaceholder);
+                    self.placeholders.push(key as *mut KeyExpression);
                     if let Some(t) = tree {
                         // Traverse the TapTree to collect mutable pointers to all
                         // leaves in left-to-right order (matching TapleavesIter),
@@ -350,7 +432,7 @@ impl<'a> Iterator for DescriptorTemplateIterMut<'a> {
                 | DescriptorTemplate::Pk_k(key)
                 | DescriptorTemplate::Pk_h(key) => {
                     // SAFETY: key is a field of frag which is valid for 'a.
-                    return Some(unsafe { &mut *(key as *mut KeyPlaceholder) });
+                    return Some(unsafe { &mut *(key as *mut KeyExpression) });
                 }
 
                 DescriptorTemplate::Sortedmulti(_, keys)
@@ -358,7 +440,7 @@ impl<'a> Iterator for DescriptorTemplateIterMut<'a> {
                 | DescriptorTemplate::Multi(_, keys)
                 | DescriptorTemplate::Multi_a(_, keys) => {
                     for key in keys.iter_mut().rev() {
-                        self.placeholders.push(key as *mut KeyPlaceholder);
+                        self.placeholders.push(key as *mut KeyExpression);
                     }
                 }
 
@@ -504,12 +586,30 @@ impl core::fmt::Display for KeyInformation {
     }
 }
 
-impl core::fmt::Display for KeyPlaceholder {
+impl core::fmt::Display for KeyExpression {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        if self.num1 == 0 && self.num2 == 1 {
-            write!(f, "@{}/**", self.key_index)
-        } else {
-            write!(f, "@{}/<{};{}>/*", self.key_index, self.num1, self.num2)
+        match &self.key_type {
+            KeyExpressionType::PlainKey(key_index) => {
+                if self.num1 == 0 && self.num2 == 1 {
+                    write!(f, "@{}/**", key_index)
+                } else {
+                    write!(f, "@{}/<{};{}>/*", key_index, self.num1, self.num2)
+                }
+            }
+            KeyExpressionType::Musig(key_indices) => {
+                write!(f, "musig(")?;
+                for (i, idx) in key_indices.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ",")?;
+                    }
+                    write!(f, "@{}", idx)?;
+                }
+                if self.num1 == 0 && self.num2 == 1 {
+                    write!(f, ")/**")
+                } else {
+                    write!(f, ")/<{};{}>/*", self.num1, self.num2)
+                }
+            }
         }
     }
 }
@@ -571,7 +671,7 @@ fn parse_number_up_to(input: &str, max: u32) -> ParseResult<'_, u32> {
 
 // Entry-point: parse a complete descriptor template string.
 fn parse_descriptor_template(input: &str) -> Result<DescriptorTemplate, ParseError> {
-    let (rest, descriptor) = parse_descriptor(input)?;
+    let (rest, descriptor) = parse_descriptor(input, ParseContext::TopLevel)?;
     if rest.is_empty() {
         Ok(descriptor)
     } else {
@@ -589,19 +689,15 @@ fn parse_derivation_step_number(input: &str) -> ParseResult<'_, u32> {
     }
 }
 
-// Parses a key placeholder: @N/** or @N/<num1;num2>/*
-fn parse_key_placeholder(input: &str) -> ParseResult<'_, KeyPlaceholder> {
-    if !input.starts_with('@') {
+// Parses the derivation suffix: /** or /<num1;num2>/*
+fn parse_derivation_suffix(input: &str) -> ParseResult<'_, (u32, u32)> {
+    if !input.starts_with('/') {
         return Err(ParseError::InvalidSyntax);
     }
-    let (rest, key_index) = parse_number_up_to(&input[1..], u32::MAX)?;
-    if !rest.starts_with('/') {
-        return Err(ParseError::InvalidSyntax);
-    }
-    let rest = &rest[1..];
+    let rest = &input[1..];
 
-    let (rest, (num1, num2)) = if rest.starts_with("**") {
-        (&rest[2..], (0u32, 1u32))
+    if rest.starts_with("**") {
+        Ok((&rest[2..], (0u32, 1u32)))
     } else if rest.starts_with('<') {
         let rest = &rest[1..];
         let (rest, num1) = parse_derivation_step_number(rest)?;
@@ -612,23 +708,62 @@ fn parse_key_placeholder(input: &str) -> ParseResult<'_, KeyPlaceholder> {
         if !rest.starts_with(">/*") {
             return Err(ParseError::InvalidSyntax);
         }
-        (&rest[3..], (num1, num2))
+        Ok((&rest[3..], (num1, num2)))
     } else {
-        return Err(ParseError::InvalidSyntax);
-    };
+        Err(ParseError::InvalidSyntax)
+    }
+}
 
-    Ok((
-        rest,
-        KeyPlaceholder {
-            key_index,
-            num1,
-            num2,
-        },
-    ))
+// Parses a key expression: @N/** or @N/<num1;num2>/*
+// When the context allows musig, also accepts: musig(@N1,@N2,...)/** or musig(@N1,@N2,...)/<num1;num2>/*
+// musig() is only valid inside tr() (BIP-390).
+fn parse_key_expression(input: &str, ctx: ParseContext) -> ParseResult<'_, KeyExpression> {
+    if input.starts_with("musig(") {
+        if !ctx.musig_allowed() {
+            return Err(ParseError::InvalidScriptContext);
+        }
+        return parse_musig_key_expression(input);
+    }
+    if !input.starts_with('@') {
+        return Err(ParseError::InvalidSyntax);
+    }
+    let (rest, key_index) = parse_number_up_to(&input[1..], u32::MAX)?;
+    let (rest, (num1, num2)) = parse_derivation_suffix(rest)?;
+
+    Ok((rest, KeyExpression::plain(key_index, num1, num2)))
+}
+
+// Parses a musig key expression: musig(@N1,@N2,...)/** or musig(@N1,@N2,...)/<num1;num2>/*
+fn parse_musig_key_expression(input: &str) -> ParseResult<'_, KeyExpression> {
+    let mut rest = &input[6..]; // skip "musig("
+    let mut key_indices = Vec::new();
+    loop {
+        if !rest.starts_with('@') {
+            return Err(ParseError::InvalidSyntax);
+        }
+        let (r, idx) = parse_number_up_to(&rest[1..], u32::MAX)?;
+        key_indices.push(idx);
+        rest = r;
+        if rest.starts_with(',') {
+            rest = &rest[1..];
+        } else {
+            break;
+        }
+    }
+    if key_indices.len() < 2 {
+        return Err(ParseError::InvalidSyntax);
+    }
+    if !rest.starts_with(')') {
+        return Err(ParseError::InvalidSyntax);
+    }
+    rest = &rest[1..]; // skip ')'
+    let (rest, (num1, num2)) = parse_derivation_suffix(rest)?;
+
+    Ok((rest, KeyExpression::musig(key_indices, num1, num2)))
 }
 
 // Parses a descriptor, optionally preceded by a wrapper prefix like "asc:".
-fn parse_descriptor(input: &str) -> ParseResult<'_, DescriptorTemplate> {
+fn parse_descriptor(input: &str, ctx: ParseContext) -> ParseResult<'_, DescriptorTemplate> {
     // A wrapper prefix is a run of ASCII alphabetic chars followed by ':'.
     // Fragment keywords are always followed by '(' instead, so no ambiguity.
     let alpha_end = input
@@ -642,7 +777,7 @@ fn parse_descriptor(input: &str) -> ParseResult<'_, DescriptorTemplate> {
         (input, "")
     };
 
-    let (input, inner) = parse_inner_descriptor(input)?;
+    let (input, inner) = parse_inner_descriptor(input, ctx)?;
 
     // Apply wrappers in reverse character order (rightmost char = outermost wrapper)
     let mut result = inner;
@@ -664,58 +799,82 @@ fn parse_descriptor(input: &str) -> ParseResult<'_, DescriptorTemplate> {
     Ok((input, result))
 }
 
-fn parse_inner_descriptor(input: &str) -> ParseResult<'_, DescriptorTemplate> {
+fn parse_inner_descriptor(input: &str, ctx: ParseContext) -> ParseResult<'_, DescriptorTemplate> {
     // Longer names checked before shorter to avoid premature prefix matches.
     if input.starts_with("sortedmulti_a(") {
         return parse_threshold_kp_fragment(
             input,
             "sortedmulti_a",
             DescriptorTemplate::Sortedmulti_a,
+            ctx,
         );
     }
     if input.starts_with("sortedmulti(") {
-        return parse_threshold_kp_fragment(input, "sortedmulti", DescriptorTemplate::Sortedmulti);
+        return parse_threshold_kp_fragment(
+            input,
+            "sortedmulti",
+            DescriptorTemplate::Sortedmulti,
+            ctx,
+        );
     }
     if input.starts_with("multi_a(") {
-        return parse_threshold_kp_fragment(input, "multi_a", DescriptorTemplate::Multi_a);
+        return parse_threshold_kp_fragment(input, "multi_a", DescriptorTemplate::Multi_a, ctx);
     }
     if input.starts_with("multi(") {
-        return parse_threshold_kp_fragment(input, "multi", DescriptorTemplate::Multi);
+        return parse_threshold_kp_fragment(input, "multi", DescriptorTemplate::Multi, ctx);
     }
     if input.starts_with("thresh(") {
-        return parse_thresh(input);
+        return parse_thresh(input, ctx);
     }
     if input.starts_with("wsh(") {
-        let (rest, scripts) = parse_n_subscripts(&input[4..], 1)?;
+        if !ctx.wsh_allowed() {
+            return Err(ParseError::InvalidScriptContext);
+        }
+        let inner_ctx = match ctx {
+            ParseContext::TopLevel => ParseContext::Segwit,
+            ParseContext::Legacy => ParseContext::WrappedSegwit,
+            _ => unreachable!(), // not possible since wsh_allowed returned true
+        };
+
+        let (rest, scripts) = parse_n_subscripts(&input[4..], 1, inner_ctx)?;
         return Ok((
             rest,
             DescriptorTemplate::Wsh(Box::new(scripts.into_iter().next().unwrap())),
         ));
     }
     if input.starts_with("sh(") {
-        let (rest, scripts) = parse_n_subscripts(&input[3..], 1)?;
+        if !ctx.sh_allowed() {
+            return Err(ParseError::InvalidScriptContext);
+        }
+        let (rest, scripts) = parse_n_subscripts(&input[3..], 1, ParseContext::Legacy)?;
         return Ok((
             rest,
             DescriptorTemplate::Sh(Box::new(scripts.into_iter().next().unwrap())),
         ));
     }
     if input.starts_with("wpkh(") {
-        return parse_kp_fragment(input, "wpkh", DescriptorTemplate::Wpkh);
+        if !ctx.wpkh_allowed() {
+            return Err(ParseError::InvalidScriptContext);
+        }
+        return parse_kp_fragment(input, "wpkh", DescriptorTemplate::Wpkh, ctx);
     }
     if input.starts_with("pkh(") {
-        return parse_kp_fragment(input, "pkh", DescriptorTemplate::Pkh);
+        return parse_kp_fragment(input, "pkh", DescriptorTemplate::Pkh, ctx);
     }
     if input.starts_with("tr(") {
+        if !ctx.tr_allowed() {
+            return Err(ParseError::InvalidScriptContext);
+        }
         return parse_tr(input);
     }
     if input.starts_with("pk_k(") {
-        return parse_kp_fragment(input, "pk_k", DescriptorTemplate::Pk_k);
+        return parse_kp_fragment(input, "pk_k", DescriptorTemplate::Pk_k, ctx);
     }
     if input.starts_with("pk_h(") {
-        return parse_kp_fragment(input, "pk_h", DescriptorTemplate::Pk_h);
+        return parse_kp_fragment(input, "pk_h", DescriptorTemplate::Pk_h, ctx);
     }
     if input.starts_with("pk(") {
-        return parse_kp_fragment(input, "pk", DescriptorTemplate::Pk);
+        return parse_kp_fragment(input, "pk", DescriptorTemplate::Pk, ctx);
     }
     if input.starts_with("older(") {
         return parse_num_fragment(input, "older", MAX_OLDER_AFTER, DescriptorTemplate::Older);
@@ -736,50 +895,50 @@ fn parse_inner_descriptor(input: &str) -> ParseResult<'_, DescriptorTemplate> {
         return parse_hex20_fragment(input, "hash160", DescriptorTemplate::Hash160);
     }
     if input.starts_with("andor(") {
-        let (rest, mut scripts) = parse_n_subscripts(&input[6..], 3)?;
+        let (rest, mut scripts) = parse_n_subscripts(&input[6..], 3, ctx)?;
         let z = Box::new(scripts.remove(2));
         let y = Box::new(scripts.remove(1));
         let x = Box::new(scripts.remove(0));
         return Ok((rest, DescriptorTemplate::Andor(x, y, z)));
     }
     if input.starts_with("and_b(") {
-        let (rest, mut scripts) = parse_n_subscripts(&input[6..], 2)?;
+        let (rest, mut scripts) = parse_n_subscripts(&input[6..], 2, ctx)?;
         let y = Box::new(scripts.remove(1));
         let x = Box::new(scripts.remove(0));
         return Ok((rest, DescriptorTemplate::And_b(x, y)));
     }
     if input.starts_with("and_v(") {
-        let (rest, mut scripts) = parse_n_subscripts(&input[6..], 2)?;
+        let (rest, mut scripts) = parse_n_subscripts(&input[6..], 2, ctx)?;
         let y = Box::new(scripts.remove(1));
         let x = Box::new(scripts.remove(0));
         return Ok((rest, DescriptorTemplate::And_v(x, y)));
     }
     if input.starts_with("and_n(") {
-        let (rest, mut scripts) = parse_n_subscripts(&input[6..], 2)?;
+        let (rest, mut scripts) = parse_n_subscripts(&input[6..], 2, ctx)?;
         let y = Box::new(scripts.remove(1));
         let x = Box::new(scripts.remove(0));
         return Ok((rest, DescriptorTemplate::And_n(x, y)));
     }
     if input.starts_with("or_b(") {
-        let (rest, mut scripts) = parse_n_subscripts(&input[5..], 2)?;
+        let (rest, mut scripts) = parse_n_subscripts(&input[5..], 2, ctx)?;
         let z = Box::new(scripts.remove(1));
         let x = Box::new(scripts.remove(0));
         return Ok((rest, DescriptorTemplate::Or_b(x, z)));
     }
     if input.starts_with("or_c(") {
-        let (rest, mut scripts) = parse_n_subscripts(&input[5..], 2)?;
+        let (rest, mut scripts) = parse_n_subscripts(&input[5..], 2, ctx)?;
         let z = Box::new(scripts.remove(1));
         let x = Box::new(scripts.remove(0));
         return Ok((rest, DescriptorTemplate::Or_c(x, z)));
     }
     if input.starts_with("or_d(") {
-        let (rest, mut scripts) = parse_n_subscripts(&input[5..], 2)?;
+        let (rest, mut scripts) = parse_n_subscripts(&input[5..], 2, ctx)?;
         let z = Box::new(scripts.remove(1));
         let x = Box::new(scripts.remove(0));
         return Ok((rest, DescriptorTemplate::Or_d(x, z)));
     }
     if input.starts_with("or_i(") {
-        let (rest, mut scripts) = parse_n_subscripts(&input[5..], 2)?;
+        let (rest, mut scripts) = parse_n_subscripts(&input[5..], 2, ctx)?;
         let z = Box::new(scripts.remove(1));
         let x = Box::new(scripts.remove(0));
         return Ok((rest, DescriptorTemplate::Or_i(x, z)));
@@ -794,14 +953,15 @@ fn parse_inner_descriptor(input: &str) -> ParseResult<'_, DescriptorTemplate> {
     Err(ParseError::UnrecognizedFragment)
 }
 
-// Parses a named fragment that wraps a single key placeholder: name(@...)
+// Parses a named fragment that wraps a single key expression: name(@...)
 fn parse_kp_fragment<'a>(
     input: &'a str,
     name: &str,
-    constructor: fn(KeyPlaceholder) -> DescriptorTemplate,
+    constructor: fn(KeyExpression) -> DescriptorTemplate,
+    ctx: ParseContext,
 ) -> ParseResult<'a, DescriptorTemplate> {
     let rest = &input[name.len()..]; // caller already checked starts_with(name)
-    let (rest, kp) = parse_key_placeholder(&rest[1..])?; // skip '('
+    let (rest, kp) = parse_key_expression(&rest[1..], ctx)?; // skip '('
     if !rest.starts_with(')') {
         return Err(ParseError::InvalidSyntax);
     }
@@ -859,20 +1019,21 @@ fn parse_hex32_fragment<'a>(
     Ok((&rest[1..], constructor(bytes)))
 }
 
-// Parses "name(threshold,@kp1,@kp2,...)".
+// Parses "name(threshold,<key1>,<key1>,...)".
 fn parse_threshold_kp_fragment<'a>(
     input: &'a str,
     name: &str,
-    constructor: fn(u32, Vec<KeyPlaceholder>) -> DescriptorTemplate,
+    constructor: fn(u32, Vec<KeyExpression>) -> DescriptorTemplate,
+    ctx: ParseContext,
 ) -> ParseResult<'a, DescriptorTemplate> {
     let rest = &input[name.len() + 1..]; // skip name and '('
     let (mut rest, threshold) = parse_number_up_to(rest, u32::MAX)?;
-    let mut keys: Vec<KeyPlaceholder> = Vec::new();
+    let mut keys: Vec<KeyExpression> = Vec::new();
     loop {
         if !rest.starts_with(',') {
             break;
         }
-        match parse_key_placeholder(&rest[1..]) {
+        match parse_key_expression(&rest[1..], ctx) {
             Ok((r, kp)) => {
                 keys.push(kp);
                 rest = r;
@@ -880,6 +1041,7 @@ fn parse_threshold_kp_fragment<'a>(
                     break;
                 }
             }
+            Err(ParseError::InvalidScriptContext) => return Err(ParseError::InvalidScriptContext),
             Err(_) => break,
         }
     }
@@ -894,11 +1056,15 @@ fn parse_threshold_kp_fragment<'a>(
 
 // Parses exactly n comma-separated sub-descriptors, then ')'.
 // Called after the opening '(' of the enclosing fragment has been consumed.
-fn parse_n_subscripts(input: &str, n: usize) -> ParseResult<'_, Vec<DescriptorTemplate>> {
+fn parse_n_subscripts(
+    input: &str,
+    n: usize,
+    ctx: ParseContext,
+) -> ParseResult<'_, Vec<DescriptorTemplate>> {
     let mut rest = input;
     let mut scripts: Vec<DescriptorTemplate> = Vec::new();
     for i in 0..n {
-        let (r, desc) = parse_descriptor(rest)?;
+        let (r, desc) = parse_descriptor(rest, ctx)?;
         scripts.push(desc);
         rest = r;
         if i + 1 < n {
@@ -919,7 +1085,7 @@ fn parse_wsh(input: &str) -> ParseResult<'_, DescriptorTemplate> {
     if !input.starts_with("wsh(") {
         return Err(ParseError::InvalidSyntax);
     }
-    let (rest, scripts) = parse_n_subscripts(&input[4..], 1)?;
+    let (rest, scripts) = parse_n_subscripts(&input[4..], 1, ParseContext::Segwit)?;
     Ok((
         rest,
         DescriptorTemplate::Wsh(Box::new(scripts.into_iter().next().unwrap())),
@@ -928,24 +1094,29 @@ fn parse_wsh(input: &str) -> ParseResult<'_, DescriptorTemplate> {
 
 #[cfg(test)]
 fn parse_sortedmulti(input: &str) -> ParseResult<'_, DescriptorTemplate> {
-    parse_threshold_kp_fragment(input, "sortedmulti", DescriptorTemplate::Sortedmulti)
+    parse_threshold_kp_fragment(
+        input,
+        "sortedmulti",
+        DescriptorTemplate::Sortedmulti,
+        ParseContext::TopLevel,
+    )
 }
 
-fn parse_thresh(input: &str) -> ParseResult<'_, DescriptorTemplate> {
+fn parse_thresh(input: &str, ctx: ParseContext) -> ParseResult<'_, DescriptorTemplate> {
     // input starts with "thresh("
     let (rest, k) = parse_number_up_to(&input[7..], u32::MAX)?;
     if !rest.starts_with(',') {
         return Err(ParseError::InvalidSyntax);
     }
     // parse first script (mandatory)
-    let (rest, first) = parse_descriptor(&rest[1..])?;
+    let (rest, first) = parse_descriptor(&rest[1..], ctx)?;
     let mut scripts = vec![first];
     let mut rest = rest;
     loop {
         if !rest.starts_with(',') {
             break;
         }
-        match parse_descriptor(&rest[1..]) {
+        match parse_descriptor(&rest[1..], ctx) {
             Ok((r, desc)) => {
                 scripts.push(desc);
                 rest = r;
@@ -964,7 +1135,7 @@ fn parse_thresh(input: &str) -> ParseResult<'_, DescriptorTemplate> {
 
 fn parse_tr(input: &str) -> ParseResult<'_, DescriptorTemplate> {
     // input starts with "tr("
-    let (rest, key_placeholder) = parse_key_placeholder(&input[3..])?;
+    let (rest, key_placeholder) = parse_key_expression(&input[3..], ParseContext::Taproot)?;
     let (rest, tree) = if rest.starts_with(',') {
         let (rest, tree) = parse_tap_tree(&rest[1..])?;
         (rest, Some(tree))
@@ -989,7 +1160,7 @@ fn parse_tap_tree(input: &str) -> ParseResult<'_, TapTree> {
         }
         Ok((&rest[1..], TapTree::Branch(Box::new(left), Box::new(right))))
     } else {
-        let (rest, desc) = parse_descriptor(input)?;
+        let (rest, desc) = parse_descriptor(input, ParseContext::Taproot)?;
         Ok((rest, TapTree::Script(Box::new(desc))))
     }
 }
@@ -1312,26 +1483,44 @@ impl WalletPolicy {
     //     }
 }
 
-fn write_key_placeholder(
+fn write_key_expression(
     w: &mut String,
     key_information: &[KeyInformation],
-    kp: &KeyPlaceholder,
+    kp: &KeyExpression,
     is_change: bool,
     address_index: u32,
 ) -> Result<(), ParseError> {
     use core::fmt::Write;
-    let key_info = key_information
-        .get(kp.key_index as usize)
-        .ok_or(ParseError::InvalidKeyIndex)?;
     let change_step = if is_change { kp.num2 } else { kp.num1 };
-    write!(w, "{}/{}/{}", key_info, change_step, address_index).map_err(|_| ParseError::FormatError)
+    match &kp.key_type {
+        KeyExpressionType::PlainKey(key_index) => {
+            let key_info = key_information
+                .get(*key_index as usize)
+                .ok_or(ParseError::InvalidKeyIndex)?;
+            write!(w, "{}/{}/{}", key_info, change_step, address_index)
+                .map_err(|_| ParseError::FormatError)
+        }
+        KeyExpressionType::Musig(key_indices) => {
+            w.push_str("musig(");
+            for (i, key_index) in key_indices.iter().enumerate() {
+                if i > 0 {
+                    w.push(',');
+                }
+                let key_info = key_information
+                    .get(*key_index as usize)
+                    .ok_or(ParseError::InvalidKeyIndex)?;
+                write!(w, "{}", key_info).map_err(|_| ParseError::FormatError)?;
+            }
+            write!(w, ")/{}/{}", change_step, address_index).map_err(|_| ParseError::FormatError)
+        }
+    }
 }
 
-// Writes a comma-separated list of key placeholders to a buffer.
-fn write_key_placeholders(
+// Writes a comma-separated list of key expressions to a buffer.
+fn write_key_expressions(
     w: &mut String,
     key_information: &[KeyInformation],
-    kps: &[KeyPlaceholder],
+    kps: &[KeyExpression],
     is_change: bool,
     address_index: u32,
 ) -> Result<(), ParseError> {
@@ -1339,7 +1528,7 @@ fn write_key_placeholders(
         if i > 0 {
             w.push(',');
         }
-        write_key_placeholder(w, key_information, kp, is_change, address_index)?;
+        write_key_expression(w, key_information, kp, is_change, address_index)?;
     }
     Ok(())
 }
@@ -1405,27 +1594,27 @@ impl DescriptorTemplate {
             }
             DescriptorTemplate::Pkh(kp) => {
                 w.push_str("pkh(");
-                write_key_placeholder(w, key_information, kp, is_change, address_index)?;
+                write_key_expression(w, key_information, kp, is_change, address_index)?;
                 w.push(')');
             }
             DescriptorTemplate::Wpkh(kp) => {
                 w.push_str("wpkh(");
-                write_key_placeholder(w, key_information, kp, is_change, address_index)?;
+                write_key_expression(w, key_information, kp, is_change, address_index)?;
                 w.push(')');
             }
             DescriptorTemplate::Sortedmulti(threshold, kps) => {
                 write!(w, "sortedmulti({}, ", threshold).map_err(|_| ParseError::FormatError)?;
-                write_key_placeholders(w, key_information, kps, is_change, address_index)?;
+                write_key_expressions(w, key_information, kps, is_change, address_index)?;
                 w.push(')');
             }
             DescriptorTemplate::Sortedmulti_a(threshold, kps) => {
                 write!(w, "sortedmulti_a({}, ", threshold).map_err(|_| ParseError::FormatError)?;
-                write_key_placeholders(w, key_information, kps, is_change, address_index)?;
+                write_key_expressions(w, key_information, kps, is_change, address_index)?;
                 w.push(')');
             }
             DescriptorTemplate::Tr(kp, tap_tree) => {
                 w.push_str("tr(");
-                write_key_placeholder(w, key_information, kp, is_change, address_index)?;
+                write_key_expression(w, key_information, kp, is_change, address_index)?;
                 if let Some(tree) = tap_tree {
                     w.push_str(", ");
                     tree.write_to(w, key_information, is_change, address_index)?;
@@ -1436,17 +1625,17 @@ impl DescriptorTemplate {
             DescriptorTemplate::One => w.push('1'),
             DescriptorTemplate::Pk(kp) => {
                 w.push_str("pk(");
-                write_key_placeholder(w, key_information, kp, is_change, address_index)?;
+                write_key_expression(w, key_information, kp, is_change, address_index)?;
                 w.push(')');
             }
             DescriptorTemplate::Pk_k(kp) => {
                 w.push_str("pk_k(");
-                write_key_placeholder(w, key_information, kp, is_change, address_index)?;
+                write_key_expression(w, key_information, kp, is_change, address_index)?;
                 w.push(')');
             }
             DescriptorTemplate::Pk_h(kp) => {
                 w.push_str("pk_h(");
-                write_key_placeholder(w, key_information, kp, is_change, address_index)?;
+                write_key_expression(w, key_information, kp, is_change, address_index)?;
                 w.push(')');
             }
             DescriptorTemplate::Older(n) => {
@@ -1545,12 +1734,12 @@ impl DescriptorTemplate {
             }
             DescriptorTemplate::Multi(threshold, kps) => {
                 write!(w, "multi({}, ", threshold).map_err(|_| ParseError::FormatError)?;
-                write_key_placeholders(w, key_information, kps, is_change, address_index)?;
+                write_key_expressions(w, key_information, kps, is_change, address_index)?;
                 w.push(')');
             }
             DescriptorTemplate::Multi_a(threshold, kps) => {
                 write!(w, "multi_a({}, ", threshold).map_err(|_| ParseError::FormatError)?;
-                write_key_placeholders(w, key_information, kps, is_change, address_index)?;
+                write_key_expressions(w, key_information, kps, is_change, address_index)?;
                 w.push(')');
             }
             DescriptorTemplate::A(inner) => {
@@ -1695,52 +1884,17 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_key_placeholder() {
+    fn test_parse_key_expression() {
         let test_cases_success = vec![
-            (
-                "@0/**",
-                KeyPlaceholder {
-                    key_index: 0,
-                    num1: 0,
-                    num2: 1,
-                },
-            ),
-            (
-                "@4294967295/**",
-                KeyPlaceholder {
-                    key_index: 4294967295,
-                    num1: 0,
-                    num2: 1,
-                },
-            ), // u32::MAX
-            (
-                "@1/<0;1>/*",
-                KeyPlaceholder {
-                    key_index: 1,
-                    num1: 0,
-                    num2: 1,
-                },
-            ),
-            (
-                "@2/<3;4>/*",
-                KeyPlaceholder {
-                    key_index: 2,
-                    num1: 3,
-                    num2: 4,
-                },
-            ),
-            (
-                "@3/<1;9>/*",
-                KeyPlaceholder {
-                    key_index: 3,
-                    num1: 1,
-                    num2: 9,
-                },
-            ),
+            ("@0/**", KeyExpression::plain(0, 0, 1)),
+            ("@4294967295/**", KeyExpression::plain(4294967295, 0, 1)), // u32::MAX
+            ("@1/<0;1>/*", KeyExpression::plain(1, 0, 1)),
+            ("@2/<3;4>/*", KeyExpression::plain(2, 3, 4)),
+            ("@3/<1;9>/*", KeyExpression::plain(3, 1, 9)),
         ];
 
         for (input, expected) in test_cases_success {
-            let result = parse_key_placeholder(input);
+            let result = parse_key_expression(input, ParseContext::TopLevel);
             assert_eq!(result, Ok(("", expected)));
         }
 
@@ -1756,7 +1910,7 @@ mod tests {
         ];
 
         for input in test_cases_err {
-            assert!(parse_key_placeholder(input).is_err());
+            assert!(parse_key_expression(input, ParseContext::TopLevel).is_err());
         }
     }
 
@@ -1767,18 +1921,7 @@ mod tests {
             "",
             DescriptorTemplate::Sortedmulti(
                 2,
-                vec![
-                    KeyPlaceholder {
-                        key_index: 0,
-                        num1: 0,
-                        num2: 1,
-                    },
-                    KeyPlaceholder {
-                        key_index: 1,
-                        num1: 0,
-                        num2: 1,
-                    },
-                ],
+                vec![KeyExpression::plain(0, 0, 1), KeyExpression::plain(1, 0, 1)],
             ),
         ));
         assert_eq!(parse_sortedmulti(input), expected);
@@ -1791,18 +1934,7 @@ mod tests {
             "",
             DescriptorTemplate::Wsh(Box::new(DescriptorTemplate::Sortedmulti(
                 2,
-                vec![
-                    KeyPlaceholder {
-                        key_index: 0,
-                        num1: 0,
-                        num2: 1,
-                    },
-                    KeyPlaceholder {
-                        key_index: 1,
-                        num1: 0,
-                        num2: 1,
-                    },
-                ],
+                vec![KeyExpression::plain(0, 0, 1), KeyExpression::plain(1, 0, 1)],
             ))),
         ));
         assert_eq!(parse_wsh(input), expected);
@@ -1813,14 +1945,7 @@ mod tests {
         let input = "tr(@0/**)";
         let expected = Ok((
             "",
-            DescriptorTemplate::Tr(
-                KeyPlaceholder {
-                    key_index: 0,
-                    num1: 0,
-                    num2: 1,
-                },
-                None,
-            ),
+            DescriptorTemplate::Tr(KeyExpression::plain(0, 0, 1), None),
         ));
         assert_eq!(parse_tr(input), expected);
 
@@ -1828,46 +1953,26 @@ mod tests {
         let expected = Ok((
             "",
             DescriptorTemplate::Tr(
-                KeyPlaceholder {
-                    key_index: 0,
-                    num1: 0,
-                    num2: 1,
-                },
+                KeyExpression::plain(0, 0, 1),
                 Some(TapTree::Script(Box::new(DescriptorTemplate::Pkh(
-                    KeyPlaceholder {
-                        key_index: 1,
-                        num1: 0,
-                        num2: 1,
-                    },
+                    KeyExpression::plain(1, 0, 1),
                 )))),
             ),
         ));
         assert_eq!(parse_tr(input), expected);
 
-        let input = "tr(@0/<2;1>/*,{pkh(@1/<2;7>/*),sh(wpkh(@2/**))})";
+        let input = "tr(@0/<2;1>/*,{pkh(@1/<2;7>/*),pk(@2/**)})";
         let expected = Ok((
             "",
             DescriptorTemplate::Tr(
-                KeyPlaceholder {
-                    key_index: 0,
-                    num1: 2,
-                    num2: 1,
-                },
+                KeyExpression::plain(0, 2, 1),
                 Some(TapTree::Branch(
                     Box::new(TapTree::Script(Box::new(DescriptorTemplate::Pkh(
-                        KeyPlaceholder {
-                            key_index: 1,
-                            num1: 2,
-                            num2: 7,
-                        },
+                        KeyExpression::plain(1, 2, 7),
                     )))),
-                    Box::new(TapTree::Script(Box::new(DescriptorTemplate::Sh(Box::new(
-                        DescriptorTemplate::Wpkh(KeyPlaceholder {
-                            key_index: 2,
-                            num1: 0,
-                            num2: 1,
-                        }),
-                    ))))),
+                    Box::new(TapTree::Script(Box::new(DescriptorTemplate::Pk(
+                        KeyExpression::plain(2, 0, 1),
+                    )))),
                 )),
             ),
         ));
@@ -1883,10 +1988,12 @@ mod tests {
 
     #[test]
     fn test_parse_valid_descriptor_templates() {
-        assert!(parse_descriptor("sln:older(12960)").is_ok());
-        assert!(
-            parse_thresh("thresh(3,pk(@0/**),s:pk(@1/**),s:pk(@2/**),sln:older(12960))").is_ok()
-        );
+        assert!(parse_descriptor("sln:older(12960)", ParseContext::TopLevel).is_ok());
+        assert!(parse_thresh(
+            "thresh(3,pk(@0/**),s:pk(@1/**),s:pk(@2/**),sln:older(12960))",
+            ParseContext::TopLevel
+        )
+        .is_ok());
 
         let test_cases = vec![
             "wsh(sortedmulti(2,@0/**,@1/**))",
@@ -2046,8 +2153,9 @@ mod tests {
 
     #[test]
     fn test_descriptortemplate_placeholders_iterator() {
-        fn format_kp(kp: &KeyPlaceholder) -> String {
-            format!("@{}/<{};{}>/*", kp.key_index, kp.num1, kp.num2)
+        fn format_kp(kp: &KeyExpression) -> String {
+            let key_index = kp.plain_key_index().expect("expected plain key in test");
+            format!("@{}/<{};{}>/*", key_index, kp.num1, kp.num2)
         }
 
         struct TestCase {
@@ -2109,7 +2217,7 @@ mod tests {
             "sln:older(12960)",
             "tr(@0/**)",
             "tr(@0/**,pkh(@1/**))",
-            "tr(@0/<2;1>/*,{pkh(@1/<2;7>/*),sh(wpkh(@2/**))})",
+            "tr(@0/<2;1>/*,{pkh(@1/<2;7>/*),pk(@2/**)})",
             "after(12345)",
             "older(65535)",
             "sha256(aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa)",
@@ -2127,5 +2235,186 @@ mod tests {
             let displayed = parsed.to_string();
             assert_eq!(displayed, s, "roundtrip failed for {:?}", s);
         }
+    }
+
+    #[test]
+    fn test_musig_inside_tr_parses() {
+        // musig() as the internal key of tr()
+        let result = DescriptorTemplate::from_str("tr(musig(@0,@1)/**)");
+        assert!(
+            result.is_ok(),
+            "musig as tr internal key should parse: {:?}",
+            result
+        );
+
+        // musig() inside a tr() taptree leaf
+        let result = DescriptorTemplate::from_str("tr(@0/**,pk(musig(@1,@2)/**))");
+        assert!(
+            result.is_ok(),
+            "musig inside tr taptree should parse: {:?}",
+            result
+        );
+
+        // musig() with more than two keys
+        let result = DescriptorTemplate::from_str("tr(musig(@0,@1,@2)/**)");
+        assert!(
+            result.is_ok(),
+            "musig with 3 keys should parse: {:?}",
+            result
+        );
+
+        // musig() with <num1;num2>/* derivation
+        let result = DescriptorTemplate::from_str("tr(musig(@0,@1)/<3;4>/*)");
+        assert!(
+            result.is_ok(),
+            "musig with custom derivation should parse: {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_musig_outside_tr_rejected() {
+        // musig() inside wpkh() should fail
+        assert_eq!(
+            DescriptorTemplate::from_str("wpkh(musig(@0,@1)/**)"),
+            Err(ParseError::InvalidScriptContext)
+        );
+
+        // musig() inside pkh() should fail
+        assert_eq!(
+            DescriptorTemplate::from_str("pkh(musig(@0,@1)/**)"),
+            Err(ParseError::InvalidScriptContext)
+        );
+
+        // musig() inside wsh(sortedmulti()) should fail
+        assert_eq!(
+            DescriptorTemplate::from_str("wsh(sortedmulti(2,musig(@0,@1)/**,@2/**))"),
+            Err(ParseError::InvalidScriptContext)
+        );
+
+        // musig() inside sh() should fail
+        assert_eq!(
+            DescriptorTemplate::from_str("sh(pk(musig(@0,@1)/**))"),
+            Err(ParseError::InvalidScriptContext)
+        );
+
+        // musig() inside wsh(pk()) should fail
+        assert_eq!(
+            DescriptorTemplate::from_str("wsh(pk(musig(@0,@1)/**))"),
+            Err(ParseError::InvalidScriptContext)
+        );
+    }
+
+    #[test]
+    fn test_musig_nested_not_allowed() {
+        // musig() inside musig() is not valid because musig() arguments
+        // must be plain @N key references, not nested key expressions
+        assert!(
+            DescriptorTemplate::from_str("tr(musig(musig(@0,@1),@2)/**)").is_err(),
+            "nested musig should not parse"
+        );
+    }
+
+    #[test]
+    fn test_musig_display_roundtrip() {
+        let cases = vec![
+            "tr(musig(@0,@1)/**)",
+            "tr(musig(@0,@1)/<3;4>/*)",
+            "tr(musig(@0,@1,@2)/**)",
+            "tr(@0/**,pk(musig(@1,@2)/**))",
+        ];
+        for s in cases {
+            let parsed = DescriptorTemplate::from_str(s)
+                .unwrap_or_else(|e| panic!("parse failed for {:?}: {:?}", s, e));
+            let displayed = parsed.to_string();
+            assert_eq!(displayed, s, "roundtrip failed for {:?}", s);
+        }
+    }
+
+    #[test]
+    fn test_sh_only_allowed_top_level() {
+        // sh() at top level is valid
+        assert!(DescriptorTemplate::from_str("sh(wsh(sortedmulti(2,@0/**,@1/**)))").is_ok());
+        assert!(DescriptorTemplate::from_str("sh(sortedmulti(2,@0/**,@1/**))").is_ok());
+
+        // sh() inside wsh() is not allowed
+        assert_eq!(
+            DescriptorTemplate::from_str("wsh(sh(pk(@0/**)))"),
+            Err(ParseError::InvalidScriptContext)
+        );
+
+        // sh() inside sh() is not allowed
+        assert_eq!(
+            DescriptorTemplate::from_str("sh(sh(pk(@0/**)))"),
+            Err(ParseError::InvalidScriptContext)
+        );
+
+        // sh() inside tr() taptree is not allowed
+        assert_eq!(
+            DescriptorTemplate::from_str("tr(@0/**,sh(pk(@1/**)))"),
+            Err(ParseError::InvalidScriptContext)
+        );
+    }
+
+    #[test]
+    fn test_wsh_only_allowed_top_level_or_inside_sh() {
+        // wsh() at top level is valid
+        assert!(DescriptorTemplate::from_str("wsh(sortedmulti(2,@0/**,@1/**))").is_ok());
+
+        // wsh() inside sh() is valid
+        assert!(DescriptorTemplate::from_str("sh(wsh(sortedmulti(2,@0/**,@1/**)))").is_ok());
+
+        // wsh() inside wsh() is not allowed
+        assert_eq!(
+            DescriptorTemplate::from_str("wsh(wsh(pk(@0/**)))"),
+            Err(ParseError::InvalidScriptContext)
+        );
+
+        // wsh() inside tr() taptree is not allowed
+        assert_eq!(
+            DescriptorTemplate::from_str("tr(@0/**,wsh(pk(@1/**)))"),
+            Err(ParseError::InvalidScriptContext)
+        );
+
+        // wsh() inside sh(wsh()) is not allowed (double wrapping)
+        assert_eq!(
+            DescriptorTemplate::from_str("sh(wsh(wsh(pk(@0/**))))"),
+            Err(ParseError::InvalidScriptContext)
+        );
+    }
+
+    #[test]
+    fn test_tr_only_allowed_top_level() {
+        // tr() at top level is valid
+        assert!(DescriptorTemplate::from_str("tr(@0/**)").is_ok());
+        assert!(DescriptorTemplate::from_str("tr(@0/**,pk(@1/**))").is_ok());
+
+        // tr() inside sh() is not allowed
+        assert_eq!(
+            DescriptorTemplate::from_str("sh(tr(@0/**))"),
+            Err(ParseError::InvalidScriptContext)
+        );
+
+        // tr() inside wsh() is not allowed
+        assert_eq!(
+            DescriptorTemplate::from_str("wsh(tr(@0/**))"),
+            Err(ParseError::InvalidScriptContext)
+        );
+
+        // tr() inside tr() taptree is not allowed
+        assert_eq!(
+            DescriptorTemplate::from_str("tr(@0/**,tr(@1/**))"),
+            Err(ParseError::InvalidScriptContext)
+        );
+    }
+
+    #[test]
+    fn test_musig_not_allowed_in_wsh_inside_tr() {
+        // musig() inside wsh() even within a tapscript should fail,
+        // because wsh() is not allowed inside tr() in the first place
+        assert_eq!(
+            DescriptorTemplate::from_str("tr(@0/**,wsh(pk(musig(@1,@2)/**)))"),
+            Err(ParseError::InvalidScriptContext)
+        );
     }
 }

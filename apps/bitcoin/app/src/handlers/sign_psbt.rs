@@ -697,7 +697,11 @@ fn sign_all_inputs(
         let PsbtAccount::WalletPolicy(wallet_policy) = &summary.accounts[account_id as usize];
 
         for (kp, tapleaf_desc) in wallet_policy.descriptor_template.placeholders() {
-            let key_info = &wallet_policy.key_information[kp.key_index as usize];
+            let key_index = match kp.plain_key_index() {
+                Some(idx) => idx,
+                None => continue, // musig key expressions not yet supported for signing
+            };
+            let key_info = &wallet_policy.key_information[key_index as usize];
 
             // Determine the key source: either the master seed (fingerprint match)
             // or the resident key (compressed pubkey + synthetic chaincode match).
