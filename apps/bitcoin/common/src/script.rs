@@ -36,7 +36,7 @@ impl<const N: usize> BubbleSort for Vec<[u8; N]> {
     }
 }
 
-use crate::account::{DescriptorTemplate, KeyInformation, KeyPlaceholder, WalletPolicy};
+use crate::account::{DescriptorTemplate, KeyExpression, KeyInformation, WalletPolicy};
 
 const MAX_PUBKEYS_PER_MULTISIG: usize = 20;
 const MAX_PUBKEYS_PER_MULTI_A: usize = 999;
@@ -108,11 +108,14 @@ impl ToScriptWithKeyInfoInner for DescriptorTemplate {
         mut builder: Builder,
         ctx: ScriptContext,
     ) -> Result<Builder, Error> {
-        let derive = |kp: &KeyPlaceholder| -> Result<Xpub, Error> {
+        let derive = |kp: &KeyExpression| -> Result<Xpub, Error> {
             let change_step = ChildNumber::from(if is_change { kp.num2 } else { kp.num1 });
 
+            // this does not yet handle musig() key expressions
+            let key_index = kp.plain_key_index().ok_or(Error::UnsupportedWalletPolicy)?;
+
             let key_info = key_information
-                .get(kp.key_index as usize)
+                .get(key_index as usize)
                 .ok_or(Error::InvalidKeyIndex)?;
 
             let root_pubkey = &key_info.pubkey;
@@ -291,7 +294,7 @@ impl ToScriptWithKeyInfoInner for DescriptorTemplate {
             DescriptorTemplate::One => builder.push_opcode(OP_PUSHNUM_1),
             DescriptorTemplate::Pk(k) => {
                 // c:pk_k(key)
-                let desc = DescriptorTemplate::C(Box::new(DescriptorTemplate::Pk_k(*k)));
+                let desc = DescriptorTemplate::C(Box::new(DescriptorTemplate::Pk_k(k.clone())));
                 desc.to_script_inner(key_information, is_change, address_index, builder, ctx)?
             }
             DescriptorTemplate::Pk_k(kp) => {
