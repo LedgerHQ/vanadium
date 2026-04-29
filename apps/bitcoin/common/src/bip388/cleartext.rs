@@ -463,19 +463,16 @@ impl TapleafClass {
 impl DescriptorTemplate {
     fn classify(&self) -> DescriptorClass {
         descriptor_match!(self, {
-            pkh(_key_index) => {
-                let key = self.placeholders().next().map(|(kp, _)| kp.clone()).unwrap();
-                DescriptorClass::LegacySingleSig { key }
+            pkh(key) => {
+                DescriptorClass::LegacySingleSig { key: key.clone() }
             },
             // normal or wrapped
-            wpkh(_key_index) | sh(wpkh(_key_index)) => {
-                let key = self.placeholders().next().map(|(kp, _)| kp.clone()).unwrap();
-                DescriptorClass::SegwitSingleSig { key }
+            wpkh(key) | sh(wpkh(key)) => {
+                DescriptorClass::SegwitSingleSig { key: key.clone() }
             },
             // 4 combinations: multi/sortedmulti; normal/wrapped
-            wsh(multi(threshold, _key_indices)) | wsh(sortedmulti(threshold, _key_indices)) | sh(wsh(multi(threshold, _key_indices))) | sh(wsh(sortedmulti(threshold, _key_indices))) => {
-                let keys: Vec<KeyPlaceholder> = self.placeholders().map(|(kp, _)| kp.clone()).collect();
-                DescriptorClass::SegwitMultisig { threshold, keys }
+            wsh(multi(threshold, keys)) | wsh(sortedmulti(threshold, keys)) | sh(wsh(multi(threshold, keys))) | sh(wsh(sortedmulti(threshold, keys))) => {
+                DescriptorClass::SegwitMultisig { threshold, keys: keys.clone() }
             },
             tr(internal_key, tree) => {
                 DescriptorClass::Taproot {
@@ -492,79 +489,53 @@ impl DescriptorTemplate {
 
     fn classify_as_tapleaf(&self) -> TapleafClass {
         descriptor_match!(self, {
-            sortedmulti_a(threshold, _key_indices) => {
-                let keys: Vec<KeyPlaceholder> = self.placeholders().map(|(kp, _)| kp.clone()).collect();
-                TapleafClass::SortedMultisig { threshold, keys }
+            sortedmulti_a(threshold, keys) => {
+                TapleafClass::SortedMultisig { threshold, keys: keys.clone() }
             },
-            pk(_key_index) | pkh(_key_index) => {
-                let key = self.placeholders().next().map(|(kp, _)| kp.clone()).unwrap();
-                TapleafClass::SingleSig { key }
+            pk(key) | pkh(key) => {
+                TapleafClass::SingleSig { key: key.clone() }
             },
-            multi_a(threshold, _key_indices) => {
-                let keys: Vec<KeyPlaceholder> = self.placeholders().map(|(kp, _)| kp.clone()).collect();
-                TapleafClass::Multisig { threshold, keys }
+            multi_a(threshold, keys) => {
+                TapleafClass::Multisig { threshold, keys: keys.clone() }
             },
-            and_v(v:pk(_key_index), older(blocks)) if blocks >= 1 && blocks < 65536 => {
-                let key = self.placeholders().next().map(|(kp, _)| kp.clone()).unwrap();
-                TapleafClass::RelativeHeightlockSingleSig { key, blocks }
+            and_v(v:pk(key), older(blocks)) if blocks >= 1 && blocks < 65536 => {
+                TapleafClass::RelativeHeightlockSingleSig { key: key.clone(), blocks }
             },
-            and_v(v:and_v(v:pk(_key_index1), pk(_key_index2)), older(blocks)) if blocks >= 1 && blocks < 65536 => {
-                let mut phs = self.placeholders().map(|(kp, _)| kp.clone());
-                let key1 = phs.next().unwrap();
-                let key2 = phs.next().unwrap();
-                TapleafClass::RelativeHeightlockBothMustSign { key1, key2, blocks }
+            and_v(v:and_v(v:pk(key1), pk(key2)), older(blocks)) if blocks >= 1 && blocks < 65536 => {
+                TapleafClass::RelativeHeightlockBothMustSign { key1: key1.clone(), key2: key2.clone(), blocks }
             },
-            and_v(v:multi_a(threshold, _key_indices), older(blocks)) if blocks >= 1 && blocks < 65536 => {
-                let keys: Vec<KeyPlaceholder> = self.placeholders().map(|(kp, _)| kp.clone()).collect();
-                TapleafClass::RelativeHeightlockMultiSig { threshold, keys, blocks }
+            and_v(v:multi_a(threshold, keys), older(blocks)) if blocks >= 1 && blocks < 65536 => {
+                TapleafClass::RelativeHeightlockMultiSig { threshold, keys: keys.clone(), blocks }
             },
-            and_v(v:pk(_key_index), older(time)) if time >= 4194305 && time < 4259840 => {
-                let key = self.placeholders().next().map(|(kp, _)| kp.clone()).unwrap();
-                TapleafClass::RelativeTimelockSingleSig { key, time }
+            and_v(v:pk(key), older(time)) if time >= 4194305 && time < 4259840 => {
+                TapleafClass::RelativeTimelockSingleSig { key: key.clone(), time }
             },
-            and_v(v:and_v(v:pk(_key_index1), pk(_key_index2)), older(time)) if time >= 4194305 && time < 4259840 => {
-                let mut phs = self.placeholders().map(|(kp, _)| kp.clone());
-                let key1 = phs.next().unwrap();
-                let key2 = phs.next().unwrap();
-                TapleafClass::RelativeTimelockBothMustSign { key1, key2, time }
+            and_v(v:and_v(v:pk(key1), pk(key2)), older(time)) if time >= 4194305 && time < 4259840 => {
+                TapleafClass::RelativeTimelockBothMustSign { key1: key1.clone(), key2: key2.clone(), time }
             },
-            and_v(v:multi_a(threshold, _key_indices), older(time)) if time >= 4194305 && time < 4259840 => {
-                let keys: Vec<KeyPlaceholder> = self.placeholders().map(|(kp, _)| kp.clone()).collect();
-                TapleafClass::RelativeTimelockMultiSig { threshold, keys, time }
+            and_v(v:multi_a(threshold, keys), older(time)) if time >= 4194305 && time < 4259840 => {
+                TapleafClass::RelativeTimelockMultiSig { threshold, keys: keys.clone(), time }
             },
-            and_v(v:pk(_key_index), after(block_height)) if block_height >= 1 && block_height < 500000000 => {
-                let key = self.placeholders().next().map(|(kp, _)| kp.clone()).unwrap();
-                TapleafClass::AbsoluteHeightlockSingleSig { key, block_height }
+            and_v(v:pk(key), after(block_height)) if block_height >= 1 && block_height < 500000000 => {
+                TapleafClass::AbsoluteHeightlockSingleSig { key: key.clone(), block_height }
             },
-            and_v(v:and_v(v:pk(_key_index1), pk(_key_index2)), after(block_height)) if block_height >= 1 && block_height < 500000000 => {
-                let mut phs = self.placeholders().map(|(kp, _)| kp.clone());
-                let key1 = phs.next().unwrap();
-                let key2 = phs.next().unwrap();
-                TapleafClass::AbsoluteHeightlockBothMustSign { key1, key2, block_height }
+            and_v(v:and_v(v:pk(key1), pk(key2)), after(block_height)) if block_height >= 1 && block_height < 500000000 => {
+                TapleafClass::AbsoluteHeightlockBothMustSign { key1: key1.clone(), key2: key2.clone(), block_height }
             },
-            and_v(v:multi_a(threshold, _key_indices), after(block_height)) if block_height >= 1 && block_height < 500000000 => {
-                let keys: Vec<KeyPlaceholder> = self.placeholders().map(|(kp, _)| kp.clone()).collect();
-                TapleafClass::AbsoluteHeightlockMultiSig { threshold, keys, block_height }
+            and_v(v:multi_a(threshold, keys), after(block_height)) if block_height >= 1 && block_height < 500000000 => {
+                TapleafClass::AbsoluteHeightlockMultiSig { threshold, keys: keys.clone(), block_height }
             },
-            and_v(v:pk(_key_index), after(timestamp)) if timestamp >= 500000000 => {
-                let key = self.placeholders().next().map(|(kp, _)| kp.clone()).unwrap();
-                TapleafClass::AbsoluteTimelockSingleSig { key, timestamp }
+            and_v(v:pk(key), after(timestamp)) if timestamp >= 500000000 => {
+                TapleafClass::AbsoluteTimelockSingleSig { key: key.clone(), timestamp }
             },
-            and_v(v:and_v(v:pk(_key_index1), pk(_key_index2)), after(timestamp)) if timestamp >= 500000000 => {
-                let mut phs = self.placeholders().map(|(kp, _)| kp.clone());
-                let key1 = phs.next().unwrap();
-                let key2 = phs.next().unwrap();
-                TapleafClass::AbsoluteTimelockBothMustSign { key1, key2, timestamp }
+            and_v(v:and_v(v:pk(key1), pk(key2)), after(timestamp)) if timestamp >= 500000000 => {
+                TapleafClass::AbsoluteTimelockBothMustSign { key1: key1.clone(), key2: key2.clone(), timestamp }
             },
-            and_v(v:multi_a(threshold, _key_indices), after(timestamp)) if timestamp >= 500000000 => {
-                let keys: Vec<KeyPlaceholder> = self.placeholders().map(|(kp, _)| kp.clone()).collect();
-                TapleafClass::AbsoluteTimelockMultiSig { threshold, keys, timestamp }
+            and_v(v:multi_a(threshold, keys), after(timestamp)) if timestamp >= 500000000 => {
+                TapleafClass::AbsoluteTimelockMultiSig { threshold, keys: keys.clone(), timestamp }
             },
-            and_v(v:pk(_key_index1), pk(_key_index2)) => {
-                let mut phs = self.placeholders().map(|(kp, _)| kp.clone());
-                let key1 = phs.next().unwrap();
-                let key2 = phs.next().unwrap();
-                TapleafClass::BothMustSign { key1, key2 }
+            and_v(v:pk(key1), pk(key2)) => {
+                TapleafClass::BothMustSign { key1: key1.clone(), key2: key2.clone() }
             },
             _ => { TapleafClass::Other(self.to_string()) },
         })
@@ -576,7 +547,8 @@ fn format_key(kp: &KeyPlaceholder, canonical: bool) -> String {
         match &kp.key_type {
             super::KeyExpressionType::PlainKey(key_index) => format!("@{}", key_index),
             super::KeyExpressionType::Musig(key_indices) => {
-                let inner: Vec<String> = key_indices.iter().map(|idx| format!("@{}", idx)).collect();
+                let inner: Vec<String> =
+                    key_indices.iter().map(|idx| format!("@{}", idx)).collect();
                 format!("musig({})", inner.join(","))
             }
         }
@@ -587,7 +559,8 @@ fn format_key(kp: &KeyPlaceholder, canonical: bool) -> String {
                 format!("@{}/<{};{}>/*", key_index, kp.num1, kp.num2)
             }
             super::KeyExpressionType::Musig(key_indices) => {
-                let inner: Vec<String> = key_indices.iter().map(|idx| format!("@{}", idx)).collect();
+                let inner: Vec<String> =
+                    key_indices.iter().map(|idx| format!("@{}", idx)).collect();
                 format!("musig({})/<{};{}>/*", inner.join(","), kp.num1, kp.num2)
             }
         }
@@ -897,7 +870,9 @@ impl DescriptorTemplate {
             alloc::collections::BTreeMap::new();
 
         for (kp, _) in self.placeholders() {
-            let next_num1 = next_num1_per_key.entry(kp.plain_key_index().unwrap_or(0)).or_insert(0);
+            let next_num1 = next_num1_per_key
+                .entry(kp.plain_key_index().unwrap_or(0))
+                .or_insert(0);
             if kp.num1 as u64 != *next_num1 || kp.num2 as u64 != *next_num1 + 1 {
                 return false;
             }
@@ -1739,7 +1714,9 @@ fn top_level_variants(
                 let mut next_per_key: alloc::collections::BTreeMap<u32, u32> =
                     alloc::collections::BTreeMap::new();
                 for kp in dt.placeholders_mut() {
-                    let next = next_per_key.entry(kp.plain_key_index().unwrap_or(0)).or_insert(0);
+                    let next = next_per_key
+                        .entry(kp.plain_key_index().unwrap_or(0))
+                        .or_insert(0);
                     kp.num1 = *next;
                     kp.num2 = *next + 1;
                     *next += 2;

@@ -64,6 +64,7 @@ fn variant_arg_kinds(variant: &str) -> &'static [ArgKind] {
         "Pk" | "Pk_k" | "Pk_h" | "Pkh" | "Wpkh" => &[Key],
         "Older" | "After" => &[Num],
         "Multi" | "Multi_a" | "Sortedmulti" | "Sortedmulti_a" => &[Num, KeyList],
+        "Tr" => &[Key, Sub],
         "And_v" | "And_b" | "And_n" | "Or_b" | "Or_c" | "Or_d" | "Or_i" => &[Sub, Sub],
         "Andor" => &[Sub, Sub, Sub],
         "Sh" | "Wsh" | "A" | "S" | "C" | "T" | "D" | "V" | "J" | "N" | "L" | "U" => &[Sub],
@@ -94,6 +95,8 @@ enum DescPattern {
 
 enum PatternArg {
     Binding(Ident),
+    /// Match only `musig()` key expressions; binds the musig key indices.
+    MusigBinding(Ident),
     SubPattern {
         wrappers: Vec<String>,
         inner: Box<DescPattern>,
@@ -228,7 +231,23 @@ fn parse_keyword_call_from_ident(
         }
         let kind = arg_kinds.get(i).copied().unwrap_or(ArgKind::Sub);
         let arg = match kind {
-            ArgKind::Key | ArgKind::Num | ArgKind::KeyList => {
+            ArgKind::Key => {
+                // Check if this is a musig() pattern in key position
+                let fork = content.fork();
+                let is_musig = fork.parse::<Ident>().map_or(false, |id| id == "musig")
+                    && fork.peek(token::Paren);
+                if is_musig {
+                    content.parse::<Ident>()?; // consume "musig"
+                    let musig_content;
+                    parenthesized!(musig_content in content);
+                    let binding: Ident = musig_content.parse()?;
+                    PatternArg::MusigBinding(binding)
+                } else {
+                    let binding: Ident = content.parse()?;
+                    PatternArg::Binding(binding)
+                }
+            }
+            ArgKind::Num | ArgKind::KeyList => {
                 let binding: Ident = content.parse()?;
                 PatternArg::Binding(binding)
             }
@@ -334,13 +353,33 @@ fn parse_possibly_wrapped_sub(input: ParseStream) -> syn::Result<PatternArg> {
 // innermost block containing the let-bindings and the body.
 
 /// A single destructuring step in a flattened pattern.
-struct MatchStep {
-    /// The expression to match (as tokens).
-    matchee: TokenStream,
-    /// The variant to match against.
-    variant: String,
-    /// Temporary variable names for each positional argument.
-    temp_vars: Vec<Ident>,
+enum MatchStep {
+    /// Match a `DescriptorTemplate` variant, destructuring its fields.
+    Variant {
+        /// The expression to match (as tokens).
+        matchee: TokenStream,
+        /// The variant to match against.
+        variant: String,
+        /// Temporary variable names for each positional argument.
+        temp_vars: Vec<Ident>,
+    },
+    /// Check that a key expression is a plain key (not musig).
+    PlainKey {
+        /// The key expression to check (as tokens).
+        key_expr: TokenStream,
+    },
+    /// Check that all key expressions in a list are plain keys (not musig).
+    PlainKeyList {
+        /// The key list expression to check (as tokens).
+        key_list_expr: TokenStream,
+    },
+    /// Check that a key expression is `musig()` and bind the musig key indices.
+    MusigKey {
+        /// The key expression to check (as tokens).
+        key_expr: TokenStream,
+        /// Temporary variable for the musig key indices.
+        temp_var: Ident,
+    },
 }
 
 /// A user-visible binding extracted from the pattern.
@@ -388,7 +427,7 @@ fn flatten_pattern(
                 .map(|(i, _)| counter.next(&format!("p{}_", i)))
                 .collect();
 
-            steps.push(MatchStep {
+            steps.push(MatchStep::Variant {
                 matchee,
                 variant: variant.clone(),
                 temp_vars: temp_vars.clone(),
@@ -399,9 +438,19 @@ fn flatten_pattern(
                 match arg {
                     PatternArg::Binding(ident) => {
                         let extraction = match kind {
-                            ArgKind::Key => quote!(#tv),
+                            ArgKind::Key => {
+                                // Plain binding in Key position: require plain key
+                                steps.push(MatchStep::PlainKey {
+                                    key_expr: quote!(#tv),
+                                });
+                                quote!(#tv)
+                            }
                             ArgKind::Num => quote!(*#tv),
                             ArgKind::KeyList => {
+                                // Plain binding in KeyList position: require all plain keys
+                                steps.push(MatchStep::PlainKeyList {
+                                    key_list_expr: quote!(#tv),
+                                });
                                 quote!(#tv)
                             }
                             ArgKind::Sub => quote!(#tv),
@@ -409,6 +458,17 @@ fn flatten_pattern(
                         user_bindings.push(UserBinding {
                             name: ident.clone(),
                             extraction,
+                        });
+                    }
+                    PatternArg::MusigBinding(ident) => {
+                        let musig_tv = counter.next("musig_");
+                        steps.push(MatchStep::MusigKey {
+                            key_expr: quote!(#tv),
+                            temp_var: musig_tv.clone(),
+                        });
+                        user_bindings.push(UserBinding {
+                            name: ident.clone(),
+                            extraction: quote!(#musig_tv),
                         });
                     }
                     PatternArg::SubPattern { wrappers, inner } => {
@@ -423,7 +483,7 @@ fn flatten_pattern(
                             } else {
                                 current_expr.clone()
                             };
-                            steps.push(MatchStep {
+                            steps.push(MatchStep::Variant {
                                 matchee: wmatchee,
                                 variant: w.clone(),
                                 temp_vars: vec![wtv.clone()],
@@ -452,21 +512,49 @@ fn flatten_pattern(
 fn fold_steps(steps: &[MatchStep], inner_code: TokenStream) -> TokenStream {
     let mut code = inner_code;
     for step in steps.iter().rev() {
-        let variant_ident = Ident::new(&step.variant, Span::call_site());
-        let matchee = &step.matchee;
-        let tvs: Vec<&Ident> = step.temp_vars.iter().collect();
+        match step {
+            MatchStep::Variant {
+                matchee,
+                variant,
+                temp_vars,
+            } => {
+                let variant_ident = Ident::new(variant, Span::call_site());
+                let tvs: Vec<&Ident> = temp_vars.iter().collect();
 
-        let destructure = if tvs.is_empty() {
-            quote!(DescriptorTemplate::#variant_ident)
-        } else {
-            quote!(DescriptorTemplate::#variant_ident(#(#tvs),*))
-        };
+                let destructure = if tvs.is_empty() {
+                    quote!(DescriptorTemplate::#variant_ident)
+                } else {
+                    quote!(DescriptorTemplate::#variant_ident(#(#tvs),*))
+                };
 
-        code = quote! {
-            if let #destructure = #matchee {
-                #code
+                code = quote! {
+                    if let #destructure = #matchee {
+                        #code
+                    }
+                };
             }
-        };
+            MatchStep::PlainKey { key_expr } => {
+                code = quote! {
+                    if #key_expr.is_plain() {
+                        #code
+                    }
+                };
+            }
+            MatchStep::PlainKeyList { key_list_expr } => {
+                code = quote! {
+                    if #key_list_expr.iter().all(|__ke| __ke.is_plain()) {
+                        #code
+                    }
+                };
+            }
+            MatchStep::MusigKey { key_expr, temp_var } => {
+                code = quote! {
+                    if let Some(#temp_var) = #key_expr.musig_key_indices() {
+                        #code
+                    }
+                };
+            }
+        }
     }
     code
 }
