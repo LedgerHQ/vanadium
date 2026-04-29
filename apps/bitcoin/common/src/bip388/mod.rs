@@ -140,6 +140,10 @@ impl KeyExpression {
         }
     }
 
+    pub fn is_plain(&self) -> bool {
+        matches!(self.key_type, KeyExpressionType::PlainKey(_))
+    }
+
     pub fn musig(key_indices: Vec<u32>, num1: u32, num2: u32) -> Self {
         KeyExpression {
             key_type: KeyExpressionType::Musig(key_indices),
@@ -158,6 +162,15 @@ impl KeyExpression {
         match &self.key_type {
             KeyExpressionType::PlainKey(idx) => Some(*idx),
             KeyExpressionType::Musig(_) => None,
+        }
+    }
+
+    /// Returns the key indices for a musig key expression.
+    /// Returns `None` for plain key expressions.
+    pub fn musig_key_indices(&self) -> Option<&Vec<u32>> {
+        match &self.key_type {
+            KeyExpressionType::Musig(indices) => Some(indices),
+            KeyExpressionType::PlainKey(_) => None,
         }
     }
 }
