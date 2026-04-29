@@ -549,7 +549,8 @@ fn fold_steps(steps: &[MatchStep], inner_code: TokenStream) -> TokenStream {
             }
             MatchStep::MusigKey { key_expr, temp_var } => {
                 code = quote! {
-                    if let Some(#temp_var) = #key_expr.musig_key_indices() {
+                    if #key_expr.is_musig() {
+                        let #temp_var = #key_expr;
                         #code
                     }
                 };
