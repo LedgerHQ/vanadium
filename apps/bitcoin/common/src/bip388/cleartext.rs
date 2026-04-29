@@ -38,7 +38,7 @@ use super::time::{parse_relative_time_to_seconds, parse_utc_date_to_timestamp};
 #[cfg(any(test, feature = "cleartext-decode"))]
 use super::TapTree;
 #[cfg(any(test, feature = "cleartext-decode"))]
-use alloc::rc::Rc;
+use alloc::{boxed::Box, rc::Rc};
 #[cfg(any(test, feature = "cleartext-decode"))]
 use core::str::FromStr;
 
@@ -70,7 +70,13 @@ enum DescriptorClass {
         keys: Vec<KeyPlaceholder>,
     },
     Taproot {
+        // taproot descriptor templates where the internal key is a plain key
         internal_key: KeyPlaceholder,
+        leaves: Vec<TapleafClass>,
+    },
+    TaprootMusig {
+        // taproot descriptor templates where the internal key is a musig expression
+        keys: Vec<KeyPlaceholder>,
         leaves: Vec<TapleafClass>,
     },
     Other,
@@ -207,6 +213,7 @@ enum TopLevelPattern {
     SegwitSingleSig,
     SegwitMultisig,
     Taproot,
+    TaprootMusig,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -272,6 +279,10 @@ mod specs {
         CleartextSpec {
             kind: TopLevelPattern::Taproot,
             parts: &[lit("Primary path: "), KeyIndex],
+        },
+        CleartextSpec {
+            kind: TopLevelPattern::TaprootMusig,
+            parts: &[lit("Primary path: "), Threshold, lit(" of "), KeyIndices],
         },
     ];
 
@@ -501,6 +512,19 @@ impl DescriptorTemplate {
                         .unwrap_or_default(),
                 }
             },
+            tr(musig(key_indices), tree) => {
+                let keys = key_indices
+                    .iter()
+                    .map(|&idx| KeyPlaceholder::plain(idx, 0, 1))
+                    .collect();
+                DescriptorClass::TaprootMusig {
+                    keys,
+                    leaves: tree
+                        .as_ref()
+                        .map(|t| t.tapleaves().map(|l| l.classify_as_tapleaf()).collect())
+                        .unwrap_or_default(),
+                }
+            },
             _ => { DescriptorClass::Other },
         })
     }
@@ -682,6 +706,13 @@ impl DescriptorClass {
             DescriptorClass::Taproot { internal_key, .. } => Some((
                 TopLevelPattern::Taproot,
                 vec![CleartextValue::KeyIndex(internal_key.clone())],
+            )),
+            DescriptorClass::TaprootMusig { keys, .. } => Some((
+                TopLevelPattern::TaprootMusig,
+                vec![
+                    CleartextValue::Threshold(keys.len() as u32),
+                    CleartextValue::KeyIndices(keys.clone()),
+                ],
             )),
             DescriptorClass::Other => None,
         }
@@ -905,7 +936,8 @@ impl ClearText for DescriptorTemplate {
             DescriptorClass::LegacySingleSig { .. } => 1,
             DescriptorClass::SegwitSingleSig { .. } => 2, // wpkh and sh(wpkh)
             DescriptorClass::SegwitMultisig { .. } => 4, // multi or sortedmulti / normal or wrapped
-            DescriptorClass::Taproot { leaves, .. } => {
+            DescriptorClass::Taproot { leaves, .. }
+            | DescriptorClass::TaprootMusig { leaves, .. } => {
                 // The confusion score of a taproot descriptor is the product of the confusion scores of the internal key and all the leaves,
                 // multiplied by the number T(n) of rearrangements of the tree.
                 let mut score = 1u64;
@@ -958,12 +990,15 @@ impl ClearText for DescriptorTemplate {
                     .expect("missing cleartext")],
                 canonical,
             ),
-            class @ DescriptorClass::Taproot { .. } => {
+            class @ DescriptorClass::Taproot { .. }
+            | class @ DescriptorClass::TaprootMusig { .. } => {
                 let primary_path = class
                     .to_cleartext_string(canonical)
                     .expect("missing cleartext");
-                let DescriptorClass::Taproot { mut leaves, .. } = class else {
-                    unreachable!();
+                let mut leaves = match class {
+                    DescriptorClass::Taproot { leaves, .. } => leaves,
+                    DescriptorClass::TaprootMusig { leaves, .. } => leaves,
+                    _ => unreachable!(),
                 };
                 leaves.sort_by(|a, b| a.display_cmp(b));
                 let mut descriptions = vec![primary_path];
@@ -1134,6 +1169,17 @@ impl DescriptorClass {
                 internal_key: values.key_index()?,
                 leaves: Vec::new(),
             },
+            TopLevelPattern::TaprootMusig => {
+                let threshold = values.threshold()?;
+                let keys = values.key_indices()?;
+                if threshold as usize != keys.len() {
+                    return None;
+                }
+                DescriptorClass::TaprootMusig {
+                    keys,
+                    leaves: Vec::new(),
+                }
+            }
         };
         values.finish()?;
         Some(result)
@@ -1416,23 +1462,32 @@ fn parse_top_level_candidates(
             );
 
             for (kind, values) in parse_with_specs(TOP_LEVEL_SPECS, first) {
-                if kind != TopLevelPattern::Taproot {
-                    continue;
-                }
                 let base_class = DescriptorClass::from_cleartext_pattern(kind, values)
                     .expect("spec/from_cleartext_pattern mismatch: this is a bug");
-                let DescriptorClass::Taproot { internal_key, .. } = base_class else {
-                    continue;
-                };
-
-                for leaves in &leaf_combinations {
-                    push_unique(
-                        &mut classes,
-                        DescriptorClass::Taproot {
-                            internal_key: internal_key.clone(),
-                            leaves: leaves.clone(),
-                        },
-                    );
+                match base_class {
+                    DescriptorClass::Taproot { internal_key, .. } => {
+                        for leaves in &leaf_combinations {
+                            push_unique(
+                                &mut classes,
+                                DescriptorClass::Taproot {
+                                    internal_key: internal_key.clone(),
+                                    leaves: leaves.clone(),
+                                },
+                            );
+                        }
+                    }
+                    DescriptorClass::TaprootMusig { keys, .. } => {
+                        for leaves in &leaf_combinations {
+                            push_unique(
+                                &mut classes,
+                                DescriptorClass::TaprootMusig {
+                                    keys: keys.clone(),
+                                    leaves: leaves.clone(),
+                                },
+                            );
+                        }
+                    }
+                    _ => continue,
                 }
             }
 
@@ -1738,6 +1793,41 @@ fn top_level_variants(
                 dt
             })))
         }
+        DescriptorClass::TaprootMusig { keys, leaves } => {
+            let key_indices: Vec<u32> = keys
+                .iter()
+                .map(|k| {
+                    k.plain_key_index()
+                        .expect("TaprootMusig keys must be plain")
+                })
+                .collect();
+            let num1 = keys.first().map(|k| k.num1).unwrap_or(0);
+            let num2 = keys.first().map(|k| k.num2).unwrap_or(1);
+            let internal_key = KeyPlaceholder::musig(key_indices, num1, num2);
+            if leaves.is_empty() {
+                return Ok(Box::new(core::iter::once(DescriptorTemplate::Tr(
+                    internal_key,
+                    None,
+                ))));
+            }
+            let mut per_leaf_variants = Vec::new();
+            for leaf in &leaves {
+                per_leaf_variants.push(tapleaf_to_descriptors(leaf)?);
+            }
+            let trees = enumerate_taptrees(per_leaf_variants);
+            Ok(Box::new(trees.map(move |t| {
+                let mut dt = DescriptorTemplate::Tr(internal_key.clone(), Some(t));
+                let mut next_per_key: alloc::collections::BTreeMap<super::KeyExpressionType, u32> =
+                    alloc::collections::BTreeMap::new();
+                for kp in dt.placeholders_mut() {
+                    let next = next_per_key.entry(kp.key_type.clone()).or_insert(0);
+                    kp.num1 = *next;
+                    kp.num2 = *next + 1;
+                    *next += 2;
+                }
+                dt
+            })))
+        }
         DescriptorClass::Other => Err(CleartextError::ParseError(
             "cannot enumerate variants for unrecognized descriptor class".into(),
         )),
@@ -1800,6 +1890,16 @@ mod tests {
                 "tr(@0/**,{pk(@1/**),and_v(v:multi_a(2,@2/<0;1>/*,@3/<0;1>/*),older(4194484))})",
                 1,
             ),
+            // Taproot with musig internal key: key-path only (score 1)
+            ("tr(musig(@0,@1)/**)", 1),
+            // Taproot with musig internal key: 3 keys (score 1)
+            ("tr(musig(@0,@1,@2)/**)", 1),
+            // Taproot with musig internal key + 1 SingleSig leaf (score 1)
+            ("tr(musig(@0,@1)/**,pk(@2/**))", 1),
+            // Taproot with musig internal key + 2 SingleSig leaves: T(2)=1 → 1
+            ("tr(musig(@0,@1)/**,{pk(@2/**),pk(@3/**)})", 1),
+            // Taproot with musig internal key + 3 SingleSig leaves: T(3)=3 → 3
+            ("tr(musig(@0,@1)/**,{{pk(@2/**),pk(@3/**)},pk(@4/**)})", 3),
         ];
 
         for &(desc_str, expected) in cases {
@@ -1842,6 +1942,11 @@ mod tests {
             "tr(@0/**,{pk(@1/**),and_v(v:multi_a(2,@2/<0;1>/*,@3/<0;1>/*),after(840000))})",
             "tr(@0/**,and_v(v:pk(@1/<0;1>/*),after(500000000)))",
             "tr(@0/**,{pk(@1/**),and_v(v:multi_a(2,@2/<0;1>/*,@3/<0;1>/*),after(1700000000))})",
+            // Taproot with musig internal key
+            "tr(musig(@0,@1)/**)",
+            "tr(musig(@0,@1,@2)/**)",
+            "tr(musig(@0,@1)/**,pk(@2/**))",
+            "tr(musig(@0,@1)/**,{pk(@2/**),pk(@3/**)})",
         ];
         for &desc_str in cases {
             assert!(
@@ -2072,6 +2177,49 @@ mod tests {
                 true,
             ),
             // --------------------------------------------------------------------------------------
+            // Taproot with musig() internal key
+            // --------------------------------------------------------------------------------------
+            // Taproot: musig key-path only (2-of-2)
+            (
+                "tr(musig(@0,@1)/**)",
+                &["Primary path: 2 of @0 and @1"],
+                true,
+            ),
+            // Taproot: musig key-path only (3-of-3)
+            (
+                "tr(musig(@0,@1,@2)/**)",
+                &["Primary path: 3 of @0, @1 and @2"],
+                true,
+            ),
+            // Taproot: musig key-path + single leaf
+            (
+                "tr(musig(@0,@1)/**,pk(@2/**))",
+                &[
+                    "Primary path: 2 of @0 and @1",
+                    "Single-signature (@2)",
+                ],
+                true,
+            ),
+            // Taproot: musig key-path + two leaves
+            (
+                "tr(musig(@0,@1)/**,{pk(@2/**),pk(@3/**)})",
+                &[
+                    "Primary path: 2 of @0 and @1",
+                    "Single-signature (@2)",
+                    "Single-signature (@3)",
+                ],
+                true,
+            ),
+            // Taproot: musig key-path + relative heightlock leaf
+            (
+                "tr(musig(@0,@1)/**,and_v(v:pk(@2/<0;1>/*),older(1008)))",
+                &[
+                    "Primary path: 2 of @0 and @1",
+                    "@2 after 1008 blocks",
+                ],
+                true,
+            ),
+            // --------------------------------------------------------------------------------------
             // Non-canonical key derivations: cleartext must includes <num1;num2> for all derivations
             // --------------------------------------------------------------------------------------
             // Legacy single-sig: num1 is not 0 for the first (and only) occurrence
@@ -2178,6 +2326,14 @@ mod tests {
             // Taproot: BothMustSign (key repeated across leaves with canonical derivations)
             "tr(@0/<0;1>/*,{and_v(v:pk(@1/<0;1>/*),older(4383)),and_v(v:pk(@2/<0;1>/*),pk(@1/<2;3>/*))})",
             "tr(@0/<0;1>/*,{and_v(v:multi_a(2,@1/<0;1>/*,@2/<0;1>/*,@3/<0;1>/*),older(144)),and_v(v:pk(@1/<2;3>/*),pk(@2/<2;3>/*))})",
+            // Taproot: musig key-path only
+            "tr(musig(@0,@1)/**)",
+            "tr(musig(@0,@1,@2)/**)",
+            // Taproot: musig key-path with leaves
+            "tr(musig(@0,@1)/**,pk(@2/**))",
+            "tr(musig(@0,@1)/**,{pk(@2/**),pk(@3/**)})",
+            "tr(musig(@0,@1)/**,and_v(v:pk(@2/<0;1>/*),older(1008)))",
+            "tr(musig(@0,@1)/**,{pk(@2/**),and_v(v:pk(@3/<0;1>/*),after(840000))})",
         ];
 
         for &desc_str in cases {
