@@ -241,6 +241,12 @@ fn parse_keyword_call_from_ident(
                     let musig_content;
                     parenthesized!(musig_content in content);
                     let binding: Ident = musig_content.parse()?;
+                    if !musig_content.is_empty() {
+                        return Err(syn::Error::new(
+                            musig_content.span(),
+                            "musig(...) expects exactly one identifier",
+                        ));
+                    }
                     PatternArg::MusigBinding(binding)
                 } else {
                     let binding: Ident = content.parse()?;
