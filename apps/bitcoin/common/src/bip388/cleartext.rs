@@ -956,28 +956,61 @@ pub trait ClearText {
 }
 
 impl DescriptorTemplate {
-    // Verify that for each key index that appears multiple times in placeholders, the derivations are <0;1>/*,
-    // then <2;3>/*, etc. This guarantees that no information on the derivations is lost when omitting this part
-    // in the cleartext representation.
+    // Verify that, for each distinct key expression in placeholders, its k occurrences carry derivations
+    // (in some order) equal to <0;1>/*, <2;3>/*, ..., <2k-2;2k-1>/*. That is, after sorting the (num1, num2)
+    // pairs for each key, they must be exactly (0,1), (2,3), .... This guarantees that no information on
+    // the derivations is lost when omitting this part in the cleartext representation, up to the
+    // permutation of pair assignments to occurrences (which is accounted for in the confusion score).
     fn are_key_derivations_canonical(&self) -> bool {
-        let mut next_num1_per_key: alloc::collections::BTreeMap<super::KeyExpressionType, u64> =
-            alloc::collections::BTreeMap::new();
+        let mut pairs_per_key: alloc::collections::BTreeMap<
+            super::KeyExpressionType,
+            Vec<(u32, u32)>,
+        > = alloc::collections::BTreeMap::new();
 
         for (kp, _) in self.placeholders() {
-            let next_num1 = next_num1_per_key.entry(kp.key_type.clone()).or_insert(0);
-            if kp.num1 as u64 != *next_num1 || kp.num2 as u64 != *next_num1 + 1 {
-                return false;
+            pairs_per_key
+                .entry(kp.key_type.clone())
+                .or_default()
+                .push((kp.num1, kp.num2));
+        }
+
+        for pairs in pairs_per_key.values_mut() {
+            pairs.sort();
+            for (i, &(n1, n2)) in pairs.iter().enumerate() {
+                let expected = (2 * i as u32, 2 * i as u32 + 1);
+                if (n1, n2) != expected {
+                    return false;
+                }
             }
-            *next_num1 += 2;
         }
 
         true
+    }
+
+    // For each distinct key expression that appears k times in the placeholders, returns the product of
+    // k! across all keys. This is the number of distinct ways the canonical derivation pairs
+    // (0,1), (2,3), ... can be permuted across the k occurrences.
+    fn key_derivation_orderings_count(&self) -> u64 {
+        let mut counts: alloc::collections::BTreeMap<super::KeyExpressionType, u32> =
+            alloc::collections::BTreeMap::new();
+        for (kp, _) in self.placeholders() {
+            *counts.entry(kp.key_type.clone()).or_insert(0) += 1;
+        }
+        let mut product = 1u64;
+        for &k in counts.values() {
+            let mut f = 1u64;
+            for i in 1..=k as u64 {
+                f = f.saturating_mul(i);
+            }
+            product = product.saturating_mul(f);
+        }
+        product
     }
 }
 
 impl ClearText for DescriptorTemplate {
     fn confusion_score(&self) -> u64 {
-        match self.classify() {
+        let base = match self.classify() {
             DescriptorClass::LegacySingleSig { .. } => 1,
             DescriptorClass::SegwitSingleSig { .. } => 2, // wpkh and sh(wpkh)
             DescriptorClass::SegwitMultisig { .. } => 4, // multi or sortedmulti / normal or wrapped
@@ -1059,25 +1092,27 @@ impl ClearText for DescriptorTemplate {
                 score
             }
             DescriptorClass::Other => 1,
-        }
+        };
+        // For each key expression that appears k times in the descriptor template, multiply by k!
+        // to account for the possible re-orderings of the canonical derivation pairs across its
+        // occurrences. This is only applied at the root level (not when recurring).
+        base.saturating_mul(self.key_derivation_orderings_count())
     }
 
     fn to_cleartext(&self) -> (Vec<String>, bool) {
-        let canonical = self.are_key_derivations_canonical();
+        if !self.are_key_derivations_canonical() {
+            return (vec![self.to_string()], false);
+        }
         match self.classify() {
             class @ DescriptorClass::LegacySingleSig { .. }
             | class @ DescriptorClass::SegwitSingleSig { .. }
             | class @ DescriptorClass::SegwitMultisig { .. } => (
-                vec![class
-                    .to_cleartext_string(canonical)
-                    .expect("missing cleartext")],
-                canonical,
+                vec![class.to_cleartext_string(true).expect("missing cleartext")],
+                true,
             ),
             class @ DescriptorClass::Taproot { .. }
             | class @ DescriptorClass::TaprootMusig { .. } => {
-                let primary_path = class
-                    .to_cleartext_string(canonical)
-                    .expect("missing cleartext");
+                let primary_path = class.to_cleartext_string(true).expect("missing cleartext");
                 let mut leaves = match class {
                     DescriptorClass::Taproot { leaves, .. } => leaves,
                     DescriptorClass::TaprootMusig { leaves, .. } => leaves,
@@ -1085,9 +1120,9 @@ impl ClearText for DescriptorTemplate {
                 };
                 leaves.sort_by(|a, b| a.display_cmp(b));
                 let mut descriptions = vec![primary_path];
-                let mut all_leaves_have_cleartext = canonical;
+                let mut all_leaves_have_cleartext = true;
                 for leaf in leaves {
-                    if let Some(description) = leaf.to_cleartext_string(canonical) {
+                    if let Some(description) = leaf.to_cleartext_string(true) {
                         descriptions.push(description);
                     } else {
                         let TapleafClass::Other(raw) = leaf else {
@@ -1110,7 +1145,9 @@ impl ClearText for DescriptorTemplate {
         let mut variants = Vec::new();
         for class in parse_top_level_candidates(descriptions)? {
             for variant in top_level_variants(class)? {
-                push_unique(&mut variants, variant);
+                for permuted in expand_derivation_orderings(variant) {
+                    push_unique(&mut variants, permuted);
+                }
             }
         }
         Ok(Box::new(variants.into_iter()))
@@ -1479,6 +1516,103 @@ fn parse_spec_parts(
 fn push_unique<T: PartialEq>(items: &mut Vec<T>, item: T) {
     if !items.iter().any(|existing| existing == &item) {
         items.push(item);
+    }
+}
+
+#[cfg(any(test, feature = "cleartext-decode"))]
+fn permutations(n: usize) -> Vec<Vec<usize>> {
+    let mut result = Vec::new();
+    let mut current: Vec<usize> = (0..n).collect();
+    permute_helper(&mut current, 0, &mut result);
+    result
+}
+
+#[cfg(any(test, feature = "cleartext-decode"))]
+fn permute_helper(arr: &mut Vec<usize>, start: usize, out: &mut Vec<Vec<usize>>) {
+    if start == arr.len() {
+        out.push(arr.clone());
+        return;
+    }
+    for i in start..arr.len() {
+        arr.swap(start, i);
+        permute_helper(arr, start + 1, out);
+        arr.swap(start, i);
+    }
+}
+
+/// Given a base descriptor template (with canonical derivation pairs (0,1), (2,3), ...
+/// assigned to placeholder occurrences in source order, per key expression), return the
+/// list of all variants obtained by permuting the assignment of those canonical pairs
+/// across the occurrences of each key expression.
+#[cfg(any(test, feature = "cleartext-decode"))]
+fn expand_derivation_orderings(base: DescriptorTemplate) -> Vec<DescriptorTemplate> {
+    use alloc::collections::BTreeMap;
+
+    // Collect the source-order positions of placeholders, grouped by key expression.
+    let mut groups: BTreeMap<super::KeyExpressionType, Vec<usize>> = BTreeMap::new();
+    for (i, (kp, _)) in base.placeholders().enumerate() {
+        groups.entry(kp.key_type.clone()).or_default().push(i);
+    }
+
+    let positions_per_group: Vec<Vec<usize>> = groups.into_values().collect();
+    let perms_per_group: Vec<Vec<Vec<usize>>> = positions_per_group
+        .iter()
+        .map(|positions| permutations(positions.len()))
+        .collect();
+
+    let mut results = Vec::new();
+    let mut chosen: Vec<&Vec<usize>> = Vec::with_capacity(perms_per_group.len());
+    expand_derivation_orderings_rec(
+        &positions_per_group,
+        &perms_per_group,
+        &mut chosen,
+        &base,
+        &mut results,
+    );
+    results
+}
+
+#[cfg(any(test, feature = "cleartext-decode"))]
+fn expand_derivation_orderings_rec<'a>(
+    positions_per_group: &[Vec<usize>],
+    perms_per_group: &'a [Vec<Vec<usize>>],
+    chosen: &mut Vec<&'a Vec<usize>>,
+    base: &DescriptorTemplate,
+    results: &mut Vec<DescriptorTemplate>,
+) {
+    if chosen.len() == perms_per_group.len() {
+        // Build mapping: source-position -> (num1, num2)
+        let mut mapping: alloc::collections::BTreeMap<usize, (u32, u32)> =
+            alloc::collections::BTreeMap::new();
+        for (g, perm) in chosen.iter().enumerate() {
+            let positions = &positions_per_group[g];
+            for (slot, &src_pos) in positions.iter().enumerate() {
+                let p = perm[slot];
+                mapping.insert(src_pos, (2 * p as u32, 2 * p as u32 + 1));
+            }
+        }
+        let mut new_dt = base.clone();
+        let mut idx = 0;
+        for kp in new_dt.placeholders_mut() {
+            let (n1, n2) = mapping[&idx];
+            kp.num1 = n1;
+            kp.num2 = n2;
+            idx += 1;
+        }
+        results.push(new_dt);
+        return;
+    }
+    let g = chosen.len();
+    for p in &perms_per_group[g] {
+        chosen.push(p);
+        expand_derivation_orderings_rec(
+            positions_per_group,
+            perms_per_group,
+            chosen,
+            base,
+            results,
+        );
+        chosen.pop();
     }
 }
 
@@ -2076,6 +2210,16 @@ mod tests {
                 "tr(@0/**,{multi_a(2,@1/**,@2/**,@3/**),pk(musig(@4,@5)/**)})",
                 2,
             ),
+            (
+                // leaves are unambiguous, but keys @1 and @2 appear twice each, so the result is multiplied by 2! * 2!
+                "tr(@0/<0;1>/*,{and_v(v:multi_a(2,@1/<0;1>/*,@2/<0;1>/*,@3/<0;1>/*),older(144)),and_v(v:pk(@1/<2;3>/*),pk(@2/<2;3>/*))})", 
+                4
+            ),
+            (
+                // leaves are unambiguous, but keys @1 and @2 appear twice each, so the result is multiplied by 2! * 2!
+                "tr(@0/<0;1>/*,{and_v(v:multi_a(2,@1/<0;1>/*,@2/<0;1>/*,@3/<0;1>/*),older(144)),and_v(v:pk(@1/<2;3>/*),pk(@2/<2;3>/*))})", 
+                4
+            ),
         ];
 
         for &(desc_str, expected) in cases {
@@ -2130,6 +2274,12 @@ mod tests {
             "tr(@0/**,and_v(v:pk(musig(@1,@2)/**),older(4194484)))",
             "tr(@0/**,and_v(v:pk(musig(@1,@2)/**),after(840000)))",
             "tr(@0/**,and_v(v:pk(musig(@1,@2)/**),after(1700000000)))",
+            // Key derivation ordering tests (keys appear multiple times with canonical derivations)
+            "tr(@0/<0;1>/*,pk(@0/<2;3>/*))",
+            "tr(@0/<0;1>/*,{pk(@0/<2;3>/*),pk(@0/<4;5>/*)})",
+            "tr(@0/**,{pk(@1/<0;1>/*),pk(@1/<2;3>/*)})",
+            "tr(@0/**,{and_v(v:pk(@1/<0;1>/*),older(4383)),pk(@1/<2;3>/*)})",
+            "tr(@0/<0;1>/*,{pk(@0/<2;3>/*),and_v(v:pk(@1/<0;1>/*),pk(@1/<2;3>/*))})",
         ];
         for &desc_str in cases {
             assert!(
@@ -2452,47 +2602,30 @@ mod tests {
                 true,
             ),
             // --------------------------------------------------------------------------------------
-            // Non-canonical key derivations: cleartext must includes <num1;num2> for all derivations
+            // Non-canonical key derivations: no cleartext representation; raw to_string() is returned.
             // --------------------------------------------------------------------------------------
             // Legacy single-sig: num1 is not 0 for the first (and only) occurrence
             (
                 "pkh(@0/<2;3>/*)",
-                &["Legacy single-signature (@0/<2;3>/*)"],
+                &["pkh(@0/<2;3>/*)"],
                 false,
             ),
             // Segwit single-sig: num2 is not num1+1
             (
                 "wpkh(@0/<0;2>/*)",
-                &["Segwit single-signature (@0/<0;2>/*)"],
-                false,
-            ),
-            // 2-of-2 sortedmulti: first key has wrong num1
-            (
-                "wsh(sortedmulti(2,@0/<2;3>/*,@1/**))",
-                &["2 of @0/<2;3>/* and @1/<0;1>/* (SegWit)"],
+                &["wpkh(@0/<0;2>/*)"],
                 false,
             ),
             // Taproot, key-path only: internal key has non-canonical derivation
             (
                 "tr(@0/<4;5>/*)",
-                &["Primary path: @0/<4;5>/*"],
+                &["tr(@0/<4;5>/*)"],
                 false,
             ),
             // Taproot single leaf: internal key canonical, leaf key non-canonical
             (
                 "tr(@0/**,pk(@1/<2;3>/*))",
-                &["Primary path: @0/<0;1>/*", "Single-signature (@1/<2;3>/*)"],
-                false,
-            ),
-            // Taproot two leaves: same key index appears twice, derivations reversed
-            // (first occurrence has <2;3>, second has <0;1> — both must be shown verbatim)
-            (
-                "tr(@0/**,{pk(@1/<2;3>/*),pk(@1/<0;1>/*)})",
-                &[
-                    "Primary path: @0/<0;1>/*",
-                    "Single-signature (@1/<2;3>/*)",
-                    "Single-signature (@1/<0;1>/*)",
-                ],
+                &["tr(@0/**,pk(@1/<2;3>/*))"],
                 false,
             ),
         ];
@@ -2573,6 +2706,13 @@ mod tests {
             "tr(@0/**,and_v(v:pk(musig(@1,@2)/**),older(4194484)))",
             "tr(@0/**,and_v(v:pk(musig(@1,@2)/**),after(840000)))",
             "tr(@0/**,and_v(v:pk(musig(@1,@2)/**),after(1700000000)))",
+            // Key derivation ordering roundtrip tests
+            "tr(@0/<0;1>/*,pk(@0/<2;3>/*))",
+            "tr(@0/<0;1>/*,{pk(@0/<2;3>/*),pk(@0/<4;5>/*)})",
+            "tr(@0/**,{pk(@1/<0;1>/*),pk(@1/<2;3>/*)})",
+            "tr(@0/**,{and_v(v:pk(@1/<0;1>/*),older(4383)),pk(@1/<2;3>/*)})",
+            // @0 appears twice, @1 appears twice
+            "tr(@0/<0;1>/*,{pk(@0/<2;3>/*),and_v(v:pk(@1/<0;1>/*),pk(@1/<2;3>/*))})",
         ];
 
         for &desc_str in cases {
