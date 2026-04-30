@@ -1,6 +1,6 @@
 use crate::{
     account::{AccountCoordinates, WalletPolicy, WalletPolicyCoordinates},
-    bip388::KeyPlaceholder,
+    bip388::KeyExpression,
 };
 
 use alloc::{collections::btree_map::BTreeMap, string::String, vec::Vec};
@@ -35,6 +35,7 @@ pub enum PsbtAccountError {
     InvalidValue,
     TooManyAccounts,
     DeserializeError,
+    Unsupported,
 }
 
 fn is_valid_account_name(value: &[u8]) -> bool {
@@ -372,7 +373,7 @@ fn get_wallet_policy_coordinates(
     >,
     fingerprint: Fingerprint,
     origin_path_len: usize,
-    key_placeholder: &KeyPlaceholder,
+    key_placeholder: &KeyExpression,
 ) -> Option<WalletPolicyCoordinates> {
     // iterate over all derivations; if it's a key derived from the internal key,
     // deduce the coordinates and insert them
@@ -432,7 +433,7 @@ pub fn fill_psbt_with_bip388_coordinates(
     wallet_policy: &WalletPolicy,
     name: Option<&str>,
     proof_of_registrations: Option<&[u8]>,
-    key_placeholder: &KeyPlaceholder,
+    key_placeholder: &KeyExpression,
     account_id: u32,
 ) -> Result<(), PsbtAccountError> {
     psbt.set_account(account_id, PsbtAccount::WalletPolicy(wallet_policy.clone()))?;
@@ -443,8 +444,13 @@ pub fn fill_psbt_with_bip388_coordinates(
         psbt.set_account_proof_of_registration(account_id, por)?;
     }
 
+    // Musig key expressions are not yet supported for PSBT coordinate filling.
+    let key_index = key_placeholder
+        .plain_key_index()
+        .ok_or(PsbtAccountError::Unsupported)?;
+
     // we will look for keys derived from this
-    let key_expr = &wallet_policy.key_information[key_placeholder.key_index as usize];
+    let key_expr = &wallet_policy.key_information[key_index as usize];
     // When origin info is present, use its fingerprint and derivation-path length to
     // locate derived keys inside the PSBT.  When it is absent (e.g. a bare/resident
     // xpub), fall back to the xpub's own fingerprint with an origin path length of 0.
@@ -499,7 +505,7 @@ pub fn prepare_psbt(
     // TODO: generalize this function to support transactions involving multiple accounts, and accounts of different types.
     assert!(named_accounts.len() == 1);
     for (wallet_policy, account_name, por) in named_accounts {
-        let placeholders: Vec<KeyPlaceholder> = wallet_policy
+        let placeholders: Vec<KeyExpression> = wallet_policy
             .descriptor_template
             .placeholders()
             .map(|(k, _)| k.clone())
@@ -650,13 +656,13 @@ mod tests {
         let psbt_str = "cHNidP8BAKYCAAAAAp4s/ifwrYe3iiN9XXQF1KMGZso2HVhaRnsN/kImK020AQAAAAD9////r7+uBlkPdB/xr1m2rEYRJjNqTEqC21U99v76tzesM/MAAAAAAP3///8CqDoGAAAAAAAWABTrOPqbgSj4HybpXtsMX/rqg2kP5OCTBAAAAAAAIgAgP6lmyd3Nwv2W5KXhvHZbn69s6LPrTxEEqta993Mk5b4AAAAAAAEAcQIAAAABk2qy4BBy95PP5Ml3VN4bYf4D59tlNsiy8h3QtXQsSEUBAAAAAP7///8C3uHHAAAAAAAWABTreNfEC/EGOw4/zinDVltonIVZqxAnAAAAAAAAFgAUIxjWb4T+9cSHX5M7A43GODH42hP5lx4AAQEfECcAAAAAAAAWABQjGNZvhP71xIdfkzsDjcY4MfjaEyIGA0Ve587cl7C6Q1uABm/JLJY6NMYAMXmB0TUzDE7kOsejGPWswv1UAACAAQAAgAAAAIAAAAAAAQAAAAABAHEBAAAAAQ5HHvTpLBrLUe/IZg+NP2mTbqnJsr/3L/m8gcUe/PRkAQAAAAAAAAAAAmCuCgAAAAAAFgAUNcbg3W08hLFrqIXcpzrIY9C1k+yvBjIAAAAAABYAFNwobgzS5r03zr6ew0n7XwiQVnL8AAAAAAEBH2CuCgAAAAAAFgAUNcbg3W08hLFrqIXcpzrIY9C1k+wiBgJxtbd5rYcIOFh3l7z28MeuxavnanCdck9I0uJs+HTwoBj1rML9VAAAgAEAAIAAAACAAQAAAAAAAAAAIgICKexHcnEx7SWIogxG7amrt9qm9J/VC6/nC5xappYcTswY9azC/VQAAIABAACAAAAAgAEAAAAKAAAAAAA=";
         let mut psbt = psbt_from_str(psbt_str).unwrap();
 
-        let placeholders: Vec<KeyPlaceholder> = wallet_policy
+        let placeholders: Vec<KeyExpression> = wallet_policy
             .descriptor_template
             .placeholders()
             .map(|(k, _)| k.clone())
             .collect();
         assert!(placeholders.len() == 1);
-        let key_placeholder = placeholders[0];
+        let key_placeholder = &placeholders[0];
 
         let result = fill_psbt_with_bip388_coordinates(
             &mut psbt,

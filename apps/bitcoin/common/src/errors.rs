@@ -17,6 +17,7 @@ pub enum Error {
     InvalidScriptContext,
     TooManyKeys,
     InvalidMultisigQuorum,
+    UnsupportedWalletPolicy,
 
     // Derivation / crypto
     DerivationPathTooLong,
@@ -82,7 +83,7 @@ impl fmt::Display for Error {
             InvalidScriptContext => write!(f, "Invalid script context"),
             TooManyKeys => write!(f, "Too many keys"),
             InvalidMultisigQuorum => write!(f, "Invalid multisig quorum"),
-
+            UnsupportedWalletPolicy => write!(f, "Unsupported wallet policy"),
             DerivationPathTooLong => write!(f, "Derivation path is too long"),
             KeyDerivationFailed => write!(f, "Failed to derive key for the given path"),
             HardenedDerivationNotSupported => write!(f, "Hardened derivation is not supported for resident keys"),

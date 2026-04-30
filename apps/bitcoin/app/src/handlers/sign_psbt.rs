@@ -151,7 +151,7 @@ fn resolve_private_key(
 fn sign_input_ecdsa(
     psbt: &fastpsbt::Psbt,
     input_index: usize,
-    sighash_cache: &mut SighashCache<Transaction>,
+    sighash_cache: &mut SighashCache<&Transaction>,
     key_source: &KeySource,
 ) -> Result<PartialSignature, Error> {
     let (sighash, sighash_type) = psbt
@@ -181,7 +181,7 @@ fn sign_input_ecdsa(
 
 fn sign_input_schnorr(
     input_index: usize,
-    sighash_cache: &mut SighashCache<Transaction>,
+    sighash_cache: &mut SighashCache<&Transaction>,
     prevouts: &[TxOut],
     key_source: &KeySource,
     taptree_hash: Option<[u8; 32]>,
@@ -681,7 +681,7 @@ fn sign_all_inputs(
     let unsigned_tx = psbt
         .unsigned_tx()
         .map_err(|_| Error::FailedUnsignedTransaction)?;
-    let mut sighash_cache = SighashCache::new(unsigned_tx.clone());
+    let mut sighash_cache = SighashCache::new(unsigned_tx);
 
     let mut prevouts: Option<Vec<TxOut>> = None;
     let master_fingerprint = sdk::curve::Secp256k1::get_master_fingerprint();
@@ -697,7 +697,11 @@ fn sign_all_inputs(
         let PsbtAccount::WalletPolicy(wallet_policy) = &summary.accounts[account_id as usize];
 
         for (kp, tapleaf_desc) in wallet_policy.descriptor_template.placeholders() {
-            let key_info = wallet_policy.key_information[kp.key_index as usize].clone();
+            let key_index = match kp.plain_key_index() {
+                Some(idx) => idx,
+                None => continue, // musig key expressions not yet supported for signing
+            };
+            let key_info = &wallet_policy.key_information[key_index as usize];
 
             // Determine the key source: either the master seed (fingerprint match)
             // or the resident key (compressed pubkey + synthetic chaincode match).
