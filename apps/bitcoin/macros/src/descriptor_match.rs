@@ -95,7 +95,7 @@ enum DescPattern {
 
 enum PatternArg {
     Binding(Ident),
-    /// Match only `musig()` key expressions; binds the musig key indices.
+    /// Match only `musig()` key expressions; binds the whole musig key expression.
     MusigBinding(Ident),
     SubPattern {
         wrappers: Vec<String>,
@@ -373,11 +373,12 @@ enum MatchStep {
         /// The key list expression to check (as tokens).
         key_list_expr: TokenStream,
     },
-    /// Check that a key expression is `musig()` and bind the musig key indices.
+    /// Check that a key expression is `musig()` and bind a temporary variable
+    /// for the matched musig key expression used by later code generation.
     MusigKey {
         /// The key expression to check (as tokens).
         key_expr: TokenStream,
-        /// Temporary variable for the musig key indices.
+        /// Temporary variable holding the matched musig key expression.
         temp_var: Ident,
     },
 }
