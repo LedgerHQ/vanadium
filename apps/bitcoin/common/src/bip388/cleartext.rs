@@ -1528,24 +1528,51 @@ fn push_unique<T: PartialEq>(items: &mut Vec<T>, item: T) {
     }
 }
 
+/// Lazy iterator that generates permutations of `[0, 1, ..., n-1]` in lexicographic order
+/// without storing them all in memory.
 #[cfg(any(test, feature = "cleartext-decode"))]
-fn permutations(n: usize) -> Vec<Vec<usize>> {
-    let mut result = Vec::new();
-    let mut current: Vec<usize> = (0..n).collect();
-    permute_helper(&mut current, 0, &mut result);
-    result
+struct PermutationIter {
+    current: Vec<usize>,
+    first: bool,
+    done: bool,
 }
 
 #[cfg(any(test, feature = "cleartext-decode"))]
-fn permute_helper(arr: &mut Vec<usize>, start: usize, out: &mut Vec<Vec<usize>>) {
-    if start == arr.len() {
-        out.push(arr.clone());
-        return;
+impl PermutationIter {
+    fn new(n: usize) -> Self {
+        Self {
+            current: (0..n).collect(),
+            first: true,
+            done: n == 0,
+        }
     }
-    for i in start..arr.len() {
-        arr.swap(start, i);
-        permute_helper(arr, start + 1, out);
-        arr.swap(start, i);
+}
+
+#[cfg(any(test, feature = "cleartext-decode"))]
+impl Iterator for PermutationIter {
+    type Item = Vec<usize>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.done {
+            return None;
+        }
+        if self.first {
+            self.first = false;
+            return Some(self.current.clone());
+        }
+        let n = self.current.len();
+        // Find largest i such that current[i] < current[i + 1]
+        let Some(i) = (0..n - 1).rfind(|&k| self.current[k] < self.current[k + 1]) else {
+            self.done = true;
+            return None;
+        };
+        // Find largest j such that current[i] < current[j]
+        let j = (0..n)
+            .rfind(|&j| self.current[i] < self.current[j])
+            .unwrap();
+        self.current.swap(i, j);
+        self.current[i + 1..].reverse();
+        Some(self.current.clone())
     }
 }
 
@@ -1564,16 +1591,13 @@ fn expand_derivation_orderings(base: DescriptorTemplate) -> Vec<DescriptorTempla
     }
 
     let positions_per_group: Vec<Vec<usize>> = groups.into_values().collect();
-    let perms_per_group: Vec<Vec<Vec<usize>>> = positions_per_group
-        .iter()
-        .map(|positions| permutations(positions.len()))
-        .collect();
+    let group_sizes: Vec<usize> = positions_per_group.iter().map(|p| p.len()).collect();
 
     let mut results = Vec::new();
-    let mut chosen: Vec<&Vec<usize>> = Vec::with_capacity(perms_per_group.len());
+    let mut chosen: Vec<Vec<usize>> = Vec::with_capacity(group_sizes.len());
     expand_derivation_orderings_rec(
         &positions_per_group,
-        &perms_per_group,
+        &group_sizes,
         &mut chosen,
         &base,
         &mut results,
@@ -1582,14 +1606,14 @@ fn expand_derivation_orderings(base: DescriptorTemplate) -> Vec<DescriptorTempla
 }
 
 #[cfg(any(test, feature = "cleartext-decode"))]
-fn expand_derivation_orderings_rec<'a>(
+fn expand_derivation_orderings_rec(
     positions_per_group: &[Vec<usize>],
-    perms_per_group: &'a [Vec<Vec<usize>>],
-    chosen: &mut Vec<&'a Vec<usize>>,
+    group_sizes: &[usize],
+    chosen: &mut Vec<Vec<usize>>,
     base: &DescriptorTemplate,
     results: &mut Vec<DescriptorTemplate>,
 ) {
-    if chosen.len() == perms_per_group.len() {
+    if chosen.len() == group_sizes.len() {
         // Build mapping: source-position -> (num1, num2)
         let mut mapping: alloc::collections::BTreeMap<usize, (u32, u32)> =
             alloc::collections::BTreeMap::new();
@@ -1612,15 +1636,9 @@ fn expand_derivation_orderings_rec<'a>(
         return;
     }
     let g = chosen.len();
-    for p in &perms_per_group[g] {
-        chosen.push(p);
-        expand_derivation_orderings_rec(
-            positions_per_group,
-            perms_per_group,
-            chosen,
-            base,
-            results,
-        );
+    for perm in PermutationIter::new(group_sizes[g]) {
+        chosen.push(perm);
+        expand_derivation_orderings_rec(positions_per_group, group_sizes, chosen, base, results);
         chosen.pop();
     }
 }
