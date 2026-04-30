@@ -48,10 +48,19 @@ pub const MAX_CONFUSION_SCORE: u64 = 3600;
 const SEQUENCE_LOCKTIME_TYPE_FLAG: u32 = 1 << 22;
 
 /// Error type for `from_cleartext`.
+#[cfg(any(test, feature = "cleartext-decode"))]
 #[derive(Debug)]
-pub enum CleartextError {
-    /// The cleartext string could not be parsed.
-    ParseError(String),
+pub enum CleartextDecodeError {
+    /// The input descriptions slice was empty.
+    EmptyInput,
+    /// The cleartext string could not be matched to any known pattern.
+    UnrecognizedPattern,
+    /// A descriptor template string embedded in the cleartext could not be parsed.
+    InvalidDescriptor(String),
+    /// A key placeholder was expected to be a plain key but was not.
+    ExpectedPlainKey,
+    /// Internal inconsistency in spec/pattern matching (should not happen).
+    InternalError(&'static str),
 }
 
 // Private intermediate representations for the DescriptorTemplate variants for the root descriptor template that have
@@ -950,7 +959,7 @@ pub trait ClearText {
     #[cfg(any(test, feature = "cleartext-decode"))]
     fn from_cleartext(
         descriptions: &[&str],
-    ) -> Result<Box<dyn Iterator<Item = Self>>, CleartextError>
+    ) -> Result<Box<dyn Iterator<Item = Self>>, CleartextDecodeError>
     where
         Self: Sized;
 }
@@ -1141,7 +1150,7 @@ impl ClearText for DescriptorTemplate {
     #[cfg(any(test, feature = "cleartext-decode"))]
     fn from_cleartext(
         descriptions: &[&str],
-    ) -> Result<Box<dyn Iterator<Item = Self>>, CleartextError> {
+    ) -> Result<Box<dyn Iterator<Item = Self>>, CleartextDecodeError> {
         let mut variants = Vec::new();
         for class in parse_top_level_candidates(descriptions)? {
             for variant in top_level_variants(class)? {
@@ -1617,13 +1626,14 @@ fn expand_derivation_orderings_rec<'a>(
 }
 
 #[cfg(any(test, feature = "cleartext-decode"))]
-fn parse_leaf_candidates(s: &str) -> Result<Vec<TapleafClass>, CleartextError> {
+fn parse_leaf_candidates(s: &str) -> Result<Vec<TapleafClass>, CleartextDecodeError> {
     let mut leaves = Vec::new();
     for (kind, values) in parse_with_specs(TAPLEAF_SPECS, s) {
         push_unique(
             &mut leaves,
-            TapleafClass::from_cleartext_pattern(kind, values)
-                .expect("spec/from_cleartext_pattern mismatch: this is a bug"),
+            TapleafClass::from_cleartext_pattern(kind, values).ok_or(
+                CleartextDecodeError::InternalError("spec/from_cleartext_pattern mismatch"),
+            )?,
         );
     }
     if leaves.is_empty() {
@@ -1653,17 +1663,18 @@ fn collect_tapleaf_combinations(
 #[cfg(any(test, feature = "cleartext-decode"))]
 fn parse_top_level_candidates(
     descriptions: &[&str],
-) -> Result<Vec<DescriptorClass>, CleartextError> {
-    let err = || CleartextError::ParseError("unrecognized cleartext".into());
+) -> Result<Vec<DescriptorClass>, CleartextDecodeError> {
+    let err = || CleartextDecodeError::UnrecognizedPattern;
     match descriptions {
-        [] => Err(CleartextError::ParseError("empty descriptions".into())),
+        [] => Err(CleartextDecodeError::EmptyInput),
         [single] => {
             let mut classes = Vec::new();
             for (kind, values) in parse_with_specs(TOP_LEVEL_SPECS, single) {
                 push_unique(
                     &mut classes,
-                    DescriptorClass::from_cleartext_pattern(kind, values)
-                        .expect("spec/from_cleartext_pattern mismatch: this is a bug"),
+                    DescriptorClass::from_cleartext_pattern(kind, values).ok_or(
+                        CleartextDecodeError::InternalError("spec/from_cleartext_pattern mismatch"),
+                    )?,
                 );
             }
             if classes.is_empty() {
@@ -1686,8 +1697,9 @@ fn parse_top_level_candidates(
             );
 
             for (kind, values) in parse_with_specs(TOP_LEVEL_SPECS, first) {
-                let base_class = DescriptorClass::from_cleartext_pattern(kind, values)
-                    .expect("spec/from_cleartext_pattern mismatch: this is a bug");
+                let base_class = DescriptorClass::from_cleartext_pattern(kind, values).ok_or(
+                    CleartextDecodeError::InternalError("spec/from_cleartext_pattern mismatch"),
+                )?;
                 match base_class {
                     DescriptorClass::Taproot { internal_key, .. } => {
                         for leaves in &leaf_combinations {
@@ -1729,7 +1741,9 @@ fn parse_top_level_candidates(
 // ---------------------------------------------------------------------------
 
 #[cfg(any(test, feature = "cleartext-decode"))]
-fn tapleaf_to_descriptors(leaf: &TapleafClass) -> Result<Vec<DescriptorTemplate>, CleartextError> {
+fn tapleaf_to_descriptors(
+    leaf: &TapleafClass,
+) -> Result<Vec<DescriptorTemplate>, CleartextDecodeError> {
     match leaf {
         TapleafClass::SingleSig { key } => Ok(vec![DescriptorTemplate::Pk(key.clone())]),
         TapleafClass::BothMustSign { key1, key2 } => Ok(vec![DescriptorTemplate::And_v(
@@ -1748,7 +1762,12 @@ fn tapleaf_to_descriptors(leaf: &TapleafClass) -> Result<Vec<DescriptorTemplate>
             let mut variants = vec![DescriptorTemplate::Multi_a(*threshold, keys.clone())];
             if *threshold as usize == keys.len() {
                 variants.push(DescriptorTemplate::Pk(KeyPlaceholder::musig(
-                    keys.iter().map(|k| k.plain_key_index().unwrap()).collect(),
+                    keys.iter()
+                        .map(|k| {
+                            k.plain_key_index()
+                                .ok_or(CleartextDecodeError::ExpectedPlainKey)
+                        })
+                        .collect::<Result<Vec<_>, _>>()?,
                     0,
                     1,
                 )));
@@ -1789,7 +1808,12 @@ fn tapleaf_to_descriptors(leaf: &TapleafClass) -> Result<Vec<DescriptorTemplate>
                 variants.push(DescriptorTemplate::And_v(
                     Box::new(DescriptorTemplate::V(Box::new(DescriptorTemplate::Pk(
                         KeyPlaceholder::musig(
-                            keys.iter().map(|k| k.plain_key_index().unwrap()).collect(),
+                            keys.iter()
+                                .map(|k| {
+                                    k.plain_key_index()
+                                        .ok_or(CleartextDecodeError::ExpectedPlainKey)
+                                })
+                                .collect::<Result<Vec<_>, _>>()?,
                             0,
                             1,
                         ),
@@ -1833,7 +1857,12 @@ fn tapleaf_to_descriptors(leaf: &TapleafClass) -> Result<Vec<DescriptorTemplate>
                 variants.push(DescriptorTemplate::And_v(
                     Box::new(DescriptorTemplate::V(Box::new(DescriptorTemplate::Pk(
                         KeyPlaceholder::musig(
-                            keys.iter().map(|k| k.plain_key_index().unwrap()).collect(),
+                            keys.iter()
+                                .map(|k| {
+                                    k.plain_key_index()
+                                        .ok_or(CleartextDecodeError::ExpectedPlainKey)
+                                })
+                                .collect::<Result<Vec<_>, _>>()?,
                             0,
                             1,
                         ),
@@ -1879,7 +1908,12 @@ fn tapleaf_to_descriptors(leaf: &TapleafClass) -> Result<Vec<DescriptorTemplate>
                 variants.push(DescriptorTemplate::And_v(
                     Box::new(DescriptorTemplate::V(Box::new(DescriptorTemplate::Pk(
                         KeyPlaceholder::musig(
-                            keys.iter().map(|k| k.plain_key_index().unwrap()).collect(),
+                            keys.iter()
+                                .map(|k| {
+                                    k.plain_key_index()
+                                        .ok_or(CleartextDecodeError::ExpectedPlainKey)
+                                })
+                                .collect::<Result<Vec<_>, _>>()?,
                             0,
                             1,
                         ),
@@ -1925,7 +1959,12 @@ fn tapleaf_to_descriptors(leaf: &TapleafClass) -> Result<Vec<DescriptorTemplate>
                 variants.push(DescriptorTemplate::And_v(
                     Box::new(DescriptorTemplate::V(Box::new(DescriptorTemplate::Pk(
                         KeyPlaceholder::musig(
-                            keys.iter().map(|k| k.plain_key_index().unwrap()).collect(),
+                            keys.iter()
+                                .map(|k| {
+                                    k.plain_key_index()
+                                        .ok_or(CleartextDecodeError::ExpectedPlainKey)
+                                })
+                                .collect::<Result<Vec<_>, _>>()?,
                             0,
                             1,
                         ),
@@ -1937,7 +1976,7 @@ fn tapleaf_to_descriptors(leaf: &TapleafClass) -> Result<Vec<DescriptorTemplate>
         }
         TapleafClass::Other(s) => {
             let dt = DescriptorTemplate::from_str(s)
-                .map_err(|e| CleartextError::ParseError(format!("{:?}", e)))?;
+                .map_err(|e| CleartextDecodeError::InvalidDescriptor(format!("{:?}", e)))?;
             Ok(vec![dt])
         }
     }
@@ -2026,7 +2065,7 @@ fn enumerate_taptrees_indices(
 #[cfg(any(test, feature = "cleartext-decode"))]
 fn top_level_variants(
     class: DescriptorClass,
-) -> Result<Box<dyn Iterator<Item = DescriptorTemplate>>, CleartextError> {
+) -> Result<Box<dyn Iterator<Item = DescriptorTemplate>>, CleartextDecodeError> {
     match class {
         DescriptorClass::LegacySingleSig { key } => {
             Ok(Box::new(core::iter::once(DescriptorTemplate::Pkh(key))))
@@ -2113,9 +2152,7 @@ fn top_level_variants(
                 dt
             })))
         }
-        DescriptorClass::Other => Err(CleartextError::ParseError(
-            "cannot enumerate variants for unrecognized descriptor class".into(),
-        )),
+        DescriptorClass::Other => Err(CleartextDecodeError::UnrecognizedPattern),
     }
 }
 
@@ -2209,11 +2246,6 @@ mod tests {
             (
                 "tr(@0/**,{multi_a(2,@1/**,@2/**,@3/**),pk(musig(@4,@5)/**)})",
                 2,
-            ),
-            (
-                // leaves are unambiguous, but keys @1 and @2 appear twice each, so the result is multiplied by 2! * 2!
-                "tr(@0/<0;1>/*,{and_v(v:multi_a(2,@1/<0;1>/*,@2/<0;1>/*,@3/<0;1>/*),older(144)),and_v(v:pk(@1/<2;3>/*),pk(@2/<2;3>/*))})", 
-                4
             ),
             (
                 // leaves are unambiguous, but keys @1 and @2 appear twice each, so the result is multiplied by 2! * 2!
