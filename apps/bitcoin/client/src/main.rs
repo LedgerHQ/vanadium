@@ -62,7 +62,7 @@ enum CliCommand {
         #[clap(long)]
         keys_info: String,
         /// If set, show a human-readable cleartext description of the descriptor
-        /// template on screen (when its complexity score is at most MAX_CONFUSION_SCORE).
+        /// template on screen (when its confusion score is at most MAX_CONFUSION_SCORE).
         #[clap(long, default_missing_value = "true", num_args = 0..=1)]
         show_cleartext: bool,
     },
