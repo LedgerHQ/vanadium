@@ -30,6 +30,10 @@ subtle = { version="2.6.1", default-features = false }
 hex-literal = "0.4.1"
 sdk = { package = "vanadium-app-sdk", path = "../../../app-sdk", default-features = false, features = ["target_native"] }
 
+[build-dependencies]
+toml = { version = "0.8", default-features = false, features = ["parse"] }
+serde = { version = "1.0", features = ["derive"] }
+
 [profile.release]
 opt-level = 3
 lto = true
