@@ -1,9 +1,10 @@
 This document details the specifications of extensions to the PSBT format used by the Vanadium Bitcoin app.
 
-Two extensions are currently defined:
+Three extensions are currently defined:
 
 - **Accounts**: The signing flow uses BIP-388 wallet policies (or other account abstractions) to identify inputs and outputs that belong to known accounts. The PSBT contains the necessary information to easily verify that UTXOs belong to the claimed accounts.
 - **Authenticated outputs**: Outputs that do not belong to known accounts can be *authenticated* by attaching a signature from a pubkey with an established Root of Trust.
+- **Signing policies**: Resident-key xpubs whose chaincode is the hash of a scripting-engine program can authorize signing programmatically. The cleartext program is carried in the PSBT.
 
 # Accounts and coordinates
 
@@ -101,3 +102,30 @@ For each output, a signer should verify each provided proof against that output'
 
 - If a proof is well-formed and valid, it may be used for UX authentication if the pubkey is trusted.
 - If a proof is malformed or invalid, signing should be aborted.
+
+# Signing policies
+
+A *signing policy* is a program (in some scripting engine) that decides, at signing time, whether the device should produce signatures with a given resident key. The chaincode of the resident-key xpub commits to the policy: when the chaincode does not start with 30 zero bytes (the legacy-resident-key prefix), it is interpreted as the SHA-256 of the policy program's serialized representation. The cleartext policy is provided in the PSBT, the device checks the hash, executes the program against the PSBT, and uses the program's return value to decide whether to sign and whether to do so without explicit user confirmation.
+
+Engines are identified by a 1-byte `engine_id`. Each engine declares an `engine_version` byte that is part of the hashed value: incrementing the version invalidates every policy previously registered against that engine.
+
+| `engine_id` | Engine                                                 |
+|-------------|--------------------------------------------------------|
+| `0x00`      | [Rhai](https://rhai.rs/) scripting language            |
+
+Signing policies are carried in proprietary PSBT fields using the proprietary identifier `SIGNING_POLICY` (all uppercase). Within `PSBT_GLOBAL_PROPRIETARY`, multiple entries with distinct hashes are allowed: one signing policy per resident-key xpub involved in the transaction, indexed by hash.
+
+## Global subkey types
+
+| Name&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;| `<subkeytype>`&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;| `<subkeydata>`&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;| `<subkeydata>` Description | `<valuedata>`&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;| `<valuedata>`&nbsp;Description&nbsp;&nbsp; | Versions Requiring Inclusion | Versions Requiring Exclusion | Versions Allowing Inclusion | Parent BIP |
+|---------------------|--------------------------------------------------|-----------------------|-----------------------------|-----------------------------------------------------------------------|--------------------------------------------------------------------|-|-|------|--------|
+| Policy Script       | `PSBT_SIGNING_POLICY_GLOBAL_SCRIPT = 0x00`       | `<32-byte policy hash>` | The SHA-256 of `<valuedata>`. Must equal the chaincode of every resident-key xpub bound to this policy. | `<1-byte engine_id> <1-byte engine_version> <compact size script length> <script bytes>` | The scripting engine, its version, and the program source. | | | 0, 2 | No BIP |
+
+Verifier requirements:
+
+- For each `Policy Script` entry, `SHA-256(<valuedata>)` MUST equal the entry's `<subkeydata>`.
+- For each resident-key xpub involved in signing whose chaincode does not start with 30 zero bytes, there MUST be exactly one matching `Policy Script` entry.
+- The signer MAY reject the PSBT if it contains `Policy Script` entries that are not referenced by any signing key.
+- For each referenced `Policy Script` entry, the signer dispatches to the engine identified by `engine_id`, refuses to proceed if the engine or `engine_version` is unsupported, and executes the script in a sandbox.
+
+The script must return one of three sentinel values: `DENY`, `APPROVE`, or `APPROVE_SILENT`. `DENY` removes the bound xpub from the signing set; `APPROVE` permits signing with the standard user-confirmation flow; `APPROVE_SILENT` permits signing without prompting the user, but is only honored if every key used in the transaction comes from a policy-mode resident key that also returned `APPROVE_SILENT`.

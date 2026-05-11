@@ -63,6 +63,13 @@ pub enum Error {
     // Storage errors
     StorageError,
 
+    // Signing policy
+    InvalidSigningPolicy,
+    SigningPolicyMissing,
+    UnsupportedPolicyEngine,
+    PolicyExecutionFailed,
+    PolicyRejected,
+
     // User rejections (separate to keep enum small and avoid strings)
     UserRejected,
 }
@@ -133,6 +140,12 @@ impl fmt::Display for Error {
             UnexpectedSegwitVersion => write!(f, "Unexpected state: should be SegwitV0 or Taproot"),
 
             StorageError => write!(f, "Storage error"),
+
+            InvalidSigningPolicy => write!(f, "Invalid signing policy entry in PSBT"),
+            SigningPolicyMissing => write!(f, "Signing policy referenced by a resident-key xpub is missing from the PSBT"),
+            UnsupportedPolicyEngine => write!(f, "Unsupported signing policy engine"),
+            PolicyExecutionFailed => write!(f, "Signing policy script failed to execute"),
+            PolicyRejected => write!(f, "Signing policy rejected the transaction"),
 
             UserRejected => write!(f, "Rejected by the user"),
         }

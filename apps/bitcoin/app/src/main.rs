@@ -6,6 +6,7 @@ mod bip32;
 mod constants;
 mod handlers;
 mod identity;
+mod policy;
 mod resident_key;
 
 use handlers::*;
