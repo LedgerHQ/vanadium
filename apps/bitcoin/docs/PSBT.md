@@ -105,7 +105,30 @@ For each output, a signer should verify each provided proof against that output'
 
 # Signing policies
 
-A *signing policy* is a program (in some scripting engine) that decides, at signing time, whether the device should produce signatures with a given resident key. The chaincode of the resident-key xpub commits to the policy: when the chaincode does not start with 30 zero bytes (the legacy-resident-key prefix), it is interpreted as the SHA-256 of the policy program's serialized representation. The cleartext policy is provided in the PSBT, the device checks the hash, executes the program against the PSBT, and uses the program's return value to decide whether to sign and whether to do so without explicit user confirmation.
+A *signing policy* is a program (in some scripting engine) that decides, at signing time, whether the device should produce signatures with a given key. The chaincode of the xpub committed in the wallet policy doubles as the policy hash: when the device determines that an xpub's chaincode is a *synthetic* value rather than the canonical one for its key class, the chaincode is interpreted as the SHA-256 of the policy program's serialized representation. The cleartext policy is provided in the PSBT, the device checks the hash, executes the program against the PSBT, and uses the program's return value to decide whether to sign and whether to do so without explicit user confirmation.
+
+This mechanism applies uniformly to every xpub a signing device knows how to use, whether the corresponding private key is master-seed-derived or device-resident.
+
+## How the device detects a policy-bound xpub
+
+The wallet policy already commits to each xpub via the proof-of-registration. The chaincode in those xpubs is *content-addressed* to the policy: if the chaincode equals the canonical value for the key class, no policy is involved; otherwise, the chaincode is the policy hash and the device must find and evaluate a matching `Policy Script` entry. Detection differs by key class:
+
+- **Master-seed-derived keys** (the xpub's origin info matches the device's master fingerprint): the device derives the parent HD node at the key's origin path and compares the resulting BIP-32 chaincode to the xpub's chaincode. Equal → no policy; different → policy-bound, with the policy hash equal to the xpub's chaincode.
+- **Resident-key xpubs** (the xpub's public key matches the device's resident public key): the device checks whether the chaincode begins with 30 zero bytes (the legacy convention used by `get_resident_pubkey` to encode a sub-key index). All zero prefix → no policy; otherwise → policy-bound.
+
+In both cases an attacker cannot turn a normal xpub into a policy-bound one without finding a SHA-256 preimage of a value they do not control, which is computationally infeasible.
+
+## Signing-key derivation for policy-bound keys
+
+Once the chaincode is treated as a synthetic value, the device signs by:
+
+1. Obtaining the *parent* private key — derived from the master seed at the origin path for master-seed keys, or simply the device's resident private key for resident keys.
+2. Pairing it with the xpub's synthetic chaincode to form an HD node.
+3. Performing the standard two-step BIP-32 non-hardened derivation `change_step / address_index` from that node.
+
+For master-seed keys whose chaincode equals the canonical BIP-32 chaincode (the no-policy case), the same procedure produces byte-identical output to the standard `derive_hd_node(origin_path / change / index)` derivation. The unified derivation therefore covers both cases without behavioural drift.
+
+## Engines
 
 Engines are identified by a 1-byte `engine_id`. Each engine declares an `engine_version` byte that is part of the hashed value: incrementing the version invalidates every policy previously registered against that engine.
 
@@ -113,19 +136,21 @@ Engines are identified by a 1-byte `engine_id`. Each engine declares an `engine_
 |-------------|--------------------------------------------------------|
 | `0x00`      | [Rhai](https://rhai.rs/) scripting language            |
 
-Signing policies are carried in proprietary PSBT fields using the proprietary identifier `SIGNING_POLICY` (all uppercase). Within `PSBT_GLOBAL_PROPRIETARY`, multiple entries with distinct hashes are allowed: one signing policy per resident-key xpub involved in the transaction, indexed by hash.
+## PSBT representation
 
-## Global subkey types
+Signing policies are carried in proprietary PSBT fields using the proprietary identifier `SIGNING_POLICY` (all uppercase). Within `PSBT_GLOBAL_PROPRIETARY`, multiple entries with distinct hashes are allowed: one signing policy per policy-bound xpub involved in the transaction, indexed by hash.
+
+### Global subkey types
 
 | Name&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;| `<subkeytype>`&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;| `<subkeydata>`&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;| `<subkeydata>` Description | `<valuedata>`&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;| `<valuedata>`&nbsp;Description&nbsp;&nbsp; | Versions Requiring Inclusion | Versions Requiring Exclusion | Versions Allowing Inclusion | Parent BIP |
 |---------------------|--------------------------------------------------|-----------------------|-----------------------------|-----------------------------------------------------------------------|--------------------------------------------------------------------|-|-|------|--------|
-| Policy Script       | `PSBT_SIGNING_POLICY_GLOBAL_SCRIPT = 0x00`       | `<32-byte policy hash>` | The SHA-256 of `<valuedata>`. Must equal the chaincode of every resident-key xpub bound to this policy. | `<1-byte engine_id> <1-byte engine_version> <compact size script length> <script bytes>` | The scripting engine, its version, and the program source. | | | 0, 2 | No BIP |
+| Policy Script       | `PSBT_SIGNING_POLICY_GLOBAL_SCRIPT = 0x00`       | `<32-byte policy hash>` | The SHA-256 of `<valuedata>`. Must equal the chaincode of every xpub bound to this policy. | `<1-byte engine_id> <1-byte engine_version> <compact size script length> <script bytes>` | The scripting engine, its version, and the program source. | | | 0, 2 | No BIP |
 
-Verifier requirements:
+### Verifier requirements
 
 - For each `Policy Script` entry, `SHA-256(<valuedata>)` MUST equal the entry's `<subkeydata>`.
-- For each resident-key xpub involved in signing whose chaincode does not start with 30 zero bytes, there MUST be exactly one matching `Policy Script` entry.
+- For each xpub involved in signing that the device classifies as policy-bound (per the detection rules above), there MUST be exactly one matching `Policy Script` entry.
 - The signer MAY reject the PSBT if it contains `Policy Script` entries that are not referenced by any signing key.
 - For each referenced `Policy Script` entry, the signer dispatches to the engine identified by `engine_id`, refuses to proceed if the engine or `engine_version` is unsupported, and executes the script in a sandbox.
 
-The script must return one of three sentinel values: `DENY`, `APPROVE`, or `APPROVE_SILENT`. `DENY` removes the bound xpub from the signing set; `APPROVE` permits signing with the standard user-confirmation flow; `APPROVE_SILENT` permits signing without prompting the user, but is only honored if every key used in the transaction comes from a policy-mode resident key that also returned `APPROVE_SILENT`.
+The script must return one of three sentinel values: `DENY`, `APPROVE`, or `APPROVE_SILENT`. `DENY` removes the bound xpub from the signing set; `APPROVE` permits signing with the standard user-confirmation flow; `APPROVE_SILENT` permits signing without prompting the user, but is only honored if every key used in the transaction is policy-bound and *all* such policies returned `APPROVE_SILENT`. Any normal-mode signer (a master-seed key without a policy, or a legacy resident key) anywhere in the signing set forces a confirmation prompt.

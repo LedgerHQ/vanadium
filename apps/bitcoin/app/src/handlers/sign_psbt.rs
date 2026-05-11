@@ -138,20 +138,13 @@ enum KeyMatchKind {
     None,
     /// Master-seed key (matches by fingerprint).
     Master,
-    /// Resident key, legacy mode (chaincode starts with 30 zero bytes).
-    ResidentLegacy,
-    /// Resident key, policy mode. The 32-byte chaincode is the policy hash.
-    ResidentPolicy([u8; 32]),
+    /// Resident key (xpub pubkey matches the device's resident pubkey).
+    Resident,
 }
 
-/// Classify a single wallet-policy key relative to this device.
-///
-/// Resident-tree keys are further split into `ResidentLegacy` (their xpub's
-/// chaincode is what BIP-32 derivation actually produces at `origin_path`) and
-/// `ResidentPolicy` (the xpub's chaincode is a policy hash that overrides the
-/// real chaincode for the final child derivation). The pubkey is always checked
-/// against the genuine derivation, so a wrong fingerprint or wrong pubkey
-/// produces `KeyMatchKind::None`.
+/// Classify a single wallet-policy key relative to this device by fingerprint
+/// alone. Pubkey validation and chaincode-policy detection are performed
+/// separately by [`validate_planned_key`].
 fn classify_key(
     key_info: &common::bip388::KeyInformation,
     standard_fingerprint: u32,
@@ -167,42 +160,103 @@ fn classify_key(
         return KeyMatchKind::Master;
     }
 
-    if origin.fingerprint != resident_fingerprint {
-        return KeyMatchKind::None;
+    if origin.fingerprint == resident_fingerprint {
+        return KeyMatchKind::Resident;
     }
 
-    // Resident tree: verify the xpub's pubkey matches what we'd actually derive
-    // at `origin_path`. The chaincode is allowed to differ; that signals a
-    // policy-bound key whose chaincode is the policy hash.
-    let path_u32: Vec<u32> = origin.derivation_path.iter().map(|&s| u32::from(s)).collect();
-    let Ok(parent_node) = derive_resident_hd_node(&path_u32) else {
-        return KeyMatchKind::None;
+    KeyMatchKind::None
+}
+
+/// Cache mapping `(tree, origin_path)` to the HD node derived at that path.
+///
+/// The cache is constructed once per `handle_sign_psbt` call, populated lazily,
+/// and dropped at the end. It avoids re-deriving the same parent node both for
+/// pubkey/policy-hash validation during planning and for signing each input.
+type ParentCache = alloc::collections::BTreeMap<(KeyTree, Vec<u32>), CachedParent>;
+
+/// A cached parent HD node. Kept separate from `HDPrivNode` because the latter
+/// is not `Clone`; the private key here is short-lived (whole signing call).
+struct CachedParent {
+    privkey: [u8; 32],
+    chaincode: [u8; 32],
+}
+
+fn child_path_as_u32(path: &[ChildNumber]) -> Vec<u32> {
+    path.iter().map(|&x| u32::from(x)).collect()
+}
+
+/// Look up the parent HD node for `(tree, parent_path)` in the cache, deriving
+/// it from the appropriate tree's master and inserting it on a miss.
+fn get_or_derive_parent<'c>(
+    cache: &'c mut ParentCache,
+    tree: KeyTree,
+    parent_path: &[ChildNumber],
+) -> Result<&'c CachedParent, Error> {
+    let key = (tree, child_path_as_u32(parent_path));
+    if !cache.contains_key(&key) {
+        let node = match tree {
+            KeyTree::Standard => sdk::curve::Secp256k1::derive_hd_node(&key.1)
+                .map_err(|_| Error::KeyDerivationFailed)?,
+            KeyTree::Resident => derive_resident_hd_node(&key.1)?,
+        };
+        let cached = CachedParent {
+            privkey: *node.privkey,
+            chaincode: node.chaincode,
+        };
+        cache.insert(key.clone(), cached);
+    }
+    Ok(cache.get(&key).unwrap())
+}
+
+/// Validate a fingerprint-classified key against the real BIP-32 derivation
+/// at its origin path, and decide whether it is policy-bound.
+///
+/// Returns the final [`PlannedKey`] for the (input, placeholder) pair:
+/// - `kind = KeyMatchKind::None` if `kind` is already `None`, or if the
+///   derived pubkey doesn't match the xpub (fingerprint collision).
+/// - Otherwise, `policy_hash = Some(h)` when the xpub's chaincode differs
+///   from the BIP-32-derived chaincode (the chaincode then IS the policy
+///   hash that binds any signature to a signing policy); `None` for keys
+///   using their real BIP-32 chaincode.
+fn validate_planned_key(
+    kind: KeyMatchKind,
+    key_info: &common::bip388::KeyInformation,
+    parent_cache: &mut ParentCache,
+) -> Result<PlannedKey, Error> {
+    let tree = match kind {
+        KeyMatchKind::None => return Ok(PlannedKey { kind: KeyMatchKind::None, policy_hash: None }),
+        KeyMatchKind::Master => KeyTree::Standard,
+        KeyMatchKind::Resident => KeyTree::Resident,
     };
-    let derived_pubkey = EcfpPrivateKey::<sdk::curve::Secp256k1, 32>::new(*parent_node.privkey)
+    let origin = key_info.origin_info.as_ref().unwrap();
+    let parent = get_or_derive_parent(parent_cache, tree, &origin.derivation_path)?;
+
+    let derived_pubkey = EcfpPrivateKey::<sdk::curve::Secp256k1, 32>::new(parent.privkey)
         .to_public_key()
         .to_compressed();
     if derived_pubkey != key_info.pubkey.public_key.serialize() {
-        return KeyMatchKind::None;
+        return Ok(PlannedKey { kind: KeyMatchKind::None, policy_hash: None });
     }
+
     let xpub_chaincode: &[u8; 32] = key_info.pubkey.chain_code.as_ref();
-    if parent_node.chaincode == *xpub_chaincode {
-        KeyMatchKind::ResidentLegacy
+    let policy_hash = if parent.chaincode == *xpub_chaincode {
+        None
     } else {
-        KeyMatchKind::ResidentPolicy(*xpub_chaincode)
-    }
+        Some(*xpub_chaincode)
+    };
+    Ok(PlannedKey { kind, policy_hash })
 }
 
 /// Resolves a `KeySource` into an `HDPrivNode` containing the final private key.
+///
+/// `parent_cache` is consulted for `Master` sources to avoid re-deriving the
+/// parent HD node when multiple inputs share the same `parent_path`.
 fn resolve_private_key(
     key_source: &KeySource,
+    parent_cache: &mut ParentCache,
 ) -> Result<HDPrivNode<sdk::curve::Secp256k1, 32>, Error> {
-    let parent_path: Vec<u32> = key_source.parent_path.iter().map(|&x| x.into()).collect();
-    let parent_node = match key_source.tree {
-        KeyTree::Standard => sdk::curve::Secp256k1::derive_hd_node(&parent_path)
-            .map_err(|_| Error::KeyDerivationFailed)?,
-        KeyTree::Resident => derive_resident_hd_node(&parent_path)?,
-    };
-    let pseudo_root = EcfpPrivateKey::<sdk::curve::Secp256k1, 32>::new(*parent_node.privkey)
+    let parent = get_or_derive_parent(parent_cache, key_source.tree, &key_source.parent_path)?;
+    let pseudo_root = EcfpPrivateKey::<sdk::curve::Secp256k1, 32>::new(parent.privkey)
         .into_hd_node(&key_source.parent_chaincode);
     pseudo_root
         .ckd_priv(u32::from(key_source.change_step))
@@ -216,12 +270,13 @@ fn sign_input_ecdsa(
     input_index: usize,
     sighash_cache: &mut SighashCache<&Transaction>,
     key_source: &KeySource,
+    parent_cache: &mut ParentCache,
 ) -> Result<PartialSignature, Error> {
     let (sighash, sighash_type) = psbt
         .sighash_ecdsa(input_index, sighash_cache)
         .map_err(|_| Error::ErrorComputingSighash)?;
 
-    let hd_node = resolve_private_key(key_source)?;
+    let hd_node = resolve_private_key(key_source, parent_cache)?;
     let privkey: EcfpPrivateKey<sdk::curve::Secp256k1, 32> = EcfpPrivateKey::new(*hd_node.privkey);
     let pubkey = privkey.to_public_key();
     let pubkey_uncompressed = pubkey.as_ref().to_bytes();
@@ -249,6 +304,7 @@ fn sign_input_schnorr(
     key_source: &KeySource,
     taptree_hash: Option<[u8; 32]>,
     leaf_hash: Option<TapLeafHash>,
+    parent_cache: &mut ParentCache,
 ) -> Result<PartialSignature, Error> {
     let sighash_type = TapSighashType::Default; // TODO: only DEFAULT is supported for now
 
@@ -271,7 +327,7 @@ fn sign_input_schnorr(
             .map_err(|_| Error::ErrorComputingSighash)?
     };
 
-    let hd_node = resolve_private_key(key_source)?;
+    let hd_node = resolve_private_key(key_source, parent_cache)?;
     let secp = bitcoin::secp256k1::Secp256k1::new();
     let keypair: Keypair = Keypair::from_seckey_slice(&secp, hd_node.privkey.as_ref())
         .map_err(|_| Error::InvalidKey)?;
@@ -736,15 +792,30 @@ fn build_display_pairs(
     Ok(pairs)
 }
 
-/// Walk the (input, placeholder) pairs of the PSBT, returning their
-/// [`KeyMatchKind`] classification in iteration order.
+/// Planning entry for a single (input, placeholder) pair.
 ///
-/// The returned vector is parallel to the placeholder iteration order used by
-/// [`sign_all_inputs`], so a planning pass and a signing pass agree on which
-/// placeholders contribute keys.
-fn classify_inputs(summary: &TransactionSummary) -> Result<Vec<Vec<KeyMatchKind>>, Error> {
+/// `kind` is the key match (or `None` if this placeholder won't sign), and
+/// `policy_hash` is `Some(h)` when the key is policy-bound — i.e. when the
+/// xpub's chaincode does not match the canonical BIP-32 chaincode at the
+/// origin path. In that case `h` is the xpub's chaincode itself, and binding
+/// any signature to it requires evaluating the matching signing policy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PlannedKey {
+    kind: KeyMatchKind,
+    policy_hash: Option<[u8; 32]>,
+}
+
+/// Walk the (input, placeholder) pairs of the PSBT, returning a parallel plan
+/// and the populated parent-HD-node cache.
+///
+/// The plan's iteration order matches what [`sign_all_inputs`] uses, so the
+/// planning pass and the signing pass agree on every placeholder. The cache
+/// is populated during planning (one derivation per distinct parent path) and
+/// reused at signing time.
+fn plan_signing(summary: &TransactionSummary) -> Result<(Vec<Vec<PlannedKey>>, ParentCache), Error> {
     let standard_fingerprint = sdk::curve::Secp256k1::get_master_fingerprint();
     let resident_fingerprint = get_resident_master_fingerprint()?;
+    let mut parent_cache: ParentCache = alloc::collections::BTreeMap::new();
 
     let mut out = Vec::with_capacity(summary.input_coordinates.len());
     for (account_id, _) in &summary.input_coordinates {
@@ -752,30 +823,30 @@ fn classify_inputs(summary: &TransactionSummary) -> Result<Vec<Vec<KeyMatchKind>
         let mut per_input = Vec::new();
         for (kp, _) in wallet_policy.descriptor_template.placeholders() {
             if kp.plain_key_index().is_none() {
-                per_input.push(KeyMatchKind::None);
+                per_input.push(PlannedKey {
+                    kind: KeyMatchKind::None,
+                    policy_hash: None,
+                });
                 continue;
             }
             let key_index = kp.plain_key_index().unwrap();
             let key_info = &wallet_policy.key_information[key_index as usize];
-            per_input.push(classify_key(
-                key_info,
-                standard_fingerprint,
-                resident_fingerprint,
-            ));
+            let kind = classify_key(key_info, standard_fingerprint, resident_fingerprint);
+            per_input.push(validate_planned_key(kind, key_info, &mut parent_cache)?);
         }
         out.push(per_input);
     }
-    Ok(out)
+    Ok((out, parent_cache))
 }
 
-/// Collect the set of distinct policy-mode chaincodes referenced by the planning.
-fn collect_policy_hashes(plan: &[Vec<KeyMatchKind>]) -> Vec<[u8; 32]> {
+/// Collect the set of distinct policy hashes referenced by the plan.
+fn collect_policy_hashes(plan: &[Vec<PlannedKey>]) -> Vec<[u8; 32]> {
     let mut hashes: Vec<[u8; 32]> = Vec::new();
     for per_input in plan {
-        for kind in per_input {
-            if let KeyMatchKind::ResidentPolicy(h) = kind {
-                if !hashes.contains(h) {
-                    hashes.push(*h);
+        for pk in per_input {
+            if let Some(h) = pk.policy_hash {
+                if !hashes.contains(&h) {
+                    hashes.push(h);
                 }
             }
         }
@@ -786,22 +857,25 @@ fn collect_policy_hashes(plan: &[Vec<KeyMatchKind>]) -> Vec<[u8; 32]> {
 /// Decide whether signing can proceed without user confirmation.
 ///
 /// Returns `true` iff at least one (input, placeholder) match would produce a
-/// signature AND every contributing match comes from a policy-mode resident key
-/// whose policy returned [`SigningDecision::ApproveSilently`].
+/// signature AND every contributing match comes from a policy-bound key whose
+/// policy returned [`SigningDecision::ApproveSilently`]. Any normal-mode key
+/// (master without policy, or resident-legacy) anywhere in the signing set
+/// forces a confirmation prompt.
 fn can_skip_confirmation(
-    plan: &[Vec<KeyMatchKind>],
+    plan: &[Vec<PlannedKey>],
     hashes: &[[u8; 32]],
     decisions: &[SigningDecision],
 ) -> bool {
     let mut any_signed = false;
     for per_input in plan {
-        for kind in per_input {
-            match kind {
-                KeyMatchKind::None => continue,
-                KeyMatchKind::Master | KeyMatchKind::ResidentLegacy => return false,
-                KeyMatchKind::ResidentPolicy(h) => {
-                    let idx = hashes.iter().position(|x| x == h);
-                    let Some(idx) = idx else {
+        for pk in per_input {
+            if pk.kind == KeyMatchKind::None {
+                continue;
+            }
+            match pk.policy_hash {
+                None => return false,
+                Some(h) => {
+                    let Some(idx) = hashes.iter().position(|x| x == &h) else {
                         return false;
                     };
                     match decisions[idx] {
@@ -830,13 +904,16 @@ fn decision_for(
 
 /// Sign all inputs of the PSBT, producing one `PartialSignature` per signing key per input.
 ///
-/// Policy-mode resident-key placeholders are skipped when their associated
-/// [`SigningDecision`] is [`SigningDecision::Deny`].
+/// `plan` and `parent_cache` come from [`plan_signing`]. Policy-bound
+/// placeholders whose associated [`SigningDecision`] is
+/// [`SigningDecision::Deny`] are silently skipped (no signature emitted).
 fn sign_all_inputs(
     psbt: &fastpsbt::Psbt,
     summary: &TransactionSummary,
+    plan: &[Vec<PlannedKey>],
     policy_hashes: &[[u8; 32]],
     policy_decisions: &[SigningDecision],
+    parent_cache: &mut ParentCache,
 ) -> Result<Vec<PartialSignature>, Error> {
     let unsigned_tx = psbt
         .unsigned_tx()
@@ -844,8 +921,6 @@ fn sign_all_inputs(
     let mut sighash_cache = SighashCache::new(unsigned_tx);
 
     let mut prevouts: Option<Vec<TxOut>> = None;
-    let standard_fpr = sdk::curve::Secp256k1::get_master_fingerprint();
-    let resident_fpr = get_resident_master_fingerprint()?;
     let mut partial_signatures = Vec::with_capacity(psbt.inputs.len());
 
     for (input_index, input) in psbt.inputs.iter().enumerate() {
@@ -853,7 +928,12 @@ fn sign_all_inputs(
         let PsbtAccountCoordinates::WalletPolicy(coords) = coords;
         let PsbtAccount::WalletPolicy(wallet_policy) = &summary.accounts[account_id as usize];
 
-        for (kp, tapleaf_desc) in wallet_policy.descriptor_template.placeholders() {
+        let placeholder_plan = &plan[input_index];
+
+        for (placeholder_idx, (kp, tapleaf_desc)) in
+            wallet_policy.descriptor_template.placeholders().enumerate()
+        {
+            let planned = placeholder_plan[placeholder_idx];
             let key_index = match kp.plain_key_index() {
                 Some(idx) => idx,
                 None => continue, // musig key expressions not yet supported for signing
@@ -867,58 +947,28 @@ fn sign_all_inputs(
             };
             let address_index: ChildNumber = coords.address_index.into();
 
-            let kind = classify_key(key_info, standard_fpr, resident_fpr);
-            let (tree, parent_chaincode) = match kind {
+            // If this key is policy-bound, consult the decision before deriving.
+            if let Some(h) = planned.policy_hash {
+                match decision_for(&h, policy_hashes, policy_decisions) {
+                    Some(SigningDecision::Deny) => continue,
+                    Some(SigningDecision::ApproveWithUserConfirmation)
+                    | Some(SigningDecision::ApproveSilently) => {}
+                    // Defensive: planning ensures all needed policies were evaluated.
+                    None => return Err(Error::SigningPolicyMissing),
+                }
+            }
+
+            let tree = match planned.kind {
                 KeyMatchKind::None => continue,
-                KeyMatchKind::Master => {
-                    // Master-tree keys do not (yet) carry signing policies; verify the
-                    // claimed xpub matches a real BIP-32 derivation from the master seed.
-                    let key_origin = key_info.origin_info.as_ref().unwrap();
-                    let path_u32: Vec<u32> = key_origin
-                        .derivation_path
-                        .iter()
-                        .map(|&s| u32::from(s))
-                        .collect();
-                    let Ok(claim_node) = sdk::curve::Secp256k1::derive_hd_node(&path_u32) else {
-                        continue;
-                    };
-                    let derived_pubkey =
-                        EcfpPrivateKey::<sdk::curve::Secp256k1, 32>::new(*claim_node.privkey)
-                            .to_public_key()
-                            .to_compressed();
-                    let expected_pubkey = key_info.pubkey.public_key.serialize();
-                    let expected_chaincode: &[u8; 32] = key_info.pubkey.chain_code.as_ref();
-                    if derived_pubkey != expected_pubkey
-                        || claim_node.chaincode != *expected_chaincode
-                    {
-                        continue;
-                    }
-                    (KeyTree::Standard, claim_node.chaincode)
-                }
-                KeyMatchKind::ResidentLegacy => {
-                    // `classify_key` already verified the pubkey and that the chaincode
-                    // matches the BIP-32 derivation; the xpub's chaincode is the real one.
-                    let chaincode: [u8; 32] = *key_info.pubkey.chain_code.as_ref();
-                    (KeyTree::Resident, chaincode)
-                }
-                KeyMatchKind::ResidentPolicy(_) => {
-                    let chaincode: [u8; 32] = *key_info.pubkey.chain_code.as_ref();
-                    match decision_for(&chaincode, policy_hashes, policy_decisions) {
-                        Some(SigningDecision::Deny) => continue,
-                        Some(SigningDecision::ApproveWithUserConfirmation)
-                        | Some(SigningDecision::ApproveSilently) => {}
-                        // Defensive: planning ensures all needed policies were evaluated.
-                        None => return Err(Error::SigningPolicyMissing),
-                    }
-                    (KeyTree::Resident, chaincode)
-                }
+                KeyMatchKind::Master => KeyTree::Standard,
+                KeyMatchKind::Resident => KeyTree::Resident,
             };
 
             let key_origin = key_info.origin_info.as_ref().unwrap();
             let key_source = KeySource {
                 tree,
                 parent_path: key_origin.derivation_path.clone(),
-                parent_chaincode,
+                parent_chaincode: *key_info.pubkey.chain_code.as_ref(),
                 change_step,
                 address_index,
             };
@@ -926,8 +976,13 @@ fn sign_all_inputs(
             if input.witness_utxo.is_some() {
                 match wallet_policy.get_segwit_version() {
                     Ok(SegwitVersion::SegwitV0) => {
-                        let partial_signature =
-                            sign_input_ecdsa(psbt, input_index, &mut sighash_cache, &key_source)?;
+                        let partial_signature = sign_input_ecdsa(
+                            psbt,
+                            input_index,
+                            &mut sighash_cache,
+                            &key_source,
+                            parent_cache,
+                        )?;
                         partial_signatures.push(partial_signature);
                     }
                     Ok(SegwitVersion::Taproot) => {
@@ -977,6 +1032,7 @@ fn sign_all_inputs(
                             &key_source,
                             taptree_hash,
                             leaf_hash,
+                            parent_cache,
                         )?;
                         partial_signatures.push(partial_signature);
                     }
@@ -988,6 +1044,7 @@ fn sign_all_inputs(
                     input_index,
                     &mut sighash_cache,
                     &key_source,
+                    parent_cache,
                 )?);
             }
         }
@@ -1005,8 +1062,10 @@ pub async fn handle_sign_psbt(app: &mut sdk::App, psbt: &[u8]) -> Result<Respons
     let (summary, account_proofs, script_checks) = analyze_transaction(&psbt)?;
 
     // Plan signing: classify every (input, placeholder) match so we can resolve any
-    // policy-mode resident keys and decide whether user confirmation may be skipped.
-    let plan = classify_inputs(&summary)?;
+    // policy-bound keys and decide whether user confirmation may be skipped.
+    // `parent_cache` is populated during planning and reused at signing time to
+    // avoid re-deriving the same parent HD nodes.
+    let (plan, mut parent_cache) = plan_signing(&summary)?;
     let policy_hashes = collect_policy_hashes(&plan);
     let policy_decisions = policy::evaluate_policies(&psbt, &policy_hashes)?;
     let skip_confirmation = can_skip_confirmation(&plan, &policy_hashes, &policy_decisions);
@@ -1057,8 +1116,14 @@ pub async fn handle_sign_psbt(app: &mut sdk::App, psbt: &[u8]) -> Result<Respons
 
     // All checks passed — sign
     app.show_spinner("Signing transaction...");
-    let partial_signatures =
-        sign_all_inputs(&psbt, &summary, &policy_hashes, &policy_decisions)?;
+    let partial_signatures = sign_all_inputs(
+        &psbt,
+        &summary,
+        &plan,
+        &policy_hashes,
+        &policy_decisions,
+        &mut parent_cache,
+    )?;
 
     #[cfg(not(any(test, feature = "autoapprove")))]
     app.show_info(Icon::Success, "Transaction signed");
@@ -1552,6 +1617,168 @@ mod tests {
         assert_eq!(result, Err(Error::PolicyExecutionFailed));
     }
 
+    /// Build a complete PSBT v2 that exercises the master-seed-derived policy
+    /// path. The xpub is a synthetic key whose pubkey is the real BIP-32
+    /// derivation at `m/84'/1'/0'` from the test master seed, but whose chaincode
+    /// has been replaced with the policy hash. The wallet policy carries the
+    /// origin info `[f5acc2fd/84'/1'/0']` so the device recognizes it as a
+    /// master-seed key.
+    fn build_master_policy_psbt(script: &[u8], add_policy_field: bool) -> Vec<u8> {
+        use sdk::curve::{Curve as _, EcfpPrivateKey, ToPublicKey};
+
+        let (policy_value, hash) = build_signing_policy_value(0x00, 0x00, script);
+
+        // m/84'/1'/0' as raw BIP-32 indices.
+        const HARDEN: u32 = 0x80000000;
+        let origin_path: [u32; 3] = [84 | HARDEN, 1 | HARDEN, HARDEN];
+
+        // Derive the real parent HD node at the origin path from the test seed.
+        let parent_node = sdk::curve::Secp256k1::derive_hd_node(&origin_path).unwrap();
+        let parent_priv =
+            EcfpPrivateKey::<sdk::curve::Secp256k1, 32>::new(*parent_node.privkey);
+        let parent_pub = parent_priv.to_public_key();
+        let uncompressed = parent_pub.as_ref().to_bytes();
+        let mut compressed_pubkey = [0u8; 33];
+        compressed_pubkey[0] = 2 + uncompressed[64] % 2;
+        compressed_pubkey[1..33].copy_from_slice(&uncompressed[1..33]);
+
+        // Construct the wallet-policy xpub with the synthetic chaincode.
+        let mut xpub_bytes = [0u8; 78];
+        xpub_bytes[0..4].copy_from_slice(&BIP32_TESTNET_PUBKEY_VERSION.to_be_bytes());
+        xpub_bytes[4] = 3; // depth
+        // parent_fpr (bytes 5..9) and child_num (bytes 9..13) can stay zero —
+        // the device only cares about (pubkey, chaincode).
+        xpub_bytes[13..45].copy_from_slice(&hash);
+        xpub_bytes[45..78].copy_from_slice(&compressed_pubkey);
+        let xpub_str = bitcoin::base58::encode_check(&xpub_bytes);
+        let key_str = alloc::format!("[f5acc2fd/84'/1'/0']{}", xpub_str);
+
+        let wallet_policy =
+            WalletPolicy::new("wpkh(@0/**)", vec![key_str.as_str().try_into().unwrap()])
+                .unwrap();
+
+        let script_in = wallet_policy.to_script(false, 0).unwrap();
+        let script_out = wallet_policy.to_script(true, 0).unwrap();
+
+        let xpub = Xpub::decode(&xpub_bytes).expect("xpub parses");
+        let secp = Secp256k1::verification_only();
+        let in_child = xpub
+            .derive_pub(&secp, &[BChildNumber::from(0_u32), BChildNumber::from(0_u32)])
+            .expect("derive in child");
+        let out_child = xpub
+            .derive_pub(&secp, &[BChildNumber::from(1_u32), BChildNumber::from(0_u32)])
+            .expect("derive out child");
+
+        let prev_tx = Transaction {
+            version: bitcoin::transaction::Version(2),
+            lock_time: bitcoin::absolute::LockTime::ZERO,
+            input: vec![],
+            output: vec![TxOut {
+                value: Amount::from_sat(10_000),
+                script_pubkey: script_in.clone(),
+            }],
+        };
+        let prev_txid = prev_tx.compute_txid();
+        let spend_tx = Transaction {
+            version: bitcoin::transaction::Version(2),
+            lock_time: bitcoin::absolute::LockTime::ZERO,
+            input: vec![TxIn {
+                previous_output: OutPoint {
+                    txid: prev_txid,
+                    vout: 0,
+                },
+                script_sig: ScriptBuf::new(),
+                sequence: Sequence::ZERO,
+                witness: Witness::new(),
+            }],
+            output: vec![TxOut {
+                value: Amount::from_sat(9_000),
+                script_pubkey: script_out.clone(),
+            }],
+        };
+
+        let mut psbt = Psbt::from_unsigned_tx(spend_tx).unwrap();
+        psbt.inputs[0].witness_utxo = Some(prev_tx.output[0].clone());
+
+        // bip32_derivation entries use the master fingerprint and the full path
+        // origin_path / change_step / address_index, so that `prepare_psbt`
+        // fills in the account coordinates.
+        let fpr = bitcoin::bip32::Fingerprint::from([0xf5u8, 0xac, 0xc2, 0xfd]);
+        let mk_path = |change: u32, idx: u32| -> bitcoin::bip32::DerivationPath {
+            let path: Vec<BChildNumber> = vec![
+                BChildNumber::from(origin_path[0]),
+                BChildNumber::from(origin_path[1]),
+                BChildNumber::from(origin_path[2]),
+                BChildNumber::from(change),
+                BChildNumber::from(idx),
+            ];
+            path.into()
+        };
+        psbt.inputs[0]
+            .bip32_derivation
+            .insert(in_child.public_key, (fpr, mk_path(0, 0)));
+        psbt.outputs[0]
+            .bip32_derivation
+            .insert(out_child.public_key, (fpr, mk_path(1, 0)));
+
+        let account_name = "Master policy account";
+        let por = ProofOfRegistration::new(&wallet_policy.registration_id(account_name))
+            .dangerous_as_bytes();
+        prepare_psbt(&mut psbt, &[(&wallet_policy, account_name, &por)]).unwrap();
+
+        if add_policy_field {
+            psbt.proprietary.insert(
+                ProprietaryKey {
+                    prefix: PSBT_SIGNING_POLICY_PROPRIETARY_IDENTIFIER.to_vec(),
+                    subtype: PSBT_SIGNING_POLICY_GLOBAL_SCRIPT,
+                    key: hash.to_vec(),
+                },
+                policy_value,
+            );
+        }
+
+        serialize_as_psbtv2(&psbt)
+    }
+
+    #[test]
+    fn test_master_policy_approve_signs() {
+        let psbt_bytes = build_master_policy_psbt(b"APPROVE", true);
+        let response = sdk::executor::block_on(handle_sign_psbt(
+            &mut sdk::App::singleton(),
+            &psbt_bytes,
+        ))
+        .expect("master-seed policy signing should succeed");
+        let Response::PsbtSigned(sigs) = response else {
+            panic!("expected PsbtSigned");
+        };
+        assert_eq!(sigs.len(), 1);
+        assert_eq!(sigs[0].input_index, 0);
+    }
+
+    #[test]
+    fn test_master_policy_deny_produces_no_signatures() {
+        let psbt_bytes = build_master_policy_psbt(b"DENY", true);
+        let response = sdk::executor::block_on(handle_sign_psbt(
+            &mut sdk::App::singleton(),
+            &psbt_bytes,
+        ))
+        .expect("flow should not error");
+        let Response::PsbtSigned(sigs) = response else {
+            panic!("expected PsbtSigned");
+        };
+        assert!(sigs.is_empty(), "expected no signatures, got {:?}", sigs);
+    }
+
+    #[test]
+    fn test_master_policy_missing_entry_fails() {
+        let psbt_bytes = build_master_policy_psbt(b"APPROVE", false);
+        let result = sdk::executor::block_on(handle_sign_psbt(
+            &mut sdk::App::singleton(),
+            &psbt_bytes,
+        ));
+        assert_eq!(result, Err(Error::SigningPolicyMissing));
+    }
+
     #[test]
     fn test_policy_can_inspect_psbt() {
         // Policy enforces that exactly one input and one output are present.
@@ -1570,22 +1797,53 @@ mod tests {
 
     // --- Unit tests for can_skip_confirmation ---
 
+    fn pk_none() -> PlannedKey {
+        PlannedKey {
+            kind: KeyMatchKind::None,
+            policy_hash: None,
+        }
+    }
+    fn pk_master_nopolicy() -> PlannedKey {
+        PlannedKey {
+            kind: KeyMatchKind::Master,
+            policy_hash: None,
+        }
+    }
+    fn pk_resident_nopolicy() -> PlannedKey {
+        PlannedKey {
+            kind: KeyMatchKind::Resident,
+            policy_hash: None,
+        }
+    }
+    fn pk_resident_policy(h: [u8; 32]) -> PlannedKey {
+        PlannedKey {
+            kind: KeyMatchKind::Resident,
+            policy_hash: Some(h),
+        }
+    }
+    fn pk_master_policy(h: [u8; 32]) -> PlannedKey {
+        PlannedKey {
+            kind: KeyMatchKind::Master,
+            policy_hash: Some(h),
+        }
+    }
+
     #[test]
     fn can_silent_requires_at_least_one_signed_key() {
         // No matches at all → cannot skip confirmation (no work to do silently).
-        let plan: Vec<Vec<KeyMatchKind>> = vec![vec![KeyMatchKind::None]];
+        let plan: Vec<Vec<PlannedKey>> = vec![vec![pk_none()]];
         assert!(!can_skip_confirmation(&plan, &[], &[]));
     }
 
     #[test]
     fn can_silent_rejected_by_master_key() {
-        let plan = vec![vec![KeyMatchKind::Master]];
+        let plan = vec![vec![pk_master_nopolicy()]];
         assert!(!can_skip_confirmation(&plan, &[], &[]));
     }
 
     #[test]
     fn can_silent_rejected_by_legacy_resident() {
-        let plan = vec![vec![KeyMatchKind::ResidentLegacy]];
+        let plan = vec![vec![pk_resident_nopolicy()]];
         assert!(!can_skip_confirmation(&plan, &[], &[]));
     }
 
@@ -1594,8 +1852,8 @@ mod tests {
         let h_a = [0x11u8; 32];
         let h_b = [0x22u8; 32];
         let plan = vec![
-            vec![KeyMatchKind::ResidentPolicy(h_a)],
-            vec![KeyMatchKind::ResidentPolicy(h_b)],
+            vec![pk_resident_policy(h_a)],
+            vec![pk_resident_policy(h_b)],
         ];
         let hashes = vec![h_a, h_b];
         let decisions = vec![
@@ -1609,8 +1867,8 @@ mod tests {
     fn can_silent_when_all_policies_silent() {
         let h = [0xAAu8; 32];
         let plan = vec![
-            vec![KeyMatchKind::ResidentPolicy(h)],
-            vec![KeyMatchKind::ResidentPolicy(h)],
+            vec![pk_resident_policy(h)],
+            vec![pk_resident_policy(h)],
         ];
         let hashes = vec![h];
         let decisions = vec![SigningDecision::ApproveSilently];
@@ -1622,12 +1880,20 @@ mod tests {
         // Two policy hashes, one Deny one ApproveSilently.
         let h_yes = [0x11u8; 32];
         let h_no = [0x22u8; 32];
-        let plan = vec![vec![
-            KeyMatchKind::ResidentPolicy(h_yes),
-            KeyMatchKind::ResidentPolicy(h_no),
-        ]];
+        let plan = vec![vec![pk_resident_policy(h_yes), pk_resident_policy(h_no)]];
         let hashes = vec![h_yes, h_no];
         let decisions = vec![SigningDecision::ApproveSilently, SigningDecision::Deny];
+        assert!(can_skip_confirmation(&plan, &hashes, &decisions));
+    }
+
+    #[test]
+    fn can_silent_with_master_policy_key() {
+        // A policy-bound master-seed key authorizes silent signing just like a
+        // policy-bound resident key.
+        let h = [0xCDu8; 32];
+        let plan = vec![vec![pk_master_policy(h)]];
+        let hashes = vec![h];
+        let decisions = vec![SigningDecision::ApproveSilently];
         assert!(can_skip_confirmation(&plan, &hashes, &decisions));
     }
 }

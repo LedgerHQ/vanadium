@@ -10,7 +10,7 @@ pub struct Bip32Path(pub Vec<u32>);
 /// `Standard` is the tree rooted at the device seed; `Resident` is the
 /// per-app tree rooted at the resident master key generated from the
 /// resident seed stored on-device.
-#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum KeyTree {
     Standard,
     Resident,
