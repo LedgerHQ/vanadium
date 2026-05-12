@@ -2,7 +2,10 @@
 
 use base64::{self, Engine};
 use bitcoin::Psbt;
-use common::{message::Account, psbt::prepare_psbt};
+use common::{
+    message::{Account, KeyTree},
+    psbt::prepare_psbt,
+};
 use sdk::test_utils::{setup_test, TestSetup};
 
 use vnd_bitcoin_client::BitcoinClient;
@@ -73,7 +76,11 @@ fn serialize_as_psbtv2(psbt: &Psbt) -> Vec<u8> {
 async fn test_get_fingerprint() {
     let mut setup = setup().await;
 
-    let fpr = setup.client.get_master_fingerprint().await.unwrap();
+    let fpr = setup
+        .client
+        .get_master_fingerprint(KeyTree::Standard)
+        .await
+        .unwrap();
     assert_eq!(fpr, 0xf5acc2fd);
 }
 

@@ -119,8 +119,11 @@ impl<'a> BitcoinClient {
         }
     }
 
-    pub async fn get_master_fingerprint(&mut self) -> Result<u32, BitcoinClientError> {
-        let msg = postcard::to_allocvec(&Request::GetMasterFingerprint).map_err(|_| {
+    pub async fn get_master_fingerprint(
+        &mut self,
+        tree: message::KeyTree,
+    ) -> Result<u32, BitcoinClientError> {
+        let msg = postcard::to_allocvec(&Request::GetMasterFingerprint { tree }).map_err(|_| {
             BitcoinClientError::GenericError(
                 "Failed to serialize GetMasterFingerprint request".to_string(),
             )
@@ -138,6 +141,7 @@ impl<'a> BitcoinClient {
 
     pub async fn get_extended_pubkey(
         &mut self,
+        tree: message::KeyTree,
         bip32_path: &str,
         display: bool,
         identity_index: Option<u32>,
@@ -146,6 +150,7 @@ impl<'a> BitcoinClient {
             .map_err(|e| format!("Failed to convert bip32_path: {}", e))?;
 
         let msg = postcard::to_allocvec(&Request::GetExtendedPubkey {
+            tree,
             display,
             path: message::Bip32Path(path.to_u32_vec()),
             identity_index,
@@ -178,6 +183,7 @@ impl<'a> BitcoinClient {
     ) -> Result<[u8; 78], BitcoinClientError> {
         let path = common::identity::identity_derivation_path(index);
         let msg = postcard::to_allocvec(&Request::GetExtendedPubkey {
+            tree: message::KeyTree::Standard,
             display,
             path: message::Bip32Path(path),
             identity_index: None,
@@ -191,34 +197,6 @@ impl<'a> BitcoinClient {
         match Self::parse_response(&response_raw).await? {
             Response::ExtendedPubkey { xpub, .. } => {
                 let arr: [u8; 78] = xpub.as_slice().try_into().map_err(|_| {
-                    BitcoinClientError::InvalidResponse("Invalid pubkey length".to_string())
-                })?;
-                Ok(arr)
-            }
-            e => Err(BitcoinClientError::InvalidResponse(format!(
-                "Invalid response: {:?}",
-                e
-            ))),
-        }
-    }
-
-    pub async fn get_resident_pubkey(
-        &mut self,
-        index: u16,
-        display: bool,
-    ) -> Result<[u8; 78], BitcoinClientError> {
-        let msg = postcard::to_allocvec(&Request::GetResidentPubkey { display, index }).map_err(
-            |_| {
-                BitcoinClientError::GenericError(
-                    "Failed to serialize GetResidentPubkey request".to_string(),
-                )
-            },
-        )?;
-
-        let response_raw = self.send_message(&msg).await?;
-        match Self::parse_response(&response_raw).await? {
-            Response::ResidentPubkey(pubkey) => {
-                let arr: [u8; 78] = pubkey.as_slice().try_into().map_err(|_| {
                     BitcoinClientError::InvalidResponse("Invalid pubkey length".to_string())
                 })?;
                 Ok(arr)

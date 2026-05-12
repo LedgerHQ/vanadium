@@ -5,6 +5,23 @@ use serde::{Deserialize, Serialize};
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct Bip32Path(pub Vec<u32>);
 
+/// Selects which BIP-32 derivation tree a key request refers to.
+///
+/// `Standard` is the tree rooted at the device seed; `Resident` is the
+/// per-app tree rooted at the resident master key generated from the
+/// resident seed stored on-device.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeyTree {
+    Standard,
+    Resident,
+}
+
+impl Default for KeyTree {
+    fn default() -> Self {
+        KeyTree::Standard
+    }
+}
+
 // Key origin information
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct KeyOrigin {
@@ -84,12 +101,15 @@ pub struct RegisteredIdentityEntry {
 pub enum Request {
     GetVersion,
     Exit,
-    GetMasterFingerprint,
+    GetMasterFingerprint {
+        tree: KeyTree,
+    },
     GetExtendedPubkey {
+        tree: KeyTree,
         display: bool,
         path: Bip32Path,
         /// If set, the response will include a Schnorr signature over the xpub
-        /// using the identity key at this index.
+        /// using the identity key at this index. Only valid with `KeyTree::Standard`.
         identity_index: Option<u32>,
     },
     RegisterAccount {
@@ -118,10 +138,6 @@ pub enum Request {
     },
     SignPsbt {
         psbt: Vec<u8>,
-    },
-    GetResidentPubkey {
-        display: bool,
-        index: u16,
     },
     RegisterIdentityKey {
         name: String,
@@ -156,7 +172,6 @@ pub enum Response {
         identity_sig: Option<IdentitySignature>,
     },
     PsbtSigned(Vec<PartialSignature>),
-    ResidentPubkey(Vec<u8>),
     IdentityKeyRegistered {
         key_id: [u8; 32],
         hmac: [u8; 32],

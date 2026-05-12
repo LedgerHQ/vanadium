@@ -28,29 +28,46 @@ struct Cli {
     command: CliCommand,
 }
 
+/// Which BIP-32 derivation tree to use.
+#[derive(clap::ValueEnum, Debug, Clone, Copy, Default)]
+#[clap(rename_all = "lowercase")]
+enum CliKeyTree {
+    #[default]
+    Standard,
+    Resident,
+}
+
+impl From<CliKeyTree> for common::message::KeyTree {
+    fn from(t: CliKeyTree) -> Self {
+        match t {
+            CliKeyTree::Standard => common::message::KeyTree::Standard,
+            CliKeyTree::Resident => common::message::KeyTree::Resident,
+        }
+    }
+}
+
 #[derive(Subcommand, Debug)]
 #[clap(rename_all = "snake_case")]
 enum CliCommand {
-    GetFingerprint,
+    GetFingerprint {
+        #[clap(long, value_enum, default_value_t = CliKeyTree::Standard)]
+        tree: CliKeyTree,
+    },
     GetPubkey {
+        #[clap(long, value_enum, default_value_t = CliKeyTree::Standard)]
+        tree: CliKeyTree,
         #[clap(long)]
         path: String,
         #[clap(long, default_missing_value = "true", num_args = 0..=1)]
         display: bool,
         /// If set, the response will include a Schnorr signature over the xpub
-        /// using the identity key at this index.
+        /// using the identity key at this index. Only valid with `--tree standard`.
         #[clap(long)]
         identity_index: Option<u32>,
     },
     GetIdentityKey {
         #[clap(long)]
         index: Option<u32>,
-        #[clap(long, default_missing_value = "true", num_args = 0..=1)]
-        display: bool,
-    },
-    GetResidentPubkey {
-        #[clap(long, default_value = "0")]
-        index: u16,
         #[clap(long, default_missing_value = "true", num_args = 0..=1)]
         display: bool,
     },
@@ -292,17 +309,18 @@ async fn handle_cli_command(
     cli: &Cli,
 ) -> Result<(), BitcoinClientError> {
     match &cli.command {
-        CliCommand::GetFingerprint => {
-            let fpr = bitcoin_client.get_master_fingerprint().await?;
+        CliCommand::GetFingerprint { tree } => {
+            let fpr = bitcoin_client.get_master_fingerprint((*tree).into()).await?;
             println!("{:08x}", fpr);
         }
         CliCommand::GetPubkey {
+            tree,
             path,
             display,
             identity_index,
         } => {
             let (xpub, identity_sig) = bitcoin_client
-                .get_extended_pubkey(&path, *display, *identity_index)
+                .get_extended_pubkey((*tree).into(), &path, *display, *identity_index)
                 .await?;
 
             match bitcoin::bip32::Xpub::decode(&xpub) {
@@ -323,13 +341,6 @@ async fn handle_cli_command(
                     // print the pubkey in hex as well, since it's more useful for the user of the CLI
                     println!("Identity key: {}", hex::encode(xpub.public_key.serialize()));
                 }
-                Err(_) => println!("Invalid xpub returned"),
-            }
-        }
-        CliCommand::GetResidentPubkey { index, display } => {
-            let xpub = bitcoin_client.get_resident_pubkey(*index, *display).await?;
-            match bitcoin::bip32::Xpub::decode(&xpub) {
-                Ok(xpub) => println!("{}", xpub),
                 Err(_) => println!("Invalid xpub returned"),
             }
         }
