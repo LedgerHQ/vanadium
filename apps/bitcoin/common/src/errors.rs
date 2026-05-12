@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 pub enum Error {
     // Generic / request
     InvalidRequest,
+    InvalidParameter,
 
     // Wallet policy / account
     InvalidWalletPolicy,
@@ -71,6 +72,7 @@ impl fmt::Display for Error {
         use Error::*;
         match self {
             InvalidRequest => write!(f, "Invalid request"),
+            InvalidParameter => write!(f, "Invalid parameter"),
 
             InvalidWalletPolicy => write!(f, "Invalid wallet policy"),
             DefaultAccountsNotSupported => write!(f, "Default accounts are not supported yet"),

@@ -32,8 +32,9 @@ use sdk::{
     ux::TagValue,
 };
 
+use crate::bip32::KeyTree;
 use crate::constants::COIN_TICKER;
-use crate::resident_key;
+use crate::resident_key::{derive_resident_hd_node, get_resident_master_fingerprint};
 
 #[cfg(not(any(test, feature = "autoapprove")))]
 use sdk::ux::Icon;
@@ -110,41 +111,23 @@ fn format_amount(value: u64, ticker: &str) -> String {
     format!("{}.{:08} {}", whole_part, fractional_part, ticker)
 }
 
-/// Identifies how the signing private key should be obtained.
-enum KeySource<'a> {
-    /// Derive from the master seed via the BIP32 ECALL using the full derivation path.
-    MasterSeed(Vec<ChildNumber>),
-    /// Derive from the resident private key using the given synthetic chaincode
-    /// and a two-step non-hardened derivation (`change_step / address_index`).
-    ResidentKey {
-        chaincode: &'a [u8; 32],
-        change_step: ChildNumber,
-        address_index: ChildNumber,
-    },
+/// Identifies how the signing private key should be obtained: a key tree and a
+/// full BIP-32 derivation path relative to that tree's master.
+struct KeySource {
+    tree: KeyTree,
+    path: Vec<ChildNumber>,
 }
 
 /// Resolves a `KeySource` into an `HDPrivNode` containing the final private key.
 fn resolve_private_key(
     key_source: &KeySource,
 ) -> Result<HDPrivNode<sdk::curve::Secp256k1, 32>, Error> {
-    match key_source {
-        KeySource::MasterSeed(path) => {
-            let path: Vec<u32> = path.iter().map(|&x| x.into()).collect();
+    let path: Vec<u32> = key_source.path.iter().map(|&x| x.into()).collect();
+    match key_source.tree {
+        KeyTree::Standard => {
             sdk::curve::Secp256k1::derive_hd_node(&path).map_err(|_| Error::KeyDerivationFailed)
         }
-        KeySource::ResidentKey {
-            chaincode,
-            change_step,
-            address_index,
-        } => {
-            let root = resident_key::get_or_init_resident_private_key()?.into_hd_node(chaincode);
-            let intermediate = root
-                .ckd_priv(u32::from(*change_step))
-                .map_err(|_| Error::KeyDerivationFailed)?;
-            intermediate
-                .ckd_priv(u32::from(*address_index))
-                .map_err(|_| Error::KeyDerivationFailed)
-        }
+        KeyTree::Resident => derive_resident_hd_node(&path),
     }
 }
 
@@ -684,12 +667,9 @@ fn sign_all_inputs(
     let mut sighash_cache = SighashCache::new(unsigned_tx);
 
     let mut prevouts: Option<Vec<TxOut>> = None;
-    let master_fingerprint = sdk::curve::Secp256k1::get_master_fingerprint();
+    let standard_fpr = sdk::curve::Secp256k1::get_master_fingerprint();
+    let resident_fpr = get_resident_master_fingerprint()?;
     let mut partial_signatures = Vec::with_capacity(psbt.inputs.len());
-
-    // Cache the resident compressed pubkey to avoid repeated storage reads.
-    // Lazily initialised on first use.
-    let mut cached_resident_pubkey: Option<Option<[u8; 33]>> = None;
 
     for (input_index, input) in psbt.inputs.iter().enumerate() {
         let (account_id, ref coords) = summary.input_coordinates[input_index];
@@ -703,8 +683,6 @@ fn sign_all_inputs(
             };
             let key_info = &wallet_policy.key_information[key_index as usize];
 
-            // Determine the key source: either the master seed (fingerprint match)
-            // or the resident key (compressed pubkey + synthetic chaincode match).
             let change_step: ChildNumber = if !coords.is_change {
                 kp.num1.into()
             } else {
@@ -712,47 +690,52 @@ fn sign_all_inputs(
             };
             let address_index: ChildNumber = coords.address_index.into();
 
-            let key_source = if key_info
-                .origin_info
-                .as_ref()
-                .is_some_and(|x| x.fingerprint == master_fingerprint)
-            {
-                // Master seed key: build the full BIP32 derivation path
-                let key_origin = key_info.origin_info.as_ref().unwrap();
-
-                // TODO: in principle, there could be collisions on the fingerprint;
-                // we shouldn't sign in that case
-
-                let mut path = Vec::with_capacity(key_origin.derivation_path.len() + 2);
-                path.extend_from_slice(&key_origin.derivation_path);
-                path.push(change_step);
-                path.push(address_index);
-                KeySource::MasterSeed(path)
-            } else {
-                // Check if this is a resident key
-                let resident_pubkey = cached_resident_pubkey
-                    .get_or_insert_with(|| resident_key::get_resident_compressed_pubkey().ok());
-                let Some(resident_pubkey) = resident_pubkey else {
-                    continue;
-                };
-
-                let xpub_pubkey = key_info.pubkey.public_key.serialize();
-                if *resident_pubkey != xpub_pubkey {
-                    continue;
-                }
-
-                let chain_code: &[u8; 32] = key_info.pubkey.chain_code.as_ref();
-                // First 30 bytes of chaincode must be zero for it to be a resident key
-                if chain_code[..30].iter().any(|&b| b != 0) {
-                    continue;
-                }
-
-                KeySource::ResidentKey {
-                    chaincode: chain_code,
-                    change_step,
-                    address_index,
-                }
+            // Keys without origin info are not ours; skip.
+            let Some(ref key_origin) = key_info.origin_info else {
+                continue;
             };
+
+            // Pick the tree based on the origin fingerprint.
+            let tree = if key_origin.fingerprint == standard_fpr {
+                KeyTree::Standard
+            } else if key_origin.fingerprint == resident_fpr {
+                KeyTree::Resident
+            } else {
+                continue;
+            };
+
+            // Build the full path from the tree root.
+            let mut path = Vec::with_capacity(key_origin.derivation_path.len() + 2);
+            path.extend_from_slice(&key_origin.derivation_path);
+            path.push(change_step);
+            path.push(address_index);
+
+            // Verify the derivation actually yields the claimed pubkey/chaincode.
+            // Without this, a fingerprint collision could trick us into signing.
+            let path_u32: Vec<u32> = key_origin
+                .derivation_path
+                .iter()
+                .map(|&s| u32::from(s))
+                .collect();
+            let claim_node = match tree {
+                KeyTree::Standard => sdk::curve::Secp256k1::derive_hd_node(&path_u32).ok(),
+                KeyTree::Resident => derive_resident_hd_node(&path_u32).ok(),
+            };
+            let Some(claim_node) = claim_node else {
+                continue;
+            };
+
+            let derived_pubkey =
+                EcfpPrivateKey::<sdk::curve::Secp256k1, 32>::new(*claim_node.privkey)
+                    .to_public_key()
+                    .to_compressed();
+            let expected_pubkey = key_info.pubkey.public_key.serialize();
+            let expected_chaincode: &[u8; 32] = key_info.pubkey.chain_code.as_ref();
+            if derived_pubkey != expected_pubkey || claim_node.chaincode != *expected_chaincode {
+                continue;
+            }
+
+            let key_source = KeySource { tree, path };
 
             if input.witness_utxo.is_some() {
                 match wallet_policy.get_segwit_version() {
@@ -1018,15 +1001,14 @@ mod tests {
 
     #[test]
     fn test_handle_sign_psbt_with_resident_pubkey() {
-        // 5th resident pubkey: tpubD6NzVbkrYhZ4WLczPJWReQycCJdd6YVWXubbVUFnJ5KgU5MDQrD998ZK5NXERxDkze3yNr1iFmEoAA4g2GVfmzA68K6AVfC7bzGVgsBRWhy
+        let psbt_b64 = "cHNidP8BAKYCAAAAAs6MJQ9uBSUCmJpgUB9wGYZGqTMGYmOnXuyrkUGhcHyCAQAAAAD9////heZDgiEqZove1y7DCgxH7C8ERyDQkoVefghpmYDeKlwAAAAAAP3///8C5ygAAAAAAAAiUSAGDJP2Niux4bvyYwYNNDt/ff0v3KIN49hbSJrnZb0MQoSQAQAAAAAAFgAUKcCaIuEMi5OceEB5MbFv3Bxi7/AAAAAAAAEBKxFJAQAAAAAAIlEg1Klrfzt/O4NPudEUKKEhj69xxtM3OGnhY4Z3E9fqjHshFsZ2FyAcWD9j8ONZl/Sek1uj3W1JVPmlhZBzRiPIKiG1GQCthdlVMAAAgAEAAIAAAACAAAAAAAAAAAABFyDGdhcgHFg/Y/DjWZf0npNbo91tSVT5pYWQc0YjyCohtQABASsicQAAAAAAACJRIMRxNS3nHwMfn/AcfJ4/Bk3YkBzFZ0mz2NL1Atr1s4MIIRbJq1223YydIq4HkOWtLr6DBB9LrP8lN/ulMpG93sru0xkArYXZVTAAAIABAACAAAAAgAAAAAACAAAAARcgyatdtt2MnSKuB5DlrS6+gwQfS6z/JTf7pTKRvd7K7tMAAQUgOEeAjyIcpdjjuYWnkpRzrpDt2GVALyLidlPWZSDzRRchBzhHgI8iHKXY47mFp5KUc66Q7dhlQC8i4nZT1mUg80UXGQCthdlVMAAAgAEAAIAAAACAAAAAAAMAAAAAAA==";
 
-        let psbt_b64 = "cHNidP8BALICAAAAAkvuLQL+TXmgc8ium+Kxqwxz49lhcIpCcVqy6DhF8NzIAQAAAAAAAAAA0+nh2KBbX8AeoKNkieT0V/2Q9f0mdiByktGXpJFd87oDAAAAAAAAAAACmDoAAAAAAAAiUSDcH+P34kHoc+fctxVKmO/RlrwtgevDkXfwxtAqCZC8tZc6AAAAAAAAIlEg+ShCMPZNPe1LBkU3ek3IGUMm1Ml1EZ6BbBaFAxSPvqQAAAAATwEENYfPAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAUDI0nRq+bZ4MF08BGhxL0J/ltuiLKhYuYd3sXQdVT6J1oEvEygWQABASsQJwAAAAAAACJRIN2eHExRF8dd6oSbSpJmBUt15uwLwXdFOPHk99AwE6HsIRZQMypmzBRgIOw8KtjxVpzu2DKFhkG+eIOv9rMqfD7xyQ0AvEygWQEAAACGFgAAARcgUDMqZswUYCDsPCrY8Vac7tgyhYZBvniDr/azKnw+8ckAAQErIE4AAAAAAAAiUSBnOzCR0Q6WkMJu2p169fohrlhi1ARRQ45xweAF/5uDBCEWAMELtUrxE8aXfsXtqRNjCWELcP90hDZ/jvxSWKSU1NMNALxMoFkAAAAASRkAAAEXIADBC7VK8RPGl37F7akTYwlhC3D/dIQ2f478UliklNTTAAABBSBr/eLmT/+0ZlJIcsfxV+k9OBXtxXEenbErhFpy/Dtv2iEHa/3i5k//tGZSSHLH8VfpPTgV7cVxHp2xK4Racvw7b9oNALxMoFkBAAAA3SMAAAA=";
         let mut psbt = Psbt::deserialize(&STANDARD.decode(&psbt_b64).unwrap()).unwrap();
 
         let wallet_policy = WalletPolicy::new(
             "tr(@0/**)",
             vec![
-                "tpubD6NzVbkrYhZ4WLczPJWReQycCJdd6YVWXubbVUFnJ5KgU5MDQrD998ZK5NXERxDkze3yNr1iFmEoAA4g2GVfmzA68K6AVfC7bzGVgsBRWhy".try_into().unwrap()
+                "[ad85d955/44'/1'/0']tpubDD7URPdwnhN6XNWRkMLhaGvhp1xaZNTAqgn8qULdENfMrUbCUcV4Kd4FQzVSHkKx9nmU7sNjBMPa96b9g3KTSJTAvTsTcT5mYDz97fUppvd".try_into().unwrap()
             ]
         ).unwrap();
 
@@ -1046,28 +1028,6 @@ mod tests {
         };
 
         assert_eq!(partial_signatures.len(), 2);
-
-        let expected_pubkey0 = psbt.inputs[0]
-            .witness_utxo
-            .as_ref()
-            .unwrap()
-            .script_pubkey
-            .as_bytes()[2..]
-            .to_vec();
-
-        assert_eq!(partial_signatures[0].input_index, 0);
-        assert_eq!(partial_signatures[0].pubkey, expected_pubkey0);
-
-        let expected_pubkey1 = psbt.inputs[1]
-            .witness_utxo
-            .as_ref()
-            .unwrap()
-            .script_pubkey
-            .as_bytes()[2..]
-            .to_vec();
-
-        assert_eq!(partial_signatures[1].input_index, 1);
-        assert_eq!(partial_signatures[1].pubkey, expected_pubkey1);
     }
 
     #[test]

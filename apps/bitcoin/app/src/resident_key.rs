@@ -1,62 +1,155 @@
 use common::errors::Error;
-use sdk::curve::{EcfpPrivateKey, EcfpPublicKey, Secp256k1, ToPublicKey};
+use sdk::curve::{EcfpPrivateKey, HDPrivNode, Secp256k1, ToPublicKey};
+use sdk::hash::{Hasher, Sha512};
 
-#[cfg(not(any(test, feature = "fixed_resident_key")))]
-use sdk::storage::{is_slot_empty, read_slot};
+#[cfg(not(any(test, feature = "fixed_resident_seed")))]
+use sdk::storage::{is_slot_empty, read_slot, write_slot};
 
-#[cfg(not(feature = "fixed_resident_key"))]
-use sdk::storage::write_slot;
+#[cfg(not(any(test, feature = "fixed_resident_seed")))]
+const RESIDENT_SEED_SLOT: u32 = 0;
 
-#[cfg(not(feature = "fixed_resident_key"))]
-const RESIDENT_KEY_SLOT: u32 = 0;
+#[cfg(any(test, feature = "fixed_resident_seed"))]
+// this is a 32-byte seed that is part of test vectors for BIP-32
+pub const FIXED_RESIDENT_SEED: [u8; 32] =
+    hex_literal::hex!("3ddd5602285899a946114506157c7997e5444528f3003f6134712147db19b678");
 
-#[cfg(any(test, feature = "fixed_resident_key"))]
-pub const FIXED_RESIDENT_KEY: [u8; 32] =
-    hex_literal::hex!("5245534944454e544b45595245534944454e544b45595245534944454e544b45");
-#[cfg(test)]
-pub const FIXED_RESIDENT_PUBKEY: [u8; 33] =
-    hex_literal::hex!("032349d1abe6d9e0c174f011a1c4bd09fe5b6e88b2a162e61ddec5d07554fa275a");
-
-/// Returns the resident private key from storage slot 0, generating and storing
-/// a fresh random key on first use (detected by the slot being all-zeros).
+/// Returns the resident BIP-32 seed from storage slot 0, generating and storing
+/// a fresh random seed on first use (detected by the slot being all-zeros).
 ///
-/// If the `fixed_resident_key` feature is enabled, always returns the fixed
-/// compile-time key FIXED_RESIDENT_KEY.
-/// This is only useful for testing.
-pub fn get_or_init_resident_private_key() -> Result<EcfpPrivateKey<Secp256k1, 32>, Error> {
-    #[cfg(any(test, feature = "fixed_resident_key"))]
-    return Ok(EcfpPrivateKey::new(FIXED_RESIDENT_KEY));
+/// If the `fixed_resident_seed` feature is enabled, always returns the fixed
+/// compile-time seed `FIXED_RESIDENT_SEED`. This is only useful for testing.
+pub fn get_or_init_resident_seed() -> Result<[u8; 32], Error> {
+    #[cfg(any(test, feature = "fixed_resident_seed"))]
+    return Ok(FIXED_RESIDENT_SEED);
 
-    #[cfg(not(any(test, feature = "fixed_resident_key")))]
-    if is_slot_empty(RESIDENT_KEY_SLOT).map_err(|_| Error::StorageError)? {
-        // First run: generate a random 32-byte private key and persist it.
-        let random_key = sdk::rand::random_bytes(32).try_into().unwrap();
-        write_slot(RESIDENT_KEY_SLOT, &random_key).map_err(|_| Error::StorageError)?;
-        Ok(EcfpPrivateKey::new(random_key))
+    #[cfg(not(any(test, feature = "fixed_resident_seed")))]
+    if is_slot_empty(RESIDENT_SEED_SLOT).map_err(|_| Error::StorageError)? {
+        let random_seed: [u8; 32] = sdk::rand::random_bytes(32).try_into().unwrap();
+        write_slot(RESIDENT_SEED_SLOT, &random_seed).map_err(|_| Error::StorageError)?;
+        Ok(random_seed)
     } else {
-        let slot = read_slot(RESIDENT_KEY_SLOT).map_err(|_| Error::StorageError)?;
-        Ok(EcfpPrivateKey::new(slot))
+        read_slot(RESIDENT_SEED_SLOT).map_err(|_| Error::StorageError)
     }
 }
 
-/// Returns the resident public key derived from the resident private key in storage slot 0,
-/// generating and storing a fresh random private key on first use.
-pub fn get_or_init_resident_public_key() -> Result<EcfpPublicKey<Secp256k1, 32>, Error> {
-    Ok(get_or_init_resident_private_key()?.to_public_key())
+/// Returns the resident BIP-32 master HD node derived from the resident seed
+/// per BIP-32 (`HMAC-SHA512("Bitcoin seed", seed) -> (privkey || chaincode)`).
+pub fn get_resident_master_hd_node() -> Result<HDPrivNode<Secp256k1, 32>, Error> {
+    let seed = get_or_init_resident_seed()?;
+    let hmac = hmac_sha512(b"Bitcoin seed", &seed);
+
+    let mut privkey = [0u8; 32];
+    privkey.copy_from_slice(&hmac[0..32]);
+    let mut chaincode = [0u8; 32];
+    chaincode.copy_from_slice(&hmac[32..64]);
+
+    Ok(EcfpPrivateKey::<Secp256k1, 32>::new(privkey).into_hd_node(&chaincode))
 }
 
-/// Returns the compressed resident public key.
-pub fn get_resident_compressed_pubkey() -> Result<[u8; 33], Error> {
-    let pubkey = get_or_init_resident_public_key()?;
-    let uncompressed = pubkey.as_ref().to_bytes();
-    let mut compressed = [0u8; 33];
-    compressed[0] = 2 + uncompressed[64] % 2;
-    compressed[1..33].copy_from_slice(&uncompressed[1..33]);
-    Ok(compressed)
+/// Derives the resident HD node at the given BIP-32 path, starting from the
+/// resident master HD node.
+pub fn derive_resident_hd_node(path: &[u32]) -> Result<HDPrivNode<Secp256k1, 32>, Error> {
+    let mut node = get_resident_master_hd_node()?;
+    for &step in path {
+        node = node
+            .ckd_priv(step)
+            .map_err(|_| Error::KeyDerivationFailed)?;
+    }
+    Ok(node)
 }
 
-/// Sets the resident key to the given 32-byte value. Only available in tests.
+/// Returns the BIP-32 fingerprint of the resident master public key.
+pub fn get_resident_master_fingerprint() -> Result<u32, Error> {
+    let master = get_resident_master_hd_node()?;
+    let privkey = EcfpPrivateKey::<Secp256k1, 32>::new(*master.privkey);
+    Ok(privkey.to_public_key().fingerprint())
+}
+
+/// HMAC-SHA512 with an arbitrary-length key.
+/// TODO: Implement a proper HMAC-SHA512 in the app-sdk and use that instead.
+fn hmac_sha512(key: &[u8], data: &[u8]) -> [u8; 64] {
+    const BLOCK_SIZE: usize = 128;
+
+    let mut key_block = [0u8; BLOCK_SIZE];
+    if key.len() > BLOCK_SIZE {
+        let mut h = Sha512::new();
+        h.update(key);
+        let mut digest = [0u8; 64];
+        h.digest(&mut digest);
+        key_block[..64].copy_from_slice(&digest);
+    } else {
+        key_block[..key.len()].copy_from_slice(key);
+    }
+
+    let mut ipad_key = [0x36u8; BLOCK_SIZE];
+    let mut opad_key = [0x5cu8; BLOCK_SIZE];
+    for i in 0..BLOCK_SIZE {
+        ipad_key[i] ^= key_block[i];
+        opad_key[i] ^= key_block[i];
+    }
+
+    let mut inner = Sha512::new();
+    inner.update(&ipad_key);
+    inner.update(data);
+    let mut inner_digest = [0u8; 64];
+    inner.digest(&mut inner_digest);
+
+    let mut outer = Sha512::new();
+    outer.update(&opad_key);
+    outer.update(&inner_digest);
+    let mut result = [0u8; 64];
+    outer.digest(&mut result);
+    result
+}
+
 #[cfg(test)]
-pub fn set_resident_key(key: [u8; 32]) -> Result<(), Error> {
-    write_slot(RESIDENT_KEY_SLOT, &key).map_err(|_| Error::StorageError)
+mod tests {
+    use super::*;
+
+    // BIP-32 test vector 4 (seed 3ddd5602285899a946114506157c7997e5444528f3003f6134712147db19b678),
+    // which equals FIXED_RESIDENT_SEED used in tests.
+
+    /// Chain m
+    #[test]
+    fn test_bip32_tv4_master() {
+        let node = get_resident_master_hd_node().unwrap();
+        assert_eq!(
+            &*node.privkey,
+            &hex_literal::hex!("12c0d59c7aa3a10973dbd3f478b65f2516627e3fe61e00c345be9a477ad2e215")
+        );
+        assert_eq!(
+            node.chaincode,
+            hex_literal::hex!("d0c8a1f6edf2500798c3e0b54f1b56e45f6d03e6076abd36e5e2f54101e44ce6")
+        );
+        // fingerprint of master pubkey = parent fingerprint stored in the m/0H xpub
+        assert_eq!(get_resident_master_fingerprint().unwrap(), 0xad85d955);
+    }
+
+    /// Chain m/0H
+    #[test]
+    fn test_bip32_tv4_m_0h() {
+        let node = derive_resident_hd_node(&[0x80000000]).unwrap();
+        assert_eq!(
+            &*node.privkey,
+            &hex_literal::hex!("00d948e9261e41362a688b916f297121ba6bfb2274a3575ac0e456551dfd7f7e")
+        );
+        assert_eq!(
+            node.chaincode,
+            hex_literal::hex!("cdc0f06456a14876c898790e0b3b1a41c531170aec69da44ff7b7265bfe7743b")
+        );
+    }
+
+    /// Chain m/0H/1H
+    #[test]
+    fn test_bip32_tv4_m_0h_1h() {
+        let node = derive_resident_hd_node(&[0x80000000, 0x80000001]).unwrap();
+        assert_eq!(
+            &*node.privkey,
+            &hex_literal::hex!("3a2086edd7d9df86c3487a5905a1712a9aa664bce8cc268141e07549eaa8661d")
+        );
+        assert_eq!(
+            node.chaincode,
+            hex_literal::hex!("a48ee6674c5264a237703fd383bccd9fad4d9378ac98ab05e6e7029b06360c0d")
+        );
+    }
 }

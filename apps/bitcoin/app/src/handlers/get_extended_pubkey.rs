@@ -1,26 +1,11 @@
 use alloc::{format, vec::Vec};
 
 use common::{errors::Error, identity, message::Response};
-use sdk::{
-    curve::{Curve, EcfpPrivateKey, EcfpPublicKey, Secp256k1, ToPublicKey},
-    hash::{Hasher, Ripemd160, Sha256},
+use sdk::curve::{EcfpPrivateKey, Secp256k1, ToPublicKey};
+
+use crate::{
+    bip32::KeyTree, constants::BIP32_TESTNET_PUBKEY_VERSION, identity::compute_identity_signature,
 };
-
-use crate::{constants::BIP32_TESTNET_PUBKEY_VERSION, identity::compute_identity_signature};
-
-// TODO: refactor using vlib_bitcoin
-fn get_pubkey_fingerprint(pubkey: &EcfpPublicKey<Secp256k1, 32>) -> u32 {
-    let pk_bytes = pubkey.as_ref().to_bytes();
-    let mut sha256hasher = Sha256::new();
-    sha256hasher.update(&[pk_bytes[64] % 2 + 0x02]);
-    sha256hasher.update(&pk_bytes[1..33]);
-    let mut sha256 = [0u8; 32];
-    sha256hasher.digest(&mut sha256);
-
-    let hash = Ripemd160::hash(&sha256);
-
-    u32::from_be_bytes([hash[0], hash[1], hash[2], hash[3]])
-}
 
 #[cfg(not(any(test, feature = "autoapprove")))]
 async fn display_identity_key(app: &mut sdk::App, value: &str, index: Option<u32>) -> bool {
@@ -80,11 +65,17 @@ async fn display_identity_key(app: &mut sdk::App, value: &str, index: Option<u32
 }
 
 #[cfg(not(any(test, feature = "autoapprove")))]
-async fn display_xpub(app: &mut sdk::App, xpub: &str, path: &[u32]) -> bool {
+async fn display_xpub(app: &mut sdk::App, tree: KeyTree, xpub: &str, path: &[u32]) -> bool {
     use alloc::{string::ToString, vec};
     use sdk::ux::{Icon, TagValue};
 
-    let (intro_text, intro_subtext) = if sdk::ux::has_page_api() {
+    let (intro_text, intro_subtext) = if tree == KeyTree::Resident {
+        if sdk::ux::has_page_api() {
+            ("Verify Bitcoin\next. public key\n(resident)", "")
+        } else {
+            ("Verify Bitcoin", "ext. pubkey (resident)")
+        }
+    } else if sdk::ux::has_page_api() {
         ("Verify Bitcoin\nextended public key", "")
     } else {
         ("Verify Bitcoin", "extended public key")
@@ -135,12 +126,13 @@ async fn display_identity_key(_app: &mut sdk::App, _value: &str, _index: Option<
 }
 
 #[cfg(any(test, feature = "autoapprove"))]
-async fn display_xpub(_app: &mut sdk::App, _xpub: &str, _path: &[u32]) -> bool {
+async fn display_xpub(_app: &mut sdk::App, _tree: KeyTree, _xpub: &str, _path: &[u32]) -> bool {
     true
 }
 
 pub async fn handle_get_extended_pubkey(
     app: &mut sdk::App,
+    tree: KeyTree,
     bip32_path: &common::message::Bip32Path,
     display: bool,
     identity_index: Option<u32>,
@@ -149,8 +141,12 @@ pub async fn handle_get_extended_pubkey(
         return Err(Error::DerivationPathTooLong);
     }
 
-    let hd_node = sdk::curve::Secp256k1::derive_hd_node(&bip32_path.0)
-        .map_err(|_| Error::KeyDerivationFailed)?;
+    // Identity signing is a property of the standard tree only.
+    if identity_index.is_some() && tree != KeyTree::Standard {
+        return Err(Error::InvalidParameter);
+    }
+
+    let hd_node = crate::bip32::derive_hd_node(tree, &bip32_path.0)?;
     let privkey: EcfpPrivateKey<Secp256k1, 32> = EcfpPrivateKey::new(*hd_node.privkey);
     let pubkey = privkey.to_public_key();
     let pubkey_bytes = pubkey.as_ref().to_bytes();
@@ -169,14 +165,13 @@ pub async fn handle_get_extended_pubkey(
     let parent_fpr: u32 = if bip32_path.0.is_empty() {
         0
     } else if bip32_path.0.len() == 1 {
-        sdk::curve::Secp256k1::get_master_fingerprint()
+        crate::bip32::master_fingerprint(tree)?
     } else {
-        let hd_node =
-            sdk::curve::Secp256k1::derive_hd_node(&bip32_path.0[..bip32_path.0.len() - 1])
-                .map_err(|_| Error::KeyDerivationFailed)?;
-        let parent_privkey: EcfpPrivateKey<Secp256k1, 32> = EcfpPrivateKey::new(*hd_node.privkey);
-        let parent_pubkey = parent_privkey.to_public_key();
-        get_pubkey_fingerprint(&parent_pubkey)
+        let parent_node =
+            crate::bip32::derive_hd_node(tree, &bip32_path.0[..bip32_path.0.len() - 1])?;
+        let parent_privkey: EcfpPrivateKey<Secp256k1, 32> =
+            EcfpPrivateKey::new(*parent_node.privkey);
+        parent_privkey.to_public_key().fingerprint()
     };
 
     let child_number: u32 = if bip32_path.0.is_empty() {
@@ -196,14 +191,27 @@ pub async fn handle_get_extended_pubkey(
 
     if display {
         let xpub_base58 = bitcoin::base58::encode_check(&xpub);
-        let value = match identity::is_identity_path(&bip32_path.0) {
-            Some(None) => &xpub_base58,
-            Some(Some(_)) => &compressed_pubkey_hex,
-            None => &xpub_base58,
+        // identity keys are displayed in hex, rather than as an xpub
+        let is_identity =
+            tree == KeyTree::Standard && identity::is_identity_path(&bip32_path.0).is_some();
+        let value = if is_identity {
+            match identity::is_identity_path(&bip32_path.0) {
+                Some(None) => &xpub_base58,
+                Some(Some(_)) => &compressed_pubkey_hex,
+                None => &xpub_base58,
+            }
+        } else {
+            &xpub_base58
         };
-        let approved = match identity::is_identity_path(&bip32_path.0) {
-            Some(index) => display_identity_key(app, value, index).await,
-            None => display_xpub(app, &xpub_base58, &bip32_path.0).await,
+        let approved = if is_identity {
+            display_identity_key(
+                app,
+                value,
+                identity::is_identity_path(&bip32_path.0).unwrap(),
+            )
+            .await
+        } else {
+            display_xpub(app, tree, &xpub_base58, &bip32_path.0).await
         };
         if !approved {
             return Err(Error::UserRejected);
@@ -291,6 +299,37 @@ mod tests {
 
             let response = sdk::executor::block_on(handle_get_extended_pubkey(
                 &mut sdk::App::singleton(),
+                KeyTree::Standard,
+                &common::message::Bip32Path(parse_derivation_path(path).unwrap()),
+                false,
+                None,
+            ))
+            .unwrap();
+
+            assert_eq!(
+                response,
+                Response::ExtendedPubkey {
+                    xpub: bitcoin::base58::decode_check(expected_xpub).unwrap(),
+                    identity_sig: None,
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn test_handle_get_extended_pubkey_resident() {
+        // for tests, the root tpriv is tprv8ZgxMBicQKsPex9oTu7vZcJnLRnxXZL41PfqipcVUU8DrpRi5JLows2s99Sw4ztgevDXvyY8NZLidoABQaWMkmDGtztsMhcT7BoRQgw41hu
+        let testcases = vec![
+            ("m/44'/1'/0'", "tpubDD7URPdwnhN6XNWRkMLhaGvhp1xaZNTAqgn8qULdENfMrUbCUcV4Kd4FQzVSHkKx9nmU7sNjBMPa96b9g3KTSJTAvTsTcT5mYDz97fUppvd"),
+            ("m/44'/1'/0'/3", "tpubDExN4iEszTsYJshQBJwUka8bvbyZN3dEGSXF5CsT9r9KYVu8ZszgX7F6zxystWLzrNcSdr2Hv66EbuvYjZqiSsSQ389vQdnoQKc2wJHPBuL"),
+        ];
+
+        for (path, expected_xpub) in testcases {
+            // decode the derivation path into a Vec<u32>
+
+            let response = sdk::executor::block_on(handle_get_extended_pubkey(
+                &mut sdk::App::singleton(),
+                KeyTree::Resident,
                 &common::message::Bip32Path(parse_derivation_path(path).unwrap()),
                 false,
                 None,

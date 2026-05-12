@@ -2,6 +2,7 @@
 
 extern crate alloc;
 
+mod bip32;
 mod constants;
 mod handlers;
 mod identity;
@@ -23,15 +24,13 @@ async fn handle_request(
     match request {
         Request::GetVersion => todo!(),
         Request::Exit => sdk::exit(0),
-        Request::GetMasterFingerprint => handle_get_master_fingerprint(app),
+        Request::GetMasterFingerprint { tree } => handle_get_master_fingerprint(app, *tree),
         Request::GetExtendedPubkey {
+            tree,
             path,
             display,
             identity_index,
-        } => handle_get_extended_pubkey(app, path, *display, *identity_index).await,
-        Request::GetResidentPubkey { index, display } => {
-            handle_get_resident_pubkey(app, *index, *display).await
-        }
+        } => handle_get_extended_pubkey(app, *tree, path, *display, *identity_index).await,
         Request::RegisterAccount {
             name,
             account,
