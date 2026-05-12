@@ -693,6 +693,19 @@ impl EcfpPublicKey<Secp256k1, 32> {
         }
         Ok(())
     }
+
+    /// BIP-32 fingerprint: first 4 bytes of RIPEMD160(SHA256(compressed_pubkey)).
+    pub fn fingerprint(&self) -> u32 {
+        use crate::hash::{Hasher, Ripemd160, Sha256};
+        let pk_bytes = self.public_key.to_bytes();
+        let mut sha256_hasher = Sha256::new();
+        sha256_hasher.update(&[pk_bytes[64] % 2 + 0x02]);
+        sha256_hasher.update(&pk_bytes[1..33]);
+        let mut sha256 = [0u8; 32];
+        sha256_hasher.digest(&mut sha256);
+        let hash = Ripemd160::hash(&sha256);
+        u32::from_be_bytes([hash[0], hash[1], hash[2], hash[3]])
+    }
 }
 
 // TODO: can we generalize this to all curves?
@@ -1214,5 +1227,16 @@ mod tests {
             child.chaincode,
             hex!("47fdacbd0f1097043b78c63c20c34ef4ed9a111d980047ad16282c7ae6236141")
         );
+    }
+
+    /// BIP-32 test vector 1: fingerprint of the master public key (seed 000102030405060708090a0b0c0d0e0f).
+    /// The expected value 0x3442193e is the parent_fingerprint recorded in the m/0h serialization
+    /// in the BIP-32 specification.
+    #[test]
+    fn test_fingerprint_bip32_tv1_master() {
+        let privkey = EcfpPrivateKey::<Secp256k1, 32>::new(hex!(
+            "e8f32e723decf4051aefac8e2c93c9c5b214313817cdb01a1494b917c8436b35"
+        ));
+        assert_eq!(privkey.to_public_key().fingerprint(), 0x3442193e);
     }
 }
