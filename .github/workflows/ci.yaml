@@ -378,7 +378,7 @@ jobs:
         uses: actions/checkout@v4
       - name: Install cargo-vnd
         working-directory: cargo-vnd
-        run: cargo install --path .
+        run: cargo install --locked --path .
       - name: Create new V-App using cargo vnd new
         run: cargo vnd new --name testapp --template-path "$(pwd)/apps/template/generate"
       - name: Build the app for RISC-V target
