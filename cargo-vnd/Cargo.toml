@@ -13,6 +13,10 @@ clap = { version = "4.5.38", features = ["derive"] }
 common = { path = "../common", features = ["serde_json"] }
 client_sdk = { path = "../client-sdk", package="vanadium-client-sdk", features=["cargo_toml", "transport", "target_all"], default-features = false }
 which = "7.0.3"
-cargo-generate = "0.23.7"
+cargo-generate = "0.23.8"
+# auth-git2 0.5.8 has a broken version requirement `>0.14, <21.0` (intended as `<0.21`)
+# that allows git2 0.21 but uses APIs only present in earlier versions. Pin git2 to
+# 0.20 here to keep the resolver on a compatible version.
+git2 = { version = "0.20", default-features = false }
 tokio = { version = "1.38.1", features = ["io-util", "macros", "net", "rt", "rt-multi-thread", "sync"] }
 env_logger = "0.11"
