@@ -6,7 +6,7 @@ pub fn handle_get_master_fingerprint(
     tree: KeyTree,
 ) -> Result<Response, common::errors::Error> {
     let fpr = crate::bip32::master_fingerprint(tree)?;
-    Ok(Response::MasterFingerprint(fpr))
+    Ok(Response::MasterFingerprint { fingerprint: fpr })
 }
 
 #[cfg(test)]
@@ -17,13 +17,23 @@ mod tests {
     fn test_handle_get_master_fingerprint_standard() {
         let response =
             handle_get_master_fingerprint(&mut sdk::App::singleton(), KeyTree::Standard).unwrap();
-        assert_eq!(response, Response::MasterFingerprint(0xf5acc2fdu32));
+        assert_eq!(
+            response,
+            Response::MasterFingerprint {
+                fingerprint: 0xf5acc2fdu32
+            }
+        );
     }
 
     #[test]
     fn test_handle_get_master_fingerprint_resident() {
         let response =
             handle_get_master_fingerprint(&mut sdk::App::singleton(), KeyTree::Resident).unwrap();
-        assert_eq!(response, Response::MasterFingerprint(0xad85d955));
+        assert_eq!(
+            response,
+            Response::MasterFingerprint {
+                fingerprint: 0xad85d955
+            }
+        );
     }
 }

@@ -87,17 +87,23 @@ impl<'a> BitcoinClient {
 
     // Parse app response; if the response is a Response::Error, it is converted to BitcoinClientError::AppError.
     async fn parse_response(response_raw: &'a [u8]) -> Result<Response, BitcoinClientError> {
-        let resp: Response = postcard::from_bytes(response_raw).map_err(|_| {
+        let mut decoder = minicbor::Decoder::new(response_raw);
+        let resp: Response = decoder.decode().map_err(|_| {
             BitcoinClientError::GenericError("Failed to parse response".to_string())
         })?;
-        if let Response::Error(e) = resp {
-            return Err(BitcoinClientError::AppError(e));
+        if decoder.position() != response_raw.len() {
+            return Err(BitcoinClientError::GenericError(
+                "Failed to parse response".to_string(),
+            ));
+        }
+        if let Response::Error { error } = resp {
+            return Err(BitcoinClientError::AppError(error));
         }
         Ok(resp)
     }
 
     pub async fn exit(&mut self) -> Result<i32, BitcoinClientError> {
-        let msg = postcard::to_allocvec(&Request::Exit).map_err(|_| {
+        let msg = minicbor::to_vec(&Request::Exit).map_err(|_| {
             BitcoinClientError::GenericError("Failed to serialize Exit request".to_string())
         })?;
 
@@ -123,7 +129,7 @@ impl<'a> BitcoinClient {
         &mut self,
         tree: message::KeyTree,
     ) -> Result<u32, BitcoinClientError> {
-        let msg = postcard::to_allocvec(&Request::GetMasterFingerprint { tree }).map_err(|_| {
+        let msg = minicbor::to_vec(&Request::GetMasterFingerprint { tree }).map_err(|_| {
             BitcoinClientError::GenericError(
                 "Failed to serialize GetMasterFingerprint request".to_string(),
             )
@@ -131,7 +137,7 @@ impl<'a> BitcoinClient {
 
         let response_raw = self.send_message(&msg).await?;
         match Self::parse_response(&response_raw).await? {
-            Response::MasterFingerprint(fpr) => Ok(fpr),
+            Response::MasterFingerprint { fingerprint } => Ok(fingerprint),
             e => Err(BitcoinClientError::InvalidResponse(format!(
                 "Invalid response: {:?}",
                 e
@@ -149,7 +155,7 @@ impl<'a> BitcoinClient {
         let path = DerivationPath::from_str(bip32_path)
             .map_err(|e| format!("Failed to convert bip32_path: {}", e))?;
 
-        let msg = postcard::to_allocvec(&Request::GetExtendedPubkey {
+        let msg = minicbor::to_vec(&Request::GetExtendedPubkey {
             tree,
             display,
             path: message::Bip32Path(path.to_u32_vec()),
@@ -182,7 +188,7 @@ impl<'a> BitcoinClient {
         display: bool,
     ) -> Result<[u8; 78], BitcoinClientError> {
         let path = common::identity::identity_derivation_path(index);
-        let msg = postcard::to_allocvec(&Request::GetExtendedPubkey {
+        let msg = minicbor::to_vec(&Request::GetExtendedPubkey {
             tree: message::KeyTree::Standard,
             display,
             path: message::Bip32Path(path),
@@ -222,7 +228,7 @@ impl<'a> BitcoinClient {
         ),
         BitcoinClientError,
     > {
-        let msg = postcard::to_allocvec(&Request::RegisterAccount {
+        let msg = minicbor::to_vec(&Request::RegisterAccount {
             name: name.into(),
             account: account.clone(),
             registered_identities,
@@ -259,7 +265,7 @@ impl<'a> BitcoinClient {
         ),
         BitcoinClientError,
     > {
-        let msg = postcard::to_allocvec(&Request::RegisterIdentityKey {
+        let msg = minicbor::to_vec(&Request::RegisterIdentityKey {
             name: name.into(),
             pubkey: pubkey.to_vec(),
         })
@@ -291,7 +297,7 @@ impl<'a> BitcoinClient {
         display: bool,
         identity_index: Option<u32>,
     ) -> Result<(String, Option<IdentitySignature>), BitcoinClientError> {
-        let msg = postcard::to_allocvec(&Request::GetAddress {
+        let msg = minicbor::to_vec(&Request::GetAddress {
             display,
             name: Some(name.to_string()),
             account: account.clone(),
@@ -322,7 +328,7 @@ impl<'a> BitcoinClient {
         &mut self,
         psbt: &[u8],
     ) -> Result<Vec<PartialSignature>, BitcoinClientError> {
-        let msg = postcard::to_allocvec(&Request::SignPsbt {
+        let msg = minicbor::to_vec(&Request::SignPsbt {
             psbt: psbt.to_vec(),
         })
         .map_err(|_| {
@@ -331,7 +337,7 @@ impl<'a> BitcoinClient {
 
         let response_raw = self.send_message(&msg).await?;
         match Self::parse_response(&response_raw).await? {
-            Response::PsbtSigned(partial_sigs) => Ok(partial_sigs),
+            Response::PsbtSigned { signatures } => Ok(signatures),
             e => Err(BitcoinClientError::InvalidResponse(format!(
                 "Invalid response: {:?}",
                 e

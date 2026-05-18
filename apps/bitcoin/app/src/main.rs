@@ -76,14 +76,23 @@ async fn handle_request(
 
 #[sdk::handler]
 async fn process_message(app: &mut App, request: &[u8]) -> Vec<u8> {
-    let Ok(request) = postcard::from_bytes(request) else {
-        return postcard::to_allocvec(&Response::Error(common::errors::Error::InvalidRequest))
-            .unwrap();
+    let mut decoder = minicbor::Decoder::new(request);
+    let Ok(decoded_request) = decoder.decode::<Request>() else {
+        return minicbor::to_vec(&Response::Error {
+            error: common::errors::Error::InvalidRequest,
+        })
+        .unwrap();
     };
-    let response = handle_request(app, &request)
+    if decoder.position() != request.len() {
+        return minicbor::to_vec(&Response::Error {
+            error: common::errors::Error::InvalidRequest,
+        })
+        .unwrap();
+    }
+    let response = handle_request(app, &decoded_request)
         .await
-        .unwrap_or_else(|e| Response::Error(e));
-    postcard::to_allocvec(&response).unwrap()
+        .unwrap_or_else(|error| Response::Error { error });
+    minicbor::to_vec(&response).unwrap()
 }
 
 pub fn main() {

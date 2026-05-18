@@ -1,69 +1,119 @@
 use core::fmt;
-use serde::{Deserialize, Serialize};
+use minicbor::{Decode, Encode};
 
 // Central error type used across the app; variants stay small and descriptive.
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+//
+// Each variant carries a stable CBOR index. NEVER reuse an index; only ever
+// append new variants at fresh indices.
+#[derive(Encode, Decode, Debug, Clone, PartialEq, Eq)]
+#[cbor(index_only)]
 pub enum Error {
     // Generic / request
+    #[n(0)]
     InvalidRequest,
+    #[n(1)]
     InvalidParameter,
 
     // Wallet policy / account
+    #[n(2)]
     InvalidWalletPolicy,
+    #[n(3)]
     DefaultAccountsNotSupported,
+    #[n(4)]
     InvalidProofOfRegistrationLength,
+    #[n(5)]
     InvalidProofOfRegistration,
+    #[n(6)]
     InvalidAccountId,
+    #[n(7)]
     InvalidKeyIndex,
+    #[n(8)]
     InvalidScriptContext,
+    #[n(9)]
     TooManyKeys,
+    #[n(10)]
     InvalidMultisigQuorum,
+    #[n(11)]
     UnsupportedWalletPolicy,
 
     // Derivation / crypto
+    #[n(12)]
     DerivationPathTooLong,
+    #[n(13)]
     KeyDerivationFailed,
+    #[n(14)]
     HardenedDerivationNotSupported,
+    #[n(15)]
     InvalidKey,
+    #[n(16)]
     ErrorComputingSighash,
+    #[n(17)]
     SigningFailed,
 
     // PSBT / UTXO checks
+    #[n(18)]
     FailedToDeserializePsbt,
+    #[n(19)]
     FailedToGetAccounts,
+    #[n(20)]
     ExternalInputsNotSupported,
+    #[n(21)]
     WitnessUtxoNotAllowedForLegacy,
+    #[n(22)]
     InvalidNonWitnessUtxo,
+    #[n(23)]
     NonWitnessUtxoMismatch,
+    #[n(24)]
     NonWitnessUtxoRequired,
+    #[n(25)]
     WitnessUtxoRequiredForSegwit,
+    #[n(26)]
     InvalidWitnessUtxo,
+    #[n(27)]
     RedeemScriptMismatchWitness,
+    #[n(28)]
     WitnessScriptRequiredForP2WSH,
+    #[n(29)]
     WitnessScriptMismatchWitness,
+    #[n(30)]
     RedeemScriptMismatch,
+    #[n(31)]
     MissingPreviousOutputIndex,
+    #[n(32)]
     MissingInputUtxo,
+    #[n(33)]
     InputScriptMismatch,
+    #[n(34)]
     OutputScriptMissing,
+    #[n(35)]
     OutputAmountMissing,
+    #[n(36)]
     OutputScriptMismatch,
+    #[n(37)]
     InputsLessThanOutputs,
+    #[n(38)]
     FailedUnsignedTransaction,
+    #[n(39)]
     AddressFromScriptFailed,
 
     // Identity authentication
+    #[n(40)]
     InvalidIdentitySignature,
+    #[n(41)]
     IdentityMessageFieldTooLong,
 
     // Unexpected states
+    #[n(42)]
     UnexpectedTaprootPolicy,
+    #[n(43)]
     UnexpectedSegwitVersion,
 
     // Storage errors
+    #[n(44)]
     StorageError,
 
     // User rejections (separate to keep enum small and avoid strings)
+    #[n(45)]
     UserRejected,
 }
 
