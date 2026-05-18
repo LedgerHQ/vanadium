@@ -1,5 +1,5 @@
 use common::errors::Error;
-use sdk::curve::{EcfpPrivateKey, HDPrivNode, Secp256k1, ToPublicKey};
+use sdk::curve::{Curve, EcfpPrivateKey, HDPrivNode, Secp256k1, ToPublicKey};
 use sdk::hash::{Hasher, Sha512};
 
 #[cfg(not(any(test, feature = "fixed_resident_seed")))]
@@ -24,7 +24,14 @@ pub fn get_or_init_resident_seed() -> Result<[u8; 32], Error> {
 
     #[cfg(not(any(test, feature = "fixed_resident_seed")))]
     if is_slot_empty(RESIDENT_SEED_SLOT).map_err(|_| Error::StorageError)? {
-        let random_seed: [u8; 32] = sdk::rand::random_bytes(32).try_into().unwrap();
+        let standard_fpr = Secp256k1::get_master_fingerprint();
+        // avoid generating a seed that would produce the same master fingerprint
+        let random_seed: [u8; 32] = loop {
+            let candidate: [u8; 32] = sdk::rand::random_bytes(32).try_into().unwrap();
+            if master_fingerprint(&master_hd_node_from_seed(&candidate)) != standard_fpr {
+                break candidate;
+            }
+        };
         write_slot(RESIDENT_SEED_SLOT, &random_seed).map_err(|_| Error::StorageError)?;
         Ok(random_seed)
     } else {
@@ -32,18 +39,30 @@ pub fn get_or_init_resident_seed() -> Result<[u8; 32], Error> {
     }
 }
 
-/// Returns the resident BIP-32 master HD node derived from the resident seed
-/// per BIP-32 (`HMAC-SHA512("Bitcoin seed", seed) -> (privkey || chaincode)`).
-pub fn get_resident_master_hd_node() -> Result<HDPrivNode<Secp256k1, 32>, Error> {
-    let seed = get_or_init_resident_seed()?;
-    let hmac = hmac_sha512(b"Bitcoin seed", &seed);
+/// Derives the BIP-32 master HD node from a 32-byte seed
+/// (`HMAC-SHA512("Bitcoin seed", seed) -> (privkey || chaincode)`).
+fn master_hd_node_from_seed(seed: &[u8; 32]) -> HDPrivNode<Secp256k1, 32> {
+    let hmac = hmac_sha512(b"Bitcoin seed", seed);
 
     let mut privkey = [0u8; 32];
     privkey.copy_from_slice(&hmac[0..32]);
     let mut chaincode = [0u8; 32];
     chaincode.copy_from_slice(&hmac[32..64]);
 
-    Ok(EcfpPrivateKey::<Secp256k1, 32>::new(privkey).into_hd_node(&chaincode))
+    EcfpPrivateKey::<Secp256k1, 32>::new(privkey).into_hd_node(&chaincode)
+}
+
+/// Returns the BIP-32 fingerprint of the public key associated with the given master HD node.
+fn master_fingerprint(node: &HDPrivNode<Secp256k1, 32>) -> u32 {
+    EcfpPrivateKey::<Secp256k1, 32>::new(*node.privkey)
+        .to_public_key()
+        .fingerprint()
+}
+
+/// Returns the resident BIP-32 master HD node derived from the resident seed.
+pub fn get_resident_master_hd_node() -> Result<HDPrivNode<Secp256k1, 32>, Error> {
+    let seed = get_or_init_resident_seed()?;
+    Ok(master_hd_node_from_seed(&seed))
 }
 
 /// Derives the resident HD node at the given BIP-32 path, starting from the
@@ -60,9 +79,7 @@ pub fn derive_resident_hd_node(path: &[u32]) -> Result<HDPrivNode<Secp256k1, 32>
 
 /// Returns the BIP-32 fingerprint of the resident master public key.
 pub fn get_resident_master_fingerprint() -> Result<u32, Error> {
-    let master = get_resident_master_hd_node()?;
-    let privkey = EcfpPrivateKey::<Secp256k1, 32>::new(*master.privkey);
-    Ok(privkey.to_public_key().fingerprint())
+    Ok(master_fingerprint(&get_resident_master_hd_node()?))
 }
 
 /// HMAC-SHA512 with an arbitrary-length key.
