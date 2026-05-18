@@ -867,7 +867,9 @@ pub async fn handle_sign_psbt(app: &mut sdk::App, psbt: &[u8]) -> Result<Respons
     #[cfg(not(any(test, feature = "autoapprove")))]
     app.show_info(Icon::Success, "Transaction signed");
 
-    Ok(Response::PsbtSigned(partial_signatures))
+    Ok(Response::PsbtSigned {
+        signatures: partial_signatures,
+    })
 }
 
 #[cfg(test)]
@@ -907,14 +909,16 @@ mod tests {
         ))
         .unwrap();
 
-        assert_eq!(response, Response::PsbtSigned(vec![
-            PartialSignature {
-                input_index: 0,
-                signature: hex!("3045022100e55b3ca788721aae8def2eadff710e524ffe8c9dec1764fdaa89584f9726e196022012a30fbcf9e1a24df31a1010356b794ab8de438b4250684757ed5772402540f401").to_vec(),
-                pubkey: hex!("02ee8608207e21028426f69e76447d7e3d5e077049f5e683c3136c2314762a4718").to_vec(),
-                leaf_hash: None
-            }
-        ]));
+        assert_eq!(response, Response::PsbtSigned {
+            signatures: vec![
+                PartialSignature {
+                    input_index: 0,
+                    signature: hex!("3045022100e55b3ca788721aae8def2eadff710e524ffe8c9dec1764fdaa89584f9726e196022012a30fbcf9e1a24df31a1010356b794ab8de438b4250684757ed5772402540f401").to_vec(),
+                    pubkey: hex!("02ee8608207e21028426f69e76447d7e3d5e077049f5e683c3136c2314762a4718").to_vec(),
+                    leaf_hash: None
+                }
+            ]
+        });
     }
 
     #[test]
@@ -939,14 +943,16 @@ mod tests {
         ))
         .unwrap();
 
-        assert_eq!(response, Response::PsbtSigned(vec![
-            PartialSignature {
-                input_index: 0,
-                signature: hex!("3045022100ab44f34dd7e87c9054591297a101e8500a0641d1d591878d0d23cf8096fa79e802205d12d1062d925e27b57bdcf994ecf332ad0a8e67b8fe407bab2101255da632aa01").to_vec(),
-                pubkey: hex!("03ee2c3d98eb1f93c0a1aa8e5a4009b70eb7b44ead15f1666f136b012ad58d3068").to_vec(),
-                leaf_hash: None
-            }
-        ]));
+        assert_eq!(response, Response::PsbtSigned {
+            signatures: vec![
+                PartialSignature {
+                    input_index: 0,
+                    signature: hex!("3045022100ab44f34dd7e87c9054591297a101e8500a0641d1d591878d0d23cf8096fa79e802205d12d1062d925e27b57bdcf994ecf332ad0a8e67b8fe407bab2101255da632aa01").to_vec(),
+                    pubkey: hex!("03ee2c3d98eb1f93c0a1aa8e5a4009b70eb7b44ead15f1666f136b012ad58d3068").to_vec(),
+                    leaf_hash: None
+                }
+            ]
+        });
     }
 
     #[test]
@@ -972,7 +978,10 @@ mod tests {
         ))
         .unwrap();
 
-        let Response::PsbtSigned(partial_signatures) = response else {
+        let Response::PsbtSigned {
+            signatures: partial_signatures,
+        } = response
+        else {
             panic!("Expected PsbtSigned response");
         };
 
@@ -1023,7 +1032,10 @@ mod tests {
         ))
         .unwrap();
 
-        let Response::PsbtSigned(partial_signatures) = response else {
+        let Response::PsbtSigned {
+            signatures: partial_signatures,
+        } = response
+        else {
             panic!("Expected PsbtSigned response");
         };
 
