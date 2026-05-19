@@ -51,6 +51,10 @@
       "name": "₿ vnd-bitcoin-common"
     },
     {
+      "path": "apps/bitcoin/bip388",
+      "name": "₿ bip388"
+    },
+    {
       "path": "apps/bitcoin/client",
       "name": "₿ vnd-bitcoin-client"
     },

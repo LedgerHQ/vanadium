@@ -323,7 +323,7 @@ jobs:
     uses: ./.github/workflows/reusable_native_tests.yaml
     with:
       vapp_name: "vnd-bitcoin"
-      test_dirs_json: '["apps/bitcoin/common","apps/bitcoin/app"]'
+      test_dirs_json: '["apps/bitcoin/bip388","apps/bitcoin/common","apps/bitcoin/app"]'
 
   vnd_bitcoin_integration_tests:
     needs: [build_vanadium_app, build_vnd_bitcoin_autoapprove]

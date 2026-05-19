@@ -1,3 +1,7 @@
+#![cfg_attr(not(test), no_std)]
+
+extern crate alloc;
+
 // TODO:
 // - add type checks
 // - add malleability checks
