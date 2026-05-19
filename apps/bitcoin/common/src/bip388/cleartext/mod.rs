@@ -50,7 +50,7 @@ pub(super) const SEQUENCE_LOCKTIME_TYPE_FLAG: u32 = 1 << 22;
 // the `TOP_LEVEL_SPECS` / `TAPLEAF_SPECS` cleartext templates, and the
 // always-compiled pattern-matching code (`classify`, `classify_as_tapleaf`,
 // `cleartext_pattern`, `order`, `outer_score`, `per_leaf_score`) are generated
-// from `cleartext.spec.toml` by `build.rs`. The decode-side generated code
+// from `specs/cleartext.toml` by `build.rs`. The decode-side generated code
 // lives in `cleartext_decode_generated.rs` and is included from `decode.rs`.
 include!(concat!(env!("OUT_DIR"), "/cleartext_generated.rs"));
 
@@ -472,7 +472,7 @@ impl ClearText for DescriptorTemplate {
 #[cfg(test)]
 mod tests {
     use super::{ClearText, DescriptorTemplate};
-    use alloc::{string::ToString, vec::Vec};
+    use alloc::{string::String, vec::Vec};
     use core::str::FromStr;
 
     fn dt(s: &str) -> DescriptorTemplate {
@@ -480,629 +480,133 @@ mod tests {
             .unwrap_or_else(|e| panic!("parse failed for {:?}: {:?}", s, e))
     }
 
-    fn strs(ss: &[&str]) -> Vec<alloc::string::String> {
-        ss.iter().map(|s| s.to_string()).collect()
+    /// One entry from `specs/test_vectors.toml`. Every field except
+    /// `template` is optional so the same data file can carry partial
+    /// vectors (e.g. confusion-score-only) for cases that historically
+    /// asserted only one property.
+    #[derive(Debug, serde::Deserialize)]
+    struct Vector {
+        template: String,
+        #[serde(default)]
+        confusion_score: Option<u64>,
+        #[serde(default)]
+        cleartext: Option<Vec<String>>,
+        #[serde(default)]
+        has_cleartext: Option<bool>,
+    }
+
+    #[derive(Debug, serde::Deserialize)]
+    struct TestVectors {
+        vector: Vec<Vector>,
+    }
+
+    fn load_vectors() -> Vec<Vector> {
+        const RAW: &str = include_str!("specs/test_vectors.toml");
+        let parsed: TestVectors =
+            toml::from_str(RAW).expect("failed to parse specs/test_vectors.toml");
+        parsed.vector
     }
 
     #[test]
-    fn test_confusion_score() {
-        // (descriptor_template, expected_confusion_score)
-        let cases: &[(&str, u64)] = &[
-            // Legacy single-sig
-            ("pkh(@0/**)", 1),
-            // Segwit single-sig
-            ("wpkh(@0/**)", 2),
-            ("sh(wpkh(@0/**))", 2), // wrapped
-            // Segwit multi-sig (wsh + sortedmulti / multi)
-            ("wsh(sortedmulti(2,@0/**,@1/**))", 4),
-            ("wsh(sortedmulti(2,@0/**,@1/**,@2/**))", 4),
-            ("wsh(sortedmulti(3,@0/**,@1/**,@2/**))", 4),
-            ("wsh(multi(2,@0/**,@1/**))", 4),
-            ("sh(wsh(multi(2,@0/**,@1/**)))", 4), // wrapped
-            ("sh(wsh(sortedmulti(2,@0/**,@1/**)))", 4), // wrapped
-            ("sh(wsh(multi(2,@0/**,@1/**,@2/**)))", 4), // wrapped
-            ("sh(wsh(sortedmulti(3,@0/**,@1/**,@2/**)))", 4), // wrapped
-            // Taproot with 1 SingleSig leaf (score 1)
-            ("tr(@0/**,pk(@1/**))", 1),
-            // Taproot with 2 leaves: both SingleSig (score 1 each), T(2)=1 → 1×1×1=1
-            ("tr(@0/**,{pk(@1/**),pk(@2/**)})", 1),
-            // Taproot with 2 leaves: SortedMultisig (score 1) + SingleSig (score 1), T(2)=1 → 1×1×1=1
-            ("tr(@0/**,{sortedmulti_a(2,@1/**,@2/**),pk(@3/**)})", 1),
-            // Taproot with 3 leaves: 3×SingleSig (1×1×1=1), T(3)=3 → 1×3=3
-            ("tr(@0/**,{{pk(@1/**),pk(@2/**)},pk(@3/**)})", 3),
-            // Taproot with 2 leaves: RelativeHeightlockSingleSig (score 1) + SingleSig (score 1), T(2)=1 → 1
-            (
-                "tr(@0/**,{pk(@1/**),and_v(v:pk(@2/<0;1>/*),older(52560))})",
-                1,
-            ),
-            // Taproot with 2 leaves: RelativeTimelockSingleSig (score 1) + SingleSig (score 1), T(2)=1 → 1
-            (
-                "tr(@0/**,{pk(@1/**),and_v(v:pk(@2/<0;1>/*),older(4194305))})",
-                1,
-            ),
-            // Taproot with 2 leaves: RelativeTimelockMultiSig (score 2, threshold==keys) + SingleSig (score 1), T(2)=1 → 2
-            (
-                "tr(@0/**,{pk(@1/**),and_v(v:multi_a(2,@2/<0;1>/*,@3/<0;1>/*),older(4194484))})",
-                2,
-            ),
-            // Taproot with musig internal key: key-path only (score 1)
-            ("tr(musig(@0,@1)/**)", 1),
-            // Taproot with musig internal key: 3 keys (score 1)
-            ("tr(musig(@0,@1,@2)/**)", 1),
-            // Taproot with musig internal key + 1 SingleSig leaf (score 1)
-            ("tr(musig(@0,@1)/**,pk(@2/**))", 1),
-            // Taproot with musig internal key + 2 SingleSig leaves: T(2)=1 → 1
-            ("tr(musig(@0,@1)/**,{pk(@2/**),pk(@3/**)})", 1),
-            // Taproot with musig internal key + 3 SingleSig leaves: T(3)=3 → 3
-            ("tr(musig(@0,@1)/**,{{pk(@2/**),pk(@3/**)},pk(@4/**)})", 3),
-            // --------------------------------------------------------------------------------------
-            // Taproot with musig() tapleaf (pk(musig(...)) maps to Multisig)
-            // --------------------------------------------------------------------------------------
-            // pk(musig) leaf: 2-of-2 (threshold==keys, score 2)
-            ("tr(@0/**,pk(musig(@1,@2)/**))", 2),
-            // pk(musig) leaf: 3-of-3 (threshold==keys, score 2)
-            ("tr(@0/**,pk(musig(@1,@2,@3)/**))", 2),
-            // pk(musig) + relative heightlock (threshold==keys, score 2)
-            ("tr(@0/**,and_v(v:pk(musig(@1,@2)/**),older(1008)))", 2),
-            // pk(musig) + relative timelock (threshold==keys, score 2)
-            ("tr(@0/**,and_v(v:pk(musig(@1,@2)/**),older(4194484)))", 2),
-            // pk(musig) + absolute heightlock (threshold==keys, score 2)
-            ("tr(@0/**,and_v(v:pk(musig(@1,@2)/**),after(840000)))", 2),
-            // pk(musig) + absolute timelock (threshold==keys, score 2)
-            (
-                "tr(@0/**,and_v(v:pk(musig(@1,@2)/**),after(1700000000)))",
-                2,
-            ),
-            // pk(musig) alongside SingleSig: 1*2*T(2)=2
-            ("tr(@0/**,{pk(@1/**),pk(musig(@2,@3)/**)})", 2),
-            // multi_a with threshold < keys.len() alongside pk(musig): 1*2*T(2)=2
-            (
-                "tr(@0/**,{multi_a(2,@1/**,@2/**,@3/**),pk(musig(@4,@5)/**)})",
-                2,
-            ),
-            (
-                // leaves are unambiguous, but keys @1 and @2 appear twice each, so the result is multiplied by 2! * 2!
-                "tr(@0/<0;1>/*,{and_v(v:multi_a(2,@1/<0;1>/*,@2/<0;1>/*,@3/<0;1>/*),older(144)),and_v(v:pk(@1/<2;3>/*),pk(@2/<2;3>/*))})",
-                4
-            ),
-        ];
-
-        for &(desc_str, expected) in cases {
+    fn test_vectors_confusion_score() {
+        for v in load_vectors() {
+            let Some(expected) = v.confusion_score else {
+                continue;
+            };
             assert_eq!(
-                dt(desc_str).confusion_score(),
+                dt(&v.template).confusion_score(),
                 expected,
                 "confusion_score mismatch for {:?}",
-                desc_str
+                v.template
             );
         }
     }
 
     #[test]
-    fn test_has_cleartext() {
-        // list of descriptor templates that should have a cleartext description
-        let cases = &[
-            "pkh(@0/**)",
-            "wpkh(@0/**)",
-            "wsh(sortedmulti(2,@0/**,@1/**))",
-            "wsh(sortedmulti(2,@0/**,@1/**,@2/**))",
-            "wsh(sortedmulti(3,@0/**,@1/**,@2/**))",
-            "wsh(multi(2,@0/**,@1/**))",
-            "tr(@0/**)",
-            "tr(@0/**,pk(@1/**))",
-            "tr(@0/**,{pk(@1/**),pk(@2/**)})",
-            "tr(@0/**,{sortedmulti_a(2,@1/**,@2/**),pk(@3/**)})",
-            "tr(@0/**,{{pk(@1/**),pk(@2/**)},pk(@3/**)})",
-            "tr(@0/**,and_v(v:pk(@1/<0;1>/*),older(52560)))",
-            "tr(@0/**,{pk(@1/**),and_v(v:pk(@2/<0;1>/*),older(1008))})",
-            "tr(@0/<0;1>/*,{and_v(v:pk(@1/<0;1>/*),older(4383)),and_v(v:pk(@2/<0;1>/*),pk(@1/<2;3>/*))})",
-            "tr(@0/<0;1>/*,{and_v(v:multi_a(2,@1/<0;1>/*,@2/<0;1>/*,@3/<0;1>/*),older(144)),and_v(v:pk(@1/<2;3>/*),pk(@2/<2;3>/*))})",
-            "tr(@0/**,and_v(v:pk(@1/<0;1>/*),older(4194305)))",
-            "tr(@0/**,{pk(@1/**),and_v(v:pk(@2/<0;1>/*),older(4194484))})",
-            "tr(@0/**,{pk(@1/**),and_v(v:multi_a(2,@2/<0;1>/*,@3/<0;1>/*),older(4194484))})",
-            "tr(@0/**,and_v(v:and_v(v:pk(@1/<0;1>/*),pk(@2/<0;1>/*)),older(1008)))",
-            "tr(@0/**,and_v(v:and_v(v:pk(@1/<0;1>/*),pk(@2/<0;1>/*)),older(4194484)))",
-            "tr(@0/**,and_v(v:and_v(v:pk(@1/<0;1>/*),pk(@2/<0;1>/*)),after(840000)))",
-            "tr(@0/**,and_v(v:and_v(v:pk(@1/<0;1>/*),pk(@2/<0;1>/*)),after(1700000000)))",
-            "tr(@0/**,and_v(v:pk(@1/<0;1>/*),after(840000)))",
-            "tr(@0/**,{pk(@1/**),and_v(v:multi_a(2,@2/<0;1>/*,@3/<0;1>/*),after(840000))})",
-            "tr(@0/**,and_v(v:pk(@1/<0;1>/*),after(500000000)))",
-            "tr(@0/**,{pk(@1/**),and_v(v:multi_a(2,@2/<0;1>/*,@3/<0;1>/*),after(1700000000))})",
-            // Taproot with musig internal key
-            "tr(musig(@0,@1)/**)",
-            "tr(musig(@0,@1,@2)/**)",
-            "tr(musig(@0,@1)/**,pk(@2/**))",
-            "tr(musig(@0,@1)/**,{pk(@2/**),pk(@3/**)})",
-            // Taproot with musig tapleaf
-            "tr(@0/**,pk(musig(@1,@2)/**))",
-            "tr(@0/**,pk(musig(@1,@2,@3)/**))",
-            "tr(@0/**,and_v(v:pk(musig(@1,@2)/**),older(1008)))",
-            "tr(@0/**,and_v(v:pk(musig(@1,@2)/**),older(4194484)))",
-            "tr(@0/**,and_v(v:pk(musig(@1,@2)/**),after(840000)))",
-            "tr(@0/**,and_v(v:pk(musig(@1,@2)/**),after(1700000000)))",
-            // Key derivation ordering tests (keys appear multiple times with canonical derivations)
-            "tr(@0/<0;1>/*,pk(@0/<2;3>/*))",
-            "tr(@0/<0;1>/*,{pk(@0/<2;3>/*),pk(@0/<4;5>/*)})",
-            "tr(@0/**,{pk(@1/<0;1>/*),pk(@1/<2;3>/*)})",
-            "tr(@0/**,{and_v(v:pk(@1/<0;1>/*),older(4383)),pk(@1/<2;3>/*)})",
-            "tr(@0/<0;1>/*,{pk(@0/<2;3>/*),and_v(v:pk(@1/<0;1>/*),pk(@1/<2;3>/*))})",
-        ];
-        for &desc_str in cases {
-            assert!(
-                dt(desc_str).to_cleartext().1,
-                "expected to have cleartext description: {:?}",
-                desc_str
-            );
-        }
-    }
-
-    #[test]
-    fn test_to_cleartext() {
-        // (descriptor_template, expected_descriptions, expected_all_have_cleartext)
-        let cases: &[(&str, &[&str], bool)] = &[
-            // Legacy single-sig
-            ("pkh(@0/**)", &["Legacy single-signature (@0)"], true),
-            // Segwit single-sig
-            ("wpkh(@0/**)", &["Segwit single-signature (@0)"], true),
-            // Multisig: 2-of-2 sortedmulti
-            (
-                "wsh(sortedmulti(2,@0/**,@1/**))",
-                &["2 of @0 and @1 (SegWit)"],
-                true,
-            ),
-            // Multisig: 2-of-3 sortedmulti (format_key_indices with 3 keys)
-            (
-                "wsh(sortedmulti(2,@0/**,@1/**,@2/**))",
-                &["2 of @0, @1 and @2 (SegWit)"],
-                true,
-            ),
-            // Multisig: 3-of-3 sortedmulti
-            (
-                "wsh(sortedmulti(3,@0/**,@1/**,@2/**))",
-                &["3 of @0, @1 and @2 (SegWit)"],
-                true,
-            ),
-            // Multisig: multi (non-sorted)
-            (
-                "wsh(multi(2,@0/**,@1/**))",
-                &["2 of @0 and @1 (SegWit)"],
-                true,
-            ),
-            // Taproot: key-path only (no leaves)
-            ("tr(@0/**)", &["Primary path: @0"], true),
-            // Taproot: single pk leaf
-            (
-                "tr(@0/**,pk(@1/**))",
-                &["Primary path: @0", "Single-signature (@1)"],
-                true,
-            ),
-            // Taproot: two SingleSig leaves
-            (
-                "tr(@0/**,{pk(@1/**),pk(@2/**)})",
-                &[
-                    "Primary path: @0",
-                    "Single-signature (@1)",
-                    "Single-signature (@2)",
-                ],
-                true,
-            ),
-            // Taproot: SortedMultisig leaf + SingleSig leaf (SingleSig sorts first)
-            (
-                "tr(@0/**,{sortedmulti_a(2,@1/**,@2/**),pk(@3/**)})",
-                &[
-                    "Primary path: @0",
-                    "Single-signature (@3)",
-                    "2 of @1 and @2 (sorted)",
-                ],
-                true,
-            ),
-            // Taproot: three SingleSig leaves
-            (
-                "tr(@0/**,{{pk(@1/**),pk(@2/**)},pk(@3/**)})",
-                &[
-                    "Primary path: @0",
-                    "Single-signature (@1)",
-                    "Single-signature (@2)",
-                    "Single-signature (@3)",
-                ],
-                true,
-            ),
-            // Taproot: relative timelock single-sig leaf
-            (
-                "tr(@0/**,and_v(v:pk(@1/<0;1>/*),older(52560)))",
-                &["Primary path: @0", "@1 after 52560 blocks"],
-                true,
-            ),
-            // Taproot: relative timelock single-sig alongside a plain single-sig
-            (
-                "tr(@0/**,{pk(@1/**),and_v(v:pk(@2/<0;1>/*),older(1008))})",
-                &[
-                    "Primary path: @0",
-                    "Single-signature (@1)",
-                    "@2 after 1008 blocks",
-                ],
-                true,
-            ),
-            // Taproot: relative time-lock single-sig (1 unit = 512s = 8m 32s)
-            (
-                "tr(@0/**,and_v(v:pk(@1/<0;1>/*),older(4194305)))",
-                &["Primary path: @0", "@1 after 8m 32s"],
-                true,
-            ),
-            // Taproot: relative time-lock single-sig (180 units = 92160s = 1d 1h 36m)
-            (
-                "tr(@0/**,{pk(@1/**),and_v(v:pk(@2/<0;1>/*),older(4194484))})",
-                &[
-                    "Primary path: @0",
-                    "Single-signature (@1)",
-                    "@2 after 1d 1h 36m",
-                ],
-                true,
-            ),
-            // Taproot: relative time-lock multisig (180 units = 92160s = 1d 1h 36m)
-            (
-                "tr(@0/**,{pk(@1/**),and_v(v:multi_a(2,@2/<0;1>/*,@3/<0;1>/*),older(4194484))})",
-                &[
-                    "Primary path: @0",
-                    "Single-signature (@1)",
-                    "2 of @2 and @3 after 1d 1h 36m",
-                ],
-                true,
-            ),
-            // Taproot: absolute heightlock single-sig (block height 840000)
-            (
-                "tr(@0/**,and_v(v:pk(@1/<0;1>/*),after(840000)))",
-                &["Primary path: @0", "@1 after block height 840000"],
-                true,
-            ),
-            // Taproot: absolute heightlock multisig alongside a plain single-sig
-            (
-                "tr(@0/**,{pk(@1/**),and_v(v:multi_a(2,@2/<0;1>/*,@3/<0;1>/*),after(840000))})",
-                &[
-                    "Primary path: @0",
-                    "Single-signature (@1)",
-                    "2 of @2 and @3 after block height 840000",
-                ],
-                true,
-            ),
-            // Taproot: absolute timelock single-sig (timestamp 500000000 = 1985-11-05T00:53:20)
-            (
-                "tr(@0/**,and_v(v:pk(@1/<0;1>/*),after(500000000)))",
-                &["Primary path: @0", "@1 after date 1985-11-05 00:53:20"],
-                true,
-            ),
-            // Taproot: absolute timelock multisig (timestamp 1700000000 = 2023-11-14 22:13:20)
-            (
-                "tr(@0/**,{pk(@1/**),and_v(v:multi_a(2,@2/<0;1>/*,@3/<0;1>/*),after(1700000000))})",
-                &[
-                    "Primary path: @0",
-                    "Single-signature (@1)",
-                    "2 of @2 and @3 after date 2023-11-14 22:13:20",
-                ],
-                true,
-            ),
-            // Taproot: relative heightlock both-must-sign
-            (
-                "tr(@0/**,and_v(v:and_v(v:pk(@1/<0;1>/*),pk(@2/<0;1>/*)),older(1008)))",
-                &["Primary path: @0", "Both @1 and @2 after 1008 blocks"],
-                true,
-            ),
-            // Taproot: relative heightlock both-must-sign alongside a plain single-sig
-            (
-                "tr(@0/**,{pk(@1/**),and_v(v:and_v(v:pk(@2/<0;1>/*),pk(@3/<0;1>/*)),older(1008))})",
-                &[
-                    "Primary path: @0",
-                    "Single-signature (@1)",
-                    "Both @2 and @3 after 1008 blocks",
-                ],
-                true,
-            ),
-            // Taproot: relative timelock both-must-sign (180 units = 92160s = 1d 1h 36m)
-            (
-                "tr(@0/**,and_v(v:and_v(v:pk(@1/<0;1>/*),pk(@2/<0;1>/*)),older(4194484)))",
-                &["Primary path: @0", "Both @1 and @2 after 1d 1h 36m"],
-                true,
-            ),
-            // Taproot: absolute heightlock both-must-sign (block height 840000)
-            (
-                "tr(@0/**,and_v(v:and_v(v:pk(@1/<0;1>/*),pk(@2/<0;1>/*)),after(840000)))",
-                &["Primary path: @0", "Both @1 and @2 after block height 840000"],
-                true,
-            ),
-            // Taproot: absolute timelock both-must-sign (timestamp 1700000000 = 2023-11-14 22:13:20)
-            (
-                "tr(@0/**,and_v(v:and_v(v:pk(@1/<0;1>/*),pk(@2/<0;1>/*)),after(1700000000)))",
-                &["Primary path: @0", "Both @1 and @2 after date 2023-11-14 22:13:20"],
-                true,
-            ),
-            // Taproot: first leaf recognized (heightlock single-sig), second leaf unrecognized (complex miniscript)
-            (
-                "tr(@0/**,{and_v(v:pk(@1/**),older(960)),t:or_c(pk(@2/**),and_v(v:pk(@3/**),or_c(pk(@4/**),v:ripemd160(907cd521fff981ce4063a4dc43c6f3fd28e08995))))})",
-                &[
-                    "Primary path: @0",
-                    "@1 after 960 blocks",
-                    "t:or_c(pk(@2/**),and_v(v:pk(@3/**),or_c(pk(@4/**),v:ripemd160(907cd521fff981ce4063a4dc43c6f3fd28e08995))))",
-                ],
-                false,
-            ),
-            // Tie-break: two SingleSig leaves given in reverse key_index order → sorted by key_index
-            (
-                "tr(@0/**,{pk(@2/**),pk(@1/**)})",
-                &[
-                    "Primary path: @0",
-                    "Single-signature (@1)",
-                    "Single-signature (@2)",
-                ],
-                true,
-            ),
-            // Tie-break: two RelativeHeightlockSingleSig → sorted by key_index, then blocks
-            (
-                "tr(@0/**,{and_v(v:pk(@2/<0;1>/*),older(2000)),and_v(v:pk(@1/<0;1>/*),older(1000))})",
-                &[
-                    "Primary path: @0",
-                    "@1 after 1000 blocks",
-                    "@2 after 2000 blocks",
-                ],
-                true,
-            ),
-            // Tie-break: two Multisig leaves → fewer keys first, then smaller threshold
-            (
-                "tr(@0/**,{multi_a(2,@1/**,@2/**,@3/**),multi_a(2,@4/**,@5/**)})",
-                &[
-                    "Primary path: @0",
-                    "2 of @4 and @5",
-                    "2 of @1, @2 and @3",
-                ],
-                true,
-            ),
-            // --------------------------------------------------------------------------------------
-            // Taproot with musig() internal key
-            // --------------------------------------------------------------------------------------
-            // Taproot: musig key-path only (2-of-2)
-            (
-                "tr(musig(@0,@1)/**)",
-                &["Primary path: 2 of @0 and @1"],
-                true,
-            ),
-            // Taproot: musig key-path only (3-of-3)
-            (
-                "tr(musig(@0,@1,@2)/**)",
-                &["Primary path: 3 of @0, @1 and @2"],
-                true,
-            ),
-            // Taproot: musig key-path + single leaf
-            (
-                "tr(musig(@0,@1)/**,pk(@2/**))",
-                &[
-                    "Primary path: 2 of @0 and @1",
-                    "Single-signature (@2)",
-                ],
-                true,
-            ),
-            // Taproot: musig key-path + two leaves
-            (
-                "tr(musig(@0,@1)/**,{pk(@2/**),pk(@3/**)})",
-                &[
-                    "Primary path: 2 of @0 and @1",
-                    "Single-signature (@2)",
-                    "Single-signature (@3)",
-                ],
-                true,
-            ),
-            // Taproot: musig key-path + relative heightlock leaf
-            (
-                "tr(musig(@0,@1)/**,and_v(v:pk(@2/<0;1>/*),older(1008)))",
-                &[
-                    "Primary path: 2 of @0 and @1",
-                    "@2 after 1008 blocks",
-                ],
-                true,
-            ),
-            // --------------------------------------------------------------------------------------
-            // Taproot with musig() tapleaf (pk(musig(...)) maps to Multisig)
-            // --------------------------------------------------------------------------------------
-            // pk(musig) leaf: 2-of-2
-            (
-                "tr(@0/**,pk(musig(@1,@2)/**))",
-                &["Primary path: @0", "2 of @1 and @2"],
-                true,
-            ),
-            // pk(musig) leaf: 3-of-3
-            (
-                "tr(@0/**,pk(musig(@1,@2,@3)/**))",
-                &["Primary path: @0", "3 of @1, @2 and @3"],
-                true,
-            ),
-            // pk(musig) + relative heightlock
-            (
-                "tr(@0/**,and_v(v:pk(musig(@1,@2)/**),older(1008)))",
-                &["Primary path: @0", "2 of @1 and @2 after 1008 blocks"],
-                true,
-            ),
-            // pk(musig) + relative timelock (180 units = 92160s = 1d 1h 36m)
-            (
-                "tr(@0/**,and_v(v:pk(musig(@1,@2)/**),older(4194484)))",
-                &["Primary path: @0", "2 of @1 and @2 after 1d 1h 36m"],
-                true,
-            ),
-            // pk(musig) + absolute heightlock (block 840000)
-            (
-                "tr(@0/**,and_v(v:pk(musig(@1,@2)/**),after(840000)))",
-                &["Primary path: @0", "2 of @1 and @2 after block height 840000"],
-                true,
-            ),
-            // pk(musig) + absolute timelock (timestamp 1700000000 = 2023-11-14 22:13:20)
-            (
-                "tr(@0/**,and_v(v:pk(musig(@1,@2)/**),after(1700000000)))",
-                &["Primary path: @0", "2 of @1 and @2 after date 2023-11-14 22:13:20"],
-                true,
-            ),
-            // pk(musig) alongside a plain single-sig
-            (
-                "tr(@0/**,{pk(@1/**),pk(musig(@2,@3)/**)})",
-                &[
-                    "Primary path: @0",
-                    "Single-signature (@1)",
-                    "2 of @2 and @3",
-                ],
-                true,
-            ),
-            // --------------------------------------------------------------------------------------
-            // Non-canonical key derivations: no cleartext representation; raw to_string() is returned.
-            // --------------------------------------------------------------------------------------
-            // Legacy single-sig: num1 is not 0 for the first (and only) occurrence
-            (
-                "pkh(@0/<2;3>/*)",
-                &["pkh(@0/<2;3>/*)"],
-                false,
-            ),
-            // Segwit single-sig: num2 is not num1+1
-            (
-                "wpkh(@0/<0;2>/*)",
-                &["wpkh(@0/<0;2>/*)"],
-                false,
-            ),
-            // Taproot, key-path only: internal key has non-canonical derivation
-            (
-                "tr(@0/<4;5>/*)",
-                &["tr(@0/<4;5>/*)"],
-                false,
-            ),
-            // Taproot single leaf: internal key canonical, leaf key non-canonical
-            (
-                "tr(@0/**,pk(@1/<2;3>/*))",
-                &["tr(@0/**,pk(@1/<2;3>/*))"],
-                false,
-            ),
-        ];
-
-        for &(desc_str, expected_txts, expected_has_cleartext) in cases {
-            let (txts, has_cleartext) = dt(desc_str).to_cleartext();
+    fn test_vectors_to_cleartext() {
+        for v in load_vectors() {
+            let (Some(expected_ct), Some(expected_hct)) = (&v.cleartext, v.has_cleartext) else {
+                continue;
+            };
+            let (actual_ct, actual_hct) = dt(&v.template).to_cleartext();
             assert_eq!(
-                txts,
-                strs(expected_txts),
-                "cleartext descriptions mismatch for {:?}",
-                desc_str
+                actual_ct, *expected_ct,
+                "cleartext mismatch for {:?}",
+                v.template
             );
             assert_eq!(
-                has_cleartext, expected_has_cleartext,
-                "cleartext flag mismatch for {:?}",
-                desc_str
+                actual_hct, expected_hct,
+                "has_cleartext flag mismatch for {:?}",
+                v.template
+            );
+        }
+    }
+
+    /// Covers vectors that pin only the `has_cleartext` flag without an
+    /// explicit `cleartext` array (currently none in the data file, but
+    /// kept so partial vectors remain useful).
+    #[test]
+    fn test_vectors_has_cleartext() {
+        for v in load_vectors() {
+            if v.cleartext.is_some() {
+                continue;
+            }
+            let Some(expected_hct) = v.has_cleartext else {
+                continue;
+            };
+            assert_eq!(
+                dt(&v.template).to_cleartext().1,
+                expected_hct,
+                "has_cleartext flag mismatch for {:?}",
+                v.template
             );
         }
     }
 
     #[test]
-    fn test_from_cleartext_roundtrip() {
-        // All descriptors from test_to_cleartext and test_confusion_score that
-        // have a cleartext representation (has_cleartext == true).
-        let cases: &[&str] = &[
-            // Legacy single-sig
-            "pkh(@0/**)",
-            // Segwit single-sig
-            "wpkh(@0/**)",
-            // Multisig variants
-            "wsh(sortedmulti(2,@0/**,@1/**))",
-            "wsh(sortedmulti(2,@0/**,@1/**,@2/**))",
-            "wsh(sortedmulti(3,@0/**,@1/**,@2/**))",
-            "wsh(multi(2,@0/**,@1/**))",
-            // Taproot: key-path only
-            "tr(@0/**)",
-            // Taproot: single leaf
-            "tr(@0/**,pk(@1/**))",
-            // Taproot: two leaves
-            "tr(@0/**,{pk(@1/**),pk(@2/**)})",
-            "tr(@0/**,{sortedmulti_a(2,@1/**,@2/**),pk(@3/**)})",
-            // Taproot: three leaves
-            "tr(@0/**,{{pk(@1/**),pk(@2/**)},pk(@3/**)})",
-            // Taproot: relative heightlock
-            "tr(@0/**,and_v(v:pk(@1/<0;1>/*),older(52560)))",
-            "tr(@0/**,{pk(@1/**),and_v(v:pk(@2/<0;1>/*),older(1008))})",
-            // Taproot: relative timelock
-            "tr(@0/**,and_v(v:pk(@1/<0;1>/*),older(4194305)))",
-            "tr(@0/**,{pk(@1/**),and_v(v:pk(@2/<0;1>/*),older(4194484))})",
-            "tr(@0/**,{pk(@1/**),and_v(v:multi_a(2,@2/<0;1>/*,@3/<0;1>/*),older(4194484))})",
-            // Taproot: absolute heightlock
-            "tr(@0/**,and_v(v:pk(@1/<0;1>/*),after(840000)))",
-            "tr(@0/**,{pk(@1/**),and_v(v:multi_a(2,@2/<0;1>/*,@3/<0;1>/*),after(840000))})",
-            // Taproot: absolute timelock
-            "tr(@0/**,and_v(v:pk(@1/<0;1>/*),after(500000000)))",
-            "tr(@0/**,{pk(@1/**),and_v(v:multi_a(2,@2/<0;1>/*,@3/<0;1>/*),after(1700000000))})",
-            // Taproot: BothMustSign + locks
-            "tr(@0/**,and_v(v:and_v(v:pk(@1/<0;1>/*),pk(@2/<0;1>/*)),older(1008)))",
-            "tr(@0/**,{pk(@1/**),and_v(v:and_v(v:pk(@2/<0;1>/*),pk(@3/<0;1>/*)),older(1008))})",
-            "tr(@0/**,and_v(v:and_v(v:pk(@1/<0;1>/*),pk(@2/<0;1>/*)),older(4194484)))",
-            "tr(@0/**,and_v(v:and_v(v:pk(@1/<0;1>/*),pk(@2/<0;1>/*)),after(840000)))",
-            "tr(@0/**,and_v(v:and_v(v:pk(@1/<0;1>/*),pk(@2/<0;1>/*)),after(1700000000)))",
-            // Taproot: BothMustSign (key repeated across leaves with canonical derivations)
-            "tr(@0/<0;1>/*,{and_v(v:pk(@1/<0;1>/*),older(4383)),and_v(v:pk(@2/<0;1>/*),pk(@1/<2;3>/*))})",
-            "tr(@0/<0;1>/*,{and_v(v:multi_a(2,@1/<0;1>/*,@2/<0;1>/*,@3/<0;1>/*),older(144)),and_v(v:pk(@1/<2;3>/*),pk(@2/<2;3>/*))})",
-            // Taproot: musig key-path only
-            "tr(musig(@0,@1)/**)",
-            "tr(musig(@0,@1,@2)/**)",
-            // Taproot: musig key-path with leaves
-            "tr(musig(@0,@1)/**,pk(@2/**))",
-            "tr(musig(@0,@1)/**,{pk(@2/**),pk(@3/**)})",
-            "tr(musig(@0,@1)/**,and_v(v:pk(@2/<0;1>/*),older(1008)))",
-            "tr(musig(@0,@1)/**,{pk(@2/**),and_v(v:pk(@3/<0;1>/*),after(840000))})",
-            // Taproot: musig tapleaf (pk(musig(...)))
-            "tr(@0/**,pk(musig(@1,@2)/**))",
-            "tr(@0/**,pk(musig(@1,@2,@3)/**))",
-            "tr(@0/**,and_v(v:pk(musig(@1,@2)/**),older(1008)))",
-            "tr(@0/**,and_v(v:pk(musig(@1,@2)/**),older(4194484)))",
-            "tr(@0/**,and_v(v:pk(musig(@1,@2)/**),after(840000)))",
-            "tr(@0/**,and_v(v:pk(musig(@1,@2)/**),after(1700000000)))",
-            // Key derivation ordering roundtrip tests
-            "tr(@0/<0;1>/*,pk(@0/<2;3>/*))",
-            "tr(@0/<0;1>/*,{pk(@0/<2;3>/*),pk(@0/<4;5>/*)})",
-            "tr(@0/**,{pk(@1/<0;1>/*),pk(@1/<2;3>/*)})",
-            "tr(@0/**,{and_v(v:pk(@1/<0;1>/*),older(4383)),pk(@1/<2;3>/*)})",
-            // @0 appears twice, @1 appears twice
-            "tr(@0/<0;1>/*,{pk(@0/<2;3>/*),and_v(v:pk(@1/<0;1>/*),pk(@1/<2;3>/*))})",
-        ];
+    fn test_vectors_from_cleartext_roundtrip() {
+        for v in load_vectors() {
+            if v.has_cleartext != Some(true) {
+                continue;
+            }
+            let (Some(expected_ct), Some(score)) = (&v.cleartext, v.confusion_score) else {
+                continue;
+            };
 
-        for &desc_str in cases {
-            let original = dt(desc_str);
-            let (cleartext, has_cleartext) = original.to_cleartext();
-            assert!(
-                has_cleartext,
-                "expected to have cleartext description for {:?}",
-                desc_str
-            );
-            let cleartext_refs: Vec<&str> = cleartext.iter().map(|s| s.as_str()).collect();
+            let cleartext_refs: Vec<&str> = expected_ct.iter().map(|s| s.as_str()).collect();
             let variants: Vec<_> = DescriptorTemplate::from_cleartext(&cleartext_refs)
-                .unwrap_or_else(|e| panic!("from_cleartext failed for {:?}: {:?}", desc_str, e))
+                .unwrap_or_else(|e| {
+                    panic!("from_cleartext failed for {:?}: {:?}", v.template, e)
+                })
                 .collect();
 
-            // Number of variants must equal confusion_score
             assert_eq!(
                 variants.len() as u64,
-                original.confusion_score(),
+                score,
                 "variant count != confusion_score for {:?}",
-                desc_str
+                v.template
             );
 
-            // Every variant must produce the same cleartext
             for variant in &variants {
                 let (variant_ct, variant_clear) = variant.to_cleartext();
                 assert_eq!(
-                    variant_ct, cleartext,
+                    variant_ct, *expected_ct,
                     "variant {:?} produces different cleartext for original {:?}",
-                    variant, desc_str
+                    variant, v.template
                 );
-                assert_eq!(
-                    variant_clear, has_cleartext,
-                    "variant {:?} has different cleartext flag for original {:?}",
-                    variant, desc_str
+                assert!(
+                    variant_clear,
+                    "variant {:?} has has_cleartext=false for original {:?}",
+                    variant, v.template
                 );
             }
 
-            // All variants must be distinct
             for i in 0..variants.len() {
                 for j in (i + 1)..variants.len() {
                     assert_ne!(
                         variants[i], variants[j],
                         "duplicate variants at indices {} and {} for {:?}",
-                        i, j, desc_str
+                        i, j, v.template
                     );
                 }
             }

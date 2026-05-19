@@ -39,7 +39,7 @@ pub enum CleartextDecodeError {
 
 // `DescriptorClass::from_cleartext_pattern`, `TapleafClass::from_cleartext_pattern`,
 // `top_level_variants`, and `tapleaf_to_descriptors` are generated from
-// `cleartext.spec.toml` by `build.rs` (see `emit_decode` there).
+// `specs/cleartext.toml` by `build.rs` (see `emit_decode` there).
 include!(concat!(env!("OUT_DIR"), "/cleartext_decode_generated.rs"));
 
 fn parse_key_index(s: &str) -> Option<KeyPlaceholder> {
