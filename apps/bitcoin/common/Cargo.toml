@@ -11,7 +11,6 @@ target_native = [
 target_vanadium_ledger = [
     "sdk/target_vanadium_ledger",
 ]
-cleartext-decode = []
 
 [dependencies]
 bitcoin = { version = "0.32.0", features = ["serde"], default-features = false }
@@ -24,20 +23,11 @@ hex = { version = "0.4.3", default-features = false, features = ["alloc"] }
 minicbor = { version = "2.2", default-features = false, features = ["alloc", "derive"] }
 sdk = { package = "vanadium-app-sdk", path = "../../../app-sdk", default-features = false }
 subtle = { version="2.6.1", default-features = false }
+bip388 = { path = "../bip388", default-features = false }
 
 [dev-dependencies]
 hex-literal = "0.4.1"
 sdk = { package = "vanadium-app-sdk", path = "../../../app-sdk", default-features = false, features = ["target_native"] }
-toml = { version = "0.8", default-features = false, features = ["parse"] }
-serde = { version = "1.0", features = ["derive"] }
-
-[build-dependencies]
-toml = { version = "0.8", default-features = false, features = ["parse"] }
-serde = { version = "1.0", features = ["derive"] }
-proc-macro2 = "1.0"
-quote = "1.0"
-syn = { version = "2.0", features = ["full"] }
-prettyplease = "0.2"
 
 [profile.release]
 opt-level = 3
