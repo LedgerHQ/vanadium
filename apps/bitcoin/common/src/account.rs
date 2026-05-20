@@ -9,8 +9,7 @@ use sdk::hash::{Hasher, Sha256};
 pub use crate::message::WalletPolicyCoordinates;
 
 pub use crate::bip388::{
-    DescriptorTemplate, KeyExpression, KeyExpressionType, KeyInformation, KeyPlaceholder, TapTree,
-    WalletPolicy,
+    DescriptorTemplate, KeyExpression, KeyExpressionType, KeyInformation, TapTree, WalletPolicy,
 };
 use crate::por::{Registerable, RegistrationId};
 use bitcoin::{params::Params, Address};

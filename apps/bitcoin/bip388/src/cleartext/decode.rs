@@ -16,7 +16,7 @@ use alloc::{
 };
 
 use super::super::time::{parse_relative_time_to_seconds, parse_utc_date_to_timestamp};
-use super::super::{DescriptorTemplate, KeyExpressionType, KeyPlaceholder, TapTree};
+use super::super::{DescriptorTemplate, KeyExpression, KeyExpressionType, TapTree};
 use super::{
     CleartextPart, CleartextSpec, CleartextValue, DescriptorClass, TapleafClass, TapleafPattern,
     TopLevelPattern, SEQUENCE_LOCKTIME_TYPE_FLAG, TAPLEAF_SPECS, TOP_LEVEL_SPECS,
@@ -42,11 +42,11 @@ pub enum CleartextDecodeError {
 // `specs/cleartext.toml` by `build.rs` (see `emit_decode` there).
 include!(concat!(env!("OUT_DIR"), "/cleartext_decode_generated.rs"));
 
-fn parse_key_index(s: &str) -> Option<KeyPlaceholder> {
+fn parse_key_index(s: &str) -> Option<KeyExpression> {
     let rest = s.strip_prefix('@')?;
     if let Ok(idx) = rest.parse::<u32>() {
         // "@N" canonical format
-        Some(KeyPlaceholder::plain(idx, 0, 1))
+        Some(KeyExpression::plain(idx, 0, 1))
     } else if let Some((idx_str, deriv)) = rest.split_once('/') {
         // "@N/<M;K>/*" explicit derivation format
         let key_index = idx_str.parse().ok()?;
@@ -54,17 +54,17 @@ fn parse_key_index(s: &str) -> Option<KeyPlaceholder> {
         let (m, k) = deriv.split_once(';')?;
         let num1 = m.parse().ok()?;
         let num2 = k.parse().ok()?;
-        Some(KeyPlaceholder::plain(key_index, num1, num2))
+        Some(KeyExpression::plain(key_index, num1, num2))
     } else {
         None
     }
 }
 
-fn parse_key_indices(s: &str) -> Option<Vec<KeyPlaceholder>> {
+fn parse_key_indices(s: &str) -> Option<Vec<KeyExpression>> {
     // Formats: "@A", "@A and @B", "@A, @B and @C", "@A, @B, @C and @D", ...
     if let Some((init, last)) = s.rsplit_once(" and ") {
         let last_kp = parse_key_index(last.trim())?;
-        let mut kps: Vec<KeyPlaceholder> = Vec::new();
+        let mut kps: Vec<KeyExpression> = Vec::new();
         for part in init.split(", ") {
             kps.push(parse_key_index(part.trim())?);
         }
@@ -102,14 +102,14 @@ impl CleartextValueCursor {
         }
     }
 
-    fn key_index(&mut self) -> Option<KeyPlaceholder> {
+    fn key_index(&mut self) -> Option<KeyExpression> {
         match self.values.next()? {
             CleartextValue::KeyIndex(value) => Some(value),
             _ => None,
         }
     }
 
-    fn key_indices(&mut self) -> Option<Vec<KeyPlaceholder>> {
+    fn key_indices(&mut self) -> Option<Vec<KeyExpression>> {
         match self.values.next()? {
             CleartextValue::KeyIndices(value) => Some(value),
             _ => None,

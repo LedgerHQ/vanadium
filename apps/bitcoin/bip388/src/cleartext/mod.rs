@@ -30,7 +30,7 @@
 use alloc::{format, string::String, string::ToString, vec, vec::Vec};
 
 use super::time::{format_seconds, format_utc_date};
-use super::{DescriptorTemplate, KeyExpressionType, KeyPlaceholder};
+use super::{DescriptorTemplate, KeyExpression, KeyExpressionType};
 
 #[cfg(any(test, feature = "cleartext-decode"))]
 mod decode;
@@ -76,8 +76,8 @@ pub(super) struct CleartextSpec<K> {
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum CleartextValue {
     Threshold(u32),
-    KeyIndex(KeyPlaceholder),
-    KeyIndices(Vec<KeyPlaceholder>),
+    KeyIndex(KeyExpression),
+    KeyIndices(Vec<KeyExpression>),
     Blocks(u32),
     RelativeTime(u32),
     BlockHeight(u32),
@@ -88,7 +88,7 @@ enum CleartextValue {
 /// - plain key vs plain key: ordered by key index
 /// - plain key vs musig: plain key comes first
 /// - musig vs musig: ordered by number of keys, then left-to-right by key index
-fn cmp_key(a: &KeyPlaceholder, b: &KeyPlaceholder) -> core::cmp::Ordering {
+fn cmp_key(a: &KeyExpression, b: &KeyExpression) -> core::cmp::Ordering {
     match (&a.key_type, &b.key_type) {
         (KeyExpressionType::PlainKey(i1), KeyExpressionType::PlainKey(i2)) => i1.cmp(i2),
         (KeyExpressionType::PlainKey(_), KeyExpressionType::Musig(_)) => core::cmp::Ordering::Less,
@@ -190,7 +190,7 @@ impl TapleafClass {
     }
 }
 
-fn format_key(kp: &KeyPlaceholder, canonical: bool) -> String {
+fn format_key(kp: &KeyExpression, canonical: bool) -> String {
     if canonical {
         match &kp.key_type {
             KeyExpressionType::PlainKey(key_index) => format!("@{}", key_index),
@@ -215,7 +215,7 @@ fn format_key(kp: &KeyPlaceholder, canonical: bool) -> String {
     }
 }
 
-fn format_key_indices(keys: &[KeyPlaceholder], canonical: bool) -> String {
+fn format_key_indices(keys: &[KeyExpression], canonical: bool) -> String {
     match keys {
         [] => String::new(),
         [single] => format_key(single, canonical),
@@ -575,9 +575,7 @@ mod tests {
 
             let cleartext_refs: Vec<&str> = expected_ct.iter().map(|s| s.as_str()).collect();
             let variants: Vec<_> = DescriptorTemplate::from_cleartext(&cleartext_refs)
-                .unwrap_or_else(|e| {
-                    panic!("from_cleartext failed for {:?}: {:?}", v.template, e)
-                })
+                .unwrap_or_else(|e| panic!("from_cleartext failed for {:?}: {:?}", v.template, e))
                 .collect();
 
             assert_eq!(
