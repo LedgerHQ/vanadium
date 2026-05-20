@@ -31,6 +31,11 @@ use bitcoin::{
 const HARDENED_INDEX: u32 = 0x80000000u32;
 const MAX_OLDER_AFTER: u32 = 2147483647; // maximum allowed in older/after
 
+// Maximum key count for `multi`/`sortedmulti` (OP_CHECKMULTISIG consensus limit).
+const MAX_KEYS_MULTI: usize = 20;
+// Maximum key count for the Taproot `multi_a`/`sortedmulti_a` variants.
+const MAX_KEYS_MULTI_A: usize = 999;
+
 /// Error type for descriptor template / wallet policy parsing and serialization.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ParseError {
@@ -751,6 +756,7 @@ fn parse_key_expression(input: &str, ctx: ParseContext) -> ParseResult<'_, KeyEx
 }
 
 // Parses a musig key expression: musig(@N1,@N2,...)/** or musig(@N1,@N2,...)/<num1;num2>/*
+// Per BIP-390, all participant key indices must be distinct.
 fn parse_musig_key_expression(input: &str) -> ParseResult<'_, KeyExpression> {
     let mut rest = &input[6..]; // skip "musig("
     let mut key_indices = Vec::new();
@@ -759,6 +765,9 @@ fn parse_musig_key_expression(input: &str) -> ParseResult<'_, KeyExpression> {
             return Err(ParseError::InvalidSyntax);
         }
         let (r, idx) = parse_number_up_to(&rest[1..], u32::MAX)?;
+        if key_indices.contains(&idx) {
+            return Err(ParseError::InvalidKey);
+        }
         key_indices.push(idx);
         rest = r;
         if rest.starts_with(',') {
@@ -768,7 +777,7 @@ fn parse_musig_key_expression(input: &str) -> ParseResult<'_, KeyExpression> {
         }
     }
     if key_indices.len() < 2 {
-        return Err(ParseError::InvalidSyntax);
+        return Err(ParseError::TooFewKeyPlaceholders);
     }
     if !rest.starts_with(')') {
         return Err(ParseError::InvalidSyntax);
@@ -824,6 +833,7 @@ fn parse_inner_descriptor(input: &str, ctx: ParseContext) -> ParseResult<'_, Des
             "sortedmulti_a",
             DescriptorTemplate::Sortedmulti_a,
             ctx,
+            MAX_KEYS_MULTI_A,
         );
     }
     if input.starts_with("sortedmulti(") {
@@ -832,13 +842,26 @@ fn parse_inner_descriptor(input: &str, ctx: ParseContext) -> ParseResult<'_, Des
             "sortedmulti",
             DescriptorTemplate::Sortedmulti,
             ctx,
+            MAX_KEYS_MULTI,
         );
     }
     if input.starts_with("multi_a(") {
-        return parse_threshold_kp_fragment(input, "multi_a", DescriptorTemplate::Multi_a, ctx);
+        return parse_threshold_kp_fragment(
+            input,
+            "multi_a",
+            DescriptorTemplate::Multi_a,
+            ctx,
+            MAX_KEYS_MULTI_A,
+        );
     }
     if input.starts_with("multi(") {
-        return parse_threshold_kp_fragment(input, "multi", DescriptorTemplate::Multi, ctx);
+        return parse_threshold_kp_fragment(
+            input,
+            "multi",
+            DescriptorTemplate::Multi,
+            ctx,
+            MAX_KEYS_MULTI,
+        );
     }
     if input.starts_with("thresh(") {
         return parse_thresh(input, ctx);
@@ -1042,6 +1065,7 @@ fn parse_threshold_kp_fragment<'a>(
     name: &str,
     constructor: fn(u32, Vec<KeyExpression>) -> DescriptorTemplate,
     ctx: ParseContext,
+    max_keys: usize,
 ) -> ParseResult<'a, DescriptorTemplate> {
     let rest = &input[name.len() + 1..]; // skip name and '('
     let (mut rest, threshold) = parse_number_up_to(rest, u32::MAX)?;
@@ -1050,13 +1074,13 @@ fn parse_threshold_kp_fragment<'a>(
         if !rest.starts_with(',') {
             break;
         }
+        if keys.len() >= max_keys {
+            return Err(ParseError::TooManyKeys);
+        }
         match parse_key_expression(&rest[1..], ctx) {
             Ok((r, kp)) => {
                 keys.push(kp);
                 rest = r;
-                if keys.len() == 20 {
-                    break;
-                }
             }
             Err(ParseError::InvalidScriptContext) => return Err(ParseError::InvalidScriptContext),
             Err(_) => break,
@@ -1064,6 +1088,9 @@ fn parse_threshold_kp_fragment<'a>(
     }
     if keys.len() < 2 {
         return Err(ParseError::TooFewKeyPlaceholders);
+    }
+    if threshold == 0 || (threshold as usize) > keys.len() {
+        return Err(ParseError::InvalidMultisigQuorum);
     }
     if !rest.starts_with(')') {
         return Err(ParseError::InvalidSyntax);
@@ -1116,6 +1143,7 @@ fn parse_sortedmulti(input: &str) -> ParseResult<'_, DescriptorTemplate> {
         "sortedmulti",
         DescriptorTemplate::Sortedmulti,
         ParseContext::TopLevel,
+        MAX_KEYS_MULTI,
     )
 }
 
@@ -1140,6 +1168,9 @@ fn parse_thresh(input: &str, ctx: ParseContext) -> ParseResult<'_, DescriptorTem
             }
             Err(_) => break,
         }
+    }
+    if k == 0 {
+        return Err(ParseError::InvalidMultisigQuorum);
     }
     if (k as usize) > scripts.len() {
         return Err(ParseError::ThreshExceedsScripts);
@@ -1620,12 +1651,12 @@ impl DescriptorTemplate {
                 w.push(')');
             }
             DescriptorTemplate::Sortedmulti(threshold, kps) => {
-                write!(w, "sortedmulti({}, ", threshold).map_err(|_| ParseError::FormatError)?;
+                write!(w, "sortedmulti({},", threshold).map_err(|_| ParseError::FormatError)?;
                 write_key_expressions(w, key_information, kps, is_change, address_index)?;
                 w.push(')');
             }
             DescriptorTemplate::Sortedmulti_a(threshold, kps) => {
-                write!(w, "sortedmulti_a({}, ", threshold).map_err(|_| ParseError::FormatError)?;
+                write!(w, "sortedmulti_a({},", threshold).map_err(|_| ParseError::FormatError)?;
                 write_key_expressions(w, key_information, kps, is_change, address_index)?;
                 w.push(')');
             }
@@ -1633,7 +1664,7 @@ impl DescriptorTemplate {
                 w.push_str("tr(");
                 write_key_expression(w, key_information, kp, is_change, address_index)?;
                 if let Some(tree) = tap_tree {
-                    w.push_str(", ");
+                    w.push(',');
                     tree.write_to(w, key_information, is_change, address_index)?;
                 }
                 w.push(')');
@@ -1740,22 +1771,20 @@ impl DescriptorTemplate {
                 w.push(')');
             }
             DescriptorTemplate::Thresh(k, sub_templates) => {
-                write!(w, "thresh({},[", k).map_err(|_| ParseError::FormatError)?;
-                for (i, template) in sub_templates.iter().enumerate() {
-                    if i > 0 {
-                        w.push(',');
-                    }
+                write!(w, "thresh({}", k).map_err(|_| ParseError::FormatError)?;
+                for template in sub_templates {
+                    w.push(',');
                     template.write_to(w, key_information, is_change, address_index)?;
                 }
-                w.push_str("])");
+                w.push(')');
             }
             DescriptorTemplate::Multi(threshold, kps) => {
-                write!(w, "multi({}, ", threshold).map_err(|_| ParseError::FormatError)?;
+                write!(w, "multi({},", threshold).map_err(|_| ParseError::FormatError)?;
                 write_key_expressions(w, key_information, kps, is_change, address_index)?;
                 w.push(')');
             }
             DescriptorTemplate::Multi_a(threshold, kps) => {
-                write!(w, "multi_a({}, ", threshold).map_err(|_| ParseError::FormatError)?;
+                write!(w, "multi_a({},", threshold).map_err(|_| ParseError::FormatError)?;
                 write_key_expressions(w, key_information, kps, is_change, address_index)?;
                 w.push(')');
             }
@@ -1819,8 +1848,6 @@ impl ToDescriptor for DescriptorTemplate {
         Ok(result)
     }
 }
-
-// TODO: add tests for to_descriptor
 
 #[cfg(test)]
 mod tests {
@@ -2433,5 +2460,116 @@ mod tests {
             DescriptorTemplate::from_str("tr(@0/**,wsh(pk(musig(@1,@2)/**)))"),
             Err(ParseError::InvalidScriptContext)
         );
+    }
+
+    #[test]
+    fn test_parser_rejects_zero_threshold() {
+        assert_eq!(
+            DescriptorTemplate::from_str("wsh(multi(0,@0/**,@1/**))"),
+            Err(ParseError::InvalidMultisigQuorum)
+        );
+        assert_eq!(
+            DescriptorTemplate::from_str("wsh(sortedmulti(0,@0/**,@1/**))"),
+            Err(ParseError::InvalidMultisigQuorum)
+        );
+        assert_eq!(
+            DescriptorTemplate::from_str("tr(@0/**,multi_a(0,@1/**,@2/**))"),
+            Err(ParseError::InvalidMultisigQuorum)
+        );
+        assert_eq!(
+            DescriptorTemplate::from_str("tr(@0/**,sortedmulti_a(0,@1/**,@2/**))"),
+            Err(ParseError::InvalidMultisigQuorum)
+        );
+        assert_eq!(
+            DescriptorTemplate::from_str("wsh(thresh(0,pk(@0/**)))"),
+            Err(ParseError::InvalidMultisigQuorum)
+        );
+    }
+
+    #[test]
+    fn test_parser_rejects_threshold_exceeds_keys() {
+        assert_eq!(
+            DescriptorTemplate::from_str("wsh(multi(3,@0/**,@1/**))"),
+            Err(ParseError::InvalidMultisigQuorum)
+        );
+        assert_eq!(
+            DescriptorTemplate::from_str("wsh(sortedmulti(3,@0/**,@1/**))"),
+            Err(ParseError::InvalidMultisigQuorum)
+        );
+        assert_eq!(
+            DescriptorTemplate::from_str("tr(@0/**,multi_a(3,@1/**,@2/**))"),
+            Err(ParseError::InvalidMultisigQuorum)
+        );
+        assert_eq!(
+            DescriptorTemplate::from_str("tr(@0/**,sortedmulti_a(3,@1/**,@2/**))"),
+            Err(ParseError::InvalidMultisigQuorum)
+        );
+    }
+
+    #[test]
+    fn test_parser_rejects_duplicate_musig_keys() {
+        assert_eq!(
+            DescriptorTemplate::from_str("tr(musig(@0,@0)/**)"),
+            Err(ParseError::InvalidKey)
+        );
+        assert_eq!(
+            DescriptorTemplate::from_str("tr(@0/**,pk(musig(@1,@1)/**))"),
+            Err(ParseError::InvalidKey)
+        );
+        assert_eq!(
+            DescriptorTemplate::from_str("tr(musig(@0,@1,@0)/**)"),
+            Err(ParseError::InvalidKey)
+        );
+    }
+
+    #[test]
+    fn test_parser_rejects_too_many_keys_multi() {
+        // multi/sortedmulti cap at 20 keys
+        let mut s = String::from("wsh(multi(2");
+        for i in 0..21 {
+            s.push_str(&format!(",@{}/**", i));
+        }
+        s.push_str("))");
+        assert_eq!(
+            DescriptorTemplate::from_str(&s),
+            Err(ParseError::TooManyKeys)
+        );
+
+        // Exactly 20 keys must still parse
+        let mut s = String::from("wsh(multi(2");
+        for i in 0..20 {
+            s.push_str(&format!(",@{}/**", i));
+        }
+        s.push_str("))");
+        assert!(DescriptorTemplate::from_str(&s).is_ok());
+    }
+
+    #[test]
+    fn test_parser_accepts_more_than_20_keys_multi_a() {
+        // multi_a allows >20 keys (Taproot OP_CHECKSIGADD pattern)
+        let mut s = String::from("tr(@0/**,multi_a(2");
+        for i in 1..=50 {
+            s.push_str(&format!(",@{}/**", i));
+        }
+        s.push_str("))");
+        assert!(DescriptorTemplate::from_str(&s).is_ok());
+    }
+
+    #[test]
+    fn test_to_descriptor_exact_output() {
+        let xpub_str = "tpubDCtKfsNyRhULjZ9XMS4VKKtVcPdVDi8MKUbcSD9MJDyjRu1A2ND5MiipozyyspBT9bg8upEp7a8EAgFxNxXn1d7QkdbL52Ty5jiSLcxPt1P";
+        let keys = vec![
+            KeyInformation::try_from(xpub_str).unwrap(),
+            KeyInformation::try_from(xpub_str).unwrap(),
+        ];
+        let dt = DescriptorTemplate::from_str("wsh(sortedmulti(2,@0/**,@1/**))").unwrap();
+        let out = dt.to_descriptor(&keys, false, 7).unwrap();
+        let expected = format!("wsh(sortedmulti(2,{}/0/7,{}/0/7))", xpub_str, xpub_str);
+        assert_eq!(out, expected);
+
+        let dt = DescriptorTemplate::from_str("wsh(thresh(1,pk(@0/**),s:pk(@1/**)))").unwrap();
+        let out = dt.to_descriptor(&keys, true, 3).unwrap();
+        let expected = format!("wsh(thresh(1,pk({}/1/3),s:pk({}/1/3)))", xpub_str, xpub_str);
+        assert_eq!(out, expected);
     }
 }
