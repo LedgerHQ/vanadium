@@ -676,12 +676,12 @@ fn sign_all_inputs(
         let PsbtAccountCoordinates::WalletPolicy(coords) = coords;
         let PsbtAccount::WalletPolicy(wallet_policy) = &summary.accounts[account_id as usize];
 
-        for (kp, tapleaf_desc) in wallet_policy.descriptor_template.placeholders() {
+        for (kp, tapleaf_desc) in wallet_policy.descriptor_template().placeholders() {
             let key_index = match kp.plain_key_index() {
                 Some(idx) => idx,
                 None => continue, // musig key expressions not yet supported for signing
             };
-            let key_info = &wallet_policy.key_information[key_index as usize];
+            let key_info = &wallet_policy.key_information()[key_index as usize];
 
             let change_step: ChildNumber = if !coords.is_change {
                 kp.num1.into()
@@ -745,12 +745,12 @@ fn sign_all_inputs(
                         partial_signatures.push(partial_signature);
                     }
                     Ok(SegwitVersion::Taproot) => {
-                        let taptree_hash = match &wallet_policy.descriptor_template {
+                        let taptree_hash = match wallet_policy.descriptor_template() {
                             DescriptorTemplate::Tr(_, tree) => tree
                                 .as_ref()
                                 .map(|t| {
                                     t.get_taptree_hash(
-                                        &wallet_policy.key_information,
+                                        wallet_policy.key_information(),
                                         coords.is_change,
                                         coords.address_index,
                                     )
@@ -763,7 +763,7 @@ fn sign_all_inputs(
                         let leaf_hash = tapleaf_desc
                             .map(|desc| {
                                 desc.get_tapleaf_hash(
-                                    &wallet_policy.key_information,
+                                    wallet_policy.key_information(),
                                     coords.is_change,
                                     coords.address_index,
                                 )

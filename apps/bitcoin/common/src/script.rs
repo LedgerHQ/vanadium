@@ -479,8 +479,8 @@ impl ToScriptWithKeyInfo for DescriptorTemplate {
 
 impl ToScript for WalletPolicy {
     fn to_script(&self, is_change: bool, address_index: u32) -> Result<ScriptBuf, Error> {
-        self.descriptor_template.to_script(
-            &self.key_information,
+        self.descriptor_template().to_script(
+            self.key_information(),
             is_change,
             address_index,
             ScriptContext::None,
