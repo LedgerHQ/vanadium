@@ -277,31 +277,9 @@ fn parse_keys_info(
 fn parse_wallet_policy(
     descriptor_template: &str,
     keys_info: &str,
-) -> Result<common::message::WalletPolicy, common::bip388::ParseError> {
+) -> Result<common::bip388::WalletPolicy, common::bip388::ParseError> {
     let keys_info = parse_keys_info(keys_info)?;
-    let wallet_policy_msg = common::message::WalletPolicy {
-        template: descriptor_template.to_string(),
-        keys_info: keys_info
-            .iter()
-            .map(|ki| common::message::PubkeyInfo {
-                pubkey: ki.pubkey.encode().to_vec(),
-                origin: ki
-                    .origin_info
-                    .as_ref()
-                    .map(|origin_info| common::message::KeyOrigin {
-                        fingerprint: origin_info.fingerprint,
-                        path: common::message::Bip32Path(
-                            origin_info
-                                .derivation_path
-                                .iter()
-                                .map(|step| u32::from(*step))
-                                .collect(),
-                        ),
-                    }),
-            })
-            .collect(),
-    };
-    Ok(wallet_policy_msg)
+    common::bip388::WalletPolicy::new(descriptor_template, keys_info)
 }
 
 async fn handle_cli_command(
@@ -357,8 +335,8 @@ async fn handle_cli_command(
 
             // TODO: passing registered identities and key signatures is not yet supported in the CLI
 
-            let wallet_policy_msg = parse_wallet_policy(descriptor_template, keys_info)?;
-            let account = common::message::Account::WalletPolicy(wallet_policy_msg);
+            let wallet_policy = parse_wallet_policy(descriptor_template, keys_info)?;
+            let account = common::message::Account::WalletPolicy(wallet_policy);
             let (account_id, hmac) = bitcoin_client
                 .register_account(name, &account, None, None, *show_cleartext)
                 .await?;
@@ -394,7 +372,7 @@ async fn handle_cli_command(
             keys_info,
             identity_index,
         } => {
-            let wallet_policy_msg = parse_wallet_policy(descriptor_template, keys_info)?;
+            let wallet_policy = parse_wallet_policy(descriptor_template, keys_info)?;
             let wallet_policy_coords = common::message::WalletPolicyCoordinates {
                 is_change: *is_change,
                 address_index: *address_index,
@@ -418,7 +396,7 @@ async fn handle_cli_command(
 
             let (addr, identity_sig) = bitcoin_client
                 .get_address(
-                    &common::message::Account::WalletPolicy(wallet_policy_msg),
+                    &common::message::Account::WalletPolicy(wallet_policy),
                     name.as_deref().unwrap_or(""),
                     &common::message::AccountCoordinates::WalletPolicy(wallet_policy_coords),
                     proof_of_registration.as_ref(),

@@ -1341,7 +1341,7 @@ impl core::fmt::Display for DescriptorTemplate {
 /// Once constructed, a `WalletPolicy` is immutable. Fields are private so the
 /// parsed template cannot drift from the raw string used to compute the
 /// registration HMAC.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WalletPolicy {
     descriptor_template: DescriptorTemplate,
     key_information: Vec<KeyInformation>,
