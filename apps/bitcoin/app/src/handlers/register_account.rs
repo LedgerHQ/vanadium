@@ -21,7 +21,7 @@ async fn display_wallet_policy(
     use common::bip388::{ClearText, MAX_CONFUSION_SCORE};
     use sdk::ux::TagValue;
 
-    let mut pairs = Vec::with_capacity(2 + wallet_policy.key_information.len());
+    let mut pairs = Vec::with_capacity(2 + wallet_policy.key_information().len());
 
     pairs.push(TagValue {
         tag: "Account".into(),
@@ -29,10 +29,10 @@ async fn display_wallet_policy(
     });
 
     let use_cleartext = show_cleartext
-        && wallet_policy.descriptor_template.confusion_score() <= MAX_CONFUSION_SCORE;
+        && wallet_policy.descriptor_template().confusion_score() <= MAX_CONFUSION_SCORE;
 
     if use_cleartext {
-        let (descriptions, _all_have_cleartext) = wallet_policy.descriptor_template.to_cleartext();
+        let (descriptions, _all_have_cleartext) = wallet_policy.descriptor_template().to_cleartext();
         for (i, desc) in descriptions.iter().enumerate() {
             let tag = format!("Spending path #{}", i + 1);
             pairs.push(TagValue {
@@ -47,7 +47,7 @@ async fn display_wallet_policy(
         });
     }
 
-    for (i, key_info) in wallet_policy.key_information.iter().enumerate() {
+    for (i, key_info) in wallet_policy.key_information().iter().enumerate() {
         let tag = match key_auth_names.get(i).and_then(Option::as_ref) {
             Some(signer) => format!("Key @{} ({})", i, signer),
             None => format!("Key @{}", i),
@@ -138,7 +138,7 @@ pub async fn handle_register_account(
     };
 
     // Verify Schnorr signatures over cosigner xpubs and resolve signer names per key.
-    let n = wallet_policy.key_information.len();
+    let n = wallet_policy.key_information().len();
     let mut key_auth_names: Vec<Option<String>> = Vec::with_capacity(n);
     for _ in 0..n {
         key_auth_names.push(None);
@@ -161,7 +161,7 @@ pub async fn handle_register_account(
                     .map_err(|_| Error::InvalidIdentitySignature)?;
                 let ecfp_pubkey = EcfpPublicKey::<Secp256k1, 32>::from_compressed(&identity_pubkey)
                     .map_err(|_| Error::InvalidIdentitySignature)?;
-                let xpub_bytes = wallet_policy.key_information[i].pubkey.encode();
+                let xpub_bytes = wallet_policy.key_information()[i].pubkey.encode();
                 let msg = build_identity_message(MSG_TYPE_XPUB, &xpub_bytes)
                     .map_err(|_| Error::InvalidIdentitySignature)?;
                 ecfp_pubkey
@@ -178,7 +178,7 @@ pub async fn handle_register_account(
     // Label keys as "dummy" or "our key" based on their properties.
     let standard_fpr = crate::bip32::master_fingerprint(KeyTree::Standard)?;
     let resident_fpr = crate::bip32::master_fingerprint(KeyTree::Resident)?;
-    for (i, key_info) in wallet_policy.key_information.iter().enumerate() {
+    for (i, key_info) in wallet_policy.key_information().iter().enumerate() {
         // Skip keys that already have a label from identity signature verification.
         if key_auth_names[i].is_some() {
             continue;

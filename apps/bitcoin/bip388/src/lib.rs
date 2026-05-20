@@ -1334,11 +1334,17 @@ impl core::fmt::Display for DescriptorTemplate {
     }
 }
 
+/// A BIP-388 wallet policy: a parsed [`DescriptorTemplate`] together with the
+/// list of [`KeyInformation`] entries it references, and the original textual
+/// template the policy was constructed from.
+///
+/// Once constructed, a `WalletPolicy` is immutable. Fields are private so the
+/// parsed template cannot drift from the raw string used to compute the
+/// registration HMAC.
 #[derive(Debug, Clone)]
 pub struct WalletPolicy {
-    pub descriptor_template: DescriptorTemplate,
-    pub key_information: Vec<KeyInformation>,
-
+    descriptor_template: DescriptorTemplate,
+    key_information: Vec<KeyInformation>,
     descriptor_template_raw: String,
 }
 
@@ -1369,6 +1375,20 @@ impl WalletPolicy {
         })
     }
 
+    /// The parsed descriptor template AST.
+    pub fn descriptor_template(&self) -> &DescriptorTemplate {
+        &self.descriptor_template
+    }
+
+    /// The list of key information entries referenced by the template's
+    /// `@i` placeholders.
+    pub fn key_information(&self) -> &[KeyInformation] {
+        &self.key_information
+    }
+
+    /// The exact textual template that was passed to [`WalletPolicy::new`].
+    /// This string is what gets HMACed during account registration, so it is
+    /// preserved byte-for-byte rather than re-derived via `Display`.
     pub fn descriptor_template_raw(&self) -> &str {
         &self.descriptor_template_raw
     }

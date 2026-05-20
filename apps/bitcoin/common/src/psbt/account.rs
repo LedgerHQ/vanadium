@@ -450,7 +450,7 @@ pub fn fill_psbt_with_bip388_coordinates(
         .ok_or(PsbtAccountError::Unsupported)?;
 
     // we will look for keys derived from this
-    let key_expr = &wallet_policy.key_information[key_index as usize];
+    let key_expr = &wallet_policy.key_information()[key_index as usize];
     // When origin info is present, use its fingerprint and derivation-path length to
     // locate derived keys inside the PSBT.  When it is absent (e.g. a bare/resident
     // xpub), fall back to the xpub's own fingerprint with an origin path length of 0.
@@ -506,7 +506,7 @@ pub fn prepare_psbt(
     assert!(named_accounts.len() == 1);
     for (wallet_policy, account_name, por) in named_accounts {
         let placeholders: Vec<KeyExpression> = wallet_policy
-            .descriptor_template
+            .descriptor_template()
             .placeholders()
             .map(|(k, _)| k.clone())
             .collect();
@@ -657,7 +657,7 @@ mod tests {
         let mut psbt = psbt_from_str(psbt_str).unwrap();
 
         let placeholders: Vec<KeyExpression> = wallet_policy
-            .descriptor_template
+            .descriptor_template()
             .placeholders()
             .map(|(k, _)| k.clone())
             .collect();
