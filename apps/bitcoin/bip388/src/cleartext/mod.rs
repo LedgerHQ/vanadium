@@ -239,17 +239,15 @@ fn tree_to_leaves(t: &super::TapTree) -> Vec<TapleafClass> {
 fn cleartext_spec<K: Copy + Eq>(
     specs: &'static [CleartextSpec<K>],
     kind: K,
-) -> &'static CleartextSpec<K> {
-    specs
-        .iter()
-        .find(|spec| spec.kind == kind)
-        .expect("missing cleartext spec")
+) -> Option<&'static CleartextSpec<K>> {
+    specs.iter().find(|spec| spec.kind == kind)
 }
 
 /// Render a single dynamic cleartext part. `Literal` parts are inlined by
 /// `format_with_spec` directly; passing one here returns `None`. Any other
 /// (part, value) pairing represents a codegen-side bug since the two are
-/// produced in lockstep.
+/// produced in lockstep; we return `None` and let the caller fall back to a
+/// safe default rather than panic on the VM.
 fn format_cleartext_value(
     part: CleartextPart,
     value: &CleartextValue,
@@ -266,7 +264,10 @@ fn format_cleartext_value(
         (CleartextPart::RelativeTime, CleartextValue::RelativeTime(t)) => format_relative_time(*t),
         (CleartextPart::BlockHeight, CleartextValue::BlockHeight(h)) => h.to_string(),
         (CleartextPart::Timestamp, CleartextValue::Timestamp(t)) => format_utc_date(*t),
-        _ => unreachable!("cleartext part/value mismatch (codegen invariant violated)"),
+        _ => {
+            debug_assert!(false, "cleartext part/value mismatch (codegen invariant violated)");
+            return None;
+        }
     })
 }
 
@@ -274,44 +275,33 @@ fn format_with_spec<K>(
     spec: &CleartextSpec<K>,
     values: &[CleartextValue],
     canonical: bool,
-) -> String {
+) -> Option<String> {
     let mut result = String::new();
     let mut values = values.iter();
     for part in spec.parts {
         match *part {
             CleartextPart::Literal(literal) => result.push_str(literal),
             field => {
-                let value = values.next().expect("missing cleartext value");
-                result.push_str(
-                    &format_cleartext_value(field, value, canonical)
-                        .expect("invalid cleartext value"),
-                );
+                let value = values.next()?;
+                result.push_str(&format_cleartext_value(field, value, canonical)?);
             }
         }
     }
     debug_assert!(values.next().is_none(), "unused cleartext values");
-    result
+    Some(result)
 }
 
 impl DescriptorClass {
     fn to_cleartext_string(&self, canonical: bool) -> Option<String> {
         let (kind, values) = self.cleartext_pattern()?;
-        Some(format_with_spec(
-            cleartext_spec(TOP_LEVEL_SPECS, kind),
-            &values,
-            canonical,
-        ))
+        format_with_spec(cleartext_spec(TOP_LEVEL_SPECS, kind)?, &values, canonical)
     }
 }
 
 impl TapleafClass {
     fn to_cleartext_string(&self, canonical: bool) -> Option<String> {
         let (kind, values) = self.cleartext_pattern()?;
-        Some(format_with_spec(
-            cleartext_spec(TAPLEAF_SPECS, kind),
-            &values,
-            canonical,
-        ))
+        format_with_spec(cleartext_spec(TAPLEAF_SPECS, kind)?, &values, canonical)
     }
 }
 
@@ -426,20 +416,37 @@ impl ClearText for DescriptorTemplate {
         if !self.are_key_derivations_canonical() {
             return (vec![self.to_string()], false);
         }
+        // Helper: a classifier match without a corresponding cleartext spec
+        // would indicate the build-time spec is out of sync with `classify()`.
+        // We fall back to the raw descriptor instead of panicking on the VM.
+        let render = |class: &DescriptorClass| -> Option<String> { class.to_cleartext_string(true) };
+
         match self.classify() {
-            class @ DescriptorClass::LegacySingleSig { .. }
-            | class @ DescriptorClass::SegwitSingleSig { .. }
-            | class @ DescriptorClass::SegwitMultisig { .. } => (
-                vec![class.to_cleartext_string(true).expect("missing cleartext")],
-                true,
-            ),
-            class @ DescriptorClass::Taproot { .. }
-            | class @ DescriptorClass::TaprootMusig { .. } => {
-                let primary_path = class.to_cleartext_string(true).expect("missing cleartext");
+            class @ (DescriptorClass::LegacySingleSig { .. }
+            | DescriptorClass::SegwitSingleSig { .. }
+            | DescriptorClass::SegwitMultisig { .. }) => match render(&class) {
+                Some(s) => (vec![s], true),
+                None => {
+                    debug_assert!(false, "missing cleartext for {:?}", class);
+                    (vec![self.to_string()], false)
+                }
+            },
+            class @ (DescriptorClass::Taproot { .. } | DescriptorClass::TaprootMusig { .. }) => {
+                let primary_path = match render(&class) {
+                    Some(s) => s,
+                    None => {
+                        debug_assert!(false, "missing cleartext for {:?}", class);
+                        return (vec![self.to_string()], false);
+                    }
+                };
+                // Extract leaves; both variants have a `leaves` field.
                 let mut leaves = match class {
-                    DescriptorClass::Taproot { leaves, .. } => leaves,
-                    DescriptorClass::TaprootMusig { leaves, .. } => leaves,
-                    _ => unreachable!(),
+                    DescriptorClass::Taproot { leaves, .. }
+                    | DescriptorClass::TaprootMusig { leaves, .. } => leaves,
+                    // The outer match guard makes other variants impossible
+                    // here; this arm is dead but defensively returns the raw
+                    // descriptor rather than panicking.
+                    _ => return (vec![self.to_string()], false),
                 };
                 leaves.sort_by(|a, b| a.display_cmp(b));
                 let mut descriptions = vec![primary_path];
@@ -448,10 +455,17 @@ impl ClearText for DescriptorTemplate {
                     if let Some(description) = leaf.to_cleartext_string(true) {
                         descriptions.push(description);
                     } else {
-                        let TapleafClass::Other(raw) = leaf else {
-                            unreachable!();
-                        };
-                        descriptions.push(raw);
+                        match leaf {
+                            TapleafClass::Other(raw) => descriptions.push(raw),
+                            // A classified leaf with no cleartext indicates a
+                            // spec/classifier mismatch. Push the parent
+                            // descriptor as a defensive placeholder rather than
+                            // panicking on the VM.
+                            other => {
+                                debug_assert!(false, "classified leaf has no cleartext: {:?}", other);
+                                descriptions.push(self.to_string());
+                            }
+                        }
                         all_leaves_have_cleartext = false;
                     }
                 }

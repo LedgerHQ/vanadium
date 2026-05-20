@@ -35,6 +35,18 @@ const MAX_OLDER_AFTER: u32 = 2147483647; // maximum allowed in older/after
 const MAX_KEYS_MULTI: usize = 20;
 // Maximum key count for the Taproot `multi_a`/`sortedmulti_a` variants.
 const MAX_KEYS_MULTI_A: usize = 999;
+// Maximum recursion depth for descriptor parsing. Bounds host-provided nesting
+// (e.g. `andor(...andor(...))` or `{{{...}}}`) to keep stack usage finite on
+// the constrained VM. Well above any realistic policy depth.
+const MAX_PARSE_DEPTH: usize = 64;
+// Maximum byte length of a serialized descriptor template accepted by
+// `WalletPolicy::deserialize`. Practical policies are far below this.
+const MAX_SERIALIZED_DESCRIPTORTEMPLATE_LEN: usize = 4096;
+// Maximum number of key information entries accepted by `WalletPolicy::deserialize`.
+// Matches the largest multi-key fragment we can produce (`multi_a`/`sortedmulti_a`).
+const MAX_SERIALIZED_KEY_COUNT: usize = MAX_KEYS_MULTI_A;
+// Maximum length of a serialized BIP-32 derivation path.
+const MAX_BIP32_DERIVATION_PATH_LEN: usize = 32;
 
 /// Error type for descriptor template / wallet policy parsing and serialization.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -71,6 +83,8 @@ pub enum ParseError {
     TooManyKeys,
     /// Invalid multisig quorum (threshold).
     InvalidMultisigQuorum,
+    /// Descriptor template nesting exceeds [`MAX_PARSE_DEPTH`].
+    NestingTooDeep,
 }
 
 /// The parsing context, tracking which top-level descriptor we are inside.
@@ -690,7 +704,7 @@ fn parse_number_up_to(input: &str, max: u32) -> ParseResult<'_, u32> {
 
 // Entry-point: parse a complete descriptor template string.
 fn parse_descriptor_template(input: &str) -> Result<DescriptorTemplate, ParseError> {
-    let (rest, descriptor) = parse_descriptor(input, ParseContext::TopLevel)?;
+    let (rest, descriptor) = parse_descriptor(input, ParseContext::TopLevel, 0)?;
     if rest.is_empty() {
         Ok(descriptor)
     } else {
@@ -786,7 +800,23 @@ fn parse_musig_key_expression(input: &str) -> ParseResult<'_, KeyExpression> {
 }
 
 // Parses a descriptor, optionally preceded by a wrapper prefix like "asc:".
-fn parse_descriptor(input: &str, ctx: ParseContext) -> ParseResult<'_, DescriptorTemplate> {
+//
+// `depth` is the current recursion depth; it is incremented on every call and
+// rejected if it exceeds [`MAX_PARSE_DEPTH`]. This bounds stack usage on
+// untrusted input that nests descriptors arbitrarily deeply (e.g.
+// `andor(0,0,andor(0,0,...))` or `tr(@0,{{{{...}}}})`). A chain of wrapper
+// letters like `aaaa:0` does not grow recursion depth because wrappers are
+// applied iteratively in this function, not by re-entry.
+fn parse_descriptor(
+    input: &str,
+    ctx: ParseContext,
+    depth: usize,
+) -> ParseResult<'_, DescriptorTemplate> {
+    if depth >= MAX_PARSE_DEPTH {
+        return Err(ParseError::NestingTooDeep);
+    }
+    let depth = depth + 1;
+
     // A wrapper prefix is a run of ASCII alphabetic chars followed by ':'.
     // Fragment keywords are always followed by '(' instead, so no ambiguity.
     let alpha_end = input
@@ -800,7 +830,7 @@ fn parse_descriptor(input: &str, ctx: ParseContext) -> ParseResult<'_, Descripto
         (input, "")
     };
 
-    let (input, inner) = parse_inner_descriptor(input, ctx)?;
+    let (input, inner) = parse_inner_descriptor(input, ctx, depth)?;
 
     // Apply wrappers in reverse character order (rightmost char = outermost wrapper)
     let mut result = inner;
@@ -822,7 +852,11 @@ fn parse_descriptor(input: &str, ctx: ParseContext) -> ParseResult<'_, Descripto
     Ok((input, result))
 }
 
-fn parse_inner_descriptor(input: &str, ctx: ParseContext) -> ParseResult<'_, DescriptorTemplate> {
+fn parse_inner_descriptor(
+    input: &str,
+    ctx: ParseContext,
+    depth: usize,
+) -> ParseResult<'_, DescriptorTemplate> {
     // Longer names checked before shorter to avoid premature prefix matches.
     if input.starts_with("sortedmulti_a(") {
         return parse_threshold_kp_fragment(
@@ -861,7 +895,7 @@ fn parse_inner_descriptor(input: &str, ctx: ParseContext) -> ParseResult<'_, Des
         );
     }
     if input.starts_with("thresh(") {
-        return parse_thresh(input, ctx);
+        return parse_thresh(input, ctx, depth);
     }
     if input.starts_with("wsh(") {
         if !ctx.wsh_allowed() {
@@ -870,24 +904,21 @@ fn parse_inner_descriptor(input: &str, ctx: ParseContext) -> ParseResult<'_, Des
         let inner_ctx = match ctx {
             ParseContext::TopLevel => ParseContext::Segwit,
             ParseContext::Legacy => ParseContext::WrappedSegwit,
-            _ => unreachable!(), // not possible since wsh_allowed returned true
+            // `wsh_allowed` returns true only for `TopLevel`/`Legacy`; if a new
+            // `ParseContext` variant is added in the future, default to rejecting
+            // rather than panicking on hostile input.
+            _ => return Err(ParseError::InvalidScriptContext),
         };
 
-        let (rest, scripts) = parse_n_subscripts(&input[4..], 1, inner_ctx)?;
-        return Ok((
-            rest,
-            DescriptorTemplate::Wsh(Box::new(scripts.into_iter().next().unwrap())),
-        ));
+        let (rest, [script]) = parse_n_subscripts(&input[4..], inner_ctx, depth)?;
+        return Ok((rest, DescriptorTemplate::Wsh(Box::new(script))));
     }
     if input.starts_with("sh(") {
         if !ctx.sh_allowed() {
             return Err(ParseError::InvalidScriptContext);
         }
-        let (rest, scripts) = parse_n_subscripts(&input[3..], 1, ParseContext::Legacy)?;
-        return Ok((
-            rest,
-            DescriptorTemplate::Sh(Box::new(scripts.into_iter().next().unwrap())),
-        ));
+        let (rest, [script]) = parse_n_subscripts(&input[3..], ParseContext::Legacy, depth)?;
+        return Ok((rest, DescriptorTemplate::Sh(Box::new(script))));
     }
     if input.starts_with("wpkh(") {
         if !ctx.wpkh_allowed() {
@@ -902,7 +933,7 @@ fn parse_inner_descriptor(input: &str, ctx: ParseContext) -> ParseResult<'_, Des
         if !ctx.tr_allowed() {
             return Err(ParseError::InvalidScriptContext);
         }
-        return parse_tr(input);
+        return parse_tr(input, depth);
     }
     if input.starts_with("pk_k(") {
         return parse_kp_fragment(input, "pk_k", DescriptorTemplate::Pk_k, ctx);
@@ -932,53 +963,39 @@ fn parse_inner_descriptor(input: &str, ctx: ParseContext) -> ParseResult<'_, Des
         return parse_hex20_fragment(input, "hash160", DescriptorTemplate::Hash160);
     }
     if input.starts_with("andor(") {
-        let (rest, mut scripts) = parse_n_subscripts(&input[6..], 3, ctx)?;
-        let z = Box::new(scripts.remove(2));
-        let y = Box::new(scripts.remove(1));
-        let x = Box::new(scripts.remove(0));
-        return Ok((rest, DescriptorTemplate::Andor(x, y, z)));
+        let (rest, [x, y, z]) = parse_n_subscripts(&input[6..], ctx, depth)?;
+        return Ok((
+            rest,
+            DescriptorTemplate::Andor(Box::new(x), Box::new(y), Box::new(z)),
+        ));
     }
     if input.starts_with("and_b(") {
-        let (rest, mut scripts) = parse_n_subscripts(&input[6..], 2, ctx)?;
-        let y = Box::new(scripts.remove(1));
-        let x = Box::new(scripts.remove(0));
-        return Ok((rest, DescriptorTemplate::And_b(x, y)));
+        let (rest, [x, y]) = parse_n_subscripts(&input[6..], ctx, depth)?;
+        return Ok((rest, DescriptorTemplate::And_b(Box::new(x), Box::new(y))));
     }
     if input.starts_with("and_v(") {
-        let (rest, mut scripts) = parse_n_subscripts(&input[6..], 2, ctx)?;
-        let y = Box::new(scripts.remove(1));
-        let x = Box::new(scripts.remove(0));
-        return Ok((rest, DescriptorTemplate::And_v(x, y)));
+        let (rest, [x, y]) = parse_n_subscripts(&input[6..], ctx, depth)?;
+        return Ok((rest, DescriptorTemplate::And_v(Box::new(x), Box::new(y))));
     }
     if input.starts_with("and_n(") {
-        let (rest, mut scripts) = parse_n_subscripts(&input[6..], 2, ctx)?;
-        let y = Box::new(scripts.remove(1));
-        let x = Box::new(scripts.remove(0));
-        return Ok((rest, DescriptorTemplate::And_n(x, y)));
+        let (rest, [x, y]) = parse_n_subscripts(&input[6..], ctx, depth)?;
+        return Ok((rest, DescriptorTemplate::And_n(Box::new(x), Box::new(y))));
     }
     if input.starts_with("or_b(") {
-        let (rest, mut scripts) = parse_n_subscripts(&input[5..], 2, ctx)?;
-        let z = Box::new(scripts.remove(1));
-        let x = Box::new(scripts.remove(0));
-        return Ok((rest, DescriptorTemplate::Or_b(x, z)));
+        let (rest, [x, y]) = parse_n_subscripts(&input[5..], ctx, depth)?;
+        return Ok((rest, DescriptorTemplate::Or_b(Box::new(x), Box::new(y))));
     }
     if input.starts_with("or_c(") {
-        let (rest, mut scripts) = parse_n_subscripts(&input[5..], 2, ctx)?;
-        let z = Box::new(scripts.remove(1));
-        let x = Box::new(scripts.remove(0));
-        return Ok((rest, DescriptorTemplate::Or_c(x, z)));
+        let (rest, [x, y]) = parse_n_subscripts(&input[5..], ctx, depth)?;
+        return Ok((rest, DescriptorTemplate::Or_c(Box::new(x), Box::new(y))));
     }
     if input.starts_with("or_d(") {
-        let (rest, mut scripts) = parse_n_subscripts(&input[5..], 2, ctx)?;
-        let z = Box::new(scripts.remove(1));
-        let x = Box::new(scripts.remove(0));
-        return Ok((rest, DescriptorTemplate::Or_d(x, z)));
+        let (rest, [x, y]) = parse_n_subscripts(&input[5..], ctx, depth)?;
+        return Ok((rest, DescriptorTemplate::Or_d(Box::new(x), Box::new(y))));
     }
     if input.starts_with("or_i(") {
-        let (rest, mut scripts) = parse_n_subscripts(&input[5..], 2, ctx)?;
-        let z = Box::new(scripts.remove(1));
-        let x = Box::new(scripts.remove(0));
-        return Ok((rest, DescriptorTemplate::Or_i(x, z)));
+        let (rest, [x, y]) = parse_n_subscripts(&input[5..], ctx, depth)?;
+        return Ok((rest, DescriptorTemplate::Or_i(Box::new(x), Box::new(y))));
     }
     // Simple terminals: bare "0" and "1"
     if input.starts_with('0') {
@@ -1095,20 +1112,20 @@ fn parse_threshold_kp_fragment<'a>(
     Ok((&rest[1..], constructor(threshold, keys)))
 }
 
-// Parses exactly n comma-separated sub-descriptors, then ')'.
+// Parses exactly `N` comma-separated sub-descriptors followed by ')'.
 // Called after the opening '(' of the enclosing fragment has been consumed.
-fn parse_n_subscripts(
+fn parse_n_subscripts<const N: usize>(
     input: &str,
-    n: usize,
     ctx: ParseContext,
-) -> ParseResult<'_, Vec<DescriptorTemplate>> {
+    depth: usize,
+) -> ParseResult<'_, [DescriptorTemplate; N]> {
     let mut rest = input;
-    let mut scripts: Vec<DescriptorTemplate> = Vec::new();
-    for i in 0..n {
-        let (r, desc) = parse_descriptor(rest, ctx)?;
+    let mut scripts: Vec<DescriptorTemplate> = Vec::with_capacity(N);
+    for i in 0..N {
+        let (r, desc) = parse_descriptor(rest, ctx, depth)?;
         scripts.push(desc);
         rest = r;
-        if i + 1 < n {
+        if i + 1 < N {
             if !rest.starts_with(',') {
                 return Err(ParseError::InvalidSyntax);
             }
@@ -1118,7 +1135,11 @@ fn parse_n_subscripts(
     if !rest.starts_with(')') {
         return Err(ParseError::InvalidSyntax);
     }
-    Ok((&rest[1..], scripts))
+    let array: [DescriptorTemplate; N] = scripts
+        .try_into()
+        .ok()
+        .expect("loop pushed exactly N elements");
+    Ok((&rest[1..], array))
 }
 
 #[cfg(test)]
@@ -1126,11 +1147,8 @@ fn parse_wsh(input: &str) -> ParseResult<'_, DescriptorTemplate> {
     if !input.starts_with("wsh(") {
         return Err(ParseError::InvalidSyntax);
     }
-    let (rest, scripts) = parse_n_subscripts(&input[4..], 1, ParseContext::Segwit)?;
-    Ok((
-        rest,
-        DescriptorTemplate::Wsh(Box::new(scripts.into_iter().next().unwrap())),
-    ))
+    let (rest, [script]) = parse_n_subscripts(&input[4..], ParseContext::Segwit, 0)?;
+    Ok((rest, DescriptorTemplate::Wsh(Box::new(script))))
 }
 
 #[cfg(test)]
@@ -1144,25 +1162,30 @@ fn parse_sortedmulti(input: &str) -> ParseResult<'_, DescriptorTemplate> {
     )
 }
 
-fn parse_thresh(input: &str, ctx: ParseContext) -> ParseResult<'_, DescriptorTemplate> {
+fn parse_thresh(
+    input: &str,
+    ctx: ParseContext,
+    depth: usize,
+) -> ParseResult<'_, DescriptorTemplate> {
     // input starts with "thresh("
     let (rest, k) = parse_number_up_to(&input[7..], u32::MAX)?;
     if !rest.starts_with(',') {
         return Err(ParseError::InvalidSyntax);
     }
     // parse first script (mandatory)
-    let (rest, first) = parse_descriptor(&rest[1..], ctx)?;
+    let (rest, first) = parse_descriptor(&rest[1..], ctx, depth)?;
     let mut scripts = vec![first];
     let mut rest = rest;
     loop {
         if !rest.starts_with(',') {
             break;
         }
-        match parse_descriptor(&rest[1..], ctx) {
+        match parse_descriptor(&rest[1..], ctx, depth) {
             Ok((r, desc)) => {
                 scripts.push(desc);
                 rest = r;
             }
+            Err(ParseError::NestingTooDeep) => return Err(ParseError::NestingTooDeep),
             Err(_) => break,
         }
     }
@@ -1178,11 +1201,11 @@ fn parse_thresh(input: &str, ctx: ParseContext) -> ParseResult<'_, DescriptorTem
     Ok((&rest[1..], DescriptorTemplate::Thresh(k, scripts)))
 }
 
-fn parse_tr(input: &str) -> ParseResult<'_, DescriptorTemplate> {
+fn parse_tr(input: &str, depth: usize) -> ParseResult<'_, DescriptorTemplate> {
     // input starts with "tr("
     let (rest, key_placeholder) = parse_key_expression(&input[3..], ParseContext::Taproot)?;
     let (rest, tree) = if rest.starts_with(',') {
-        let (rest, tree) = parse_tap_tree(&rest[1..])?;
+        let (rest, tree) = parse_tap_tree(&rest[1..], depth)?;
         (rest, Some(tree))
     } else {
         (rest, None)
@@ -1193,19 +1216,23 @@ fn parse_tr(input: &str) -> ParseResult<'_, DescriptorTemplate> {
     Ok((&rest[1..], DescriptorTemplate::Tr(key_placeholder, tree)))
 }
 
-fn parse_tap_tree(input: &str) -> ParseResult<'_, TapTree> {
+fn parse_tap_tree(input: &str, depth: usize) -> ParseResult<'_, TapTree> {
+    if depth >= MAX_PARSE_DEPTH {
+        return Err(ParseError::NestingTooDeep);
+    }
+    let depth = depth + 1;
     if input.starts_with('{') {
-        let (rest, left) = parse_tap_tree(&input[1..])?;
+        let (rest, left) = parse_tap_tree(&input[1..], depth)?;
         if !rest.starts_with(',') {
             return Err(ParseError::InvalidSyntax);
         }
-        let (rest, right) = parse_tap_tree(&rest[1..])?;
+        let (rest, right) = parse_tap_tree(&rest[1..], depth)?;
         if !rest.starts_with('}') {
             return Err(ParseError::InvalidSyntax);
         }
         Ok((&rest[1..], TapTree::Branch(Box::new(left), Box::new(right))))
     } else {
-        let (rest, desc) = parse_descriptor(input, ParseContext::Taproot)?;
+        let (rest, desc) = parse_descriptor(input, ParseContext::Taproot, depth)?;
         Ok((rest, TapTree::Script(Box::new(desc))))
     }
 }
@@ -1347,16 +1374,19 @@ impl WalletPolicy {
     }
 
     pub fn serialize(&self) -> Vec<u8> {
+        // `consensus_encode` only fails when its writer fails. Writing to a `Vec`
+        // is infallible, so all `expect`s below are unreachable in practice.
         let mut result = Vec::<u8>::new();
 
         let len = VarInt(self.descriptor_template_raw().len() as u64);
-        len.consensus_encode(&mut result).unwrap();
+        len.consensus_encode(&mut result)
+            .expect("writing to Vec is infallible");
         result.extend_from_slice(self.descriptor_template_raw().as_bytes());
 
         // number of keys
         VarInt(self.key_information.len() as u64)
             .consensus_encode(&mut result)
-            .unwrap();
+            .expect("writing to Vec is infallible");
         for key_info in &self.key_information {
             // serialize key information
             match &key_info.origin_info {
@@ -1368,7 +1398,7 @@ impl WalletPolicy {
                     result.extend_from_slice(&k.fingerprint.to_be_bytes());
                     VarInt(k.derivation_path.len() as u64)
                         .consensus_encode(&mut result)
-                        .unwrap();
+                        .expect("writing to Vec is infallible");
                     for step in k.derivation_path.iter() {
                         result.extend_from_slice(&u32::from(*step).to_le_bytes());
                     }
@@ -1382,15 +1412,23 @@ impl WalletPolicy {
     }
 
     pub fn deserialize<R: Read + ?Sized>(r: &mut R) -> Result<Self, encode::Error> {
-        // Deserialize descriptor template.
+        // Deserialize descriptor template. Reject lengths exceeding
+        // `MAX_SERIALIZED_DESCRIPTORTEMPLATE_LEN` before allocating to prevent a hostile
+        // `VarInt` from triggering an unbounded allocation.
         let VarInt(desc_len) = VarInt::consensus_decode(r)?;
+        if desc_len > MAX_SERIALIZED_DESCRIPTORTEMPLATE_LEN as u64 {
+            return Err(encode::Error::ParseFailed("Descriptor template too long"));
+        }
         let mut desc_bytes = vec![0u8; desc_len as usize];
         r.read_exact(&mut desc_bytes)?;
         let descriptor_template_str = String::from_utf8(desc_bytes)
             .map_err(|_| encode::Error::ParseFailed("Invalid UTF-8 in descriptor"))?;
 
-        // Deserialize key_information vector.
+        // Deserialize key_information vector. Same bound check before allocating.
         let VarInt(key_count) = VarInt::consensus_decode(r)?;
+        if key_count > MAX_SERIALIZED_KEY_COUNT as u64 {
+            return Err(encode::Error::ParseFailed("Too many keys"));
+        }
         let mut key_information = Vec::with_capacity(key_count as usize);
         for _ in 0..key_count {
             let mut flag = [0u8; 1];
@@ -1402,6 +1440,10 @@ impl WalletPolicy {
                     r.read_exact(&mut fp_buf)?;
                     let fingerprint = u32::from_be_bytes(fp_buf);
                     let VarInt(dp_len) = VarInt::consensus_decode(r)?;
+                    // keys used in wallet policies must leave space for the final change/address_index derivation steps
+                    if dp_len > (MAX_BIP32_DERIVATION_PATH_LEN - 2) as u64 {
+                        return Err(encode::Error::ParseFailed("Derivation path too long"));
+                    }
                     let mut derivation_path = Vec::with_capacity(dp_len as usize);
                     for _ in 0..dp_len {
                         let mut step_bytes = [0u8; 4];
@@ -1922,7 +1964,7 @@ mod tests {
             "",
             DescriptorTemplate::Tr(KeyExpression::plain(0, 0, 1), None),
         ));
-        assert_eq!(parse_tr(input), expected);
+        assert_eq!(parse_tr(input, 0), expected);
 
         let input = "tr(@0/**,pkh(@1/**))";
         let expected = Ok((
@@ -1934,7 +1976,7 @@ mod tests {
                 )))),
             ),
         ));
-        assert_eq!(parse_tr(input), expected);
+        assert_eq!(parse_tr(input, 0), expected);
 
         let input = "tr(@0/<2;1>/*,{pkh(@1/<2;7>/*),pk(@2/**)})";
         let expected = Ok((
@@ -1951,22 +1993,23 @@ mod tests {
                 )),
             ),
         ));
-        assert_eq!(parse_tr(input), expected);
+        assert_eq!(parse_tr(input, 0), expected);
 
         // failure cases
-        assert!(parse_tr("tr(@0/**,)").is_err());
-        assert!(parse_tr("tr(pkh(@0/**))").is_err());
-        assert!(parse_tr("tr(@0))").is_err());
-        assert!(parse_tr("tr(@0/*))").is_err());
-        assert!(parse_tr("tr(@0/*/0)").is_err());
+        assert!(parse_tr("tr(@0/**,)", 0).is_err());
+        assert!(parse_tr("tr(pkh(@0/**))", 0).is_err());
+        assert!(parse_tr("tr(@0))", 0).is_err());
+        assert!(parse_tr("tr(@0/*))", 0).is_err());
+        assert!(parse_tr("tr(@0/*/0)", 0).is_err());
     }
 
     #[test]
     fn test_parse_valid_descriptor_templates() {
-        assert!(parse_descriptor("sln:older(12960)", ParseContext::TopLevel).is_ok());
+        assert!(parse_descriptor("sln:older(12960)", ParseContext::TopLevel, 0).is_ok());
         assert!(parse_thresh(
             "thresh(3,pk(@0/**),s:pk(@1/**),s:pk(@2/**),sln:older(12960))",
-            ParseContext::TopLevel
+            ParseContext::TopLevel,
+            0,
         )
         .is_ok());
 
@@ -2355,6 +2398,97 @@ mod tests {
         }
         s.push_str("))");
         assert!(DescriptorTemplate::from_str(&s).is_ok());
+    }
+
+    #[test]
+    fn test_parser_rejects_deeply_nested_descriptors() {
+        // Wrapper chains do NOT grow recursion depth — they are applied
+        // iteratively inside `parse_descriptor`. A long chain should still
+        // parse fine.
+        let mut s = String::new();
+        for _ in 0..1000 {
+            s.push('j');
+        }
+        s.push_str(":0");
+        assert!(DescriptorTemplate::from_str(&s).is_ok());
+
+        // Andor nesting recurses through `parse_descriptor` — beyond the
+        // depth limit, parsing must reject without overflowing the stack.
+        let mut s = String::new();
+        for _ in 0..(MAX_PARSE_DEPTH + 5) {
+            s.push_str("andor(0,");
+        }
+        s.push('0');
+        for _ in 0..(MAX_PARSE_DEPTH + 5) {
+            s.push_str(",0)");
+        }
+        assert_eq!(
+            DescriptorTemplate::from_str(&s),
+            Err(ParseError::NestingTooDeep)
+        );
+
+        // Same for taproot tree braces.
+        let mut s = String::from("tr(@0/**,");
+        for _ in 0..(MAX_PARSE_DEPTH + 5) {
+            s.push('{');
+        }
+        s.push_str("pk(@1/**)");
+        for _ in 0..(MAX_PARSE_DEPTH + 5) {
+            s.push_str(",pk(@2/**)}");
+        }
+        s.push(')');
+        assert_eq!(
+            DescriptorTemplate::from_str(&s),
+            Err(ParseError::NestingTooDeep)
+        );
+
+        // A taproot tree nested up to the limit must still succeed. Build a
+        // left-leaning tree of depth `MAX_PARSE_DEPTH - 4` (a few slots are
+        // consumed by `tr(` and the script wrapping at the bottom).
+        let inner_depth = MAX_PARSE_DEPTH - 4;
+        let mut s = String::from("tr(@0/**,");
+        for _ in 0..inner_depth {
+            s.push('{');
+        }
+        s.push_str("pk(@1/**)");
+        for _ in 0..inner_depth {
+            s.push_str(",pk(@2/**)}");
+        }
+        s.push(')');
+        assert!(DescriptorTemplate::from_str(&s).is_ok());
+    }
+
+    #[test]
+    fn test_deserialize_rejects_oversized_descriptor() {
+        use bitcoin::consensus::Encodable;
+        let mut buf = Vec::<u8>::new();
+        // Encode a VarInt that exceeds the descriptor-length cap. The reader
+        // must reject before allocating.
+        VarInt((MAX_SERIALIZED_DESCRIPTORTEMPLATE_LEN as u64) + 1)
+            .consensus_encode(&mut buf)
+            .unwrap();
+        let mut cursor = bitcoin::io::Cursor::new(buf);
+        let err = WalletPolicy::deserialize(&mut cursor)
+            .err()
+            .expect("expected error");
+        assert!(matches!(err, encode::Error::ParseFailed(_)));
+    }
+
+    #[test]
+    fn test_deserialize_rejects_oversized_key_count() {
+        use bitcoin::consensus::Encodable;
+        let mut buf = Vec::<u8>::new();
+        // Minimal valid descriptor: empty descriptor template.
+        VarInt(0).consensus_encode(&mut buf).unwrap();
+        // Key count way above the cap.
+        VarInt((MAX_SERIALIZED_KEY_COUNT as u64) + 1)
+            .consensus_encode(&mut buf)
+            .unwrap();
+        let mut cursor = bitcoin::io::Cursor::new(buf);
+        let err = WalletPolicy::deserialize(&mut cursor)
+            .err()
+            .expect("expected error");
+        assert!(matches!(err, encode::Error::ParseFailed(_)));
     }
 
     #[test]
