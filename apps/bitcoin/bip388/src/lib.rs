@@ -56,7 +56,7 @@ pub enum ParseError {
     /// An unrecognized descriptor fragment keyword was encountered.
     UnrecognizedFragment,
     /// A multisig/sortedmulti fragment had fewer than 2 key placeholders.
-    TooFewKeyPlaceholders,
+    TooFewKeyExpressions,
     /// The threshold `k` in `thresh(k, ...)` exceeds the number of sub-scripts.
     ThreshExceedsScripts,
     /// A key placeholder index was out of range for the key-information list.
@@ -183,9 +183,6 @@ impl KeyExpression {
         }
     }
 }
-
-/// Backward-compatible alias.
-pub type KeyPlaceholder = KeyExpression;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[allow(non_camel_case_types)]
@@ -354,7 +351,7 @@ impl<'a> Iterator for DescriptorTemplateIter<'a> {
 
 /// Mutable iterator over the key placeholders of a [`DescriptorTemplate`].
 ///
-/// Yields `&mut KeyPlaceholder` in the same traversal order as
+/// Yields `&mut KeyExpression` in the same traversal order as
 /// [`DescriptorTemplateIter`] (the immutable counterpart), so that in-place
 /// mutations preserve the canonical ordering expected by
 /// `are_key_derivations_canonical`.
@@ -373,7 +370,7 @@ impl<'a> Iterator for DescriptorTemplateIterMut<'a> {
     fn next(&mut self) -> Option<Self::Item> {
         loop {
             if let Some(ptr) = self.placeholders.pop() {
-                // SAFETY: ptr was derived from a uniquely-borrowed &mut KeyPlaceholder
+                // SAFETY: ptr was derived from a uniquely-borrowed &mut KeyExpression
                 // that lives for 'a; no other reference to it exists.
                 return Some(unsafe { &mut *ptr });
             }
@@ -777,7 +774,7 @@ fn parse_musig_key_expression(input: &str) -> ParseResult<'_, KeyExpression> {
         }
     }
     if key_indices.len() < 2 {
-        return Err(ParseError::TooFewKeyPlaceholders);
+        return Err(ParseError::TooFewKeyExpressions);
     }
     if !rest.starts_with(')') {
         return Err(ParseError::InvalidSyntax);
@@ -1087,7 +1084,7 @@ fn parse_threshold_kp_fragment<'a>(
         }
     }
     if keys.len() < 2 {
-        return Err(ParseError::TooFewKeyPlaceholders);
+        return Err(ParseError::TooFewKeyExpressions);
     }
     if threshold == 0 || (threshold as usize) > keys.len() {
         return Err(ParseError::InvalidMultisigQuorum);

@@ -91,13 +91,13 @@ impl BindingKind {
     fn info(self) -> KindInfo {
         match self {
             BindingKind::Key => KindInfo {
-                rust_type: "KeyPlaceholder",
+                rust_type: "KeyExpression",
                 cleartext_variant: Some("KeyIndex"),
                 cursor_method: Some("key_index"),
                 range: None,
             },
             BindingKind::KeyList => KindInfo {
-                rust_type: "Vec<KeyPlaceholder>",
+                rust_type: "Vec<KeyExpression>",
                 cleartext_variant: Some("KeyIndices"),
                 cursor_method: Some("key_indices"),
                 range: None,
@@ -663,7 +663,11 @@ impl ClassKind {
     }
     fn other_pat(self) -> TokenStream {
         let c = self.class();
-        if self.other_has_string { quote!(#c::Other(_)) } else { quote!(#c::Other) }
+        if self.other_has_string {
+            quote!(#c::Other(_))
+        } else {
+            quote!(#c::Other)
+        }
     }
     fn other_ctor(self) -> TokenStream {
         let c = self.class();
@@ -709,7 +713,11 @@ fn cursor_method(k: BindingKind) -> Ident {
 
 enum MatchStep {
     /// `if let DescriptorTemplate::<variant>(<temps>...) = <matchee>`.
-    Variant { matchee: TokenStream, variant: Ident, temps: Vec<Ident> },
+    Variant {
+        matchee: TokenStream,
+        variant: Ident,
+        temps: Vec<Ident>,
+    },
     /// `if <expr>.is_plain()`.
     PlainKey { expr: Ident },
     /// `if <expr>.iter().all(|k| k.is_plain())`.
@@ -717,7 +725,11 @@ enum MatchStep {
     /// `if <expr>.is_musig() { let <temp> = <expr>; ... }`.
     MusigKey { expr: Ident, temp: Ident },
     /// `if *<expr> >= lo && *<expr> < hi` (hi exclusive; None = open-ended).
-    Range { expr: Ident, lo: u32, hi: Option<u32> },
+    Range {
+        expr: Ident,
+        lo: u32,
+        hi: Option<u32>,
+    },
 }
 
 struct Counter(usize);
@@ -739,7 +751,11 @@ struct Lowered {
 
 fn lower_pattern(pat: &Pattern) -> Lowered {
     let mut counter = Counter(0);
-    let mut l = Lowered { steps: Vec::new(), preamble: Vec::new(), bindings: BTreeMap::new() };
+    let mut l = Lowered {
+        steps: Vec::new(),
+        preamble: Vec::new(),
+        bindings: BTreeMap::new(),
+    };
     lower(pat, quote!(__m), &mut counter, &mut l);
     l
 }
@@ -750,7 +766,11 @@ fn lower(pat: &Pattern, matchee: TokenStream, c: &mut Counter, l: &mut Lowered) 
     let arg_kinds = variant_arg_kinds(variant_str);
 
     let temps: Vec<Ident> = pat.args.iter().map(|_| c.next()).collect();
-    l.steps.push(MatchStep::Variant { matchee, variant, temps: temps.clone() });
+    l.steps.push(MatchStep::Variant {
+        matchee,
+        variant,
+        temps: temps.clone(),
+    });
 
     for (i, (arg, tv)) in pat.args.iter().zip(temps.iter()).enumerate() {
         let kind = arg_kinds.get(i).copied().unwrap_or(ArgKind::Sub);
@@ -762,7 +782,11 @@ fn lower(pat: &Pattern, matchee: TokenStream, c: &mut Counter, l: &mut Lowered) 
                 }
                 ArgKind::Num => {
                     if let Some((lo, hi)) = bkind.info().range {
-                        l.steps.push(MatchStep::Range { expr: tv.clone(), lo, hi });
+                        l.steps.push(MatchStep::Range {
+                            expr: tv.clone(),
+                            lo,
+                            hi,
+                        });
                     }
                     l.bindings.insert(name.clone(), quote!(*#tv));
                 }
@@ -777,15 +801,18 @@ fn lower(pat: &Pattern, matchee: TokenStream, c: &mut Counter, l: &mut Lowered) 
             PatternArg::Musig { threshold, keys } => {
                 debug_assert_eq!(kind, ArgKind::Key);
                 let m = c.next();
-                l.steps.push(MatchStep::MusigKey { expr: tv.clone(), temp: m.clone() });
+                l.steps.push(MatchStep::MusigKey {
+                    expr: tv.clone(),
+                    temp: m.clone(),
+                });
                 let kv = c.next();
                 let kt = c.next();
                 // Propagate the musig's shared (num1, num2) onto each plain key.
                 l.preamble.push(quote! {
-                    let #kv: alloc::vec::Vec<KeyPlaceholder> = #m.musig_key_indices()
+                    let #kv: alloc::vec::Vec<KeyExpression> = #m.musig_key_indices()
                         .expect("is_musig checked")
                         .iter()
-                        .map(|&__i| KeyPlaceholder::plain(__i, #m.num1, #m.num2))
+                        .map(|&__i| KeyExpression::plain(__i, #m.num1, #m.num2))
                         .collect();
                 });
                 l.preamble.push(quote!(let #kt: u32 = #kv.len() as u32;));
@@ -798,14 +825,24 @@ fn lower(pat: &Pattern, matchee: TokenStream, c: &mut Counter, l: &mut Lowered) 
                 for w in wrappers {
                     let wv = id(w);
                     let wt = c.next();
-                    let m: TokenStream =
-                        if current_boxed { quote!(#current.as_ref()) } else { current.clone() };
-                    l.steps.push(MatchStep::Variant { matchee: m, variant: wv, temps: vec![wt.clone()] });
+                    let m: TokenStream = if current_boxed {
+                        quote!(#current.as_ref())
+                    } else {
+                        current.clone()
+                    };
+                    l.steps.push(MatchStep::Variant {
+                        matchee: m,
+                        variant: wv,
+                        temps: vec![wt.clone()],
+                    });
                     current = quote!(#wt);
                     current_boxed = true;
                 }
-                let next_matchee: TokenStream =
-                    if current_boxed { quote!(#current.as_ref()) } else { current };
+                let next_matchee: TokenStream = if current_boxed {
+                    quote!(#current.as_ref())
+                } else {
+                    current
+                };
                 lower(inner, next_matchee, c, l);
             }
         }
@@ -816,7 +853,11 @@ fn fold_steps(steps: &[MatchStep], inner: TokenStream) -> TokenStream {
     let mut code = inner;
     for step in steps.iter().rev() {
         code = match step {
-            MatchStep::Variant { matchee, variant, temps } => {
+            MatchStep::Variant {
+                matchee,
+                variant,
+                temps,
+            } => {
                 if temps.is_empty() {
                     quote!(if let DescriptorTemplate::#variant = #matchee { #code })
                 } else {
@@ -941,7 +982,11 @@ fn emit_class_enum(ck: ClassKind, entries: &[ProcessedEntry]) -> TokenStream {
             }
         })
         .collect();
-    let other = if ck.other_has_string { quote!(Other(String)) } else { quote!(Other) };
+    let other = if ck.other_has_string {
+        quote!(Other(String))
+    } else {
+        quote!(Other)
+    };
     quote! {
         #[derive(Clone, Debug, PartialEq, Eq)]
         pub(super) enum #ident {
@@ -1044,7 +1089,11 @@ fn emit_cleartext_pattern(entries: &[ProcessedEntry], ck: ClassKind) -> TokenStr
 fn emit_tapleaf_helpers(tapleaf: &[ProcessedEntry]) -> TokenStream {
     let order_arms = tapleaf.iter().enumerate().map(|(i, e)| {
         let v = id(&e.name);
-        let pat: TokenStream = if e.fields.order.is_empty() { quote!() } else { quote!({ .. }) };
+        let pat: TokenStream = if e.fields.order.is_empty() {
+            quote!()
+        } else {
+            quote!({ .. })
+        };
         let idx = i as u32;
         quote!(TapleafClass::#v #pat => #idx)
     });
@@ -1071,7 +1120,9 @@ fn emit_tapleaf_helpers(tapleaf: &[ProcessedEntry]) -> TokenStream {
 }
 
 fn emit_outer_score(top_level: &[ProcessedEntry]) -> TokenStream {
-    let arms = top_level.iter().map(|e| emit_score_arm(e, "DescriptorClass"));
+    let arms = top_level
+        .iter()
+        .map(|e| emit_score_arm(e, "DescriptorClass"));
     quote! {
         impl DescriptorClass {
             fn outer_score(&self) -> u64 {
@@ -1091,8 +1142,16 @@ fn emit_outer_score(top_level: &[ProcessedEntry]) -> TokenStream {
 fn emit_score_arm(entry: &ProcessedEntry, class_enum: &str) -> TokenStream {
     let class = id(class_enum);
     let variant = id(&entry.name);
-    let plain: u64 = entry.patterns.iter().filter(|p| !pattern_uses_musig(p)).count() as u64;
-    let musig: u64 = entry.patterns.iter().filter(|p| pattern_uses_musig(p)).count() as u64;
+    let plain: u64 = entry
+        .patterns
+        .iter()
+        .filter(|p| !pattern_uses_musig(p))
+        .count() as u64;
+    let musig: u64 = entry
+        .patterns
+        .iter()
+        .filter(|p| pattern_uses_musig(p))
+        .count() as u64;
 
     let destructure: TokenStream = if entry.fields.order.is_empty() {
         quote!()
@@ -1120,7 +1179,10 @@ fn emit_score_arm(entry: &ProcessedEntry, class_enum: &str) -> TokenStream {
 fn emit_from_cleartext_pattern(entries: &[ProcessedEntry], ck: ClassKind) -> TokenStream {
     let class = ck.class();
     let pattern = ck.pattern();
-    let arms: Vec<TokenStream> = entries.iter().map(|e| emit_from_cleartext_arm(e, ck)).collect();
+    let arms: Vec<TokenStream> = entries
+        .iter()
+        .map(|e| emit_from_cleartext_arm(e, ck))
+        .collect();
     quote! {
         impl #class {
             fn from_cleartext_pattern(
@@ -1311,7 +1373,7 @@ fn emit_internal_key_local(entry: &ProcessedEntry) -> TokenStream {
                 .collect();
             let __num1 = keys.first().map(|__k| __k.num1).unwrap_or(0);
             let __num2 = keys.first().map(|__k| __k.num2).unwrap_or(1);
-            let __internal_key = KeyPlaceholder::musig(__key_indices, __num1, __num2);
+            let __internal_key = KeyExpression::musig(__key_indices, __num1, __num2);
         }
     }
 }
@@ -1323,7 +1385,11 @@ fn emit_pattern_construction_block(entry: &ProcessedEntry, owned: bool) -> Token
     let pushes = entry.patterns.iter().map(|pat| {
         let expr = build_construction_expr(pat, owned);
         if pattern_uses_musig(pat) {
-            let t: TokenStream = if owned { quote!(threshold) } else { quote!(*threshold) };
+            let t: TokenStream = if owned {
+                quote!(threshold)
+            } else {
+                quote!(*threshold)
+            };
             quote! {
                 if #t as usize == keys.len() && keys.iter().all(|__k| __k.is_plain()) {
                     __out.push(#expr);
@@ -1346,9 +1412,10 @@ fn build_construction_expr(pat: &Pattern, owned: bool) -> TokenStream {
     if pat.args.is_empty() {
         return quote!(DescriptorTemplate::#variant);
     }
-    let args = pat.args.iter().enumerate().map(|(i, a)| {
-        build_arg_expr(a, arg_kinds.get(i).copied().unwrap_or(ArgKind::Sub), owned)
-    });
+    let args =
+        pat.args.iter().enumerate().map(|(i, a)| {
+            build_arg_expr(a, arg_kinds.get(i).copied().unwrap_or(ArgKind::Sub), owned)
+        });
     quote!(DescriptorTemplate::#variant(#(#args),*))
 }
 
@@ -1359,7 +1426,11 @@ fn build_arg_expr(arg: &PatternArg, kind: ArgKind, owned: bool) -> TokenStream {
             match kind {
                 ArgKind::Key | ArgKind::KeyList => quote!(#n.clone()),
                 ArgKind::Num => {
-                    if owned { quote!(#n) } else { quote!(*#n) }
+                    if owned {
+                        quote!(#n)
+                    } else {
+                        quote!(*#n)
+                    }
                 }
                 ArgKind::Sub => quote!(#n),
                 ArgKind::Tree => quote!(None),
@@ -1368,7 +1439,7 @@ fn build_arg_expr(arg: &PatternArg, kind: ArgKind, owned: bool) -> TokenStream {
         PatternArg::Musig { keys, .. } => {
             let k = id(keys);
             quote! {
-                KeyPlaceholder::musig(
+                KeyExpression::musig(
                     #k.iter().map(|__k| __k.plain_key_index().expect("plain key")).collect(),
                     #k.first().map(|__k| __k.num1).unwrap_or(0),
                     #k.first().map(|__k| __k.num2).unwrap_or(1),
@@ -1466,8 +1537,7 @@ fn emit_decode(top_level: &[ProcessedEntry], tapleaf: &[ProcessedEntry]) -> Stri
 
 fn main() -> Result<(), Box<dyn Error>> {
     let manifest_dir = env::var("CARGO_MANIFEST_DIR")?;
-    let spec_path =
-        PathBuf::from(&manifest_dir).join("src/cleartext/specs/cleartext.toml");
+    let spec_path = PathBuf::from(&manifest_dir).join("src/cleartext/specs/cleartext.toml");
     println!("cargo:rerun-if-changed={}", spec_path.display());
     println!("cargo:rerun-if-changed=build.rs");
 
