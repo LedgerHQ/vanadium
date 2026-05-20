@@ -9,6 +9,81 @@
 //!   `cfg(test)`) is active. Contains the `from_cleartext_pattern` impls and the
 //!   `top_level_variants` / `tapleaf_to_descriptors` reverse-construction
 //!   functions.
+//!
+//! # TOML schema
+//!
+//! The spec file has two array-of-table sections — `[[top_level]]` (matched
+//! against the root `DescriptorTemplate`) and `[[tapleaf]]` (matched against
+//! each leaf of a `tr(...)` tap-tree). Both share the same per-entry schema:
+//!
+//! ```toml
+//! [[top_level]]      # or [[tapleaf]]
+//! name = "..."       # variant name in the generated DescriptorClass /
+//!                    # TapleafClass. Must be a valid Rust identifier and
+//!                    # unique within its section.
+//! patterns = [       # one or more pattern strings; the classifier tries each
+//!     "...",         # in order. The score for the entry equals the number of
+//! ]                  # patterns whose round-trip check applies.
+//! cleartext = [      # rendered cleartext template: literal strings interleaved
+//!     "...",         # with `$binding` references to fields captured by the
+//!     "$binding",    # patterns. Subject to the invariants below.
+//! ]
+//! ```
+//!
+//! ## Pattern grammar
+//!
+//! ```text
+//! Pattern    := Keyword '(' Args? ')' | Keyword
+//! Args       := Arg (',' Arg)*
+//! Arg        := '$' Name                                   // binding
+//!             | 'musig' '(' '$' Name ',' '$' Name ')'      // only in Key positions
+//!             | (WrapperChars ':')? Pattern                // nested sub-template
+//! Keyword      := one of the descriptor fragments in `keyword_to_variant`
+//! WrapperChars := any non-empty run of:  a s c t d v j n l u
+//! ```
+//!
+//! ## Binding names
+//!
+//! The base name (with any trailing digits stripped) determines the binding's
+//! kind. `$key`, `$key1`, `$key2` all resolve to single-key placeholders; the
+//! digit only disambiguates two occurrences within one pattern.
+//!
+//! | base name             | kind          | host type            | implicit range          |
+//! |-----------------------|---------------|----------------------|-------------------------|
+//! | `key`, `internal_key` | Key           | `KeyPlaceholder`     | —                       |
+//! | `keys`                | KeyList       | `Vec<KeyPlaceholder>`| —                       |
+//! | `threshold`           | Threshold     | `u32`                | —                       |
+//! | `blocks`              | Blocks        | `u32`                | `1..65_536`             |
+//! | `relative_time`       | RelativeTime  | `u32` (BIP-68 form)  | `4_194_305..4_259_840`  |
+//! | `block_height`        | BlockHeight   | `u32`                | `1..500_000_000`        |
+//! | `timestamp`           | Timestamp     | `u32` (Unix seconds) | `500_000_000..`         |
+//! | `leaves`              | Leaves        | `Vec<TapleafClass>`  | `tr(...)` only          |
+//!
+//! Ranges (where present) become guard clauses in the classifier
+//! (`if *expr >= lo && *expr < hi`), so the same keyword — e.g. `older($N)` —
+//! routes to different classes depending on `N`.
+//!
+//! # Invariants enforced at build time
+//!
+//! The runtime parser depends on these properties; the build fails with a
+//! clear message if any is violated:
+//!
+//! * Each entry has at least one pattern, and each pattern string is fully
+//!   consumed by the grammar above.
+//! * Bindings shared between patterns of the same entry have a consistent
+//!   kind (`class_fields_for_entry`).
+//! * Cleartext references only bindings that the entry's patterns capture, and
+//!   never `$leaves` (which is structural — recursed into, not rendered).
+//! * Cleartext literals are non-empty, contain no `@`, and do not start or end
+//!   with a digit — needed for unambiguous reverse parsing of numeric and
+//!   key fields adjacent to a literal.
+//! * No two `$binding` tokens appear adjacent in a cleartext template
+//!   (`parse_cleartext`). This is the invariant the runtime
+//!   `debug_assert!` in `parse_with_spec` (decode.rs) relies on.
+//! * Within each section, no two entries collapse to the same cleartext
+//!   "shape" — literal sequence with every dynamic field replaced by a
+//!   sentinel (`check_cleartext_uniqueness`).
+//! * Within each section, every `name` is unique (`check_entry_names_unique`).
 
 use std::collections::BTreeMap;
 use std::env;
@@ -510,7 +585,13 @@ enum CleartextToken {
     Field { name: String, kind: BindingKind },
 }
 
+/// Lower the `cleartext = [...]` array of an entry. Also enforces the
+/// invariants the runtime reverse parser depends on (see the module-level
+/// "Invariants enforced at build time" section).
 fn parse_cleartext(items: &[String], fields: &ClassFields) -> Result<Vec<CleartextToken>, String> {
+    if items.is_empty() {
+        return Err("cleartext template is empty".to_string());
+    }
     let mut out = Vec::new();
     for item in items {
         if let Some(rest) = item.strip_prefix('$') {
@@ -600,6 +681,22 @@ fn process_entries(entries: &[Entry]) -> Result<Vec<ProcessedEntry>, String> {
         });
     }
     Ok(processed)
+}
+
+/// Reject duplicate `name` fields within a section. Without this check a
+/// repeated name would emit two enum variants with the same identifier and
+/// fail downstream Rust compilation with an opaque error.
+fn check_entry_names_unique(entries: &[Entry], scope: &str) -> Result<(), String> {
+    let mut seen: BTreeMap<&str, ()> = BTreeMap::new();
+    for e in entries {
+        if seen.insert(e.name.as_str(), ()).is_some() {
+            return Err(format!(
+                "{} entry name '{}' is declared more than once",
+                scope, e.name
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Inter-entry uniqueness: each entry's literal-sequence (the concatenation
@@ -1543,6 +1640,9 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let raw = fs::read_to_string(&spec_path)?;
     let spec: Spec = toml::from_str(&raw)?;
+
+    check_entry_names_unique(&spec.top_level, "top_level")?;
+    check_entry_names_unique(&spec.tapleaf, "tapleaf")?;
 
     let top_level = process_entries(&spec.top_level).map_err(|e| format!("top_level: {}", e))?;
     let tapleaf = process_entries(&spec.tapleaf).map_err(|e| format!("tapleaf: {}", e))?;
