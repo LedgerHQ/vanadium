@@ -32,7 +32,8 @@ async fn display_wallet_policy(
         && wallet_policy.descriptor_template().confusion_score() <= MAX_CONFUSION_SCORE;
 
     if use_cleartext {
-        let (descriptions, _all_have_cleartext) = wallet_policy.descriptor_template().to_cleartext();
+        let (descriptions, _all_have_cleartext) =
+            wallet_policy.descriptor_template().to_cleartext();
         for (i, desc) in descriptions.iter().enumerate() {
             let tag = format!("Spending path #{}", i + 1);
             pairs.push(TagValue {
@@ -105,8 +106,7 @@ pub async fn handle_register_account(
 ) -> Result<Response, Error> {
     app.show_spinner("Processing...");
 
-    let wallet_policy: bip388::WalletPolicy =
-        account.try_into().map_err(|_| Error::InvalidWalletPolicy)?;
+    let message::Account::WalletPolicy(wallet_policy) = account;
 
     // Verify PoRs for registered identity keys and build a (pubkey ==> name) lookup table.
     let identity_key_names: Vec<([u8; 33], String)> = match registered_identities {
@@ -245,37 +245,27 @@ mod tests {
         por::{ProofOfRegistration, Registerable},
     };
 
-    fn ki(key_info_str: &str) -> message::PubkeyInfo {
-        let info = KeyInformation::try_from(key_info_str).unwrap();
+    fn make_account(template: &str, keys_info_strs: &[&str]) -> message::Account {
+        let keys = keys_info_strs
+            .iter()
+            .map(|s| KeyInformation::try_from(*s).unwrap())
+            .collect();
+        message::Account::WalletPolicy(bip388::WalletPolicy::new(template, keys).unwrap())
+    }
 
-        let origin = info.origin_info.map(|info| message::KeyOrigin {
-            fingerprint: info.fingerprint,
-            path: message::Bip32Path(
-                info.derivation_path
-                    .iter()
-                    .map(|step| u32::from(*step))
-                    .collect(),
-            ),
-        });
-
-        message::PubkeyInfo {
-            pubkey: info.pubkey.encode().to_vec(),
-            origin,
-        }
+    fn wallet_policy_of(account: &message::Account) -> &bip388::WalletPolicy {
+        let message::Account::WalletPolicy(wp) = account;
+        wp
     }
 
     #[test]
     fn test_register_account() {
         let account_name = "My Test Account";
-        let account = message::Account::WalletPolicy(message::WalletPolicy {
-            template: "wpkh(@0/**)".into(),
-            keys_info: vec![ki(
-                "[f5acc2fd/84'/1'/0']tpubDCtKfsNyRhULjZ9XMS4VKKtVcPdVDi8MKUbcSD9MJDyjRu1A2ND5MiipozyyspBT9bg8upEp7a8EAgFxNxXn1d7QkdbL52Ty5jiSLcxPt1P",
-            )],
-        });
-
-        let wallet_policy: bip388::WalletPolicy = (&account).try_into().unwrap();
-        let expected_account_id = wallet_policy.registration_id(account_name);
+        let account = make_account(
+            "wpkh(@0/**)",
+            &["[f5acc2fd/84'/1'/0']tpubDCtKfsNyRhULjZ9XMS4VKKtVcPdVDi8MKUbcSD9MJDyjRu1A2ND5MiipozyyspBT9bg8upEp7a8EAgFxNxXn1d7QkdbL52Ty5jiSLcxPt1P"],
+        );
+        let expected_account_id = wallet_policy_of(&account).registration_id(account_name);
 
         let resp = sdk::executor::block_on(handle_register_account(
             &mut sdk::App::singleton(),
@@ -299,16 +289,14 @@ mod tests {
     #[test]
     fn test_register_account_simple_inheritance() {
         let account_name = "Simple inheritance";
-        let account = message::Account::WalletPolicy(message::WalletPolicy {
-            template: "tr(@0/<0;1>/*,and_v(v:pk(@1/<0;1>/*),older(52596)))".into(),
-            keys_info: vec![
-                ki("[f5acc2fd/48'/1'/0'/2']tpubDFAqEGNyad35aBCKUAXbQGDjdVhNueno5ZZVEn3sQbW5ci457gLR7HyTmHBg93oourBssgUxuWz1jX5uhc1qaqFo9VsybY1J5FuedLfm4dK"),
-                ki("[d5365b22/48'/1'/0'/2']tpubDFWK5mCX28dt6hfy74Bc51jjbWrimXow1bTxCMpJrWqesK3AeZiYn8tcLFW3VoBiHhM9FjKdLWaC3GZVVX5PfGNG3zfbM14bMb1SLym36nN")
+        let account = make_account(
+            "tr(@0/<0;1>/*,and_v(v:pk(@1/<0;1>/*),older(52596)))",
+            &[
+                "[f5acc2fd/48'/1'/0'/2']tpubDFAqEGNyad35aBCKUAXbQGDjdVhNueno5ZZVEn3sQbW5ci457gLR7HyTmHBg93oourBssgUxuWz1jX5uhc1qaqFo9VsybY1J5FuedLfm4dK",
+                "[d5365b22/48'/1'/0'/2']tpubDFWK5mCX28dt6hfy74Bc51jjbWrimXow1bTxCMpJrWqesK3AeZiYn8tcLFW3VoBiHhM9FjKdLWaC3GZVVX5PfGNG3zfbM14bMb1SLym36nN",
             ],
-        });
-
-        let wallet_policy: bip388::WalletPolicy = (&account).try_into().unwrap();
-        let expected_account_id = wallet_policy.registration_id(account_name);
+        );
+        let expected_account_id = wallet_policy_of(&account).registration_id(account_name);
 
         let resp = sdk::executor::block_on(handle_register_account(
             &mut sdk::App::singleton(),
@@ -332,17 +320,15 @@ mod tests {
     #[test]
     fn test_register_account_simple_inheritance2() {
         let account_name = "Simple inheritance";
-        let account = message::Account::WalletPolicy(message::WalletPolicy {
-            template: "tr(@0/<0;1>/*,{and_v(v:pk(@1/<2;3>/*),older(4383)),and_v(v:pk(@2/<0;1>/*),pk(@1/<0;1>/*))})".into(),
-            keys_info: vec![
-                ki("tpubD6NzVbkrYhZ4XUBKWaWfdn2icbaEDfaUgkCCbKPm31LTLRfaaEJRDAF3XXbvTaKLHATytZPGoWpVxnMnrRbn4519fP6nhZDDFtJimcZWBGC"),
-                ki("[41e8dfb4/48'/1'/0'/2']tpubDE6DKS5H4uEZwjGqvSujs1GMKY3PZKuEvsVFbvCStYs3yNjo93aeVqEGT3gsFtAPHdj19oTZCjoKarMz1Ve6bKdzh6gNaFsfH1FudHTxGrB"),
-                ki("[f5acc2fd/48'/1'/0'/2']tpubDFAqEGNyad35aBCKUAXbQGDjdVhNueno5ZZVEn3sQbW5ci457gLR7HyTmHBg93oourBssgUxuWz1jX5uhc1qaqFo9VsybY1J5FuedLfm4dK"),
+        let account = make_account(
+            "tr(@0/<0;1>/*,{and_v(v:pk(@1/<2;3>/*),older(4383)),and_v(v:pk(@2/<0;1>/*),pk(@1/<0;1>/*))})",
+            &[
+                "tpubD6NzVbkrYhZ4XUBKWaWfdn2icbaEDfaUgkCCbKPm31LTLRfaaEJRDAF3XXbvTaKLHATytZPGoWpVxnMnrRbn4519fP6nhZDDFtJimcZWBGC",
+                "[41e8dfb4/48'/1'/0'/2']tpubDE6DKS5H4uEZwjGqvSujs1GMKY3PZKuEvsVFbvCStYs3yNjo93aeVqEGT3gsFtAPHdj19oTZCjoKarMz1Ve6bKdzh6gNaFsfH1FudHTxGrB",
+                "[f5acc2fd/48'/1'/0'/2']tpubDFAqEGNyad35aBCKUAXbQGDjdVhNueno5ZZVEn3sQbW5ci457gLR7HyTmHBg93oourBssgUxuWz1jX5uhc1qaqFo9VsybY1J5FuedLfm4dK",
             ],
-        });
-
-        let wallet_policy: bip388::WalletPolicy = (&account).try_into().unwrap();
-        let expected_account_id = wallet_policy.registration_id(account_name);
+        );
+        let expected_account_id = wallet_policy_of(&account).registration_id(account_name);
 
         let resp = sdk::executor::block_on(handle_register_account(
             &mut sdk::App::singleton(),
@@ -366,18 +352,16 @@ mod tests {
     #[test]
     fn test_register_account_expanding_multisig() {
         let account_name = "Expanding multisig";
-        let account = message::Account::WalletPolicy(message::WalletPolicy {
-            template: "tr(@0/<0;1>/*,{and_v(v:pk(@1/<2;3>/*),older(4383)),and_v(v:pk(@2/<0;1>/*),pk(@1/<0;1>/*))})".into(),
-            keys_info: vec![
-                ki("tpubD6NzVbkrYhZ4YWFESthNwVXM9BnBbB81mYcR4Y2B1cn7H2877iHruRir4JtbC4h4gDueD7WcHayskdKpHowgWiQs8AQFWgas79gF5Nc2UG7"),
-                ki("[f5acc2fd/48'/1'/0'/2']tpubDFAqEGNyad35aBCKUAXbQGDjdVhNueno5ZZVEn3sQbW5ci457gLR7HyTmHBg93oourBssgUxuWz1jX5uhc1qaqFo9VsybY1J5FuedLfm4dK"),
-                ki("[7a88647b/48'/1'/0'/2']tpubDFfCoyA3T5WhDyLUwiyy1mHm1Kmm1DRTkW3iiGWu9q8Xi3rXNsQdDq6ujG1HzKu87HmS6dimVSAgWsnH2hdeAZ5WV99yg86BiU2RtJcPVHL"),
-                ki("[deadbeef/44'/1'/0']tpubDDHMSwran1vbgn83DkbWX7hrGfzGLD5bd5Dspx7Ss2gZ9S8gT5FetN6TiKj6MvqQmBbnkaJG9zNW1roavxHa3EM3ikGs6BzARMqgRx457fT"),
+        let account = make_account(
+            "tr(@0/<0;1>/*,{and_v(v:pk(@1/<2;3>/*),older(4383)),and_v(v:pk(@2/<0;1>/*),pk(@1/<0;1>/*))})",
+            &[
+                "tpubD6NzVbkrYhZ4YWFESthNwVXM9BnBbB81mYcR4Y2B1cn7H2877iHruRir4JtbC4h4gDueD7WcHayskdKpHowgWiQs8AQFWgas79gF5Nc2UG7",
+                "[f5acc2fd/48'/1'/0'/2']tpubDFAqEGNyad35aBCKUAXbQGDjdVhNueno5ZZVEn3sQbW5ci457gLR7HyTmHBg93oourBssgUxuWz1jX5uhc1qaqFo9VsybY1J5FuedLfm4dK",
+                "[7a88647b/48'/1'/0'/2']tpubDFfCoyA3T5WhDyLUwiyy1mHm1Kmm1DRTkW3iiGWu9q8Xi3rXNsQdDq6ujG1HzKu87HmS6dimVSAgWsnH2hdeAZ5WV99yg86BiU2RtJcPVHL",
+                "[deadbeef/44'/1'/0']tpubDDHMSwran1vbgn83DkbWX7hrGfzGLD5bd5Dspx7Ss2gZ9S8gT5FetN6TiKj6MvqQmBbnkaJG9zNW1roavxHa3EM3ikGs6BzARMqgRx457fT",
             ],
-        });
-
-        let wallet_policy: bip388::WalletPolicy = (&account).try_into().unwrap();
-        let expected_account_id = wallet_policy.registration_id(account_name);
+        );
+        let expected_account_id = wallet_policy_of(&account).registration_id(account_name);
 
         let resp = sdk::executor::block_on(handle_register_account(
             &mut sdk::App::singleton(),

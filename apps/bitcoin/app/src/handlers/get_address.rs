@@ -71,8 +71,7 @@ pub async fn handle_get_address(
 ) -> Result<Response, Error> {
     app.show_spinner("Processing...");
 
-    let wallet_policy: bip388::WalletPolicy =
-        account.try_into().map_err(|_| Error::InvalidWalletPolicy)?;
+    let common::message::Account::WalletPolicy(wallet_policy) = account;
 
     // hmac should be empty or a 32 byte vector; if not, give an error, otherwise convert to Option<[u8; 32]>
     let hmac: Option<&[u8; 32]> = match por.len() {
@@ -130,39 +129,31 @@ mod tests {
 
     use super::*;
 
-    fn ki(key_info_str: &str) -> message::PubkeyInfo {
-        let info = KeyInformation::try_from(key_info_str).unwrap();
+    fn make_account(template: &str, keys_info_strs: &[&str]) -> message::Account {
+        let keys = keys_info_strs
+            .iter()
+            .map(|s| KeyInformation::try_from(*s).unwrap())
+            .collect();
+        message::Account::WalletPolicy(bip388::WalletPolicy::new(template, keys).unwrap())
+    }
 
-        let origin = info.origin_info.map(|info| message::KeyOrigin {
-            fingerprint: info.fingerprint,
-            path: message::Bip32Path(
-                info.derivation_path
-                    .iter()
-                    .map(|step| u32::from(*step))
-                    .collect(),
-            ),
-        });
-
-        message::PubkeyInfo {
-            pubkey: info.pubkey.encode().to_vec(),
-            origin,
-        }
+    fn wallet_policy_of(account: &message::Account) -> &bip388::WalletPolicy {
+        let message::Account::WalletPolicy(wp) = account;
+        wp
     }
 
     #[test]
     fn test_get_address_singlesig_wit() {
-        let account = message::Account::WalletPolicy(message::WalletPolicy {
-            template: "wpkh(@0/**)".into(),
-            keys_info: vec![ki(
-                "[f5acc2fd/84'/1'/0']tpubDCtKfsNyRhULjZ9XMS4VKKtVcPdVDi8MKUbcSD9MJDyjRu1A2ND5MiipozyyspBT9bg8upEp7a8EAgFxNxXn1d7QkdbL52Ty5jiSLcxPt1P",
-            )],
-        });
+        let account = make_account(
+            "wpkh(@0/**)",
+            &["[f5acc2fd/84'/1'/0']tpubDCtKfsNyRhULjZ9XMS4VKKtVcPdVDi8MKUbcSD9MJDyjRu1A2ND5MiipozyyspBT9bg8upEp7a8EAgFxNxXn1d7QkdbL52Ty5jiSLcxPt1P"],
+        );
 
         // default wallet accounts are not supported yet, so we simulate registration
         let account_name = "Segwit account";
-        let wallet_policy: bip388::WalletPolicy = (&account).try_into().unwrap();
-        let hmac = ProofOfRegistration::new(&wallet_policy.registration_id(account_name))
-            .dangerous_as_bytes();
+        let hmac =
+            ProofOfRegistration::new(&wallet_policy_of(&account).registration_id(account_name))
+                .dangerous_as_bytes();
 
         let resp = sdk::executor::block_on(handle_get_address(
             &mut sdk::App::singleton(),

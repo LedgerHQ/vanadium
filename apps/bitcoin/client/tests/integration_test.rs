@@ -39,33 +39,14 @@ pub fn parse_keys_info(
 pub fn parse_wallet_policy(
     descriptor_template: &str,
     keys_info: &[&str],
-) -> Result<common::message::WalletPolicy, &'static str> {
-    let wallet_policy_msg = common::message::WalletPolicy {
-        template: descriptor_template.to_string(),
-        keys_info: keys_info
-            .iter()
-            .map(|ki| {
-                let ki = common::bip388::KeyInformation::try_from(*ki).unwrap();
-                common::message::PubkeyInfo {
-                    pubkey: ki.pubkey.encode().to_vec(),
-                    origin: ki
-                        .origin_info
-                        .as_ref()
-                        .map(|origin_info| common::message::KeyOrigin {
-                            fingerprint: origin_info.fingerprint,
-                            path: common::message::Bip32Path(
-                                origin_info
-                                    .derivation_path
-                                    .iter()
-                                    .map(|step| u32::from(*step))
-                                    .collect(),
-                            ),
-                        }),
-                }
-            })
-            .collect(),
-    };
-    Ok(wallet_policy_msg)
+) -> Result<common::bip388::WalletPolicy, &'static str> {
+    let keys = keys_info
+        .iter()
+        .map(|ki| common::bip388::KeyInformation::try_from(*ki))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| "Failed to parse key info")?;
+    common::bip388::WalletPolicy::new(descriptor_template, keys)
+        .map_err(|_| "Failed to build wallet policy")
 }
 
 fn serialize_as_psbtv2(psbt: &Psbt) -> Vec<u8> {
@@ -98,23 +79,17 @@ async fn test_e2e_sign_transaction() {
     )
     .unwrap();
 
-    // TODO: simplify this once the client is modified to accept types from common:bip388 instead of common:message
     let descriptor_template = "tr(@0/**)";
     let keys_info = vec![
         "[f5acc2fd/86'/1'/0']tpubDDKYE6BREvDsSWMazgHoyQWiJwYaDDYPbCFjYxN3HFXJP5fokeiK4hwK5tTLBNEDBwrDXn8cQ4v9b2xdW62Xr5yxoQdMu1v6c7UDXYVH27U",
     ];
-    let wallet_policy = common::bip388::WalletPolicy::new(
-        descriptor_template,
-        parse_keys_info(&keys_info.join(",")).unwrap(),
-    )
-    .unwrap();
-    let wallet_policy_msg = parse_wallet_policy(descriptor_template, &keys_info).unwrap();
+    let wallet_policy = parse_wallet_policy(descriptor_template, &keys_info).unwrap();
 
     let account_name = "My taproot account #0";
     let (_, por) = client
         .register_account(
             account_name,
-            &Account::WalletPolicy(wallet_policy_msg),
+            &Account::WalletPolicy(wallet_policy.clone()),
             None,
             None,
             false,

@@ -26,6 +26,8 @@
 use alloc::{string::String, vec::Vec};
 use minicbor::{Decode, Encode};
 
+mod bip388_codec;
+
 /// BIP32 derivation path. Encoded transparently as a CBOR array of `u32`s.
 #[derive(Encode, Decode, Debug, Clone, PartialEq, Eq)]
 #[cbor(transparent)]
@@ -44,33 +46,6 @@ pub enum KeyTree {
     Standard,
     #[n(1)]
     Resident,
-}
-
-#[derive(Encode, Decode, Debug, Clone, PartialEq, Eq)]
-#[cbor(map)]
-pub struct KeyOrigin {
-    #[n(0)]
-    pub fingerprint: u32,
-    #[n(1)]
-    pub path: Bip32Path,
-}
-
-#[derive(Encode, Decode, Debug, Clone, PartialEq, Eq)]
-#[cbor(map)]
-pub struct PubkeyInfo {
-    #[cbor(n(0), with = "minicbor::bytes")]
-    pub pubkey: Vec<u8>,
-    #[n(1)]
-    pub origin: Option<KeyOrigin>,
-}
-
-#[derive(Encode, Decode, Debug, Clone, PartialEq, Eq)]
-#[cbor(map)]
-pub struct WalletPolicy {
-    #[n(0)]
-    pub template: String,
-    #[n(1)]
-    pub keys_info: Vec<PubkeyInfo>,
 }
 
 #[derive(Encode, Decode, Debug, Clone, PartialEq, Eq)]
@@ -94,7 +69,7 @@ impl WalletPolicyCoordinates {
 #[derive(Encode, Decode, Debug, Clone, PartialEq, Eq)]
 pub enum Account {
     #[n(0)]
-    WalletPolicy(#[n(0)] WalletPolicy),
+    WalletPolicy(#[cbor(n(0), with = "bip388_codec")] crate::bip388::WalletPolicy),
     // more will be added here
 }
 
@@ -103,15 +78,6 @@ pub enum AccountCoordinates {
     #[n(0)]
     WalletPolicy(#[n(0)] WalletPolicyCoordinates),
     // more will be added here
-}
-
-#[derive(Encode, Decode, Debug, Clone, PartialEq, Eq)]
-#[cbor(map)]
-pub struct NamedAccount {
-    #[n(0)]
-    name: String,
-    #[n(1)]
-    descriptor: WalletPolicy,
 }
 
 /// A Schnorr signature for object authentication, containing the compressed public key of the
@@ -306,43 +272,4 @@ pub enum Response {
         #[n(0)]
         error: crate::errors::Error,
     },
-}
-
-// Conversions between messages and other internal types
-
-impl TryFrom<&Account> for crate::bip388::WalletPolicy {
-    type Error = crate::errors::Error;
-    fn try_from(acc: &Account) -> Result<Self, Self::Error> {
-        match acc {
-            Account::WalletPolicy(wallet_policy) => {
-                let keys = wallet_policy
-                    .keys_info
-                    .iter()
-                    .map(|info| {
-                        let pubkey = bitcoin::bip32::Xpub::decode(&info.pubkey)
-                            .map_err(|_| crate::errors::Error::InvalidKey)?;
-                        let origin_info =
-                            info.origin.as_ref().map(|origin| crate::bip388::KeyOrigin {
-                                fingerprint: origin.fingerprint,
-                                derivation_path: origin
-                                    .path
-                                    .0
-                                    .iter()
-                                    .copied()
-                                    .map(Into::into)
-                                    .collect(),
-                            });
-                        Ok(crate::bip388::KeyInformation {
-                            pubkey,
-                            origin_info,
-                        })
-                    })
-                    .collect::<Result<Vec<_>, _>>()?;
-                crate::bip388::WalletPolicy::new(&wallet_policy.template, keys)
-                    .map_err(|_| crate::errors::Error::InvalidKey)
-            }
-            #[allow(unreachable_patterns)] // more patterns will be allowed in the future
-            _ => Err(crate::errors::Error::InvalidKey),
-        }
-    }
 }
