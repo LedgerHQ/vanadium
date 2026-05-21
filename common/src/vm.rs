@@ -828,6 +828,9 @@ impl<'a, M: PagedMemory> Cpu<'a, M> {
                 self.regs[rd as usize] = old;
             },
 
+            Op::Fence => {
+                // No-op: this VM is single-hart with no speculative execution.
+            },
             Op::Ecall => {
                 if let Some(ecall_handler) = ecall_handler {
                     ecall_handler.handle_ecall(self).map_err(CpuError::EcallError)?;
