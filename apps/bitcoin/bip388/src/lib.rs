@@ -2,11 +2,6 @@
 
 extern crate alloc;
 
-// TODO:
-// - add type checks
-// - add malleability checks
-// - add stack limits and other safety checks
-
 mod cleartext;
 mod time;
 
@@ -1522,6 +1517,73 @@ impl WalletPolicy {
             _ => Err(ParseError::InvalidTopLevelPolicy),
         }
     }
+
+    /// Runs the miniscript-level validity checks (type correctness, malleability,
+    /// resource limits) on this policy by instantiating it at `/0/0` and feeding
+    /// the resulting descriptor to `rust-miniscript`'s sanity check.
+    ///
+    /// The checks are structural and do not depend on the actual key values, so
+    /// validating a single concrete instantiation is sufficient for the whole
+    /// policy.
+    ///
+    /// This is intentionally **not** invoked by [`WalletPolicy::new`]: callers
+    /// run it on demand (e.g. before signing or registering a policy).
+    ///
+    /// `musig(...)` templates are not yet supported and return
+    /// [`PolicyValidityError::NotSupported`].
+    ///
+    /// TODO: converting to a descriptor as a string and reparsing it with
+    /// `rust-miniscript` is inefficient; we should rather find a way to directly
+    /// produce a miniscript::Descriptor, or reimplement the checks in this crate.
+    pub fn check_validity(&self) -> Result<(), PolicyValidityError> {
+        if self
+            .descriptor_template
+            .placeholders()
+            .any(|(kp, _)| kp.is_musig())
+        {
+            return Err(PolicyValidityError::NotSupported);
+        }
+
+        let desc_str = self.descriptor_template.to_descriptor(
+            &self.key_information,
+            /* is_change */ false,
+            /* address_index */ 0,
+        )?;
+
+        let descriptor =
+            miniscript::Descriptor::<miniscript::descriptor::DescriptorPublicKey>::from_str(
+                &desc_str,
+            )?;
+        descriptor.sanity_check()?;
+        Ok(())
+    }
+}
+
+/// Error type for [`WalletPolicy::check_validity`].
+#[derive(Debug)]
+pub enum PolicyValidityError {
+    /// Returned for any policy that we can parse, but for which we currently
+    /// do not support validity checks. Currently used for policies with `musig(...)` key expressions.
+    NotSupported,
+    /// Failed to instantiate the policy at `/0/0` (substituting the BIP-388
+    /// placeholders with the policy's keys).
+    Instantiation(ParseError),
+    /// `rust-miniscript` rejected the instantiated descriptor: either the
+    /// descriptor failed to parse, or one of the miniscript sanity checks
+    /// (type correctness, non-malleability, resource limits, ...) failed.
+    Miniscript(miniscript::Error),
+}
+
+impl From<ParseError> for PolicyValidityError {
+    fn from(e: ParseError) -> Self {
+        PolicyValidityError::Instantiation(e)
+    }
+}
+
+impl From<miniscript::Error> for PolicyValidityError {
+    fn from(e: miniscript::Error) -> Self {
+        PolicyValidityError::Miniscript(e)
+    }
 }
 
 fn write_key_expression(
@@ -2058,6 +2120,103 @@ mod tests {
         );
 
         assert!(wallet.is_ok());
+    }
+
+    // Two distinct testnet xpubs reused across the validity tests.
+    fn ki_a() -> KeyInformation {
+        koi("[76223a6e/48'/1'/0'/1']tpubDE7NQymr4AFtcJXi9TaWZtrhAdy8QyKmT4U6b9qYByAxCzoyMJ8zw5d8xVLVpbTRAEqP8pVUxjLE2vDt1rSFjaiS8DSz1QcNZ8D1qxUMx1g")
+    }
+    fn ki_b() -> KeyInformation {
+        koi("[f5acc2fd/48'/1'/0'/1']tpubDFAqEGNyad35YgH8zxvxFZqNUoPtr5mDojs7wzbXQBHTZ4xHeVXG6w2HvsKvjBpaRpTmjYDjdPg5w2c6Wvu8QBkyMDrmBWdCyqkDM7reSsY")
+    }
+    fn ki_c() -> KeyInformation {
+        koi("[12345678/48'/1'/0'/2']tpubDCtKfsNyRhULjZ9XMS4VKKtVcPdVDi8MKUbcSD9MJDyjRu1A2ND5MiipozyyspBT9bg8upEp7a8EAgFxNxXn1d7QkdbL52Ty5jiSLcxPt1P")
+    }
+
+    #[test]
+    fn test_check_validity_accepts_valid_policy() {
+        // Plain wpkh.
+        let w = WalletPolicy::new("wpkh(@0/**)", vec![ki_a()]).unwrap();
+        assert!(matches!(w.check_validity(), Ok(())));
+
+        // 2-of-2 sortedmulti.
+        let w = WalletPolicy::new("wsh(sortedmulti(2,@0/**,@1/**))", vec![ki_a(), ki_b()]).unwrap();
+        assert!(matches!(w.check_validity(), Ok(())));
+
+        // Mixed-fragment policy with a timelock branch.
+        let w = WalletPolicy::new(
+            "wsh(or_d(pk(@0/**),and_v(v:pkh(@1/**),older(12960))))",
+            vec![ki_a(), ki_b()],
+        )
+        .unwrap();
+        assert!(matches!(w.check_validity(), Ok(())));
+
+        // Taproot with a script path.
+        let w = WalletPolicy::new("tr(@0/**,pkh(@1/**))", vec![ki_a(), ki_b()]).unwrap();
+        assert!(matches!(w.check_validity(), Ok(())));
+    }
+
+    #[test]
+    fn test_check_validity_rejects_musig() {
+        // musig as the tr internal key.
+        let w = WalletPolicy::new("tr(musig(@0,@1)/**)", vec![ki_a(), ki_b()]).unwrap();
+        assert!(matches!(
+            w.check_validity(),
+            Err(PolicyValidityError::NotSupported)
+        ));
+
+        // musig inside a tapleaf.
+        let w = WalletPolicy::new(
+            "tr(@0/**,pk(musig(@1,@2)/**))",
+            vec![ki_a(), ki_b(), ki_c()],
+        )
+        .unwrap();
+        assert!(matches!(
+            w.check_validity(),
+            Err(PolicyValidityError::NotSupported)
+        ));
+    }
+
+    #[test]
+    fn test_check_validity_rejects_repeated_pubkeys() {
+        // Both pk's reference @0 — after /0/0 instantiation they become the
+        // same concrete key, which miniscript's sanity_check rejects.
+        let w = WalletPolicy::new("wsh(or_b(pk(@0/**),s:pk(@0/**)))", vec![ki_a()]).unwrap();
+        assert!(matches!(
+            w.check_validity(),
+            Err(PolicyValidityError::Miniscript(_))
+        ));
+    }
+
+    #[test]
+    fn test_check_validity_rejects_ill_typed_miniscript() {
+        // Templates that the bip388 parser accepts (it does not type-check the
+        // miniscript AST) but that rust-miniscript's type system rejects.
+        // Each must surface as `PolicyValidityError::Miniscript(_)`.
+        let cases: &[&str] = &[
+            // and_v's first child must be of type V; two pk's are both K.
+            "wsh(and_v(pk(@0/**),pk(@1/**)))",
+            // and_b's second child must be of type W; pk is K, not W.
+            "wsh(and_b(pk(@0/**),pk(@1/**)))",
+            // The `s:` wrapper can only prefix a fragment that takes exactly
+            // one input; `after` takes none.
+            "wsh(or_b(after(1),s:after(2)))",
+            // or_d's left child must be dissatisfiable; `after` is not.
+            "wsh(or_d(after(1),pk(@0/**)))",
+            // The `a:` wrapper produces type W, which is not a valid top-level
+            // type for a wsh() body.
+            "wsh(a:pk(@0/**))",
+            // No spend path requires a signature.
+            "wsh(after(1000))",
+        ];
+        for s in cases {
+            let w = WalletPolicy::new(s, vec![ki_a(), ki_b()])
+                .unwrap_or_else(|e| panic!("bip388 should accept {:?}: {:?}", s, e));
+            match w.check_validity() {
+                Err(PolicyValidityError::Miniscript(_)) => {}
+                other => panic!("expected miniscript rejection for {:?}, got {:?}", s, other),
+            }
+        }
     }
 
     #[test]
