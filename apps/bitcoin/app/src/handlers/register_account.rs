@@ -108,6 +108,11 @@ pub async fn handle_register_account(
 
     let message::Account::WalletPolicy(wallet_policy) = account;
 
+    wallet_policy.check_validity().map_err(|e| match e {
+        bip388::PolicyValidityError::NotSupported => Error::UnsupportedWalletPolicy,
+        _ => Error::InvalidWalletPolicy,
+    })?;
+
     // Verify PoRs for registered identity keys and build a (pubkey ==> name) lookup table.
     let identity_key_names: Vec<([u8; 33], String)> = match registered_identities {
         Some(identities) => {
