@@ -384,14 +384,12 @@ fn decode_uncompressed(inst: u32) -> Op {
             },
             _ => Op::Unknown,
         },
-        // 0x0000000f => match inst & 0x0000707f {
-        //     0x0000000f => match inst & 0xffffffff {
-        //         0x8330000f => Op::RV_OP_FENCE_TSO,
-        //         0x0100000f => Op::RV_OP_PAUSE,
-        //         _ => Op::RV_OP_FENCE,
-        //     },
-        //     _ => Op::Unknown,
-        // },
+        // FENCE / FENCE.TSO / PAUSE all use opcode 0x0f with funct3 = 000.
+        // This VM is single-hart with no speculative execution, so they are no-ops.
+        0x0000000f => match inst & 0x0000707f {
+            0x0000000f => Op::Fence,
+            _ => Op::Unknown,
+        },
         0x00000073 => match inst & 0xffffffff {
             0x00000073 => Op::Ecall,
             0x00100073 => Op::Break,
