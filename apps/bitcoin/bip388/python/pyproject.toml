@@ -1,0 +1,13 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "bip388"
+version = "0.1.0"
+description = "Python port of the BIP-388 wallet-policy crate (without cleartext-decode)."
+requires-python = ">=3.11"
+authors = [{ name = "Ledger" }]
+
+[tool.setuptools]
+packages = ["bip388"]
