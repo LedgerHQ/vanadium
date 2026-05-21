@@ -50,8 +50,8 @@
 //!
 //! | base name             | kind          | host type            | implicit range          |
 //! |-----------------------|---------------|----------------------|-------------------------|
-//! | `key`, `internal_key` | Key           | `KeyPlaceholder`     | —                       |
-//! | `keys`                | KeyList       | `Vec<KeyPlaceholder>`| —                       |
+//! | `key`, `internal_key` | Key           | `KeyExpression`      | —                       |
+//! | `keys`                | KeyList       | `Vec<KeyExpression>` | —                       |
 //! | `threshold`           | Threshold     | `u32`                | —                       |
 //! | `blocks`              | Blocks        | `u32`                | `1..65_536`             |
 //! | `relative_time`       | RelativeTime  | `u32` (BIP-68 form)  | `4_194_305..4_259_840`  |

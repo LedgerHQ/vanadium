@@ -61,7 +61,7 @@ pub fn decode<'b, C>(
         }
     }
     let template = template.ok_or_else(|| cbor_decode::Error::message("missing template"))?;
-    let keys = keys.ok_or_else(|| cbor_decode::Error::message("missing keys_info"))?;
+    let keys = keys.ok_or_else(|| cbor_decode::Error::message("missing keys information"))?;
     bip388::WalletPolicy::new(&template, keys)
         .map_err(|_| cbor_decode::Error::message("invalid wallet policy"))
 }
