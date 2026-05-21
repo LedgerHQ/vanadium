@@ -325,6 +325,67 @@ jobs:
       vapp_name: "vnd-bitcoin"
       test_dirs_json: '["apps/bitcoin/bip388","apps/bitcoin/common","apps/bitcoin/app"]'
 
+  # bip388 Python port tests
+  test_bip388_python:
+    name: bip388 Python tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Clone
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Run tests
+        working-directory: apps/bitcoin/bip388/python
+        run: python -m unittest discover tests
+
+  # bip388 C port tests (regular build + AddressSanitizer/UBSan build)
+  test_bip388_c:
+    name: bip388 C tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Clone
+        uses: actions/checkout@v4
+      - name: Set up Python (codegen tooling)
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Build and test
+        working-directory: apps/bitcoin/bip388/c
+        run: make test
+      - name: Build and test under sanitizers
+        working-directory: apps/bitcoin/bip388/c
+        run: |
+          make clean
+          make test CFLAGS="-fsanitize=address,undefined -O1 -g -std=c11 -Wall -Wextra -Wpedantic -Wno-unused-parameter"
+
+  # Ensures the committed generated C sources match the codegen's current output.
+  # If this fails, regenerate locally with `python3 tools/gen.py` in
+  # apps/bitcoin/bip388/c/ and commit the result.
+  check_bip388_c_codegen:
+    name: Check bip388 C codegen is up-to-date
+    runs-on: ubuntu-latest
+    steps:
+      - name: Clone
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Regenerate
+        working-directory: apps/bitcoin/bip388/c
+        run: python3 tools/gen.py
+      - name: Verify generated files are unchanged
+        run: |
+          if [ -n "$(git status --porcelain apps/bitcoin/bip388/c/src/gen/)" ]; then
+            echo "::error::Generated files in apps/bitcoin/bip388/c/src/gen/ are out of date."
+            echo "Run 'python3 tools/gen.py' in apps/bitcoin/bip388/c/ and commit the result."
+            git status --porcelain apps/bitcoin/bip388/c/src/gen/
+            git diff -- apps/bitcoin/bip388/c/src/gen/
+            exit 1
+          fi
+
   vnd_bitcoin_integration_tests:
     needs: [build_vanadium_app, build_vnd_bitcoin_autoapprove]
     uses: ./.github/workflows/reusable_vapp_integration_tests.yaml
