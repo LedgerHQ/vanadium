@@ -27,6 +27,7 @@ use bitcoin::{TapNodeHash, TapTweakHash, XOnlyPublicKey};
 use common::bip388::{KeyExpression, KeyInformation};
 use common::errors::Error;
 use common::fastpsbt;
+use common::message::{MuSig2PartialSignature, MuSig2Pubnonce};
 use common::musig::{self, MusigError, PlainPk, PubNonce, SessionContext};
 use sdk::hash::{Hasher, Sha256};
 use subtle::ConstantTimeEq;
@@ -285,25 +286,8 @@ pub struct PerInputInfo {
     pub is_xonly: [bool; 3],
 }
 
-/// Returned by [`produce_pubnonce`].
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct MuSig2PubnonceData {
-    pub input_index: u32,
-    pub pubnonce: [u8; 66],
-    pub participant_pk: [u8; 33],
-    pub aggregate_pubkey: [u8; 33],
-    pub leaf_hash: Option<[u8; 32]>,
-}
-
-/// Returned by [`sign_sighash_musig`].
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct MuSig2PartialSigData {
-    pub input_index: u32,
-    pub signature: [u8; 32],
-    pub participant_pk: [u8; 33],
-    pub aggregate_pubkey: [u8; 33],
-    pub leaf_hash: Option<[u8; 32]>,
-}
+// Round 1 / round 2 outputs are emitted directly as wire types from
+// [`common::message`] — no conversion needed at the handler boundary.
 
 // BIP-388 PSBT-session-id tagged hash. Binding the session to both the wallet
 // policy and the transaction ensures distinct PSBTs / wallets never collide on
@@ -427,7 +411,7 @@ pub fn produce_pubnonce(
     input_index: u32,
     placeholder_index: u32,
     spend: SpendPath<'_>,
-) -> Result<MuSig2PubnonceData, Error> {
+) -> Result<MuSig2Pubnonce, Error> {
     let rand_i_j = compute_rand_i_j(session, input_index, placeholder_index);
     let aggpk_xonly: [u8; 32] = per_input_info.agg_key_tweaked[1..]
         .try_into()
@@ -437,7 +421,7 @@ pub fn produce_pubnonce(
         musig::nonce_gen(&rand_i_j, internal_pk, &aggpk_xonly).map_err(map_musig_err)?;
     // `_secnonce` is dropped here, zeroizing its k1/k2 (see SecNonce's Drop).
 
-    Ok(MuSig2PubnonceData {
+    Ok(MuSig2Pubnonce {
         input_index,
         pubnonce: *pubnonce.as_bytes(),
         participant_pk: *internal_pk,
@@ -462,7 +446,7 @@ pub fn sign_sighash_musig(
     placeholder_index: u32,
     psbt_input: &fastpsbt::Input<'_>,
     spend: SpendPath<'_>,
-) -> Result<MuSig2PartialSigData, Error> {
+) -> Result<MuSig2PartialSignature, Error> {
     let agg_pk = &per_input_info.agg_key_tweaked;
     let leaf = spend.leaf_hash();
 
@@ -471,7 +455,7 @@ pub fn sign_sighash_musig(
     let _my_pubnonce = psbt_input
         .get_musig2_pub_nonce(internal_pk, agg_pk, leaf)
         .map_err(|_| Error::FailedToDeserializePsbt)?
-        .ok_or(Error::FailedToDeserializePsbt)?;
+        .ok_or(Error::MissingMusigPubnonce)?;
 
     // Collect every participant's pubnonce.
     let mut pubnonces: Vec<PubNonce> = Vec::with_capacity(per_input_info.keys.len());
@@ -479,7 +463,7 @@ pub fn sign_sighash_musig(
         let raw = psbt_input
             .get_musig2_pub_nonce(participant_pk, agg_pk, leaf)
             .map_err(|_| Error::FailedToDeserializePsbt)?
-            .ok_or(Error::FailedToDeserializePsbt)?;
+            .ok_or(Error::MissingMusigPubnonce)?;
         pubnonces.push(PubNonce(raw));
     }
     let aggnonce = musig::nonce_agg(&pubnonces).map_err(map_musig_err)?;
@@ -504,7 +488,7 @@ pub fn sign_sighash_musig(
     };
     let psig = musig::sign(secnonce, sk, &ctx).map_err(map_musig_err)?;
 
-    Ok(MuSig2PartialSigData {
+    Ok(MuSig2PartialSignature {
         input_index,
         signature: psig,
         participant_pk: *internal_pk,
