@@ -765,6 +765,60 @@ impl<'a> Input<'a> {
         self.iter_keys(PSBT_IN_BIP32_DERIVATION)
     }
 
+    /// Key data: `agg_pk(33) || [leaf_hash(32)]`. Value: a concatenation of
+    /// 33-byte participant pubkeys. Returns `Ok(None)` if the field is absent
+    /// for `(agg_pk, leaf_hash)`; `Err(PsbtError::BadValue)` if the value is
+    /// empty or its length is not a multiple of 33.
+    pub fn get_musig2_participant_pubkeys(
+        &self,
+        agg_pk: &[u8; 33],
+        leaf_hash: Option<&[u8; 32]>,
+    ) -> Result<Option<Vec<[u8; 33]>>, PsbtError> {
+        let value = match musig2_lookup_input_part_pks(&self.map, agg_pk, leaf_hash) {
+            Some(v) => v,
+            None => return Ok(None),
+        };
+        decode_participant_pubkeys(value).map(Some)
+    }
+
+    /// BIP-373 `PSBT_IN_MUSIG2_PUB_NONCE` (tag `0x1B`).
+    ///
+    /// Key data: `participant_pk(33) || agg_pk(33) || [leaf_hash(32)]`.
+    /// Value: a 66-byte public nonce (two compressed points).
+    pub fn get_musig2_pub_nonce(
+        &self,
+        participant_pk: &[u8; 33],
+        agg_pk: &[u8; 33],
+        leaf_hash: Option<&[u8; 32]>,
+    ) -> Result<Option<[u8; 66]>, PsbtError> {
+        get_fixed_value::<66>(
+            &self.map,
+            PSBT_IN_MUSIG2_PUB_NONCE,
+            participant_pk,
+            agg_pk,
+            leaf_hash,
+        )
+    }
+
+    /// BIP-373 `PSBT_IN_MUSIG2_PARTIAL_SIG` (tag `0x1C`).
+    ///
+    /// Key data: `participant_pk(33) || agg_pk(33) || [leaf_hash(32)]`.
+    /// Value: a 32-byte partial signature.
+    pub fn get_musig2_partial_sig(
+        &self,
+        participant_pk: &[u8; 33],
+        agg_pk: &[u8; 33],
+        leaf_hash: Option<&[u8; 32]>,
+    ) -> Result<Option<[u8; 32]>, PsbtError> {
+        get_fixed_value::<32>(
+            &self.map,
+            PSBT_IN_MUSIG2_PARTIAL_SIG,
+            participant_pk,
+            agg_pk,
+            leaf_hash,
+        )
+    }
+
     pub fn get_witness_utxo(&self) -> Result<Option<&bitcoin::TxOut>, PsbtError> {
         if let Some(txout) = self.cached_witness_utxo.get() {
             return Ok(Some(txout));
@@ -873,6 +927,100 @@ impl<'a> Output<'a> {
     pub fn bip32_derivations(&self) -> impl Iterator<Item = (&'a [u8], &'a [u8])> + '_ {
         self.iter_keys(PSBT_OUT_BIP32_DERIVATION)
     }
+
+    /// BIP-373 `PSBT_OUT_MUSIG2_PARTICIPANT_PUBKEYS` (tag `0x08`).
+    ///
+    /// Key data: `agg_pk(33)`. Value: a concatenation of 33-byte participant
+    /// pubkeys.
+    pub fn get_musig2_participant_pubkeys(
+        &self,
+        agg_pk: &[u8; 33],
+    ) -> Result<Option<Vec<[u8; 33]>>, PsbtError> {
+        let Some(value) = self
+            .map
+            .get(PSBT_OUT_MUSIG2_PARTICIPANT_PUBKEYS, agg_pk)
+        else {
+            return Ok(None);
+        };
+        decode_participant_pubkeys(value).map(Some)
+    }
+}
+
+// =============================================================================
+// BIP-373 (MuSig2) PSBT field helpers
+// =============================================================================
+
+/// Builds the BIP-373 input lookup key for `0x1B`/`0x1C` (participant-and-aggregate
+/// pubkeys, optionally extended with a tap_leaf_hash) and returns the slice
+/// view of its prefix.
+fn write_musig2_input_key(
+    buf: &mut [u8; 33 + 33 + 32],
+    participant_pk: &[u8; 33],
+    agg_pk: &[u8; 33],
+    leaf_hash: Option<&[u8; 32]>,
+) -> usize {
+    buf[..33].copy_from_slice(participant_pk);
+    buf[33..66].copy_from_slice(agg_pk);
+    if let Some(lh) = leaf_hash {
+        buf[66..].copy_from_slice(lh);
+        66 + 32
+    } else {
+        66
+    }
+}
+
+/// Looks up `PSBT_IN_MUSIG2_PARTICIPANT_PUBKEYS` value by `(agg_pk, leaf_hash)`.
+fn musig2_lookup_input_part_pks<'a>(
+    map: &ParsedMap<'a>,
+    agg_pk: &[u8; 33],
+    leaf_hash: Option<&[u8; 32]>,
+) -> Option<&'a [u8]> {
+    let mut buf = [0u8; 33 + 32];
+    buf[..33].copy_from_slice(agg_pk);
+    let len = if let Some(lh) = leaf_hash {
+        buf[33..].copy_from_slice(lh);
+        33 + 32
+    } else {
+        33
+    };
+    map.get(PSBT_IN_MUSIG2_PARTICIPANT_PUBKEYS, &buf[..len])
+}
+
+/// Generic getter for a fixed-size BIP-373 input value (tag `0x1B` or `0x1C`).
+fn get_fixed_value<const N: usize>(
+    map: &ParsedMap,
+    key_type: u8,
+    participant_pk: &[u8; 33],
+    agg_pk: &[u8; 33],
+    leaf_hash: Option<&[u8; 32]>,
+) -> Result<Option<[u8; N]>, PsbtError> {
+    let mut buf = [0u8; 33 + 33 + 32];
+    let len = write_musig2_input_key(&mut buf, participant_pk, agg_pk, leaf_hash);
+    let Some(value) = map.get(key_type, &buf[..len]) else {
+        return Ok(None);
+    };
+    if value.len() != N {
+        return Err(PsbtError::BadValue);
+    }
+    let mut out = [0u8; N];
+    out.copy_from_slice(value);
+    Ok(Some(out))
+}
+
+/// Decodes a participant-pubkeys list (concatenated 33-byte SEC1 compressed
+/// pubkeys).
+fn decode_participant_pubkeys(value: &[u8]) -> Result<Vec<[u8; 33]>, PsbtError> {
+    if value.is_empty() || value.len() % 33 != 0 {
+        return Err(PsbtError::BadValue);
+    }
+    let n = value.len() / 33;
+    let mut pks: Vec<[u8; 33]> = Vec::with_capacity(n);
+    for chunk in value.chunks_exact(33) {
+        let mut pk = [0u8; 33];
+        pk.copy_from_slice(chunk);
+        pks.push(pk);
+    }
+    Ok(pks)
 }
 
 #[cfg(test)]
@@ -944,4 +1092,270 @@ mod test {
     }
 
     // TODO: add other missing fields
+
+    // -------------------------------------------------------------------------
+    // BIP-373 (MuSig2) accessors
+    // -------------------------------------------------------------------------
+
+    const AGG_PK: [u8; 33] =
+        hex!("02F9308A019258C31049344F85F89D5229B531C845836F99B08601F113BCE036F9");
+    const PARTICIPANT_1: [u8; 33] =
+        hex!("03DFF1D77F2A671C5F36183726DB2341BE58FEAE1DA2DECED843240F7B502BA659");
+    const PARTICIPANT_2: [u8; 33] =
+        hex!("023590A94E768F8E1815C2F24B4D80A8E3149316C3518CE7B7AD338368D038CA66");
+    const LEAF_HASH: [u8; 32] = hex!(
+        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+    );
+
+    /// Builds a minimal valid PSBTv2 with one input (no outputs) plus arbitrary
+    /// extra map entries appended to the input map.
+    fn build_psbt_with_input_extra(input_extra: &[u8]) -> Vec<u8> {
+        let mut v = Vec::new();
+        v.extend_from_slice(b"psbt\xff");
+
+        // Global map
+        v.extend_from_slice(&[1, PSBT_GLOBAL_TX_VERSION, 4, 1, 0, 0, 0]);
+        v.extend_from_slice(&[1, PSBT_GLOBAL_FALLBACK_LOCKTIME, 4, 0, 0, 0, 0]);
+        v.extend_from_slice(&[1, PSBT_GLOBAL_INPUT_COUNT, 1, 1]);
+        v.extend_from_slice(&[1, PSBT_GLOBAL_OUTPUT_COUNT, 1, 0]);
+        v.extend_from_slice(&[1, PSBT_GLOBAL_VERSION, 4, 2, 0, 0, 0]);
+        v.push(0); // terminator
+
+        // Input 0
+        v.extend_from_slice(&[1, PSBT_IN_PREVIOUS_TXID, 32]);
+        v.extend_from_slice(&[0u8; 32]);
+        v.extend_from_slice(&[1, PSBT_IN_OUTPUT_INDEX, 4, 0, 0, 0, 0]);
+        v.extend_from_slice(input_extra);
+        v.push(0); // terminator
+        // (no outputs)
+
+        v
+    }
+
+    /// PSBT_IN_MUSIG2_PARTICIPANT_PUBKEYS entry: keytype=0x1A, key=agg_pk[||leaf_hash]
+    fn entry_participant_pubkeys(
+        agg_pk: &[u8; 33],
+        leaf_hash: Option<&[u8; 32]>,
+        value: &[u8],
+    ) -> Vec<u8> {
+        let mut v = Vec::new();
+        let keydata_len = if leaf_hash.is_some() { 33 + 32 } else { 33 };
+        v.push(1 + keydata_len as u8);
+        v.push(PSBT_IN_MUSIG2_PARTICIPANT_PUBKEYS);
+        v.extend_from_slice(agg_pk);
+        if let Some(lh) = leaf_hash {
+            v.extend_from_slice(lh);
+        }
+        v.push(value.len() as u8);
+        v.extend_from_slice(value);
+        v
+    }
+
+    /// PSBT_IN_MUSIG2_PUB_NONCE entry: keytype=0x1B, key=pk||agg_pk[||leaf_hash]
+    fn entry_pub_nonce(
+        pk: &[u8; 33],
+        agg_pk: &[u8; 33],
+        leaf_hash: Option<&[u8; 32]>,
+        value: &[u8],
+    ) -> Vec<u8> {
+        let mut v = Vec::new();
+        let keydata_len = if leaf_hash.is_some() { 66 + 32 } else { 66 };
+        v.push(1 + keydata_len as u8);
+        v.push(PSBT_IN_MUSIG2_PUB_NONCE);
+        v.extend_from_slice(pk);
+        v.extend_from_slice(agg_pk);
+        if let Some(lh) = leaf_hash {
+            v.extend_from_slice(lh);
+        }
+        v.push(value.len() as u8);
+        v.extend_from_slice(value);
+        v
+    }
+
+    /// PSBT_IN_MUSIG2_PARTIAL_SIG entry: keytype=0x1C, key=pk||agg_pk[||leaf_hash]
+    fn entry_partial_sig(
+        pk: &[u8; 33],
+        agg_pk: &[u8; 33],
+        leaf_hash: Option<&[u8; 32]>,
+        value: &[u8],
+    ) -> Vec<u8> {
+        let mut v = Vec::new();
+        let keydata_len = if leaf_hash.is_some() { 66 + 32 } else { 66 };
+        v.push(1 + keydata_len as u8);
+        v.push(PSBT_IN_MUSIG2_PARTIAL_SIG);
+        v.extend_from_slice(pk);
+        v.extend_from_slice(agg_pk);
+        if let Some(lh) = leaf_hash {
+            v.extend_from_slice(lh);
+        }
+        v.push(value.len() as u8);
+        v.extend_from_slice(value);
+        v
+    }
+
+    #[test]
+    fn musig2_participant_pubkeys_keypath() {
+        let value: Vec<u8> = [PARTICIPANT_1, PARTICIPANT_2].concat();
+        let raw =
+            build_psbt_with_input_extra(&entry_participant_pubkeys(&AGG_PK, None, &value));
+        let psbt = Psbt::parse(&raw).unwrap();
+
+        let pks = psbt.inputs[0]
+            .get_musig2_participant_pubkeys(&AGG_PK, None)
+            .unwrap()
+            .unwrap();
+        assert_eq!(pks, vec![PARTICIPANT_1, PARTICIPANT_2]);
+
+        // Wrong agg_pk → None.
+        let mut wrong_agg = AGG_PK;
+        wrong_agg[1] ^= 1;
+        assert!(psbt.inputs[0]
+            .get_musig2_participant_pubkeys(&wrong_agg, None)
+            .unwrap()
+            .is_none());
+
+        // Asking with a leaf_hash for a keypath entry → None.
+        assert!(psbt.inputs[0]
+            .get_musig2_participant_pubkeys(&AGG_PK, Some(&LEAF_HASH))
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn musig2_participant_pubkeys_scriptpath() {
+        let value: Vec<u8> = [PARTICIPANT_1, PARTICIPANT_2].concat();
+        let raw = build_psbt_with_input_extra(&entry_participant_pubkeys(
+            &AGG_PK,
+            Some(&LEAF_HASH),
+            &value,
+        ));
+        let psbt = Psbt::parse(&raw).unwrap();
+
+        let pks = psbt.inputs[0]
+            .get_musig2_participant_pubkeys(&AGG_PK, Some(&LEAF_HASH))
+            .unwrap()
+            .unwrap();
+        assert_eq!(pks, vec![PARTICIPANT_1, PARTICIPANT_2]);
+
+        // Keypath lookup must NOT match the scriptpath entry.
+        assert!(psbt.inputs[0]
+            .get_musig2_participant_pubkeys(&AGG_PK, None)
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn musig2_participant_pubkeys_bad_value_length() {
+        let bad: [u8; 32] = [0u8; 32]; // not a multiple of 33
+        let raw =
+            build_psbt_with_input_extra(&entry_participant_pubkeys(&AGG_PK, None, &bad));
+        let psbt = Psbt::parse(&raw).unwrap();
+        assert_eq!(
+            psbt.inputs[0].get_musig2_participant_pubkeys(&AGG_PK, None),
+            Err(PsbtError::BadValue)
+        );
+    }
+
+    #[test]
+    fn musig2_pub_nonce_round_trip() {
+        let nonce = [0x77u8; 66];
+        let raw = build_psbt_with_input_extra(&entry_pub_nonce(
+            &PARTICIPANT_1,
+            &AGG_PK,
+            None,
+            &nonce,
+        ));
+        let psbt = Psbt::parse(&raw).unwrap();
+
+        assert_eq!(
+            psbt.inputs[0]
+                .get_musig2_pub_nonce(&PARTICIPANT_1, &AGG_PK, None)
+                .unwrap(),
+            Some(nonce)
+        );
+
+        // Different participant → None.
+        assert!(psbt.inputs[0]
+            .get_musig2_pub_nonce(&PARTICIPANT_2, &AGG_PK, None)
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn musig2_pub_nonce_bad_length() {
+        let bad = [0u8; 65]; // should be 66
+        let raw =
+            build_psbt_with_input_extra(&entry_pub_nonce(&PARTICIPANT_1, &AGG_PK, None, &bad));
+        let psbt = Psbt::parse(&raw).unwrap();
+        assert_eq!(
+            psbt.inputs[0].get_musig2_pub_nonce(&PARTICIPANT_1, &AGG_PK, None),
+            Err(PsbtError::BadValue)
+        );
+    }
+
+    #[test]
+    fn musig2_partial_sig_round_trip() {
+        let psig = [0x55u8; 32];
+        let raw = build_psbt_with_input_extra(&entry_partial_sig(
+            &PARTICIPANT_2,
+            &AGG_PK,
+            Some(&LEAF_HASH),
+            &psig,
+        ));
+        let psbt = Psbt::parse(&raw).unwrap();
+        assert_eq!(
+            psbt.inputs[0]
+                .get_musig2_partial_sig(&PARTICIPANT_2, &AGG_PK, Some(&LEAF_HASH))
+                .unwrap(),
+            Some(psig)
+        );
+    }
+
+    #[test]
+    fn musig2_partial_sig_bad_length() {
+        let bad = [0u8; 31];
+        let raw = build_psbt_with_input_extra(&entry_partial_sig(
+            &PARTICIPANT_2,
+            &AGG_PK,
+            None,
+            &bad,
+        ));
+        let psbt = Psbt::parse(&raw).unwrap();
+        assert_eq!(
+            psbt.inputs[0].get_musig2_partial_sig(&PARTICIPANT_2, &AGG_PK, None),
+            Err(PsbtError::BadValue)
+        );
+    }
+
+    #[test]
+    fn musig2_output_participant_pubkeys() {
+        // For output, the key is just `agg_pk` (no leaf_hash branch). Build a
+        // PSBT with one output that has the field.
+        let value: Vec<u8> = [PARTICIPANT_1, PARTICIPANT_2].concat();
+        let mut v = Vec::new();
+        v.extend_from_slice(b"psbt\xff");
+        v.extend_from_slice(&[1, PSBT_GLOBAL_TX_VERSION, 4, 1, 0, 0, 0]);
+        v.extend_from_slice(&[1, PSBT_GLOBAL_FALLBACK_LOCKTIME, 4, 0, 0, 0, 0]);
+        v.extend_from_slice(&[1, PSBT_GLOBAL_INPUT_COUNT, 1, 0]);
+        v.extend_from_slice(&[1, PSBT_GLOBAL_OUTPUT_COUNT, 1, 1]);
+        v.extend_from_slice(&[1, PSBT_GLOBAL_VERSION, 4, 2, 0, 0, 0]);
+        v.push(0);
+        // (no inputs)
+        // Output 0: amount, script, then PSBT_OUT_MUSIG2_PARTICIPANT_PUBKEYS.
+        v.extend_from_slice(&[1, PSBT_OUT_AMOUNT, 8, 0, 0, 0, 0, 0, 0, 0, 0]);
+        v.extend_from_slice(&[1, PSBT_OUT_SCRIPT, 2, 0, 0]);
+        v.push(1 + 33); // keylen
+        v.push(PSBT_OUT_MUSIG2_PARTICIPANT_PUBKEYS);
+        v.extend_from_slice(&AGG_PK);
+        v.push(value.len() as u8);
+        v.extend_from_slice(&value);
+        v.push(0); // terminator
+
+        let psbt = Psbt::parse(&v).unwrap();
+        let pks = psbt.outputs[0]
+            .get_musig2_participant_pubkeys(&AGG_PK)
+            .unwrap()
+            .unwrap();
+        assert_eq!(pks, vec![PARTICIPANT_1, PARTICIPANT_2]);
+    }
 }
