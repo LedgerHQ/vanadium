@@ -1,4 +1,4 @@
-use alloc::{boxed::Box, vec, vec::Vec};
+use alloc::{boxed::Box, vec::Vec};
 
 use bitcoin::bip32::{ChildNumber, Xpub};
 use bitcoin::hashes::{hash160, sha256, Hash};
@@ -110,19 +110,34 @@ impl ToScriptWithKeyInfoInner for DescriptorTemplate {
     ) -> Result<Builder, Error> {
         let derive = |kp: &KeyExpression| -> Result<Xpub, Error> {
             let change_step = ChildNumber::from(if is_change { kp.num2 } else { kp.num1 });
-
-            // this does not yet handle musig() key expressions
-            let key_index = kp.plain_key_index().ok_or(Error::UnsupportedWalletPolicy)?;
-
-            let key_info = key_information
-                .get(key_index as usize)
-                .ok_or(Error::InvalidKeyIndex)?;
-
-            let root_pubkey = &key_info.pubkey;
-
+            let path = [change_step, ChildNumber::from(address_index)];
             let secp = bitcoin::secp256k1::Secp256k1::new();
-            root_pubkey
-                .derive_pub(&secp, &vec![change_step, ChildNumber::from(address_index)])
+
+            // Resolve the root xpub of the key expression: either a single
+            // participant's xpub (plain) or the BIP-388 aggregate of several
+            // participants' xpubs (musig).
+            let root_xpub: Xpub = if let Some(idx) = kp.plain_key_index() {
+                key_information
+                    .get(idx as usize)
+                    .ok_or(Error::InvalidKeyIndex)?
+                    .pubkey
+            } else if let Some(indices) = kp.musig_key_indices() {
+                let participant_xpubs: Vec<Xpub> = indices
+                    .iter()
+                    .map(|&i| {
+                        key_information
+                            .get(i as usize)
+                            .map(|ki| ki.pubkey)
+                            .ok_or(Error::InvalidKeyIndex)
+                    })
+                    .collect::<Result<_, _>>()?;
+                crate::musig::aggregate_xpub(&participant_xpubs).map_err(|_| Error::InvalidKey)?
+            } else {
+                return Err(Error::UnsupportedWalletPolicy);
+            };
+
+            root_xpub
+                .derive_pub(&secp, &path)
                 .map_err(|_| Error::InvalidKey)
         };
 
@@ -485,5 +500,66 @@ impl ToScript for WalletPolicy {
             address_index,
             ScriptContext::None,
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::account::WalletPolicy;
+    use hex_literal::hex;
+
+    /// `tr(musig(@0,@1)/**)` script derivation.
+    ///
+    /// Cosigner xpubs and expected scriptPubKey are lifted from the C reference
+    /// app's `tests/test_musig2.py::test_musig2_hotsigner_keypath` PSBT, whose
+    /// input is at (is_change = false, address_index = 3).
+    #[test]
+    fn tr_musig_keypath_to_script() {
+        let cosigner_1_xpub = "tpubDCwYjpDhUdPGP5rS3wgNg13mTrrjBuG8V9VpWbyptX6TRPbNoZVXsoVUSkCjmQ8jJycjuDKBb9eataSymXakTTaGifxR6kmVsfFehH1ZgJT";
+        let cosigner_2_xpub = "tpubDCwYjpDhUdPGQWG6wG6hkBJuWFZEtrn7j3xwG3i8XcQabcGC53xWZm1hSXrUPFS5UvZ3QhdPSjXWNfWmFGTioARHuG5J7XguEjgg7p8PxAm";
+
+        let wallet_policy = WalletPolicy::new(
+            "tr(musig(@0,@1)/**)",
+            vec![
+                cosigner_1_xpub.try_into().unwrap(),
+                cosigner_2_xpub.try_into().unwrap(),
+            ],
+        )
+        .unwrap();
+
+        let script = wallet_policy.to_script(false, 3).unwrap();
+        // P2TR scriptPubKey from the reference PSBT's witness UTXO.
+        let expected =
+            hex!("5120c1fdfebed063aa148340c45132e6718d8de81466ae2b90929e3d9328364cd6ed");
+        assert_eq!(script.as_bytes(), &expected);
+    }
+
+    /// Sanity: changing the (is_change, address_index) tuple produces a
+    /// different P2TR scriptPubKey but keeps the P2TR shape.
+    #[test]
+    fn tr_musig_keypath_changes_with_index() {
+        let wallet_policy = WalletPolicy::new(
+            "tr(musig(@0,@1)/**)",
+            vec![
+                "tpubDCwYjpDhUdPGP5rS3wgNg13mTrrjBuG8V9VpWbyptX6TRPbNoZVXsoVUSkCjmQ8jJycjuDKBb9eataSymXakTTaGifxR6kmVsfFehH1ZgJT".try_into().unwrap(),
+                "tpubDCwYjpDhUdPGQWG6wG6hkBJuWFZEtrn7j3xwG3i8XcQabcGC53xWZm1hSXrUPFS5UvZ3QhdPSjXWNfWmFGTioARHuG5J7XguEjgg7p8PxAm".try_into().unwrap(),
+            ],
+        )
+        .unwrap();
+
+        let s_at_3 = wallet_policy.to_script(false, 3).unwrap();
+        let s_at_4 = wallet_policy.to_script(false, 4).unwrap();
+        let s_change_3 = wallet_policy.to_script(true, 3).unwrap();
+
+        // All are P2TR: 0x51 0x20 <32-byte xonly>
+        for s in [&s_at_3, &s_at_4, &s_change_3] {
+            assert_eq!(s.len(), 34);
+            assert_eq!(s.as_bytes()[0], 0x51);
+            assert_eq!(s.as_bytes()[1], 0x20);
+        }
+        // Indexes and change differ ⇒ different output keys.
+        assert_ne!(s_at_3, s_at_4);
+        assert_ne!(s_at_3, s_change_3);
     }
 }
