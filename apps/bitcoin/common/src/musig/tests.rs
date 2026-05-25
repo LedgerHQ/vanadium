@@ -118,41 +118,23 @@ fn round_trip_two_party_keypath_no_tweaks() {
     let psig1 = sign(sn1, &sk1, &sctx).unwrap();
     let psig2 = sign(sn2, &sk2, &sctx).unwrap();
 
-    // Aggregate partial sigs: s = (s1 + s2 + e * tweak_sum_g_adjusted) mod n.
-    // For no-tweak case (or zero tweak), s = s1 + s2 mod n.
-    // (For the x-only zero tweak we used, the additive `t` contribution is 0,
-    // and `gacc` only flipped sign of secnonces which is already accounted for
-    // inside `sign`. So s_final = sum(psig).)
-    let s1 = BigNumMod::<32, N>::from_be_bytes(psig1);
-    let s2 = BigNumMod::<32, N>::from_be_bytes(psig2);
-    let s_final = (&s1 + &s2).to_be_bytes();
+    // Aggregate partial sigs into a final BIP-340 (R.x || s) signature.
+    let sig = partial_sig_agg(&sctx, &[psig1, psig2]).unwrap();
 
-    // Compute the final R: from aggnonce, apply b = noncecoef(aggnonce, Q.x, msg).
-    // R = R_1 + b * R_2; if has_odd_y(R), use -R.
-    // We recompute it the same way sign() does internally.
-    let tweaked_q_x = {
-        // Apply the zero x-only tweak: that flips sign only if has_odd_y. We
-        // need the post-tweak Q.x to verify against.
+    // The signature verifies under the (post-all-tweaks) aggregate xonly key
+    // with prefix 0x02, since BIP-340 always interprets the verifier key as
+    // even-y.
+    let tweaked_q_x: [u8; 32] = sig[..32].try_into().unwrap(); // R.x; not the verifier key
+    // Recompute the verifier key (tweaked Q.x) from key_agg + apply_tweak.
+    let verifier_xonly = {
         let mut keyagg = key_agg(&sorted).unwrap();
         super::apply_tweak(&mut keyagg, &[0u8; 32], true).unwrap();
         keyagg.q.x
     };
-
-    let b = super::noncecoef(&aggnonce, &tweaked_q_x, &msg);
-    let r = super::final_nonce(&aggnonce, &b).unwrap();
-    let r_x = r.x;
-
-    // Final 64-byte schnorr sig is R.x || s.
-    let mut sig = [0u8; 64];
-    sig[..32].copy_from_slice(&r_x);
-    sig[32..].copy_from_slice(&s_final);
-
-    // Verify via BIP-340.
     let pk_for_verify = EcfpPublicKey::<Secp256k1, 32>::from_compressed(&{
-        // Build a compressed point with prefix 0x02 (even-y) and x = tweaked_q_x.
         let mut p = [0u8; 33];
         p[0] = 0x02;
-        p[1..].copy_from_slice(&tweaked_q_x);
+        p[1..].copy_from_slice(&verifier_xonly);
         p
     })
     .unwrap();
@@ -160,6 +142,9 @@ fn round_trip_two_party_keypath_no_tweaks() {
     pk_for_verify
         .schnorr_verify(&msg, &sig)
         .expect("aggregated musig2 schnorr signature must verify under the tweaked aggregate key");
+
+    // Silence unused-warning on the BigNumMod / N imports if any.
+    let _ = (tweaked_q_x, BigNumMod::<32, N>::from_u32(0));
 }
 
 // =============================================================================

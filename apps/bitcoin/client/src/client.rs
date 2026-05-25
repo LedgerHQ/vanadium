@@ -1,7 +1,10 @@
 use std::str::FromStr;
 
 use bitcoin::bip32::DerivationPath;
-use common::message::{self, IdentitySignature, PartialSignature, Request, Response};
+use common::message::{
+    self, IdentitySignature, MuSig2PartialSignature, MuSig2Pubnonce, PartialSignature, Request,
+    Response,
+};
 use common::por::{ProofOfRegistration, RegistrationId};
 use sdk::vanadium_client::{VAppExecutionError, VAppTransport};
 
@@ -324,10 +327,20 @@ impl<'a> BitcoinClient {
         }
     }
 
+    /// Calls the V-App's `SignPsbt`. Behaviour depends on the PSBT contents:
+    /// - Inputs whose wallet policy uses plain placeholders the device
+    ///   controls → ECDSA / Schnorr partial signatures land in `signatures`.
+    /// - Inputs with a `musig(...)` placeholder the device participates in →
+    ///   - if the PSBT already carries this device's pubnonce
+    ///     (BIP-373 `PSBT_IN_MUSIG2_PUB_NONCE`) → a round-2 partial signature
+    ///     lands in `musig_partial_sigs`;
+    ///   - otherwise → a round-1 pubnonce lands in `musig_pubnonces`, and the
+    ///     host is expected to merge it with cosigners' nonces into the PSBT
+    ///     and re-send for round 2.
     pub async fn sign_psbt(
         &mut self,
         psbt: &[u8],
-    ) -> Result<Vec<PartialSignature>, BitcoinClientError> {
+    ) -> Result<SignedPsbtResponse, BitcoinClientError> {
         let msg = minicbor::to_vec(&Request::SignPsbt {
             psbt: psbt.to_vec(),
         })
@@ -337,11 +350,32 @@ impl<'a> BitcoinClient {
 
         let response_raw = self.send_message(&msg).await?;
         match Self::parse_response(&response_raw).await? {
-            Response::PsbtSigned { signatures, .. } => Ok(signatures),
+            Response::PsbtSigned {
+                signatures,
+                musig_pubnonces,
+                musig_partial_sigs,
+            } => Ok(SignedPsbtResponse {
+                signatures,
+                musig_pubnonces,
+                musig_partial_sigs,
+            }),
             e => Err(BitcoinClientError::InvalidResponse(format!(
                 "Invalid response: {:?}",
                 e
             ))),
         }
     }
+}
+
+/// All signing material the V-App can return from a single `SignPsbt` request.
+///
+/// `signatures` covers ECDSA and Schnorr partial signatures for plain key
+/// placeholders. The two `musig_*` fields are non-empty only for PSBTs that
+/// involve `musig(...)` placeholders this device participates in — see
+/// [`BitcoinClient::sign_psbt`] for the round 1 / round 2 dispatch.
+#[derive(Debug, Clone)]
+pub struct SignedPsbtResponse {
+    pub signatures: Vec<PartialSignature>,
+    pub musig_pubnonces: Vec<MuSig2Pubnonce>,
+    pub musig_partial_sigs: Vec<MuSig2PartialSignature>,
 }

@@ -502,7 +502,8 @@ fn map_musig_err(err: MusigError) -> Error {
         MusigError::InvalidPoint
         | MusigError::EmptyPubkeyList
         | MusigError::InvalidContribution(_)
-        | MusigError::PubkeyNotInList => Error::InvalidKey,
+        | MusigError::PubkeyNotInList
+        | MusigError::InvalidPartialSignature => Error::InvalidKey,
         MusigError::KeyAggInfinity
         | MusigError::TweakOutOfRange
         | MusigError::TweakInfinity

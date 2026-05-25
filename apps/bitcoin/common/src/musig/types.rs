@@ -125,4 +125,7 @@ pub enum MusigError {
     /// BIP-32 unhardened CKDpub failed (hardened index passed, or HMAC produced
     /// a tweak >= n, or the tweaked point was infinity).
     DerivationFailed,
+    /// `partial_sig_agg` received a 32-byte value that wasn't a valid scalar
+    /// (i.e. it was `>= n`).
+    InvalidPartialSignature,
 }

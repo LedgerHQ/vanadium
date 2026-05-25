@@ -494,6 +494,50 @@ pub fn sign(
     result
 }
 
+/// Combines a complete set of partial signatures into a single BIP-340 Schnorr
+/// signature `R.x || s` (64 bytes), per BIP-327 §6.3 (`PartialSigAgg`).
+///
+/// `ctx` must be the *same* session context that every partial signer used
+/// (same `aggnonce`, `pubkeys`, `tweaks`, `is_xonly`, `msg`). `psigs` must
+/// contain one entry per participant. The returned signature verifies under
+/// the final aggregate x-only key, which is `Q.x` after all tweaks (with `Q`
+/// adjusted to have even y per BIP-340).
+pub fn partial_sig_agg(
+    ctx: &SessionContext,
+    psigs: &[[u8; 32]],
+) -> Result<[u8; 64], MusigError> {
+    let values = get_session_values(ctx)?;
+
+    // s = sum(psig_i) mod n
+    let mut s = BigNumMod::<32, N>::from_u32(0);
+    for psig in psigs {
+        let reduced = BigNumMod::<32, N>::from_be_bytes(*psig);
+        if reduced.to_be_bytes() != *psig {
+            // psig >= n: bytewise different after reduction.
+            return Err(MusigError::InvalidPartialSignature);
+        }
+        s += &reduced;
+    }
+
+    // Adjust by the additive-tweak contribution: s += e * g * tacc, where
+    // g = 1 if has_even_y(Q) else n - 1.
+    let e = BigNumMod::<32, N>::from_be_bytes(values.e);
+    let tacc = BigNumMod::<32, N>::from_be_bytes(values.tacc);
+    let g = if has_even_y(&values.q) {
+        let mut one = [0u8; 32];
+        one[31] = 1;
+        BigNumMod::<32, N>::from_be_bytes(one)
+    } else {
+        -&BigNumMod::<32, N>::from_u32(1)
+    };
+    s += &(&e * &(&g * &tacc));
+
+    let mut out = [0u8; 64];
+    out[..32].copy_from_slice(&values.r.x);
+    out[32..].copy_from_slice(&s.to_be_bytes());
+    Ok(out)
+}
+
 // =============================================================================
 // BIP-388 aggregate xpub + BIP-32 unhardened CKDpub (with tweak exposure)
 // =============================================================================
