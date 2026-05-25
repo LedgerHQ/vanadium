@@ -147,6 +147,70 @@ fn round_trip_two_party_keypath_no_tweaks() {
     let _ = (tweaked_q_x, BigNumMod::<32, N>::from_u32(0));
 }
 
+/// Same as the previous round-trip, but with **two non-xonly tweaks and one
+/// xonly tweak** (the same shape `compute_per_input_info` produces for a
+/// keypath musig spend). Catches bugs in `apply_tweak`'s sequential
+/// `gacc`/`tacc` tracking that the single-tweak test wouldn't.
+#[test]
+fn round_trip_two_party_keypath_with_bip32_and_taptweak() {
+    let sk1 = hex!("0303030303030303030303030303030303030303030303030303030303030303");
+    let sk2 = hex!("0404040404040404040404040404040404040404040404040404040404040404");
+    let msg = hex!("0123456789ABCDEFFEDCBA9876543210123456789ABCDEF0FEDCBA9876543210");
+
+    let pk1 = priv_to_compressed_pk(&sk1);
+    let pk2 = priv_to_compressed_pk(&sk2);
+
+    let mut sorted: Vec<PlainPk> = vec![pk1, pk2];
+    sorted.sort();
+
+    // Three tweaks: two arbitrary additive (non-xonly), one taptweak-style
+    // (xonly).
+    let t_a = hex!("1111111111111111111111111111111111111111111111111111111111111111");
+    let t_b = hex!("2222222222222222222222222222222222222222222222222222222222222222");
+    let t_c = hex!("3333333333333333333333333333333333333333333333333333333333333333");
+    let tweaks: Vec<[u8; 32]> = vec![t_a, t_b, t_c];
+    let is_xonly: Vec<bool> = vec![false, false, true];
+
+    // Compute the post-all-tweaks aggregate Q to be used as the BIP-340
+    // verifier key.
+    let mut keyagg = key_agg(&sorted).unwrap();
+    for (tweak, is_x) in tweaks.iter().zip(is_xonly.iter()) {
+        super::apply_tweak(&mut keyagg, tweak, *is_x).unwrap();
+    }
+    let final_xonly: [u8; 32] = keyagg.q.x;
+    // The aggpk passed to `nonce_gen` is the FINAL aggregate xonly.
+
+    let rand1 = hex!("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA");
+    let rand2 = hex!("BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB");
+    let (sn1, pn1) = nonce_gen(&rand1, &pk1, &final_xonly).unwrap();
+    let (sn2, pn2) = nonce_gen(&rand2, &pk2, &final_xonly).unwrap();
+    let aggnonce = nonce_agg(&[pn1, pn2]).unwrap();
+
+    let sctx = SessionContext {
+        aggnonce: &aggnonce,
+        pubkeys: &sorted,
+        tweaks: &tweaks,
+        is_xonly: &is_xonly,
+        msg: &msg,
+    };
+    let psig1 = sign(sn1, &sk1, &sctx).unwrap();
+    let psig2 = sign(sn2, &sk2, &sctx).unwrap();
+
+    let sig = partial_sig_agg(&sctx, &[psig1, psig2]).unwrap();
+
+    let pk_for_verify = EcfpPublicKey::<Secp256k1, 32>::from_compressed(&{
+        let mut p = [0u8; 33];
+        p[0] = 0x02;
+        p[1..].copy_from_slice(&final_xonly);
+        p
+    })
+    .unwrap();
+
+    pk_for_verify
+        .schnorr_verify(&msg, &sig)
+        .expect("aggregated MuSig2 sig with mixed tweaks must verify under the post-all-tweaks aggregate");
+}
+
 // =============================================================================
 // BIP-32 unhardened CKDpub with tweak exposure
 // =============================================================================
@@ -223,8 +287,9 @@ fn aggregate_xpub_matches_key_agg() {
 
     // BIP-388 / BIP-328 chaincode.
     assert_eq!(agg.chain_code.as_bytes(), &BIP_328_CHAINCODE);
-    // The synthetic prefix is always 0x02 ("even-y").
-    assert_eq!(agg.public_key.serialize()[0], 0x02);
+    // The synthetic prefix preserves the natural parity of `Q`.
+    let expected_prefix = if expected.q.y[31] & 1 == 0 { 0x02 } else { 0x03 };
+    assert_eq!(agg.public_key.serialize()[0], expected_prefix);
 }
 
 /// End-to-end: aggregate three xpubs, then derive an unhardened child of the

@@ -233,6 +233,15 @@ mod storage {
     }
 }
 
+/// Wipes the test-only persistent-storage backing. Available only under
+/// `cfg(test)`; cross-module tests that drive `handle_sign_psbt` through
+/// multiple musig rounds should call this at the start to guarantee a clean
+/// session-storage state.
+#[cfg(test)]
+pub(crate) fn reset_storage_for_tests() {
+    storage::reset();
+}
+
 // =============================================================================
 // Per-input MuSig2 derivation + signing rounds
 // =============================================================================
@@ -337,10 +346,12 @@ pub fn compute_per_input_info(
         placeholder.num1
     });
     let address_step = ChildNumber::from(address_index);
-    let secp = secp256k1::Secp256k1::new();
 
-    // 1) Each participant's child pubkey, sorted.
-    let path = [change_step, address_step];
+    // 1) Per BIP-388, MuSig2 key-aggregation runs on the *master* participant
+    //    pubkeys — the BIP-32 `(change, address_index)` derivation is applied
+    //    *after* aggregation (and shows up as two non-xonly tweaks in the
+    //    session context below). The participants therefore sign with their
+    //    master private keys; their derived children are never used.
     let mut keys: Vec<PlainPk> = Vec::with_capacity(indices.len());
     let mut participant_xpubs: Vec<Xpub> = Vec::with_capacity(indices.len());
     for &idx in indices {
@@ -348,15 +359,13 @@ pub fn compute_per_input_info(
             .get(idx as usize)
             .ok_or(Error::InvalidKeyIndex)?
             .pubkey;
-        let child = xpub
-            .derive_pub(&secp, &path)
-            .map_err(|_| Error::KeyDerivationFailed)?;
-        keys.push(child.public_key.serialize());
+        keys.push(xpub.public_key.serialize());
         participant_xpubs.push(xpub);
     }
     keys.sort();
 
     // 2) Aggregate xpub + 2 BIP-32 derivations to (change, address_index).
+    let secp = secp256k1::Secp256k1::new();
     let agg = musig::aggregate_xpub(&participant_xpubs).map_err(|_| Error::InvalidKey)?;
     let (child1, t0) =
         musig::ckdpub_with_tweak(&agg, change_step).map_err(|_| Error::KeyDerivationFailed)?;
@@ -847,17 +856,11 @@ mod tests {
         )
         .unwrap();
 
-        // Use cosigner #1's derived child as the "local" participant.
+        // BIP-388 musig signs with the *master* participant key — `info.keys`
+        // contains the (sorted) master pubkeys directly, not derived children.
         let internal_pk: [u8; 33] = {
-            let secp = secp256k1::Secp256k1::new();
             let xpub: Xpub = COSIGNER_1_XPUB.parse().unwrap();
-            xpub.derive_pub(
-                &secp,
-                &[ChildNumber::Normal { index: 0 }, ChildNumber::Normal { index: 3 }],
-            )
-            .unwrap()
-            .public_key
-            .serialize()
+            xpub.public_key.serialize()
         };
         assert!(info.keys.contains(&internal_pk));
 

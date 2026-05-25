@@ -134,10 +134,17 @@ fn resolve_private_key(
 }
 
 /// Identifies whether `key_info` refers to a locally-controlled key (Standard
-/// or Resident tree) and, if so, returns its full BIP-32 path including the
-/// `(change, address_index)` suffix. Verifies the derivation by recomputing
-/// the pubkey + chaincode so a fingerprint collision cannot trick us into
-/// signing.
+/// or Resident tree) and, if so, returns the [`KeySource`] for signing.
+///
+/// If `child_steps` is `Some((change_step, address_index))`, the returned
+/// `KeySource` includes those as the final two BIP-32 steps — this is the
+/// plain-key signing path. If `child_steps` is `None`, the `KeySource` stops
+/// at the master xpub (no extra derivation) — this is the BIP-388 musig
+/// signing path, where the master key signs and BIP-32 derivation is folded
+/// into [`SessionContext`] tweaks.
+///
+/// In both cases, the master derivation is recomputed locally and compared
+/// against `key_info.pubkey` to defeat fingerprint collisions.
 ///
 /// Returns `None` if:
 /// - the key has no origin info (bare xpub, can't be derived locally), or
@@ -145,8 +152,7 @@ fn resolve_private_key(
 /// - the local derivation doesn't yield the claimed pubkey/chaincode.
 fn resolve_local_key_source(
     key_info: &common::bip388::KeyInformation,
-    change_step: ChildNumber,
-    address_index: ChildNumber,
+    child_steps: Option<(ChildNumber, ChildNumber)>,
     standard_fpr: u32,
     resident_fpr: u32,
 ) -> Option<KeySource> {
@@ -160,21 +166,17 @@ fn resolve_local_key_source(
         return None;
     };
 
-    let mut path = Vec::with_capacity(key_origin.derivation_path.len() + 2);
-    path.extend_from_slice(&key_origin.derivation_path);
-    path.push(change_step);
-    path.push(address_index);
-
-    let path_u32: Vec<u32> = key_origin
+    // Derive the master xpub locally and check it matches what the wallet
+    // policy claims; defeats fingerprint collisions.
+    let master_path_u32: Vec<u32> = key_origin
         .derivation_path
         .iter()
         .map(|&s| u32::from(s))
         .collect();
     let claim_node = match tree {
-        KeyTree::Standard => sdk::curve::Secp256k1::derive_hd_node(&path_u32).ok()?,
-        KeyTree::Resident => derive_resident_hd_node(&path_u32).ok()?,
+        KeyTree::Standard => sdk::curve::Secp256k1::derive_hd_node(&master_path_u32).ok()?,
+        KeyTree::Resident => derive_resident_hd_node(&master_path_u32).ok()?,
     };
-
     let derived_pubkey = EcfpPrivateKey::<sdk::curve::Secp256k1, 32>::new(*claim_node.privkey)
         .to_public_key()
         .to_compressed();
@@ -184,6 +186,11 @@ fn resolve_local_key_source(
         return None;
     }
 
+    let mut path: Vec<ChildNumber> = key_origin.derivation_path.iter().copied().collect();
+    if let Some((change_step, address_index)) = child_steps {
+        path.push(change_step);
+        path.push(address_index);
+    }
     Some(KeySource { tree, path })
 }
 
@@ -733,10 +740,7 @@ struct SignedInputs {
 
 /// Lazily materializes the prevouts list shared by all taproot sighashes in a
 /// PSBT (all witness UTXOs, in input order).
-fn ensure_prevouts<'a>(
-    cache: &'a mut Option<Vec<TxOut>>,
-    psbt: &fastpsbt::Psbt,
-) -> &'a [TxOut] {
+fn ensure_prevouts<'a>(cache: &'a mut Option<Vec<TxOut>>, psbt: &fastpsbt::Psbt) -> &'a [TxOut] {
     cache
         .get_or_insert_with(|| {
             psbt.inputs
@@ -857,8 +861,6 @@ fn sign_all_inputs(
                     tapleaf_desc,
                     wallet_policy,
                     coords,
-                    change_step,
-                    address_index,
                     session_id,
                     musig_state,
                     psbt,
@@ -878,8 +880,7 @@ fn sign_all_inputs(
             let key_info = &wallet_policy.key_information()[key_index as usize];
             let Some(key_source) = resolve_local_key_source(
                 key_info,
-                change_step,
-                address_index,
+                Some((change_step, address_index)),
                 standard_fpr,
                 resident_fpr,
             ) else {
@@ -936,8 +937,6 @@ fn handle_musig_placeholder(
     tapleaf_desc: Option<&DescriptorTemplate>,
     wallet_policy: &common::bip388::WalletPolicy,
     coords: &common::message::WalletPolicyCoordinates,
-    change_step: ChildNumber,
-    address_index: ChildNumber,
     session_id: [u8; 32],
     musig_state: &mut MusigSigningState,
     psbt: &fastpsbt::Psbt,
@@ -959,20 +958,17 @@ fn handle_musig_placeholder(
         },
     };
 
-    // Identify which participants this device controls.
+    // Identify which participants this device controls. For BIP-388 musig,
+    // signing uses the *master* participant key (no `(change, address_index)`
+    // suffix in the path) — that derivation is folded into the SessionContext
+    // tweaks below.
     let indices = kp
         .musig_key_indices()
         .expect("kp must be musig because is_musig() returned true");
     let mut ours: Vec<KeySource> = Vec::new();
     for &participant_idx in indices {
         let key_info = &wallet_policy.key_information()[participant_idx as usize];
-        if let Some(ks) = resolve_local_key_source(
-            key_info,
-            change_step,
-            address_index,
-            standard_fpr,
-            resident_fpr,
-        ) {
+        if let Some(ks) = resolve_local_key_source(key_info, None, standard_fpr, resident_fpr) {
             ours.push(ks);
         }
     }
@@ -1331,11 +1327,11 @@ mod tests {
     /// from the same test.
     #[test]
     fn test_handle_sign_psbt_musig_no_local_participant() {
+        use bitcoin::bip32::{ChildNumber, DerivationPath, Fingerprint};
         use bitcoin::{
             absolute, secp256k1::XOnlyPublicKey, transaction, Amount, OutPoint, ScriptBuf,
             Sequence, Transaction, TxIn, TxOut, Txid, Witness,
         };
-        use bitcoin::bip32::{ChildNumber, DerivationPath, Fingerprint};
 
         let unsigned_tx = Transaction {
             version: transaction::Version::TWO,
@@ -1414,7 +1410,10 @@ mod tests {
                 musig_pubnonces,
                 musig_partial_sigs,
             } => {
-                assert!(signatures.is_empty(), "no plain placeholders ⇒ no signatures");
+                assert!(
+                    signatures.is_empty(),
+                    "no plain placeholders ⇒ no signatures"
+                );
                 assert!(
                     musig_pubnonces.is_empty(),
                     "no local participants ⇒ no pubnonces"
@@ -1426,5 +1425,405 @@ mod tests {
             }
             _ => panic!("Expected PsbtSigned response"),
         }
+    }
+
+    use bitcoin::bip32::{ChainCode, ChildNumber, DerivationPath, Fingerprint, Xpriv, Xpub};
+    use bitcoin::secp256k1::Secp256k1;
+    use bitcoin::sighash::Prevouts;
+    use bitcoin::{absolute, transaction, Amount, OutPoint, Sequence, Transaction, TxIn, Txid};
+    use common::bip388::{KeyInformation, KeyOrigin};
+    use common::musig as musig_lib;
+    use std::str::FromStr;
+
+    /// Hot cosigner xprv (BIP-32 master) used by these tests. Same key as the
+    /// C reference's `test_musig2.py::test_musig2_hotsigner_keypath`.
+    const COSIGNER_XPRV: &str = "tprv8gFWbQBTLFhbVcpeAJ1nGbPetqLo2a5Duqu3E5wXUFJ4auLcBAfwhJscGbPjzKNvpCdG3KK3BLCTLi8YKy4PXnA1hxdowdpTaMqTcF5ZpUz";
+
+    /// BIP-32 path the device-controlled cosigner xpub claims to live at.
+    /// Any non-hardened-only path will do; the device just needs to be able to
+    /// re-derive it locally from its master seed.
+    const DEVICE_PATH: [u32; 4] = [0x80000030, 0x80000001, 0x80000000, 0x80000002];
+
+    /// Builds the device's xpub at [`DEVICE_PATH`] by re-deriving from the
+    /// host-side SDK's master.
+    fn device_xpub() -> Xpub {
+        let node = sdk::curve::Secp256k1::derive_hd_node(&DEVICE_PATH).unwrap();
+        let compressed = EcfpPrivateKey::<sdk::curve::Secp256k1, 32>::new(*node.privkey)
+            .to_public_key()
+            .to_compressed();
+        Xpub {
+            network: bitcoin::NetworkKind::Test,
+            depth: 4,
+            parent_fingerprint: Fingerprint::default(),
+            child_number: ChildNumber::Hardened { index: 2 },
+            public_key: bitcoin::secp256k1::PublicKey::from_slice(&compressed).unwrap(),
+            chain_code: ChainCode::from(node.chaincode),
+        }
+    }
+
+    fn cosigner_xprv() -> Xpriv {
+        Xpriv::from_str(COSIGNER_XPRV).unwrap()
+    }
+
+    fn cosigner_xpub(secp: &Secp256k1<bitcoin::secp256k1::All>) -> Xpub {
+        Xpub::from_priv(secp, &cosigner_xprv())
+    }
+
+    /// Builds the 2-of-2 keypath wallet policy `tr(musig(@0,@1)/**)` where
+    /// `@0` is device-controlled (with origin info) and `@1` is the bare hot
+    /// cosigner xpub. The exact origin path doesn't matter as long as the
+    /// device can re-derive it locally.
+    fn make_2of2_keypath_policy() -> WalletPolicy {
+        let secp = Secp256k1::new();
+        let standard_fpr = sdk::curve::Secp256k1::get_master_fingerprint();
+        let key_info_0 = KeyInformation {
+            pubkey: device_xpub(),
+            origin_info: Some(KeyOrigin {
+                fingerprint: standard_fpr,
+                derivation_path: DEVICE_PATH.iter().map(|&n| ChildNumber::from(n)).collect(),
+            }),
+        };
+        let key_info_1 = KeyInformation {
+            pubkey: cosigner_xpub(&secp),
+            origin_info: None,
+        };
+        WalletPolicy::new("tr(musig(@0,@1)/**)", vec![key_info_0, key_info_1]).unwrap()
+    }
+
+    /// Constructs a one-input/one-output PSBT for the given wallet policy at
+    /// `(is_change=false, address_index)`. The output is a dummy P2WPKH. The
+    /// witness UTXO scriptPubKey is derived via the wallet policy itself so
+    /// `analyze_transaction` accepts the PSBT.
+    fn build_musig_keypath_psbt(wallet_policy: &WalletPolicy, address_index: u32) -> Psbt {
+        let secp = Secp256k1::new();
+        let expected_script = wallet_policy.to_script(false, address_index).unwrap();
+
+        let unsigned_tx = Transaction {
+            version: transaction::Version::TWO,
+            lock_time: absolute::LockTime::ZERO,
+            input: vec![TxIn {
+                previous_output: OutPoint {
+                    txid: Txid::from_byte_array([0x42; 32]),
+                    vout: 0,
+                },
+                script_sig: ScriptBuf::new(),
+                sequence: Sequence::ENABLE_RBF_NO_LOCKTIME,
+                witness: bitcoin::Witness::new(),
+            }],
+            output: vec![TxOut {
+                value: Amount::from_sat(50_000),
+                script_pubkey: ScriptBuf::from_bytes(
+                    hex!("0014" "00112233445566778899aabbccddeeff00112233").to_vec(),
+                ),
+            }],
+        };
+        let mut psbt = Psbt::from_unsigned_tx(unsigned_tx).unwrap();
+        psbt.inputs[0].witness_utxo = Some(TxOut {
+            value: Amount::from_sat(60_000),
+            script_pubkey: expected_script,
+        });
+
+        // Inject the BIP-373 tap_bip32_derivation entry for the BIP-32-tweaked
+        // aggregate, keyed by its xonly key and tagged with the aggregate
+        // xpub's BIP-32 fingerprint.
+        let participant_xpubs: Vec<Xpub> = wallet_policy
+            .key_information()
+            .iter()
+            .map(|ki| ki.pubkey)
+            .collect();
+        let agg_xpub = musig_lib::aggregate_xpub(&participant_xpubs).unwrap();
+        let path = vec![
+            ChildNumber::Normal { index: 0 },
+            ChildNumber::Normal {
+                index: address_index,
+            },
+        ];
+        let agg_child = agg_xpub
+            .derive_pub(&secp, &path.iter().copied().collect::<DerivationPath>())
+            .unwrap();
+        let agg_xonly: [u8; 32] = agg_child.public_key.x_only_public_key().0.serialize();
+        psbt.inputs[0].tap_key_origins.insert(
+            XOnlyPublicKey::from_slice(&agg_xonly).unwrap(),
+            (vec![], (agg_xpub.fingerprint(), DerivationPath::from(path))),
+        );
+
+        psbt
+    }
+
+    /// Inserts a BIP-373 `PSBT_IN_MUSIG2_PUB_NONCE` entry into `psbt.inputs[0].unknown`.
+    /// Key layout (per BIP-373): `0x1B || participant_pk(33) || agg_pk(33)`
+    /// — leaf_hash is omitted for keypath spends.
+    fn insert_pubnonce(
+        psbt: &mut Psbt,
+        participant_pk: &[u8; 33],
+        agg_pk: &[u8; 33],
+        pubnonce: &[u8; 66],
+    ) {
+        let mut keydata = Vec::with_capacity(66);
+        keydata.extend_from_slice(participant_pk);
+        keydata.extend_from_slice(agg_pk);
+        psbt.inputs[0].unknown.insert(
+            bitcoin::psbt::raw::Key {
+                type_value: 0x1B,
+                key: keydata,
+            },
+            pubnonce.to_vec(),
+        );
+    }
+
+    /// Off-device emulation of the hot cosigner. Per BIP-388, MuSig2 signing
+    /// uses the cosigner's *master* xpub (the one listed in `keys_info`); the
+    /// `(change, address_index)` derivation is applied via session tweaks,
+    /// not by deriving children.
+    fn cosigner_master_round1(
+        agg_xonly_tweaked: &[u8; 32],
+        rand_root: &[u8; 32],
+    ) -> ([u8; 33], musig_lib::SecNonce, musig_lib::PubNonce, [u8; 32]) {
+        let secp = Secp256k1::new();
+        let xpriv = cosigner_xprv();
+        let xpub = Xpub::from_priv(&secp, &xpriv);
+        let participant_pk: [u8; 33] = xpub.public_key.serialize();
+        let sk: [u8; 32] = xpriv.private_key.secret_bytes();
+        let (secnonce, pubnonce) =
+            musig_lib::nonce_gen(rand_root, &participant_pk, agg_xonly_tweaked).unwrap();
+        (participant_pk, secnonce, pubnonce, sk)
+    }
+
+    /// Full 2-of-2 keypath MuSig2 round trip through `handle_sign_psbt`,
+    /// finishing with an aggregated 64-byte Schnorr signature that verifies
+    /// under the BIP-341-tweaked aggregate.
+    #[test]
+    fn test_handle_sign_psbt_musig_2of2_keypath_round_trip() {
+        musig_signing::reset_storage_for_tests();
+
+        let address_index: u32 = 7;
+        let wallet_policy = make_2of2_keypath_policy();
+        let account_name = "Musig 2-of-2 keypath";
+
+        let mut psbt = build_musig_keypath_psbt(&wallet_policy, address_index);
+        let por = ProofOfRegistration::new(&wallet_policy.registration_id(account_name))
+            .dangerous_as_bytes();
+        prepare_psbt(&mut psbt, &[(&wallet_policy, &account_name, &por)]).unwrap();
+
+        // ---- Round 1 ----
+        let r1 = sdk::executor::block_on(handle_sign_psbt(
+            &mut sdk::App::singleton(),
+            &serialize_as_psbtv2(&psbt),
+        ))
+        .unwrap();
+        let device_pubnonce = match r1 {
+            Response::PsbtSigned {
+                signatures,
+                musig_pubnonces,
+                musig_partial_sigs,
+            } => {
+                assert!(signatures.is_empty());
+                assert!(musig_partial_sigs.is_empty());
+                assert_eq!(musig_pubnonces.len(), 1, "expected one device pubnonce");
+                musig_pubnonces.into_iter().next().unwrap()
+            }
+            _ => panic!("Expected PsbtSigned"),
+        };
+        let agg_pk: [u8; 33] = device_pubnonce.aggregate_pubkey;
+        // The BIP-340 verifier key is the agg key with even-y prefix (BIP-341).
+        let agg_xonly: [u8; 32] = agg_pk[1..].try_into().unwrap();
+
+        // ---- Off-device: compute cosigner's pubnonce ----
+        let (cosigner_pk, _cosigner_secnonce, cosigner_pubnonce, cosigner_sk) =
+            cosigner_master_round1(&agg_xonly, &[0xAB; 32]);
+
+        // ---- Inject both pubnonces and run Round 2 ----
+        insert_pubnonce(
+            &mut psbt,
+            &device_pubnonce.participant_pk,
+            &agg_pk,
+            &device_pubnonce.pubnonce,
+        );
+        insert_pubnonce(&mut psbt, &cosigner_pk, &agg_pk, &cosigner_pubnonce.0);
+
+        let r2 = sdk::executor::block_on(handle_sign_psbt(
+            &mut sdk::App::singleton(),
+            &serialize_as_psbtv2(&psbt),
+        ))
+        .unwrap();
+        let device_psig = match r2 {
+            Response::PsbtSigned {
+                signatures,
+                musig_pubnonces,
+                musig_partial_sigs,
+            } => {
+                assert!(signatures.is_empty());
+                assert!(musig_pubnonces.is_empty());
+                assert_eq!(musig_partial_sigs.len(), 1);
+                musig_partial_sigs.into_iter().next().unwrap()
+            }
+            _ => panic!("Expected PsbtSigned"),
+        };
+
+        // ---- Off-device: cosigner's partial signature ----
+        // Reproduce the per-input info to get tweaks/keys/order; the cosigner
+        // and device run the exact same protocol, so they share the SessionContext.
+        let placeholder = wallet_policy
+            .descriptor_template()
+            .placeholders()
+            .next()
+            .unwrap()
+            .0
+            .clone();
+        let info = musig_signing::compute_per_input_info(
+            wallet_policy.key_information(),
+            &placeholder,
+            false,
+            address_index,
+            musig_signing::SpendPath::Keypath { taptree_hash: None },
+        )
+        .unwrap();
+        let aggnonce = musig_lib::nonce_agg(&[
+            musig_lib::PubNonce(device_pubnonce.pubnonce),
+            cosigner_pubnonce,
+        ])
+        .unwrap();
+        // Sighash — both sides compute it the same way.
+        let prevouts = vec![psbt.inputs[0].witness_utxo.clone().unwrap()];
+        let unsigned = psbt.unsigned_tx.clone();
+        let mut cache = SighashCache::new(&unsigned);
+        let sighash: [u8; 32] = cache
+            .taproot_key_spend_signature_hash(0, &Prevouts::All(&prevouts), TapSighashType::Default)
+            .unwrap()
+            .to_byte_array();
+
+        let tweaks_slice = &info.tweaks[..info.n_tweaks];
+        let is_xonly_slice = &info.is_xonly[..info.n_tweaks];
+        let sctx = musig_lib::SessionContext {
+            aggnonce: &aggnonce,
+            pubkeys: &info.keys,
+            tweaks: tweaks_slice,
+            is_xonly: is_xonly_slice,
+            msg: &sighash,
+        };
+        // The cosigner must hand `nonce_gen` a fresh secnonce, since `sign`
+        // consumes it; re-derive deterministically from the same rand_root.
+        let (_, cosigner_secnonce_recomputed, _, _) =
+            cosigner_master_round1(&agg_xonly, &[0xAB; 32]);
+        let cosigner_psig =
+            musig_lib::sign(cosigner_secnonce_recomputed, &cosigner_sk, &sctx).unwrap();
+
+        // ---- Aggregate the two partial signatures and verify ----
+        let final_sig =
+            musig_lib::partial_sig_agg(&sctx, &[device_psig.signature, cosigner_psig]).unwrap();
+        // The BIP-340 verifier key has prefix 0x02 (even-y) and the x of the
+        // taptweaked aggregate.
+        let mut verifier_pk = [0u8; 33];
+        verifier_pk[0] = 0x02;
+        verifier_pk[1..].copy_from_slice(&agg_pk[1..]);
+        let pk_for_verify =
+            EcfpPublicKey::<sdk::curve::Secp256k1, 32>::from_compressed(&verifier_pk).unwrap();
+        pk_for_verify.schnorr_verify(&sighash, &final_sig).expect(
+            "aggregated MuSig2 Schnorr signature must verify under the taptweaked aggregate",
+        );
+    }
+
+    /// Round 2 without a prior round 1 → the device has no session in
+    /// persistent storage and must error cleanly.
+    #[test]
+    fn test_handle_sign_psbt_musig_round2_without_round1_errors() {
+        musig_signing::reset_storage_for_tests();
+
+        let address_index: u32 = 11;
+        let wallet_policy = make_2of2_keypath_policy();
+        let account_name = "Musig negative test #1";
+
+        let mut psbt = build_musig_keypath_psbt(&wallet_policy, address_index);
+        let por = ProofOfRegistration::new(&wallet_policy.registration_id(account_name))
+            .dangerous_as_bytes();
+        prepare_psbt(&mut psbt, &[(&wallet_policy, &account_name, &por)]).unwrap();
+
+        // Compute what the agg_pk would be so we can inject pubnonces under
+        // the right BIP-373 key — the device will *try* to enter round 2.
+        let placeholder = wallet_policy
+            .descriptor_template()
+            .placeholders()
+            .next()
+            .unwrap()
+            .0
+            .clone();
+        let info = musig_signing::compute_per_input_info(
+            wallet_policy.key_information(),
+            &placeholder,
+            false,
+            address_index,
+            musig_signing::SpendPath::Keypath { taptree_hash: None },
+        )
+        .unwrap();
+        let agg_pk = info.agg_key_tweaked;
+        let agg_xonly: [u8; 32] = agg_pk[1..].try_into().unwrap();
+
+        // Both pubnonces must be present so the handler ENTERS round 2; it
+        // then fails because there's no persisted session. We use *master*
+        // participant pks (BIP-388 musig signs with master keys).
+        let device_master_pk = {
+            let n = sdk::curve::Secp256k1::derive_hd_node(&DEVICE_PATH).unwrap();
+            EcfpPrivateKey::<sdk::curve::Secp256k1, 32>::new(*n.privkey)
+                .to_public_key()
+                .to_compressed()
+        };
+        let (_sn_dev, pn_dev) =
+            musig_lib::nonce_gen(&[0xDEu8; 32], &device_master_pk, &agg_xonly).unwrap();
+        let (cosigner_pk, _, cosigner_pubnonce, _) =
+            cosigner_master_round1(&agg_xonly, &[0xCDu8; 32]);
+        insert_pubnonce(&mut psbt, &device_master_pk, &agg_pk, &pn_dev.0);
+        insert_pubnonce(&mut psbt, &cosigner_pk, &agg_pk, &cosigner_pubnonce.0);
+
+        // No prior round 1 ⇒ no session in storage ⇒ MissingMusigSession.
+        let result = sdk::executor::block_on(handle_sign_psbt(
+            &mut sdk::App::singleton(),
+            &serialize_as_psbtv2(&psbt),
+        ));
+        assert_eq!(result, Err(Error::MissingMusigSession));
+    }
+
+    /// Round 2 with the device's own pubnonce in the PSBT but the cosigner's
+    /// missing → the device should error with `MissingMusigPubnonce`.
+    #[test]
+    fn test_handle_sign_psbt_musig_round2_missing_cosigner_pubnonce_errors() {
+        musig_signing::reset_storage_for_tests();
+
+        let address_index: u32 = 13;
+        let wallet_policy = make_2of2_keypath_policy();
+        let account_name = "Musig negative test #2";
+
+        let mut psbt = build_musig_keypath_psbt(&wallet_policy, address_index);
+        let por = ProofOfRegistration::new(&wallet_policy.registration_id(account_name))
+            .dangerous_as_bytes();
+        prepare_psbt(&mut psbt, &[(&wallet_policy, &account_name, &por)]).unwrap();
+
+        // ---- Round 1 (real) ----
+        let r1 = sdk::executor::block_on(handle_sign_psbt(
+            &mut sdk::App::singleton(),
+            &serialize_as_psbtv2(&psbt),
+        ))
+        .unwrap();
+        let device_pubnonce = match r1 {
+            Response::PsbtSigned {
+                musig_pubnonces, ..
+            } => musig_pubnonces.into_iter().next().unwrap(),
+            _ => panic!(),
+        };
+        let agg_pk = device_pubnonce.aggregate_pubkey;
+
+        // Inject ONLY the device's pubnonce → the device should detect the
+        // cosigner's missing and fail.
+        insert_pubnonce(
+            &mut psbt,
+            &device_pubnonce.participant_pk,
+            &agg_pk,
+            &device_pubnonce.pubnonce,
+        );
+
+        let result = sdk::executor::block_on(handle_sign_psbt(
+            &mut sdk::App::singleton(),
+            &serialize_as_psbtv2(&psbt),
+        ));
+        assert_eq!(result, Err(Error::MissingMusigPubnonce));
     }
 }

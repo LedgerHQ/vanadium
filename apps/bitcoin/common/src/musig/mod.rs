@@ -561,8 +561,13 @@ pub fn aggregate_xpub(participant_xpubs: &[Xpub]) -> Result<Xpub, MusigError> {
     pks.sort();
     let ctx = key_agg(&pks)?;
 
+    // The synthetic xpub must preserve the *natural* parity of `Q`, not
+    // synthesise an even-y lift. Otherwise BIP-32 derivation on top of this
+    // xpub diverges from BIP-327's internal `apply_tweak` math whenever `Q`
+    // happens to have odd-y, and the resulting per-input agg key — and hence
+    // every downstream sighash — drifts.
     let mut compressed = [0u8; 33];
-    compressed[0] = 0x02;
+    compressed[0] = if has_even_y(&ctx.q) { 0x02 } else { 0x03 };
     compressed[1..].copy_from_slice(&ctx.q.x);
     let public_key =
         secp256k1::PublicKey::from_slice(&compressed).map_err(|_| MusigError::InvalidPoint)?;
