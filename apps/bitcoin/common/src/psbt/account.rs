@@ -458,7 +458,7 @@ pub fn fill_psbt_with_bip388_coordinates(
 
     // For each candidate participant, build the (fingerprint, origin_path_len)
     // pair used to identify its derivations inside the PSBT.
-    let lookups: Vec<(Fingerprint, usize)> = key_indices
+    let mut lookups: Vec<(Fingerprint, usize)> = key_indices
         .iter()
         .map(|&idx| {
             let key_expr = &wallet_policy.key_information()[idx as usize];
@@ -471,6 +471,20 @@ pub fn fill_psbt_with_bip388_coordinates(
             }
         })
         .collect();
+
+    // For a musig placeholder, the BIP-373 `tap_bip32_derivation` entry is
+    // keyed by the BIP-32-derived *aggregate* xonly key — with the aggregate
+    // BIP-388 synthetic xpub's fingerprint, not any single participant's.
+    // Add that as an extra lookup candidate so we don't miss the entry.
+    if key_placeholder.is_musig() {
+        let participant_xpubs: alloc::vec::Vec<_> = key_indices
+            .iter()
+            .map(|&idx| wallet_policy.key_information()[idx as usize].pubkey)
+            .collect();
+        if let Ok(agg) = crate::musig::aggregate_xpub(&participant_xpubs) {
+            lookups.push((agg.fingerprint(), 0));
+        }
+    }
 
     let find_coords = |bip32: &_, tap: &_| -> Option<WalletPolicyCoordinates> {
         for (fingerprint, origin_path_len) in &lookups {
