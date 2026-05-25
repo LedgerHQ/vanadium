@@ -7,11 +7,14 @@
 
 mod types;
 
+use bitcoin::bip32::{ChainCode, ChildNumber, Xpub};
+use bitcoin::secp256k1;
 use hashes::{sha256t_hash_newtype, Hash, HashEngine};
 use sdk::curve::{EcfpPublicKey, Secp256k1, Secp256k1Point};
 use subtle::ConstantTimeEq;
 use zeroize::Zeroize;
 
+use alloc::vec::Vec;
 use sdk::bignum::{BigNumMod, ModulusProvider};
 
 /// secp256k1 group order `n`.
@@ -489,6 +492,81 @@ pub fn sign(
     k2.zeroize();
 
     result
+}
+
+// =============================================================================
+// BIP-388 aggregate xpub + BIP-32 unhardened CKDpub (with tweak exposure)
+// =============================================================================
+
+/// Constructs the BIP-388 aggregate synthetic xpub for a list of participants.
+///
+/// Steps:
+/// 1. Sort participants' compressed pubkeys per BIP-327 KeySort.
+/// 2. Run [`key_agg`] to obtain the aggregate point `Q`.
+/// 3. Wrap `Q.x` (with x-only-implied `0x02` prefix per BIP-328) plus the
+///    fixed [`BIP_328_CHAINCODE`] into an [`Xpub`] that can be fed into
+///    further BIP-32 unhardened derivation.
+///
+/// The synthetic xpub is *not* meant to be serialized; depth, parent
+/// fingerprint, child number and network are zero / arbitrary.
+pub fn aggregate_xpub(participant_xpubs: &[Xpub]) -> Result<Xpub, MusigError> {
+    let mut pks: Vec<PlainPk> = participant_xpubs
+        .iter()
+        .map(|x| x.public_key.serialize())
+        .collect();
+    pks.sort();
+    let ctx = key_agg(&pks)?;
+
+    let mut compressed = [0u8; 33];
+    compressed[0] = 0x02;
+    compressed[1..].copy_from_slice(&ctx.q.x);
+    let public_key =
+        secp256k1::PublicKey::from_slice(&compressed).map_err(|_| MusigError::InvalidPoint)?;
+
+    let network = participant_xpubs
+        .first()
+        .map(|x| x.network)
+        .unwrap_or(bitcoin::NetworkKind::Test);
+
+    Ok(Xpub {
+        network,
+        depth: 0,
+        parent_fingerprint: Default::default(),
+        child_number: ChildNumber::Normal { index: 0 },
+        public_key,
+        chain_code: ChainCode::from(BIP_328_CHAINCODE),
+    })
+}
+
+/// Performs one BIP-32 unhardened CKDpub step and returns both the child
+/// [`Xpub`] and the 32-byte additive tweak scalar.
+///
+/// The tweak is the left half of `HMAC-SHA512(chain_code, pubkey || index_be)`,
+/// and it's what callers feed into [`apply_tweak`] (with `is_xonly = false`).
+pub fn ckdpub_with_tweak(
+    parent: &Xpub,
+    child: ChildNumber,
+) -> Result<(Xpub, [u8; 32]), MusigError> {
+    let (tweak_sk, chain_code) = parent
+        .ckd_pub_tweak(child)
+        .map_err(|_| MusigError::DerivationFailed)?;
+
+    let secp = secp256k1::Secp256k1::new();
+    let tweaked_pk = parent
+        .public_key
+        .add_exp_tweak(&secp, &tweak_sk.into())
+        .map_err(|_| MusigError::DerivationFailed)?;
+
+    let child_xpub = Xpub {
+        network: parent.network,
+        depth: parent.depth.saturating_add(1),
+        parent_fingerprint: parent.fingerprint(),
+        child_number: child,
+        public_key: tweaked_pk,
+        chain_code,
+    };
+
+    Ok((child_xpub, tweak_sk.secret_bytes()))
 }
 
 #[cfg(test)]

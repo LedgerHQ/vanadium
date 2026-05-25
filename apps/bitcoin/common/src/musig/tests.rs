@@ -161,3 +161,121 @@ fn round_trip_two_party_keypath_no_tweaks() {
         .schnorr_verify(&msg, &sig)
         .expect("aggregated musig2 schnorr signature must verify under the tweaked aggregate key");
 }
+
+// =============================================================================
+// BIP-32 unhardened CKDpub with tweak exposure
+// =============================================================================
+
+use bitcoin::bip32::{ChainCode, ChildNumber, Xpub};
+use bitcoin::secp256k1;
+
+/// BIP-32 test vector 1: parent m/0h derives to child m/0h/1 at index 1.
+/// Both parent and child are taken verbatim from the BIP-32 specification.
+#[test]
+fn ckdpub_with_tweak_bip32_tv1_m0h_to_m0h1() {
+    let parent_pubkey: [u8; 33] =
+        hex!("035a784662a4a20a65bf6aab9ae98a6c068a81c52e4b032c0fb5400c706cfccc56");
+    let parent_chain_code: [u8; 32] =
+        hex!("47fdacbd0f1097043b78c63c20c34ef4ed9a111d980047ad16282c7ae6236141");
+
+    let parent = Xpub {
+        network: bitcoin::NetworkKind::Main,
+        depth: 1,
+        parent_fingerprint: Default::default(),
+        child_number: ChildNumber::Hardened { index: 0 },
+        public_key: secp256k1::PublicKey::from_slice(&parent_pubkey).unwrap(),
+        chain_code: ChainCode::from(parent_chain_code),
+    };
+
+    let (child, tweak) = ckdpub_with_tweak(&parent, ChildNumber::Normal { index: 1 }).unwrap();
+
+    // Expected m/0h/1 pubkey and chain_code from BIP-32 test vector 1.
+    assert_eq!(
+        child.public_key.serialize(),
+        hex!("03501e454bf00751f24b1b489aa925215d66af2234e3891c3b21a52bedb3cd711c")
+    );
+    assert_eq!(
+        child.chain_code.as_bytes(),
+        &hex!("2a7857631386ba23dacac34180dd1983734e444fdbf774041578e9b6adb37c19")
+    );
+
+    // The tweak is non-zero (a passing CKDpub never produces a zero tweak).
+    assert_ne!(tweak, [0u8; 32]);
+
+    // Hardened child must be rejected.
+    let err = ckdpub_with_tweak(&parent, ChildNumber::Hardened { index: 0 }).unwrap_err();
+    assert_eq!(err, MusigError::DerivationFailed);
+}
+
+// =============================================================================
+// BIP-388 aggregate xpub
+// =============================================================================
+
+/// Sanity-check: the aggregate xpub's pubkey x-coordinate matches a
+/// direct `key_agg` of the (sorted) participant pubkeys, and the chaincode
+/// is exactly the BIP-328 constant.
+#[test]
+fn aggregate_xpub_matches_key_agg() {
+    fn xpub_from(pubkey: [u8; 33]) -> Xpub {
+        Xpub {
+            network: bitcoin::NetworkKind::Test,
+            depth: 0,
+            parent_fingerprint: Default::default(),
+            child_number: ChildNumber::Normal { index: 0 },
+            public_key: secp256k1::PublicKey::from_slice(&pubkey).unwrap(),
+            chain_code: ChainCode::from([1u8; 32]),
+        }
+    }
+
+    let xpubs = vec![xpub_from(X1), xpub_from(X2), xpub_from(X3)];
+    let agg = aggregate_xpub(&xpubs).unwrap();
+
+    // Same as [X1, X2, X3] sorted is the input to key_agg in the helper.
+    let mut sorted = vec![X1, X2, X3];
+    sorted.sort();
+    let expected = key_agg(&sorted).unwrap();
+    assert_eq!(&agg.public_key.serialize()[1..], &expected.q.x);
+
+    // BIP-388 / BIP-328 chaincode.
+    assert_eq!(agg.chain_code.as_bytes(), &BIP_328_CHAINCODE);
+    // The synthetic prefix is always 0x02 ("even-y").
+    assert_eq!(agg.public_key.serialize()[0], 0x02);
+}
+
+/// End-to-end: aggregate three xpubs, then derive an unhardened child of the
+/// aggregate. The two BIP-32 tweaks returned alongside the child Xpubs are the
+/// scalars the musig signing handler will feed into [`apply_tweak`].
+#[test]
+fn aggregate_xpub_then_two_ckdpub_steps() {
+    fn xpub_from(pubkey: [u8; 33]) -> Xpub {
+        Xpub {
+            network: bitcoin::NetworkKind::Test,
+            depth: 0,
+            parent_fingerprint: Default::default(),
+            child_number: ChildNumber::Normal { index: 0 },
+            public_key: secp256k1::PublicKey::from_slice(&pubkey).unwrap(),
+            chain_code: ChainCode::from([2u8; 32]),
+        }
+    }
+
+    let agg = aggregate_xpub(&[xpub_from(X1), xpub_from(X2)]).unwrap();
+    let (child1, t1) = ckdpub_with_tweak(&agg, ChildNumber::Normal { index: 0 }).unwrap();
+    let (child2, t2) = ckdpub_with_tweak(&child1, ChildNumber::Normal { index: 7 }).unwrap();
+
+    // The two-step derivation must equal a single derive_pub call over the
+    // same path (sanity check that the helper matches rust-bitcoin's BIP-32).
+    let secp = secp256k1::Secp256k1::new();
+    let path = [
+        ChildNumber::Normal { index: 0 },
+        ChildNumber::Normal { index: 7 },
+    ];
+    let expected = agg.derive_pub(&secp, &path).unwrap();
+    assert_eq!(child2.public_key, expected.public_key);
+    assert_eq!(child2.chain_code, expected.chain_code);
+
+    // Tweaks are non-zero (the HMAC output is overwhelmingly never zero).
+    assert_ne!(t1, [0u8; 32]);
+    assert_ne!(t2, [0u8; 32]);
+    // ... and they differ from each other (different index/parent).
+    assert_ne!(t1, t2);
+}

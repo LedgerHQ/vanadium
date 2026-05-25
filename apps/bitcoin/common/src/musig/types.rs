@@ -122,4 +122,7 @@ pub enum MusigError {
     SecretKeyOutOfRange,
     /// The pubkey derived from `sk` doesn't match the one stored in `secnonce`.
     PubkeyMismatch,
+    /// BIP-32 unhardened CKDpub failed (hardened index passed, or HMAC produced
+    /// a tweak >= n, or the tweaked point was infinity).
+    DerivationFailed,
 }
