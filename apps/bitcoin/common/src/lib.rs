@@ -8,6 +8,7 @@ pub mod errors;
 pub mod fastpsbt;
 pub mod identity;
 pub mod message;
+pub mod musig;
 pub mod por;
 pub mod psbt;
 pub mod script;
