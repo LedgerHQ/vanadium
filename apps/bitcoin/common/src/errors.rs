@@ -115,6 +115,12 @@ pub enum Error {
     // User rejections (separate to keep enum small and avoid strings)
     #[n(45)]
     UserRejected,
+
+    // MuSig2
+    #[n(46)]
+    MissingMusigSession,
+    #[n(47)]
+    MissingMusigPubnonce,
 }
 
 impl fmt::Display for Error {
@@ -185,6 +191,15 @@ impl fmt::Display for Error {
             StorageError => write!(f, "Storage error"),
 
             UserRejected => write!(f, "Rejected by the user"),
+
+            MissingMusigSession => write!(
+                f,
+                "MuSig2 PSBT contains a pubnonce but the device has no record of the session"
+            ),
+            MissingMusigPubnonce => write!(
+                f,
+                "MuSig2 round 2 requires this device's pubnonce in the PSBT but it is missing"
+            ),
         }
     }
 }

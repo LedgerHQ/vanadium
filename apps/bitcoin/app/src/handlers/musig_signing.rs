@@ -27,6 +27,7 @@ use bitcoin::{TapNodeHash, TapTweakHash, XOnlyPublicKey};
 use common::bip388::{KeyExpression, KeyInformation};
 use common::errors::Error;
 use common::fastpsbt;
+use common::message::{MuSig2PartialSignature, MuSig2Pubnonce};
 use common::musig::{self, MusigError, PlainPk, PubNonce, SessionContext};
 use sdk::hash::{Hasher, Sha256};
 use subtle::ConstantTimeEq;
@@ -232,6 +233,15 @@ mod storage {
     }
 }
 
+/// Wipes the test-only persistent-storage backing. Available only under
+/// `cfg(test)`; cross-module tests that drive `handle_sign_psbt` through
+/// multiple musig rounds should call this at the start to guarantee a clean
+/// session-storage state.
+#[cfg(test)]
+pub(crate) fn reset_storage_for_tests() {
+    storage::reset();
+}
+
 // =============================================================================
 // Per-input MuSig2 derivation + signing rounds
 // =============================================================================
@@ -284,25 +294,8 @@ pub struct PerInputInfo {
     pub is_xonly: [bool; 3],
 }
 
-/// Returned by [`produce_pubnonce`].
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct MuSig2PubnonceData {
-    pub input_index: u32,
-    pub pubnonce: [u8; 66],
-    pub participant_pk: [u8; 33],
-    pub aggregate_pubkey: [u8; 33],
-    pub leaf_hash: Option<[u8; 32]>,
-}
-
-/// Returned by [`sign_sighash_musig`].
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct MuSig2PartialSigData {
-    pub input_index: u32,
-    pub signature: [u8; 32],
-    pub participant_pk: [u8; 33],
-    pub aggregate_pubkey: [u8; 33],
-    pub leaf_hash: Option<[u8; 32]>,
-}
+// Round 1 / round 2 outputs are emitted directly as wire types from
+// [`common::message`] — no conversion needed at the handler boundary.
 
 // BIP-388 PSBT-session-id tagged hash. Binding the session to both the wallet
 // policy and the transaction ensures distinct PSBTs / wallets never collide on
@@ -352,10 +345,12 @@ pub fn compute_per_input_info(
         placeholder.num1
     });
     let address_step = ChildNumber::from(address_index);
-    let secp = secp256k1::Secp256k1::new();
 
-    // 1) Each participant's child pubkey, sorted.
-    let path = [change_step, address_step];
+    // 1) Per BIP-388, MuSig2 key-aggregation runs on the *master* participant
+    //    pubkeys — the BIP-32 `(change, address_index)` derivation is applied
+    //    *after* aggregation (and shows up as two non-xonly tweaks in the
+    //    session context below). The participants therefore sign with their
+    //    master private keys; their derived children are never used.
     let mut keys: Vec<PlainPk> = Vec::with_capacity(indices.len());
     let mut participant_xpubs: Vec<Xpub> = Vec::with_capacity(indices.len());
     for &idx in indices {
@@ -363,15 +358,13 @@ pub fn compute_per_input_info(
             .get(idx as usize)
             .ok_or(Error::InvalidKeyIndex)?
             .pubkey;
-        let child = xpub
-            .derive_pub(&secp, &path)
-            .map_err(|_| Error::KeyDerivationFailed)?;
-        keys.push(child.public_key.serialize());
+        keys.push(xpub.public_key.serialize());
         participant_xpubs.push(xpub);
     }
     keys.sort();
 
     // 2) Aggregate xpub + 2 BIP-32 derivations to (change, address_index).
+    let secp = secp256k1::Secp256k1::new();
     let agg = musig::aggregate_xpub(&participant_xpubs).map_err(|_| Error::InvalidKey)?;
     let (child1, t0) =
         musig::ckdpub_with_tweak(&agg, change_step).map_err(|_| Error::KeyDerivationFailed)?;
@@ -426,7 +419,7 @@ pub fn produce_pubnonce(
     input_index: u32,
     placeholder_index: u32,
     spend: SpendPath<'_>,
-) -> Result<MuSig2PubnonceData, Error> {
+) -> Result<MuSig2Pubnonce, Error> {
     let rand_i_j = compute_rand_i_j(session, input_index, placeholder_index);
     let aggpk_xonly: [u8; 32] = per_input_info.agg_key_tweaked[1..]
         .try_into()
@@ -436,7 +429,7 @@ pub fn produce_pubnonce(
         musig::nonce_gen(&rand_i_j, internal_pk, &aggpk_xonly).map_err(map_musig_err)?;
     // `_secnonce` is dropped here, zeroizing its k1/k2 (see SecNonce's Drop).
 
-    Ok(MuSig2PubnonceData {
+    Ok(MuSig2Pubnonce {
         input_index,
         pubnonce: *pubnonce.as_bytes(),
         participant_pk: *internal_pk,
@@ -461,7 +454,7 @@ pub fn sign_sighash_musig(
     placeholder_index: u32,
     psbt_input: &fastpsbt::Input<'_>,
     spend: SpendPath<'_>,
-) -> Result<MuSig2PartialSigData, Error> {
+) -> Result<MuSig2PartialSignature, Error> {
     let agg_pk = &per_input_info.agg_key_tweaked;
     let leaf = spend.leaf_hash();
 
@@ -470,7 +463,7 @@ pub fn sign_sighash_musig(
     let _my_pubnonce = psbt_input
         .get_musig2_pub_nonce(internal_pk, agg_pk, leaf)
         .map_err(|_| Error::FailedToDeserializePsbt)?
-        .ok_or(Error::FailedToDeserializePsbt)?;
+        .ok_or(Error::MissingMusigPubnonce)?;
 
     // Collect every participant's pubnonce.
     let mut pubnonces: Vec<PubNonce> = Vec::with_capacity(per_input_info.keys.len());
@@ -478,7 +471,7 @@ pub fn sign_sighash_musig(
         let raw = psbt_input
             .get_musig2_pub_nonce(participant_pk, agg_pk, leaf)
             .map_err(|_| Error::FailedToDeserializePsbt)?
-            .ok_or(Error::FailedToDeserializePsbt)?;
+            .ok_or(Error::MissingMusigPubnonce)?;
         pubnonces.push(PubNonce(raw));
     }
     let aggnonce = musig::nonce_agg(&pubnonces).map_err(map_musig_err)?;
@@ -503,7 +496,7 @@ pub fn sign_sighash_musig(
     };
     let psig = musig::sign(secnonce, sk, &ctx).map_err(map_musig_err)?;
 
-    Ok(MuSig2PartialSigData {
+    Ok(MuSig2PartialSignature {
         input_index,
         signature: psig,
         participant_pk: *internal_pk,
@@ -862,17 +855,11 @@ mod tests {
         )
         .unwrap();
 
-        // Use cosigner #1's derived child as the "local" participant.
+        // BIP-388 musig signs with the *master* participant key — `info.keys`
+        // contains the (sorted) master pubkeys directly, not derived children.
         let internal_pk: [u8; 33] = {
-            let secp = secp256k1::Secp256k1::new();
             let xpub: Xpub = COSIGNER_1_XPUB.parse().unwrap();
-            xpub.derive_pub(
-                &secp,
-                &[ChildNumber::Normal { index: 0 }, ChildNumber::Normal { index: 3 }],
-            )
-            .unwrap()
-            .public_key
-            .serialize()
+            xpub.public_key.serialize()
         };
         assert!(info.keys.contains(&internal_pk));
 

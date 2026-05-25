@@ -207,6 +207,49 @@ pub struct PartialSignature {
     pub leaf_hash: Option<Vec<u8>>,
 }
 
+/// Round-1 MuSig2 pubnonce output for a single `(input, key expression)` pair
+/// of a `musig(...)` placeholder. Mirrors the on-device representation in
+/// [`crate::musig::PubNonce`] but adds the contextual fields the host needs to
+/// populate BIP-373 PSBT entries.
+#[derive(Encode, Decode, Debug, Clone, PartialEq, Eq)]
+#[cbor(map)]
+pub struct MuSig2Pubnonce {
+    #[n(0)]
+    pub input_index: u32,
+    /// 66-byte BIP-327 public nonce (`R_s1 || R_s2`).
+    #[cbor(n(1), with = "minicbor::bytes")]
+    pub pubnonce: [u8; 66],
+    /// 33-byte SEC1 compressed pubkey of *this* participant (the device).
+    #[cbor(n(2), with = "minicbor::bytes")]
+    pub participant_pk: [u8; 33],
+    /// 33-byte SEC1 compressed aggregate pubkey *after* all tweaks
+    /// (BIP-32 derivations + optional BIP-341 taptweak for keypath spend).
+    #[cbor(n(3), with = "minicbor::bytes")]
+    pub aggregate_pubkey: [u8; 33],
+    /// `Some(hash)` for script-path spends, `None` for key-path spends.
+    #[cbor(n(4), with = "minicbor::bytes")]
+    pub leaf_hash: Option<[u8; 32]>,
+}
+
+/// Round-2 MuSig2 partial signature output for a single `(input, key expression)`
+/// pair. The host aggregates all participants' partial signatures into the
+/// final 64-byte Schnorr signature.
+#[derive(Encode, Decode, Debug, Clone, PartialEq, Eq)]
+#[cbor(map)]
+pub struct MuSig2PartialSignature {
+    #[n(0)]
+    pub input_index: u32,
+    /// 32-byte BIP-327 partial signature.
+    #[cbor(n(1), with = "minicbor::bytes")]
+    pub signature: [u8; 32],
+    #[cbor(n(2), with = "minicbor::bytes")]
+    pub participant_pk: [u8; 33],
+    #[cbor(n(3), with = "minicbor::bytes")]
+    pub aggregate_pubkey: [u8; 33],
+    #[cbor(n(4), with = "minicbor::bytes")]
+    pub leaf_hash: Option<[u8; 32]>,
+}
+
 #[derive(Encode, Decode, Debug, Clone, PartialEq, Eq)]
 pub enum Response {
     #[n(0)]
@@ -253,8 +296,21 @@ pub enum Response {
     #[n(5)]
     #[cbor(map)]
     PsbtSigned {
+        /// ECDSA / Schnorr partial signatures for plain key placeholders.
         #[n(0)]
         signatures: Vec<PartialSignature>,
+        /// Round-1 MuSig2 pubnonces produced for `musig(...)` placeholders
+        /// whose corresponding PSBT input *did not* already carry pubnonces.
+        /// Empty when the PSBT involves no musig participants for which the
+        /// device is round-1 capable, or when this is a round-2 call.
+        #[n(1)]
+        musig_pubnonces: Vec<MuSig2Pubnonce>,
+        /// Round-2 MuSig2 partial signatures produced for `musig(...)`
+        /// placeholders whose PSBT input carries this device's pubnonce
+        /// (i.e. the cosigners have completed round 1 and merged the
+        /// pubnonces back into the PSBT).
+        #[n(2)]
+        musig_partial_sigs: Vec<MuSig2PartialSignature>,
     },
 
     #[n(6)]
@@ -272,4 +328,96 @@ pub enum Response {
         #[n(0)]
         error: crate::errors::Error,
     },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// CBOR round-trip for `MuSig2Pubnonce`.
+    #[test]
+    fn musig2_pubnonce_roundtrip() {
+        let pn = MuSig2Pubnonce {
+            input_index: 7,
+            pubnonce: [0x11; 66],
+            participant_pk: [0x22; 33],
+            aggregate_pubkey: [0x33; 33],
+            leaf_hash: Some([0x44; 32]),
+        };
+        let bytes = minicbor::to_vec(&pn).unwrap();
+        let decoded: MuSig2Pubnonce = minicbor::decode(&bytes).unwrap();
+        assert_eq!(pn, decoded);
+
+        let pn_no_leaf = MuSig2Pubnonce {
+            input_index: 0,
+            pubnonce: [0u8; 66],
+            participant_pk: [0u8; 33],
+            aggregate_pubkey: [0u8; 33],
+            leaf_hash: None,
+        };
+        let bytes = minicbor::to_vec(&pn_no_leaf).unwrap();
+        let decoded: MuSig2Pubnonce = minicbor::decode(&bytes).unwrap();
+        assert_eq!(pn_no_leaf, decoded);
+    }
+
+    /// CBOR round-trip for `MuSig2PartialSignature`.
+    #[test]
+    fn musig2_partial_sig_roundtrip() {
+        let ps = MuSig2PartialSignature {
+            input_index: 3,
+            signature: [0x55; 32],
+            participant_pk: [0x22; 33],
+            aggregate_pubkey: [0x33; 33],
+            leaf_hash: None,
+        };
+        let bytes = minicbor::to_vec(&ps).unwrap();
+        let decoded: MuSig2PartialSignature = minicbor::decode(&bytes).unwrap();
+        assert_eq!(ps, decoded);
+    }
+
+    /// CBOR round-trip for the extended `Response::PsbtSigned`, including the
+    /// two new fields.
+    #[test]
+    fn response_psbt_signed_roundtrip_with_musig() {
+        let resp = Response::PsbtSigned {
+            signatures: vec![PartialSignature {
+                input_index: 0,
+                signature: vec![1, 2, 3, 4],
+                pubkey: vec![5, 6, 7],
+                leaf_hash: None,
+            }],
+            musig_pubnonces: vec![MuSig2Pubnonce {
+                input_index: 0,
+                pubnonce: [0xAB; 66],
+                participant_pk: [0xCD; 33],
+                aggregate_pubkey: [0xEF; 33],
+                leaf_hash: Some([0x12; 32]),
+            }],
+            musig_partial_sigs: vec![MuSig2PartialSignature {
+                input_index: 0,
+                signature: [0x99; 32],
+                participant_pk: [0xCD; 33],
+                aggregate_pubkey: [0xEF; 33],
+                leaf_hash: Some([0x12; 32]),
+            }],
+        };
+        let bytes = minicbor::to_vec(&resp).unwrap();
+        let decoded: Response = minicbor::decode(&bytes).unwrap();
+        assert_eq!(resp, decoded);
+    }
+
+    /// `Response::PsbtSigned` with empty musig fields (the common case for
+    /// PSBTs that don't involve any `musig(...)` placeholder) round-trips
+    /// identically.
+    #[test]
+    fn response_psbt_signed_roundtrip_empty_musig() {
+        let resp = Response::PsbtSigned {
+            signatures: vec![],
+            musig_pubnonces: vec![],
+            musig_partial_sigs: vec![],
+        };
+        let bytes = minicbor::to_vec(&resp).unwrap();
+        let decoded: Response = minicbor::decode(&bytes).unwrap();
+        assert_eq!(resp, decoded);
+    }
 }

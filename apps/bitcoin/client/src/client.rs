@@ -337,7 +337,7 @@ impl<'a> BitcoinClient {
 
         let response_raw = self.send_message(&msg).await?;
         match Self::parse_response(&response_raw).await? {
-            Response::PsbtSigned { signatures } => Ok(signatures),
+            Response::PsbtSigned { signatures, .. } => Ok(signatures),
             e => Err(BitcoinClientError::InvalidResponse(format!(
                 "Invalid response: {:?}",
                 e
