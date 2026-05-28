@@ -14,6 +14,11 @@ common = { path = "../common", features = ["serde_json"] }
 client_sdk = { path = "../client-sdk", package="vanadium-client-sdk", features=["cargo_toml", "transport", "target_all"], default-features = false }
 which = "7.0.3"
 cargo-generate = "0.23.8"
+# rhai_codegen 3.2.0 regressed: the deprecated #[export_fn]/#[export_module] macros
+# now hardcode `::rhai` as the generated-code root path. When rhai uses these macros
+# in its own source, `::rhai` cannot be resolved (you cannot reference your own crate
+# by its external name), breaking compilation on Rust >=1.94. Pin to <3.2.
+rhai_codegen = "=3.1.0"
 # auth-git2 0.5.8 has a broken version requirement `>0.14, <21.0` (intended as `<0.21`)
 # that allows git2 0.21 but uses APIs only present in earlier versions. Pin git2 to
 # 0.20 here to keep the resolver on a compatible version.
