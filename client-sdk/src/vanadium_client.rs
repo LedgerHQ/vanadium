@@ -1751,18 +1751,21 @@ impl<E: std::fmt::Debug + Send + Sync + 'static> VanadiumAppClient<E> {
                 match engine.step().await {
                     Ok(Some(VAppResponse::Message(response))) => {
                         // We got a response - send it to the pending request
-                        if let Some(resp_tx) = pending_response.take() {
-                            if resp_tx.send(Ok(response)).is_err() {
-                                #[cfg(feature = "debug")]
-                                log::debug!("Failed to send response: receiver dropped");
+                        match pending_response.take() {
+                            Some(resp_tx) => {
+                                if resp_tx.send(Ok(response)).is_err() {
+                                    #[cfg(feature = "debug")]
+                                    log::debug!("Failed to send response: receiver dropped");
+                                }
                             }
-                        } else {
-                            // Received a message without a pending request - this shouldn't happen
-                            // in a strict message-response pattern
-                            #[cfg(feature = "debug")]
-                            log::debug!(
-                                "Warning: Received unsolicited message from V-App, dropping it"
-                            );
+                            _ => {
+                                // Received a message without a pending request - this shouldn't happen
+                                // in a strict message-response pattern
+                                #[cfg(feature = "debug")]
+                                log::debug!(
+                                    "Warning: Received unsolicited message from V-App, dropping it"
+                                );
+                            }
                         }
                     }
                     Ok(Some(VAppResponse::Panic(msg))) => {

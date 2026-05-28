@@ -2,7 +2,9 @@
 
 // Ensure exactly one target feature is enabled
 #[cfg(all(feature = "target_native", feature = "target_vanadium_ledger"))]
-compile_error!("Features `target_native` and `target_vanadium_ledger` are mutually exclusive. Enable only one.");
+compile_error!(
+    "Features `target_native` and `target_vanadium_ledger` are mutually exclusive. Enable only one."
+);
 
 #[cfg(not(any(feature = "target_native", feature = "target_vanadium_ledger")))]
 compile_error!("Either `target_native` or `target_vanadium_ledger` feature must be enabled.");
@@ -76,7 +78,7 @@ unsafe impl critical_section::Impl for CriticalSection {
 
 // Allocator initialization for target_vanadium_ledger targets
 #[cfg(feature = "target_vanadium_ledger")]
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn rust_init_heap() {
     init_heap();
 }
@@ -166,7 +168,7 @@ macro_rules! println {
 macro_rules! bootstrap {
     () => {
         #[cfg(feature = "target_vanadium_ledger")]
-        #[no_mangle]
+        #[unsafe(no_mangle)]
         pub fn _start() {
             $crate::rust_init_heap();
             main()

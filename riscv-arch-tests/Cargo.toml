@@ -1,7 +1,7 @@
 [package]
 name = "vanadium-riscv-arch-tests"
 version = "0.1.0"
-edition = "2021"
+edition.workspace = true
 description = "Official RISC-V architectural tests for the Vanadium CPU emulator"
 
 [dependencies]

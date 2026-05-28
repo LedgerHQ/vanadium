@@ -48,19 +48,21 @@ const SLIP21_MAGIC: &'static str = "Symmetric key seed";
 const TICKER_MS: u64 = 100;
 
 unsafe fn to_bigint(bytes: *const u8, len: usize) -> BigUint {
-    let bytes = std::slice::from_raw_parts(bytes, len);
+    let bytes = unsafe {std::slice::from_raw_parts(bytes, len)};
     BigUint::from_bytes_be(bytes)
 }
 
 unsafe fn copy_result(r: *mut u8, result_bytes: &[u8], len: usize) -> () {
-    if result_bytes.len() < len {
-        std::ptr::write_bytes(r, 0, len - result_bytes.len());
+    unsafe {
+        if result_bytes.len() < len {
+            std::ptr::write_bytes(r, 0, len - result_bytes.len());
+        }
+        std::ptr::copy_nonoverlapping(
+            result_bytes.as_ptr(),
+            r.add(len - result_bytes.len()),
+            result_bytes.len(),
+        );
     }
-    std::ptr::copy_nonoverlapping(
-        result_bytes.as_ptr(),
-        r.add(len - result_bytes.len()),
-        result_bytes.len(),
-    );
 }
 
 // This should be called in show_page if there is no action for the user after showing the page.

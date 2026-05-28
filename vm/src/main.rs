@@ -215,7 +215,7 @@ impl TryFrom<ApduHeader> for Instruction {
 }
 
 #[cfg(not(feature = "run_tests"))]
-#[no_mangle]
+#[unsafe(no_mangle)]
 extern "C" fn sample_main() {
     // initialize the auth_key, if not already initialized
     let _ = crate::auth::VMAuthKey::get();
@@ -242,7 +242,7 @@ extern "C" fn sample_main() {
 }
 
 #[cfg(feature = "run_tests")]
-#[no_mangle]
+#[unsafe(no_mangle)]
 extern "C" fn sample_main() {
     app_tests::run_tests();
     ledger_device_sdk::exit_app(0x00);
