@@ -177,6 +177,7 @@ fn get_home_data() -> &'static HomeScreenData {
                         tokens: BAR_TOKENS.as_ptr(),
                         nbBars: 1,
                         tuneId: TUNE_TAP_CASUAL as u8,
+                        ..Default::default()
                     },
                 },
                 contentActionCallback: Some(settings_action_callback),

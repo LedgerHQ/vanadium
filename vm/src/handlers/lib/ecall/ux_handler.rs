@@ -599,6 +599,7 @@ impl UxHandler {
                             text2: self.alloc_cstring(subtext.as_ref())?,
                             onTop: false,
                             style: *style,
+                            ..Default::default()
                         }, // info
                         false,                      // not modal
                     );
