@@ -144,6 +144,13 @@ impl CleartextValueCursor {
         }
     }
 
+    fn subpolicy(&mut self) -> Option<alloc::boxed::Box<TapleafClass>> {
+        match self.values.next()? {
+            CleartextValue::Subpolicy(value) => Some(value),
+            _ => None,
+        }
+    }
+
     fn finish(mut self) -> Option<()> {
         if self.values.next().is_none() {
             Some(())
@@ -151,6 +158,23 @@ impl CleartextValueCursor {
             None
         }
     }
+}
+
+/// Parse a sub-policy cleartext string back into a `TapleafClass`.
+/// Tries all non-combinator tapleaf specs (those without `Subpolicy` parts)
+/// to prevent nesting.
+fn parse_tapleaf_cleartext(s: &str) -> Option<alloc::boxed::Box<TapleafClass>> {
+    for spec in TAPLEAF_SPECS {
+        if spec.parts.iter().any(|p| matches!(p, CleartextPart::Subpolicy)) {
+            continue; // skip combinator specs to prevent nesting
+        }
+        for values in parse_with_spec(spec, s) {
+            if let Some(leaf) = TapleafClass::from_cleartext_pattern(spec.kind, values) {
+                return Some(alloc::boxed::Box::new(leaf));
+            }
+        }
+    }
+    None
 }
 
 fn parse_cleartext_value(part: CleartextPart, input: &str) -> Option<CleartextValue> {
@@ -164,6 +188,9 @@ fn parse_cleartext_value(part: CleartextPart, input: &str) -> Option<CleartextVa
         CleartextPart::BlockHeight => input.parse().ok().map(CleartextValue::BlockHeight),
         CleartextPart::Timestamp => {
             parse_utc_date_to_timestamp(input).map(CleartextValue::Timestamp)
+        }
+        CleartextPart::Subpolicy => {
+            parse_tapleaf_cleartext(input).map(CleartextValue::Subpolicy)
         }
     }
 }

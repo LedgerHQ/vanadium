@@ -66,6 +66,7 @@ pub(super) enum CleartextPart {
     RelativeTime,
     BlockHeight,
     Timestamp,
+    Subpolicy,
 }
 
 pub(super) struct CleartextSpec<K> {
@@ -82,6 +83,7 @@ enum CleartextValue {
     RelativeTime(u32),
     BlockHeight(u32),
     Timestamp(u32),
+    Subpolicy(alloc::boxed::Box<TapleafClass>),
 }
 
 /// Compares two key placeholders for canonical display ordering:
@@ -183,6 +185,9 @@ impl TapleafClass {
                 TC::AbsoluteTimelockMultiSig { threshold: t1, keys: k1, timestamp: ts1 },
                 TC::AbsoluteTimelockMultiSig { threshold: t2, keys: k2, timestamp: ts2 },
             ) => k1.len().cmp(&k2.len()).then(t1.cmp(t2)).then(ts1.cmp(ts2)),
+            (TC::AndV { sub1: a1, sub2: a2 }, TC::AndV { sub1: b1, sub2: b2 }) => {
+                a1.display_cmp(b1).then_with(|| a2.display_cmp(b2))
+            }
             (TC::Other(s1), TC::Other(s2)) => s1.cmp(s2),
             // Same order() value implies same variant; this arm is unreachable.
             _ => Ordering::Equal,
@@ -264,6 +269,9 @@ fn format_cleartext_value(
         (CleartextPart::RelativeTime, CleartextValue::RelativeTime(t)) => format_relative_time(*t),
         (CleartextPart::BlockHeight, CleartextValue::BlockHeight(h)) => h.to_string(),
         (CleartextPart::Timestamp, CleartextValue::Timestamp(t)) => format_utc_date(*t),
+        (CleartextPart::Subpolicy, CleartextValue::Subpolicy(leaf)) => {
+            leaf.to_cleartext_string(canonical)?
+        }
         _ => {
             debug_assert!(false, "cleartext part/value mismatch (codegen invariant violated)");
             return None;

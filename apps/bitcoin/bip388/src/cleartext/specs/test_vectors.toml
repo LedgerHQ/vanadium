@@ -522,6 +522,71 @@ cleartext = [
 has_cleartext = true
 
 # =============================================================================
+# Taproot AndV leaves: and_v(v:SUBPOLICY_1, SUBPOLICY_2)
+# =============================================================================
+
+# SingleSig AND SortedMultisig: score = 1 * 1 = 1
+[[vector]]
+template = "tr(@0/**,and_v(v:pk(@1/**),sortedmulti_a(2,@2/**,@3/**)))"
+confusion_score = 1
+cleartext = [
+    "Primary path: @0",
+    "Single-signature (@1) AND 2 of @2 and @3 (sorted)",
+]
+has_cleartext = true
+
+# SingleSig AND Multisig (threshold == keys): score = 1 * 2 = 2
+[[vector]]
+template = "tr(@0/**,and_v(v:pk(@1/**),multi_a(2,@2/**,@3/**)))"
+confusion_score = 2
+cleartext = [
+    "Primary path: @0",
+    "Single-signature (@1) AND 2 of @2 and @3",
+]
+has_cleartext = true
+
+# SortedMultisig AND Multisig (threshold == keys): score = 1 * 2 = 2
+[[vector]]
+template = "tr(@0/**,and_v(v:sortedmulti_a(2,@1/**,@2/**),multi_a(2,@3/**,@4/**)))"
+confusion_score = 2
+cleartext = [
+    "Primary path: @0",
+    "2 of @1 and @2 (sorted) AND 2 of @3 and @4",
+]
+has_cleartext = true
+
+# Multisig AND Multisig (both threshold == keys): score = 2 * 2 = 4
+[[vector]]
+template = "tr(@0/**,and_v(v:multi_a(2,@1/**,@2/**),multi_a(2,@3/**,@4/**)))"
+confusion_score = 4
+cleartext = [
+    "Primary path: @0",
+    "2 of @1 and @2 AND 2 of @3 and @4",
+]
+has_cleartext = true
+
+# BothMustSign AND SortedMultisig: score = 1 * 1 = 1
+[[vector]]
+template = "tr(@0/**,and_v(v:and_v(v:pk(@1/**),pk(@2/**)),sortedmulti_a(2,@3/**,@4/**)))"
+confusion_score = 1
+cleartext = [
+    "Primary path: @0",
+    "Both @1 and @2 must sign AND 2 of @3 and @4 (sorted)",
+]
+has_cleartext = true
+
+# AndV leaf alongside a normal leaf: SingleSig (order=0) sorts before AndV (order=16)
+[[vector]]
+template = "tr(@0/**,{pk(@1/**),and_v(v:pk(@2/**),sortedmulti_a(2,@3/**,@4/**))})"
+confusion_score = 1
+cleartext = [
+    "Primary path: @0",
+    "Single-signature (@1)",
+    "Single-signature (@2) AND 2 of @3 and @4 (sorted)",
+]
+has_cleartext = true
+
+# =============================================================================
 # Non-canonical key derivations: no cleartext is produced and the encoder
 # falls back to the raw descriptor template (with `has_cleartext = false`).
 # =============================================================================
