@@ -89,77 +89,32 @@ patterns = [
 ]
 cleartext = ["$threshold", " of ", "$keys"]
 
-[[tapleaf]]
-name = "RelativeHeightlockSingleSig"
-patterns = ["and_v(v:pk($key), older($blocks))"]
-cleartext = ["$key", " after ", "$blocks", " blocks"]
+# Timelock / heightlock leaves are `and_v(v:SIGNER, LOCK)`. The signer is a
+# `$sub` sub-policy (classified recursively as a non-combinator leaf:
+# SingleSig, BothMustSign, SortedMultisig or Multisig); the lock kind is fixed
+# by the pattern and disambiguated by the binding's implicit value range (e.g.
+# `older($blocks)` vs `older($relative_time)`). This single shape per lock kind
+# replaces the former 3-signers x 4-locks cross-product.
 
 [[tapleaf]]
-name = "RelativeHeightlockBothMustSign"
-patterns = ["and_v(v:and_v(v:pk($key1), pk($key2)), older($blocks))"]
-cleartext = ["Both ", "$key1", " and ", "$key2", " after ", "$blocks", " blocks"]
+name = "RelativeHeightlock"
+patterns = ["and_v(v:$sub, older($blocks))"]
+cleartext = ["$sub", " after ", "$blocks", " blocks"]
 
 [[tapleaf]]
-name = "RelativeHeightlockMultiSig"
-patterns = [
-    "and_v(v:multi_a($threshold, $keys), older($blocks))",
-    "and_v(v:pk(musig($threshold, $keys)), older($blocks))",
-]
-cleartext = ["$threshold", " of ", "$keys", " after ", "$blocks", " blocks"]
+name = "RelativeTimelock"
+patterns = ["and_v(v:$sub, older($relative_time))"]
+cleartext = ["$sub", " after ", "$relative_time"]
 
 [[tapleaf]]
-name = "RelativeTimelockSingleSig"
-patterns = ["and_v(v:pk($key), older($relative_time))"]
-cleartext = ["$key", " after ", "$relative_time"]
+name = "AbsoluteHeightlock"
+patterns = ["and_v(v:$sub, after($block_height))"]
+cleartext = ["$sub", " after block height ", "$block_height"]
 
 [[tapleaf]]
-name = "RelativeTimelockBothMustSign"
-patterns = ["and_v(v:and_v(v:pk($key1), pk($key2)), older($relative_time))"]
-cleartext = ["Both ", "$key1", " and ", "$key2", " after ", "$relative_time"]
-
-[[tapleaf]]
-name = "RelativeTimelockMultiSig"
-patterns = [
-    "and_v(v:multi_a($threshold, $keys), older($relative_time))",
-    "and_v(v:pk(musig($threshold, $keys)), older($relative_time))",
-]
-cleartext = ["$threshold", " of ", "$keys", " after ", "$relative_time"]
-
-[[tapleaf]]
-name = "AbsoluteHeightlockSingleSig"
-patterns = ["and_v(v:pk($key), after($block_height))"]
-cleartext = ["$key", " after block height ", "$block_height"]
-
-[[tapleaf]]
-name = "AbsoluteHeightlockBothMustSign"
-patterns = ["and_v(v:and_v(v:pk($key1), pk($key2)), after($block_height))"]
-cleartext = ["Both ", "$key1", " and ", "$key2", " after block height ", "$block_height"]
-
-[[tapleaf]]
-name = "AbsoluteHeightlockMultiSig"
-patterns = [
-    "and_v(v:multi_a($threshold, $keys), after($block_height))",
-    "and_v(v:pk(musig($threshold, $keys)), after($block_height))",
-]
-cleartext = ["$threshold", " of ", "$keys", " after block height ", "$block_height"]
-
-[[tapleaf]]
-name = "AbsoluteTimelockSingleSig"
-patterns = ["and_v(v:pk($key), after($timestamp))"]
-cleartext = ["$key", " after date ", "$timestamp"]
-
-[[tapleaf]]
-name = "AbsoluteTimelockBothMustSign"
-patterns = ["and_v(v:and_v(v:pk($key1), pk($key2)), after($timestamp))"]
-cleartext = ["Both ", "$key1", " and ", "$key2", " after date ", "$timestamp"]
-
-[[tapleaf]]
-name = "AbsoluteTimelockMultiSig"
-patterns = [
-    "and_v(v:multi_a($threshold, $keys), after($timestamp))",
-    "and_v(v:pk(musig($threshold, $keys)), after($timestamp))",
-]
-cleartext = ["$threshold", " of ", "$keys", " after date ", "$timestamp"]
+name = "AbsoluteTimelock"
+patterns = ["and_v(v:$sub, after($timestamp))"]
+cleartext = ["$sub", " after date ", "$timestamp"]
 
 [[tapleaf]]
 name = "AndV"

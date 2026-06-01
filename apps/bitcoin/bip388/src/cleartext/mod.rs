@@ -109,8 +109,10 @@ impl TapleafClass {
     /// - `SingleSig`: key_index
     /// - `BothMustSign`: key_index1, then key_index2
     /// - `SortedMultisig` / `Multisig`: number of keys, then threshold
-    /// - `*SingleSig` lock variants: key_index, then lock value
-    /// - `*MultiSig` lock variants: number of keys, then threshold, then lock value
+    /// - lock variants (`RelativeHeightlock`, `RelativeTimelock`,
+    ///   `AbsoluteHeightlock`, `AbsoluteTimelock`): signer sub-policy
+    ///   (recursively), then the lock value
+    /// - `AndV`: sub1 (recursively), then sub2 (recursively)
     /// - `Other`: lexicographic by descriptor string
     #[rustfmt::skip]
     fn display_cmp(&self, other: &Self) -> core::cmp::Ordering {
@@ -138,53 +140,21 @@ impl TapleafClass {
                 TC::Multisig { threshold: t2, keys: k2 },
             ) => k1.len().cmp(&k2.len()).then(t1.cmp(t2)),
             (
-                TC::RelativeHeightlockSingleSig { key: k1, blocks: b1 },
-                TC::RelativeHeightlockSingleSig { key: k2, blocks: b2 },
-            ) => cmp_key(k1, k2).then(b1.cmp(b2)),
+                TC::RelativeHeightlock { sub: s1, blocks: b1 },
+                TC::RelativeHeightlock { sub: s2, blocks: b2 },
+            ) => s1.display_cmp(s2).then(b1.cmp(b2)),
             (
-                TC::RelativeHeightlockBothMustSign { key1: a1, key2: b1, blocks: bl1 },
-                TC::RelativeHeightlockBothMustSign { key1: a2, key2: b2, blocks: bl2 },
-            ) => cmp_key(a1, a2).then(cmp_key(b1, b2)).then(bl1.cmp(bl2)),
+                TC::RelativeTimelock { sub: s1, relative_time: t1 },
+                TC::RelativeTimelock { sub: s2, relative_time: t2 },
+            ) => s1.display_cmp(s2).then(t1.cmp(t2)),
             (
-                TC::RelativeHeightlockMultiSig { threshold: t1, keys: k1, blocks: b1 },
-                TC::RelativeHeightlockMultiSig { threshold: t2, keys: k2, blocks: b2 },
-            ) => k1.len().cmp(&k2.len()).then(t1.cmp(t2)).then(b1.cmp(b2)),
+                TC::AbsoluteHeightlock { sub: s1, block_height: h1 },
+                TC::AbsoluteHeightlock { sub: s2, block_height: h2 },
+            ) => s1.display_cmp(s2).then(h1.cmp(h2)),
             (
-                TC::RelativeTimelockSingleSig { key: k1, relative_time: t1 },
-                TC::RelativeTimelockSingleSig { key: k2, relative_time: t2 },
-            ) => cmp_key(k1, k2).then(t1.cmp(t2)),
-            (
-                TC::RelativeTimelockBothMustSign { key1: a1, key2: b1, relative_time: t1 },
-                TC::RelativeTimelockBothMustSign { key1: a2, key2: b2, relative_time: t2 },
-            ) => cmp_key(a1, a2).then(cmp_key(b1, b2)).then(t1.cmp(t2)),
-            (
-                TC::RelativeTimelockMultiSig { threshold: t1, keys: k1, relative_time: tm1 },
-                TC::RelativeTimelockMultiSig { threshold: t2, keys: k2, relative_time: tm2 },
-            ) => k1.len().cmp(&k2.len()).then(t1.cmp(t2)).then(tm1.cmp(tm2)),
-            (
-                TC::AbsoluteHeightlockSingleSig { key: k1, block_height: h1 },
-                TC::AbsoluteHeightlockSingleSig { key: k2, block_height: h2 },
-            ) => cmp_key(k1, k2).then(h1.cmp(h2)),
-            (
-                TC::AbsoluteHeightlockBothMustSign { key1: a1, key2: b1, block_height: h1 },
-                TC::AbsoluteHeightlockBothMustSign { key1: a2, key2: b2, block_height: h2 },
-            ) => cmp_key(a1, a2).then(cmp_key(b1, b2)).then(h1.cmp(h2)),
-            (
-                TC::AbsoluteHeightlockMultiSig { threshold: t1, keys: k1, block_height: h1 },
-                TC::AbsoluteHeightlockMultiSig { threshold: t2, keys: k2, block_height: h2 },
-            ) => k1.len().cmp(&k2.len()).then(t1.cmp(t2)).then(h1.cmp(h2)),
-            (
-                TC::AbsoluteTimelockSingleSig { key: k1, timestamp: ts1 },
-                TC::AbsoluteTimelockSingleSig { key: k2, timestamp: ts2 },
-            ) => cmp_key(k1, k2).then(ts1.cmp(ts2)),
-            (
-                TC::AbsoluteTimelockBothMustSign { key1: a1, key2: b1, timestamp: ts1 },
-                TC::AbsoluteTimelockBothMustSign { key1: a2, key2: b2, timestamp: ts2 },
-            ) => cmp_key(a1, a2).then(cmp_key(b1, b2)).then(ts1.cmp(ts2)),
-            (
-                TC::AbsoluteTimelockMultiSig { threshold: t1, keys: k1, timestamp: ts1 },
-                TC::AbsoluteTimelockMultiSig { threshold: t2, keys: k2, timestamp: ts2 },
-            ) => k1.len().cmp(&k2.len()).then(t1.cmp(t2)).then(ts1.cmp(ts2)),
+                TC::AbsoluteTimelock { sub: s1, timestamp: ts1 },
+                TC::AbsoluteTimelock { sub: s2, timestamp: ts2 },
+            ) => s1.display_cmp(s2).then(ts1.cmp(ts2)),
             (TC::AndV { sub1: a1, sub2: a2 }, TC::AndV { sub1: b1, sub2: b2 }) => {
                 a1.display_cmp(b1).then_with(|| a2.display_cmp(b2))
             }
