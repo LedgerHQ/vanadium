@@ -89,32 +89,16 @@ patterns = [
 ]
 cleartext = ["$threshold", " of ", "$keys"]
 
-# Timelock / heightlock leaves are `and_v(v:SIGNER, LOCK)`. The signer is a
-# `$sub` sub-policy (classified recursively as a non-combinator leaf:
-# SingleSig, BothMustSign, SortedMultisig or Multisig); the lock kind is fixed
-# by the pattern and disambiguated by the binding's implicit value range (e.g.
-# `older($blocks)` vs `older($relative_time)`). This single shape per lock kind
-# replaces the former 3-signers x 4-locks cross-product.
-
+# Timelocked leaves are `and_v(v:SIGNER, LOCK)`. The signer is a `$sub`
+# sub-policy (classified recursively as a non-combinator leaf: SingleSig,
+# BothMustSign, SortedMultisig or Multisig). The lock is a single `$timelock`
+# binding that matches both `older(...)` (relative) and `after(...)` (absolute);
+# the four display forms (blocks / duration / block height / date) are produced
+# by the `$timelock` value itself.
 [[tapleaf]]
-name = "RelativeHeightlock"
-patterns = ["and_v(v:$sub, older($blocks))"]
-cleartext = ["$sub", " after ", "$blocks", " blocks"]
-
-[[tapleaf]]
-name = "RelativeTimelock"
-patterns = ["and_v(v:$sub, older($relative_time))"]
-cleartext = ["$sub", " after ", "$relative_time"]
-
-[[tapleaf]]
-name = "AbsoluteHeightlock"
-patterns = ["and_v(v:$sub, after($block_height))"]
-cleartext = ["$sub", " after block height ", "$block_height"]
-
-[[tapleaf]]
-name = "AbsoluteTimelock"
-patterns = ["and_v(v:$sub, after($timestamp))"]
-cleartext = ["$sub", " after date ", "$timestamp"]
+name = "Timelocked"
+patterns = ["and_v(v:$sub, $timelock)"]
+cleartext = ["$sub", " after ", "$timelock"]
 
 [[tapleaf]]
 name = "AndV"
