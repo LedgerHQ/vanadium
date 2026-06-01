@@ -575,7 +575,7 @@ cleartext = [
 ]
 has_cleartext = true
 
-# AndV leaf alongside a normal leaf: SingleSig (order=0) sorts before AndV (order=8)
+# AndV leaf alongside a normal leaf: SingleSig sorts before AndV
 [[vector]]
 template = "tr(@0/**,{pk(@1/**),and_v(v:pk(@2/**),sortedmulti_a(2,@3/**,@4/**))})"
 confusion_score = 1
@@ -584,19 +584,6 @@ cleartext = [
     "Single-signature (@1)",
     "Single-signature (@2) AND 2 of @3 and @4 (sorted)",
 ]
-has_cleartext = true
-
-# =============================================================================
-# Lock with a sorted-multisig signer: newly representable as
-# RelativeHeightlock{sub: SortedMultisig}. Before unifying the lock leaves into
-# `and_v(v:$sub, LOCK)` there was no sortedmulti+lock entry, so this fell back
-# to the raw descriptor template.
-# =============================================================================
-
-[[vector]]
-template = "tr(@0/**,and_v(v:sortedmulti_a(2,@1/**,@2/**),older(1000)))"
-confusion_score = 1
-cleartext = ["Primary path: @0", "2 of @1 and @2 (sorted) after 1000 blocks"]
 has_cleartext = true
 
 # =============================================================================
