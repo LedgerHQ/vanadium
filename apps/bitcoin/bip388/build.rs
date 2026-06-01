@@ -48,20 +48,21 @@
 //! kind. `$key`, `$key1`, `$key2` all resolve to single-key placeholders; the
 //! digit only disambiguates two occurrences within one pattern.
 //!
-//! | base name             | kind          | host type            | implicit range          |
-//! |-----------------------|---------------|----------------------|-------------------------|
-//! | `key`, `internal_key` | Key           | `KeyExpression`      | —                       |
-//! | `keys`                | KeyList       | `Vec<KeyExpression>` | —                       |
-//! | `threshold`           | Threshold     | `u32`                | —                       |
-//! | `blocks`              | Blocks        | `u32`                | `1..65_536`             |
-//! | `relative_time`       | RelativeTime  | `u32` (BIP-68 form)  | `4_194_305..4_259_840`  |
-//! | `block_height`        | BlockHeight   | `u32`                | `1..500_000_000`        |
-//! | `timestamp`           | Timestamp     | `u32` (Unix seconds) | `500_000_000..`         |
-//! | `leaves`              | Leaves        | `Vec<TapleafClass>`  | `tr(...)` only          |
+//! | base name             | kind       | host type            | notes                     |
+//! |-----------------------|------------|----------------------|---------------------------|
+//! | `key`, `internal_key` | Key        | `KeyExpression`      | plain key                 |
+//! | `keys`                | KeyList    | `Vec<KeyExpression>` | —                         |
+//! | `threshold`           | Threshold  | `u32`                | —                         |
+//! | `timelock`            | Timelock   | `Timelock`           | matches `older`/`after`   |
+//! | `sub`                 | Subpolicy  | `Box<TapleafClass>`  | classified non-combinator |
+//! | `leaves`              | Leaves     | `Vec<TapleafClass>`  | `tr(...)` only            |
 //!
-//! Ranges (where present) become guard clauses in the classifier
-//! (`if *expr >= lo && *expr < hi`), so the same keyword — e.g. `older($N)` —
-//! routes to different classes depending on `N`.
+//! A `$timelock` binding is special: the same binding matches both `older($N)`
+//! (relative) and `after($N)` (absolute), and the classifier emits a validity
+//! guard (`is_valid_relative_locktime` / `is_valid_absolute_locktime`) together
+//! with the matching `Timelock::{Relative,Absolute}` wrapper, chosen by the
+//! enclosing keyword. The four display forms (blocks / duration / block height /
+//! date) are produced from the `Timelock` value at format time.
 //!
 //! # Invariants enforced at build time
 //!
@@ -136,6 +137,10 @@ enum PatternArg {
         wrappers: Vec<String>,
         inner: Box<Pattern>,
     },
+    /// `(wrappers:)?$name` where `$name` is a `Subpolicy` binding.
+    /// The wrappers are unwrapped in the AST before the sub-expression is
+    /// classified as a `TapleafClass`.
+    SubpolicyRef { wrappers: Vec<String>, name: String },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -143,23 +148,26 @@ enum BindingKind {
     Key,
     KeyList,
     Threshold,
-    Blocks,
-    RelativeTime,
-    BlockHeight,
-    Timestamp,
+    /// A spending timelock: a `$timelock` binding matches both `older(...)`
+    /// (relative) and `after(...)` (absolute). Host type is the runtime
+    /// `Timelock` enum; the enclosing keyword selects the variant and the
+    /// validity guard emitted by the classifier.
+    Timelock,
     /// Bound to the `Option<TapTree>` of a `tr(...)` and lowered to
     /// `Vec<TapleafClass>` after classification.
     Leaves,
+    /// Bound to a sub-expression that is classified as a `TapleafClass`.
+    /// Host type is `Box<TapleafClass>`.
+    Subpolicy,
 }
 
 /// Static metadata for a binding kind: the host-language type, the matching
-/// `CleartextPart` / `CleartextValue` variant name, the cursor method that
-/// pops a value of this kind, and the implicit value range (if any).
+/// `CleartextPart` / `CleartextValue` variant name, and the cursor method that
+/// pops a value of this kind.
 struct KindInfo {
     rust_type: &'static str,
     cleartext_variant: Option<&'static str>,
     cursor_method: Option<&'static str>,
-    range: Option<(u32, Option<u32>)>,
 }
 
 impl BindingKind {
@@ -169,49 +177,31 @@ impl BindingKind {
                 rust_type: "KeyExpression",
                 cleartext_variant: Some("KeyIndex"),
                 cursor_method: Some("key_index"),
-                range: None,
             },
             BindingKind::KeyList => KindInfo {
                 rust_type: "Vec<KeyExpression>",
                 cleartext_variant: Some("KeyIndices"),
                 cursor_method: Some("key_indices"),
-                range: None,
             },
             BindingKind::Threshold => KindInfo {
                 rust_type: "u32",
                 cleartext_variant: Some("Threshold"),
                 cursor_method: Some("threshold"),
-                range: None,
             },
-            BindingKind::Blocks => KindInfo {
-                rust_type: "u32",
-                cleartext_variant: Some("Blocks"),
-                cursor_method: Some("blocks"),
-                range: Some((1, Some(65_536))),
-            },
-            BindingKind::RelativeTime => KindInfo {
-                rust_type: "u32",
-                cleartext_variant: Some("RelativeTime"),
-                cursor_method: Some("relative_time"),
-                range: Some((4_194_305, Some(4_259_840))),
-            },
-            BindingKind::BlockHeight => KindInfo {
-                rust_type: "u32",
-                cleartext_variant: Some("BlockHeight"),
-                cursor_method: Some("block_height"),
-                range: Some((1, Some(500_000_000))),
-            },
-            BindingKind::Timestamp => KindInfo {
-                rust_type: "u32",
-                cleartext_variant: Some("Timestamp"),
-                cursor_method: Some("timestamp"),
-                range: Some((500_000_000, None)),
+            BindingKind::Timelock => KindInfo {
+                rust_type: "Timelock",
+                cleartext_variant: Some("Timelock"),
+                cursor_method: Some("timelock"),
             },
             BindingKind::Leaves => KindInfo {
                 rust_type: "Vec<TapleafClass>",
                 cleartext_variant: None,
                 cursor_method: None,
-                range: None,
+            },
+            BindingKind::Subpolicy => KindInfo {
+                rust_type: "alloc::boxed::Box<TapleafClass>",
+                cleartext_variant: Some("Subpolicy"),
+                cursor_method: Some("subpolicy"),
             },
         }
     }
@@ -225,11 +215,9 @@ fn binding_name_kind(name: &str) -> Option<BindingKind> {
         "key" | "internal_key" => BindingKind::Key,
         "keys" => BindingKind::KeyList,
         "threshold" => BindingKind::Threshold,
-        "blocks" => BindingKind::Blocks,
-        "relative_time" => BindingKind::RelativeTime,
-        "block_height" => BindingKind::BlockHeight,
-        "timestamp" => BindingKind::Timestamp,
+        "timelock" => BindingKind::Timelock,
         "leaves" => BindingKind::Leaves,
+        "sub" => BindingKind::Subpolicy,
         _ => return None,
     })
 }
@@ -487,6 +475,19 @@ impl<'a> PatternParser<'a> {
                 expected
             ));
         }
+        // If the next token is `$name` where name resolves to Subpolicy, this
+        // is a wrapped subpolicy reference rather than a nested pattern.
+        if self.peek() == Some(b'$') {
+            let snap = self.pos;
+            if let Ok(name) = self.parse_binding_name() {
+                if binding_name_kind(&name) == Some(BindingKind::Subpolicy) {
+                    check_kind_matches(&name, BindingKind::Subpolicy, expected)?;
+                    return Ok(PatternArg::SubpolicyRef { wrappers, name });
+                }
+            }
+            // Not a Subpolicy binding — rewind and fall through to pattern parsing.
+            self.pos = snap;
+        }
         let inner = self.parse_pattern()?;
         Ok(PatternArg::Sub {
             wrappers,
@@ -499,15 +500,9 @@ fn check_kind_matches(name: &str, binding: BindingKind, positional: ArgKind) -> 
     match (binding, positional) {
         (BindingKind::Key, ArgKind::Key)
         | (BindingKind::KeyList, ArgKind::KeyList)
-        | (
-            BindingKind::Threshold
-            | BindingKind::Blocks
-            | BindingKind::RelativeTime
-            | BindingKind::BlockHeight
-            | BindingKind::Timestamp,
-            ArgKind::Num,
-        )
-        | (BindingKind::Leaves, ArgKind::Tree) => Ok(()),
+        | (BindingKind::Threshold, ArgKind::Num)
+        | (BindingKind::Leaves, ArgKind::Tree)
+        | (BindingKind::Subpolicy | BindingKind::Timelock, ArgKind::Sub) => Ok(()),
         _ => Err(format!(
             "binding '${}' (kind {:?}) doesn't match the AST position kind {:?}",
             name, binding, positional
@@ -532,6 +527,9 @@ fn pattern_bindings(p: &Pattern) -> Vec<(String, BindingKind)> {
                     out.push((keys.clone(), BindingKind::KeyList));
                 }
                 PatternArg::Sub { inner, .. } => walk(inner, out),
+                PatternArg::SubpolicyRef { name, .. } => {
+                    out.push((name.clone(), BindingKind::Subpolicy))
+                }
             }
         }
     }
@@ -544,7 +542,7 @@ fn pattern_uses_musig(p: &Pattern) -> bool {
     p.args.iter().any(|a| match a {
         PatternArg::Musig { .. } => true,
         PatternArg::Sub { inner, .. } => pattern_uses_musig(inner),
-        _ => false,
+        PatternArg::Binding { .. } | PatternArg::SubpolicyRef { .. } => false,
     })
 }
 
@@ -821,11 +819,18 @@ enum MatchStep {
     PlainKeyList { expr: Ident },
     /// `if <expr>.is_musig() { let <temp> = <expr>; ... }`.
     MusigKey { expr: Ident, temp: Ident },
-    /// `if *<expr> >= lo && *<expr> < hi` (hi exclusive; None = open-ended).
-    Range {
-        expr: Ident,
-        lo: u32,
-        hi: Option<u32>,
+    /// Match the whole `older(...)`/`after(...)` node bound to a `$timelock`
+    /// Sub-position binding into a `Timelock` (rejecting out-of-range or
+    /// non-lock nodes). `bound` holds the resulting `Timelock`.
+    ClassifyTimelock { expr: TokenStream, bound: Ident },
+    /// Classify `<expr>.classify_as_tapleaf()` into `<classified>`;
+    /// fail the match if it is `Other` or any combinator variant.
+    /// `combinator_variants` is the list of TapleafClass variant names that
+    /// have Subpolicy fields (used to prevent nesting).
+    ClassifySubpolicy {
+        expr: TokenStream,
+        classified: Ident,
+        combinator_variants: Vec<Ident>,
     },
 }
 
@@ -846,18 +851,24 @@ struct Lowered {
     bindings: BTreeMap<String, TokenStream>,
 }
 
-fn lower_pattern(pat: &Pattern) -> Lowered {
+fn lower_pattern(pat: &Pattern, combinator_variants: &[Ident]) -> Lowered {
     let mut counter = Counter(0);
     let mut l = Lowered {
         steps: Vec::new(),
         preamble: Vec::new(),
         bindings: BTreeMap::new(),
     };
-    lower(pat, quote!(__m), &mut counter, &mut l);
+    lower(pat, quote!(__m), &mut counter, &mut l, combinator_variants);
     l
 }
 
-fn lower(pat: &Pattern, matchee: TokenStream, c: &mut Counter, l: &mut Lowered) {
+fn lower(
+    pat: &Pattern,
+    matchee: TokenStream,
+    c: &mut Counter,
+    l: &mut Lowered,
+    combinator_variants: &[Ident],
+) {
     let variant_str = keyword_to_variant(&pat.keyword).expect("keyword validated");
     let variant = id(variant_str);
     let arg_kinds = variant_arg_kinds(variant_str);
@@ -878,18 +889,34 @@ fn lower(pat: &Pattern, matchee: TokenStream, c: &mut Counter, l: &mut Lowered) 
                     l.bindings.insert(name.clone(), quote!(#tv));
                 }
                 ArgKind::Num => {
-                    if let Some((lo, hi)) = bkind.info().range {
-                        l.steps.push(MatchStep::Range {
-                            expr: tv.clone(),
-                            lo,
-                            hi,
-                        });
-                    }
                     l.bindings.insert(name.clone(), quote!(*#tv));
                 }
                 ArgKind::KeyList => {
                     l.steps.push(MatchStep::PlainKeyList { expr: tv.clone() });
                     l.bindings.insert(name.clone(), quote!(#tv));
+                }
+                // A Subpolicy binding in a Sub position with no wrappers:
+                // classify the expression directly (same as SubpolicyRef with empty wrappers).
+                ArgKind::Sub if *bkind == BindingKind::Subpolicy => {
+                    let classify_expr = quote!(#tv.as_ref());
+                    let classified = format_ident!("__cls_{}", name);
+                    l.steps.push(MatchStep::ClassifySubpolicy {
+                        expr: classify_expr,
+                        classified: classified.clone(),
+                        combinator_variants: combinator_variants.to_vec(),
+                    });
+                    l.bindings.insert(name.clone(), quote!(#classified));
+                }
+                // A Timelock binding in a Sub position matches the whole
+                // `older(...)`/`after(...)` node; `ClassifyTimelock` captures the
+                // resulting `Timelock` value (or fails the match).
+                ArgKind::Sub if *bkind == BindingKind::Timelock => {
+                    let bound = format_ident!("__tl_{}", name);
+                    l.steps.push(MatchStep::ClassifyTimelock {
+                        expr: quote!(#tv.as_ref()),
+                        bound: bound.clone(),
+                    });
+                    l.bindings.insert(name.clone(), quote!(#bound));
                 }
                 ArgKind::Sub | ArgKind::Tree => {
                     l.bindings.insert(name.clone(), quote!(#tv));
@@ -940,7 +967,33 @@ fn lower(pat: &Pattern, matchee: TokenStream, c: &mut Counter, l: &mut Lowered) 
                 } else {
                     current
                 };
-                lower(inner, next_matchee, c, l);
+                lower(inner, next_matchee, c, l, combinator_variants);
+            }
+            PatternArg::SubpolicyRef { wrappers, name } => {
+                // Unwrap through each wrapper in the AST (e.g. `v:` → V node).
+                let mut current: TokenStream = quote!(#tv);
+                for w in wrappers {
+                    let wv = id(w);
+                    let wt = c.next();
+                    l.steps.push(MatchStep::Variant {
+                        matchee: quote!(#current.as_ref()),
+                        variant: wv,
+                        temps: vec![wt.clone()],
+                    });
+                    current = quote!(#wt);
+                }
+                // After unwrapping wrappers, `current` is a temp Ident holding a
+                // `Box<DescriptorTemplate>`. We classify `current.as_ref()`.
+                let classify_expr = quote!(#current.as_ref());
+                let classified = format_ident!("__cls_{}", name);
+                l.steps.push(MatchStep::ClassifySubpolicy {
+                    expr: classify_expr,
+                    classified: classified.clone(),
+                    combinator_variants: combinator_variants.to_vec(),
+                });
+                // The binding holds the classified TapleafClass value; build_innermost
+                // wraps it in Box::new() for the Subpolicy field.
+                l.bindings.insert(name.clone(), quote!(#classified));
             }
         }
     }
@@ -971,10 +1024,34 @@ fn fold_steps(steps: &[MatchStep], inner: TokenStream) -> TokenStream {
                     #code
                 }
             },
-            MatchStep::Range { expr, lo, hi } => match hi {
-                Some(h) => quote!(if *#expr >= #lo && *#expr < #h { #code }),
-                None => quote!(if *#expr >= #lo { #code }),
+            MatchStep::ClassifyTimelock { expr, bound } => quote! {
+                let __tl = match #expr {
+                    DescriptorTemplate::Older(__n) if is_valid_relative_locktime(*__n) => {
+                        Some(Timelock::Relative(*__n))
+                    }
+                    DescriptorTemplate::After(__n) if is_valid_absolute_locktime(*__n) => {
+                        Some(Timelock::Absolute(*__n))
+                    }
+                    _ => None,
+                };
+                if let Some(#bound) = __tl { #code }
             },
+            MatchStep::ClassifySubpolicy {
+                expr,
+                classified,
+                combinator_variants,
+            } => {
+                // Reject Other and all combinator variants (no nesting).
+                let reject_pat = if combinator_variants.is_empty() {
+                    quote!(TapleafClass::Other(_))
+                } else {
+                    quote!(TapleafClass::Other(_) #(| TapleafClass::#combinator_variants { .. })*)
+                };
+                quote! {
+                    let #classified = #expr.classify_as_tapleaf();
+                    if !matches!(#classified, #reject_pat) { #code }
+                }
+            }
         };
     }
     code
@@ -998,14 +1075,11 @@ fn build_innermost(
             let f = id(fname);
             let value = match kind {
                 BindingKind::Key | BindingKind::KeyList => quote!(#bound.clone()),
-                BindingKind::Threshold
-                | BindingKind::Blocks
-                | BindingKind::RelativeTime
-                | BindingKind::BlockHeight
-                | BindingKind::Timestamp => quote!(#bound),
+                BindingKind::Threshold | BindingKind::Timelock => quote!(#bound),
                 BindingKind::Leaves => {
                     quote!(#bound.as_ref().map(tree_to_leaves).unwrap_or_default())
                 }
+                BindingKind::Subpolicy => quote!(alloc::boxed::Box::new(#bound)),
             };
             quote!(#f: #value)
         });
@@ -1023,11 +1097,24 @@ fn emit_classify(entries: &[ProcessedEntry], ck: ClassKind, fn_name: &str) -> To
     let label: TokenStream = format!("'{fn_name}").parse().unwrap();
     let other = ck.other_ctor();
 
+    // Collect all TapleafClass variant names that contain Subpolicy fields.
+    // These are excluded from sub-policy classification to prevent nesting.
+    let combinator_variants: Vec<Ident> = entries
+        .iter()
+        .filter(|e| {
+            e.fields
+                .kinds
+                .values()
+                .any(|k| *k == BindingKind::Subpolicy)
+        })
+        .map(|e| id(&e.name))
+        .collect();
+
     let blocks: Vec<TokenStream> = entries
         .iter()
         .flat_map(|entry| {
             entry.patterns.iter().map(|pat| {
-                let l = lower_pattern(pat);
+                let l = lower_pattern(pat, &combinator_variants);
                 let variant = id(&entry.name);
                 let inner = build_innermost(&l, &entry.fields, ck, &variant, &label);
                 fold_steps(&l.steps, inner)
@@ -1152,7 +1239,9 @@ fn emit_cleartext_pattern(entries: &[ProcessedEntry], ck: ClassKind) -> TokenStr
                     let ctor = cleartext_variant(*kind);
                     let n = id(name);
                     let arg: TokenStream = match kind {
-                        BindingKind::Key | BindingKind::KeyList => quote!(#n.clone()),
+                        BindingKind::Key | BindingKind::KeyList | BindingKind::Subpolicy => {
+                            quote!(#n.clone())
+                        }
                         _ => quote!(*#n),
                     };
                     Some(quote!(CleartextValue::#ctor(#arg)))
@@ -1236,9 +1325,31 @@ fn emit_outer_score(top_level: &[ProcessedEntry]) -> TokenStream {
 /// number of patterns whose round-trip applies: non-musig patterns always do,
 /// musig patterns require `threshold == len(keys)` (keys are guaranteed plain
 /// by classification).
+///
+/// For entries with Subpolicy fields the score is the product of the
+/// sub-policies' individual per-leaf scores.
 fn emit_score_arm(entry: &ProcessedEntry, class_enum: &str) -> TokenStream {
     let class = id(class_enum);
     let variant = id(&entry.name);
+
+    let subpolicy_names: Vec<&str> = entry
+        .fields
+        .order
+        .iter()
+        .filter(|n| entry.fields.kinds[*n] == BindingKind::Subpolicy)
+        .map(String::as_str)
+        .collect();
+
+    if !subpolicy_names.is_empty() {
+        let sub_idents: Vec<Ident> = subpolicy_names.iter().map(|n| id(n)).collect();
+        let destructure = quote!({ #(#sub_idents),*, .. });
+        let product = sub_idents.iter().fold(
+            quote!(1u64),
+            |acc, n| quote!(#acc.saturating_mul(#n.per_leaf_score())),
+        );
+        return quote!(#class::#variant #destructure => #product,);
+    }
+
     let plain: u64 = entry
         .patterns
         .iter()
@@ -1418,6 +1529,123 @@ fn emit_top_level_variants_arm(entry: &ProcessedEntry) -> TokenStream {
     }
 }
 
+/// Build the body of a `tapleaf_to_descriptors` arm for an entry that has
+/// Subpolicy fields. Generates a Cartesian product over the descriptor-template
+/// sets for each sub-policy, wrapping them as required by the single pattern.
+///
+/// Assumes `subpolicy_names` is non-empty and `entry.patterns` has exactly one
+/// pattern (all current combinator entries have one).
+fn emit_subpolicy_construction_block(
+    entry: &ProcessedEntry,
+    subpolicy_names: &[&str],
+) -> TokenStream {
+    // For each sub-policy field, emit a `let <name>_descs = tapleaf_to_descriptors(&**<name>)?;`.
+    // The `&**` is needed because the match arm binds sub-policy fields as
+    // `&Box<TapleafClass>` (when matching on `leaf: &TapleafClass`), whereas
+    // `tapleaf_to_descriptors` expects `&TapleafClass`.
+    let desc_lets: Vec<TokenStream> = subpolicy_names
+        .iter()
+        .map(|n| {
+            let n_ident = id(n);
+            let d_ident = format_ident!("{}_descs", n);
+            quote!(let #d_ident = tapleaf_to_descriptors(&**#n_ident)?;)
+        })
+        .collect();
+
+    assert!(
+        entry.patterns.len() == 1,
+        "entry '{}' has Subpolicy fields but {} patterns; expected exactly 1",
+        entry.name,
+        entry.patterns.len()
+    );
+
+    // Build the single pattern's construction expression, substituting each
+    // sub-policy binding with its loop variable.
+    // We derive the construction expression from `entry.patterns[0]`.
+    let pat = &entry.patterns[0];
+    let sub_loop_vars: Vec<(String, Ident)> = subpolicy_names
+        .iter()
+        .map(|n| (n.to_string(), format_ident!("__s_{}", n)))
+        .collect();
+
+    let construction_expr = build_subpolicy_construction_expr(pat, &sub_loop_vars);
+
+    // Nested for-loops over each sub-policy's descriptor set.
+    let loop_vars: Vec<Ident> = sub_loop_vars.iter().map(|(_, v)| v.clone()).collect();
+    let desc_idents: Vec<Ident> = subpolicy_names
+        .iter()
+        .map(|n| format_ident!("{}_descs", n))
+        .collect();
+
+    // Build nested loops (last sub-policy is the innermost).
+    let push_stmt = quote!(__out.push(#construction_expr););
+    let loops = desc_idents.iter().zip(loop_vars.iter()).rev().fold(
+        push_stmt,
+        |body, (desc, var)| quote!(for #var in &#desc { #body }),
+    );
+
+    quote! {
+        let mut __out: alloc::vec::Vec<DescriptorTemplate> = alloc::vec::Vec::new();
+        #(#desc_lets)*
+        #loops
+        Ok(__out)
+    }
+}
+
+/// Build a `DescriptorTemplate` construction expression for a pattern that
+/// contains `SubpolicyRef` args. Each sub-policy arg is replaced by its
+/// corresponding loop variable (a `&DescriptorTemplate`), cloned and optionally
+/// wrapped.
+fn build_subpolicy_construction_expr(pat: &Pattern, sub_vars: &[(String, Ident)]) -> TokenStream {
+    let variant_str = keyword_to_variant(&pat.keyword).expect("keyword validated");
+    let variant = id(variant_str);
+    let arg_kinds = variant_arg_kinds(variant_str);
+    if pat.args.is_empty() {
+        return quote!(DescriptorTemplate::#variant);
+    }
+    let args = pat.args.iter().enumerate().map(|(i, a)| {
+        build_subpolicy_arg_expr(
+            a,
+            arg_kinds.get(i).copied().unwrap_or(ArgKind::Sub),
+            sub_vars,
+        )
+    });
+    quote!(DescriptorTemplate::#variant(#(#args),*))
+}
+
+fn build_subpolicy_arg_expr(
+    arg: &PatternArg,
+    kind: ArgKind,
+    sub_vars: &[(String, Ident)],
+) -> TokenStream {
+    // Both `SubpolicyRef { wrappers, name }` and `Binding { kind: Subpolicy, name }`
+    // represent sub-policy arguments and are handled identically here.
+    let (wrappers, name): (&[String], &str) = match arg {
+        PatternArg::SubpolicyRef { wrappers, name } => (wrappers.as_slice(), name.as_str()),
+        PatternArg::Binding {
+            name,
+            kind: BindingKind::Subpolicy,
+        } => (&[], name.as_str()),
+        // Non-subpolicy args delegate to the standard builder.
+        _ => return build_arg_expr(arg, kind, /*owned=*/ false),
+    };
+    // Find the loop variable for this sub-policy.
+    let var = sub_vars
+        .iter()
+        .find(|(n, _)| n == name)
+        .map(|(_, v)| v.clone())
+        .expect("sub-policy var present");
+    // Start with the cloned descriptor template from the loop variable.
+    let mut expr = quote!((*#var).clone());
+    // Apply wrappers from innermost to outermost.
+    for w in wrappers.iter().rev() {
+        let wv = id(w);
+        expr = quote!(DescriptorTemplate::#wv(alloc::boxed::Box::new(#expr)));
+    }
+    // The arg is in a Sub position → box it.
+    quote!(alloc::boxed::Box::new(#expr))
+}
+
 fn emit_tapleaf_to_descriptors(tapleaf: &[ProcessedEntry]) -> TokenStream {
     let arms: Vec<TokenStream> = tapleaf
         .iter()
@@ -1429,12 +1657,26 @@ fn emit_tapleaf_to_descriptors(tapleaf: &[ProcessedEntry]) -> TokenStream {
                 let fields: Vec<Ident> = e.fields.order.iter().map(|s| id(s)).collect();
                 quote!({ #(#fields),* })
             };
-            let block = emit_pattern_construction_block(e, /*owned=*/ false);
+
+            // For entries with Subpolicy fields, emit a Cartesian product over
+            // the descriptor-template sets for each sub-policy.
+            let subpolicy_names: Vec<&str> = e
+                .fields
+                .order
+                .iter()
+                .filter(|n| e.fields.kinds[*n] == BindingKind::Subpolicy)
+                .map(String::as_str)
+                .collect();
+
+            let block = if !subpolicy_names.is_empty() {
+                emit_subpolicy_construction_block(e, &subpolicy_names)
+            } else {
+                let b = emit_pattern_construction_block(e, /*owned=*/ false);
+                quote!(#b Ok(__out))
+            };
+
             quote! {
-                TapleafClass::#variant #destructure => {
-                    #block
-                    Ok(__out)
-                },
+                TapleafClass::#variant #destructure => { #block },
             }
         })
         .collect();
@@ -1518,7 +1760,10 @@ fn build_construction_expr(pat: &Pattern, owned: bool) -> TokenStream {
 
 fn build_arg_expr(arg: &PatternArg, kind: ArgKind, owned: bool) -> TokenStream {
     match arg {
-        PatternArg::Binding { name, .. } => {
+        PatternArg::SubpolicyRef { .. } => {
+            panic!("SubpolicyRef must be handled by build_subpolicy_arg_expr, not build_arg_expr")
+        }
+        PatternArg::Binding { name, kind: bkind } => {
             let n = id(name);
             match kind {
                 ArgKind::Key | ArgKind::KeyList => quote!(#n.clone()),
@@ -1528,6 +1773,11 @@ fn build_arg_expr(arg: &PatternArg, kind: ArgKind, owned: bool) -> TokenStream {
                     } else {
                         quote!(*#n)
                     }
+                }
+                // A `$timelock` Sub-position binding reconstructs to the
+                // `older(...)`/`after(...)` node it matched.
+                ArgKind::Sub if *bkind == BindingKind::Timelock => {
+                    quote!(alloc::boxed::Box::new(#n.to_descriptor()))
                 }
                 ArgKind::Sub => quote!(#n),
                 ArgKind::Tree => quote!(None),

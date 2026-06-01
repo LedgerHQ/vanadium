@@ -19,7 +19,8 @@ use super::super::time::{parse_relative_time_to_seconds, parse_utc_date_to_times
 use super::super::{DescriptorTemplate, KeyExpression, KeyExpressionType, TapTree};
 use super::{
     CleartextPart, CleartextSpec, CleartextValue, DescriptorClass, TapleafClass, TapleafPattern,
-    TopLevelPattern, SEQUENCE_LOCKTIME_TYPE_FLAG, TAPLEAF_SPECS, TOP_LEVEL_SPECS,
+    Timelock, TopLevelPattern, LOCKTIME_THRESHOLD, RELATIVE_LOCK_LIMIT,
+    SEQUENCE_LOCKTIME_TYPE_FLAG, TAPLEAF_SPECS, TOP_LEVEL_SPECS,
 };
 
 /// Error type for `from_cleartext`.
@@ -84,6 +85,44 @@ fn parse_relative_time(s: &str) -> Option<u32> {
     Some(secs / 512 | SEQUENCE_LOCKTIME_TYPE_FLAG)
 }
 
+/// Parse the tail of a timelock description (as produced by `format_timelock`)
+/// back into a `Timelock`. Each branch accepts only the value range its display
+/// form encodes, so it is the exact inverse of `format_timelock`:
+///   "<n> blocks"        -> relative block count (`1..RELATIVE_LOCK_LIMIT`)
+///   "<duration>"        -> relative 512-second duration (type flag set)
+///   "block height <n>"  -> absolute block height (`1..LOCKTIME_THRESHOLD`)
+///   "date <utc>"        -> absolute timestamp (`>= LOCKTIME_THRESHOLD`)
+fn parse_timelock(s: &str) -> Option<Timelock> {
+    if let Some(num) = s.strip_suffix(" blocks") {
+        let n: u32 = num.parse().ok()?;
+        return (1..RELATIVE_LOCK_LIMIT).contains(&n).then_some(Timelock::Relative(n));
+    }
+    if let Some(num) = s.strip_prefix("block height ") {
+        let n: u32 = num.parse().ok()?;
+        return (1..LOCKTIME_THRESHOLD).contains(&n).then_some(Timelock::Absolute(n));
+    }
+    if let Some(date) = s.strip_prefix("date ") {
+        let n = parse_utc_date_to_timestamp(date)?;
+        return (n >= LOCKTIME_THRESHOLD).then_some(Timelock::Absolute(n));
+    }
+    let n = parse_relative_time(s)?;
+    ((SEQUENCE_LOCKTIME_TYPE_FLAG + 1)..(SEQUENCE_LOCKTIME_TYPE_FLAG + RELATIVE_LOCK_LIMIT))
+        .contains(&n)
+        .then_some(Timelock::Relative(n))
+}
+
+impl Timelock {
+    /// Reconstruct the descriptor lock node this timelock was matched from:
+    /// `Relative` -> `older(n)`, `Absolute` -> `after(n)`. Used by the generated
+    /// `tapleaf_to_descriptors` to rebuild `and_v(v:<sub>, <lock>)`.
+    fn to_descriptor(&self) -> DescriptorTemplate {
+        match self {
+            Timelock::Relative(n) => DescriptorTemplate::Older(*n),
+            Timelock::Absolute(n) => DescriptorTemplate::After(*n),
+        }
+    }
+}
+
 struct CleartextValueCursor {
     values: alloc::vec::IntoIter<CleartextValue>,
 }
@@ -116,30 +155,16 @@ impl CleartextValueCursor {
         }
     }
 
-    fn blocks(&mut self) -> Option<u32> {
+    fn timelock(&mut self) -> Option<Timelock> {
         match self.values.next()? {
-            CleartextValue::Blocks(value) => Some(value),
+            CleartextValue::Timelock(value) => Some(value),
             _ => None,
         }
     }
 
-    fn relative_time(&mut self) -> Option<u32> {
+    fn subpolicy(&mut self) -> Option<alloc::boxed::Box<TapleafClass>> {
         match self.values.next()? {
-            CleartextValue::RelativeTime(value) => Some(value),
-            _ => None,
-        }
-    }
-
-    fn block_height(&mut self) -> Option<u32> {
-        match self.values.next()? {
-            CleartextValue::BlockHeight(value) => Some(value),
-            _ => None,
-        }
-    }
-
-    fn timestamp(&mut self) -> Option<u32> {
-        match self.values.next()? {
-            CleartextValue::Timestamp(value) => Some(value),
+            CleartextValue::Subpolicy(value) => Some(value),
             _ => None,
         }
     }
@@ -153,17 +178,32 @@ impl CleartextValueCursor {
     }
 }
 
+/// Parse a sub-policy cleartext string back into a `TapleafClass`.
+/// Tries all non-combinator tapleaf specs (those without `Subpolicy` parts)
+/// to prevent nesting.
+fn parse_tapleaf_cleartext(s: &str) -> Option<alloc::boxed::Box<TapleafClass>> {
+    for spec in TAPLEAF_SPECS {
+        if spec.parts.iter().any(|p| matches!(p, CleartextPart::Subpolicy)) {
+            continue; // skip combinator specs to prevent nesting
+        }
+        for values in parse_with_spec(spec, s) {
+            if let Some(leaf) = TapleafClass::from_cleartext_pattern(spec.kind, values) {
+                return Some(alloc::boxed::Box::new(leaf));
+            }
+        }
+    }
+    None
+}
+
 fn parse_cleartext_value(part: CleartextPart, input: &str) -> Option<CleartextValue> {
     match part {
         CleartextPart::Literal(_) => None,
         CleartextPart::Threshold => input.parse().ok().map(CleartextValue::Threshold),
         CleartextPart::KeyIndex => parse_key_index(input).map(CleartextValue::KeyIndex),
         CleartextPart::KeyIndices => parse_key_indices(input).map(CleartextValue::KeyIndices),
-        CleartextPart::Blocks => input.parse().ok().map(CleartextValue::Blocks),
-        CleartextPart::RelativeTime => parse_relative_time(input).map(CleartextValue::RelativeTime),
-        CleartextPart::BlockHeight => input.parse().ok().map(CleartextValue::BlockHeight),
-        CleartextPart::Timestamp => {
-            parse_utc_date_to_timestamp(input).map(CleartextValue::Timestamp)
+        CleartextPart::Timelock => parse_timelock(input).map(CleartextValue::Timelock),
+        CleartextPart::Subpolicy => {
+            parse_tapleaf_cleartext(input).map(CleartextValue::Subpolicy)
         }
     }
 }

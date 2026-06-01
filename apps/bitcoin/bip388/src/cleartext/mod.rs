@@ -46,6 +46,42 @@ pub const MAX_CONFUSION_SCORE: u64 = 3600;
 
 pub(super) const SEQUENCE_LOCKTIME_TYPE_FLAG: u32 = 1 << 22;
 
+/// Absolute locktimes below this are block heights; at or above, Unix
+/// timestamps (BIP-65). Relative locktimes use `SEQUENCE_LOCKTIME_TYPE_FLAG`
+/// for the same block-vs-time split instead.
+pub(super) const LOCKTIME_THRESHOLD: u32 = 500_000_000;
+
+/// A relative locktime encodes a block count or 512-second interval count in
+/// its low 16 bits; valid counts are `1..RELATIVE_LOCK_LIMIT`.
+pub(super) const RELATIVE_LOCK_LIMIT: u32 = 1 << 16;
+
+/// A spending timelock attached to a tapleaf signer, carrying enough to render
+/// all four display forms. `Relative` is the raw `older(...)` sequence value
+/// (the type flag distinguishes a block count from a 512-second duration);
+/// `Absolute` is the raw `after(...)` value (`< 500_000_000` is a block height,
+/// otherwise a Unix timestamp).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(super) enum Timelock {
+    Relative(u32),
+    Absolute(u32),
+}
+
+/// `older(n)` is recognized as a timelock iff `n` is either a relative block
+/// count or a relative 512-second duration (type flag set) — in both cases with
+/// a low-16-bit count in `1..RELATIVE_LOCK_LIMIT`. Other values (e.g.
+/// `older(0)`) are left unclassified.
+pub(super) fn is_valid_relative_locktime(n: u32) -> bool {
+    (1..RELATIVE_LOCK_LIMIT).contains(&n)
+        || ((SEQUENCE_LOCKTIME_TYPE_FLAG + 1)..(SEQUENCE_LOCKTIME_TYPE_FLAG + RELATIVE_LOCK_LIMIT))
+            .contains(&n)
+}
+
+/// `after(n)` is recognized as a timelock for any `n >= 1` (a block height when
+/// `n < LOCKTIME_THRESHOLD`, otherwise a Unix timestamp).
+pub(super) fn is_valid_absolute_locktime(n: u32) -> bool {
+    n >= 1
+}
+
 // `DescriptorClass`, `TapleafClass`, `TopLevelPattern`, `TapleafPattern`,
 // the `TOP_LEVEL_SPECS` / `TAPLEAF_SPECS` cleartext templates, and the
 // always-compiled pattern-matching code (`classify`, `classify_as_tapleaf`,
@@ -62,10 +98,8 @@ pub(super) enum CleartextPart {
     Threshold,
     KeyIndex,
     KeyIndices,
-    Blocks,
-    RelativeTime,
-    BlockHeight,
-    Timestamp,
+    Timelock,
+    Subpolicy,
 }
 
 pub(super) struct CleartextSpec<K> {
@@ -78,10 +112,8 @@ enum CleartextValue {
     Threshold(u32),
     KeyIndex(KeyExpression),
     KeyIndices(Vec<KeyExpression>),
-    Blocks(u32),
-    RelativeTime(u32),
-    BlockHeight(u32),
-    Timestamp(u32),
+    Timelock(Timelock),
+    Subpolicy(alloc::boxed::Box<TapleafClass>),
 }
 
 /// Compares two key placeholders for canonical display ordering:
@@ -107,8 +139,8 @@ impl TapleafClass {
     /// - `SingleSig`: key_index
     /// - `BothMustSign`: key_index1, then key_index2
     /// - `SortedMultisig` / `Multisig`: number of keys, then threshold
-    /// - `*SingleSig` lock variants: key_index, then lock value
-    /// - `*MultiSig` lock variants: number of keys, then threshold, then lock value
+    /// - `Timelocked`: signer sub-policy (recursively), then the lock value
+    /// - `AndV`: sub1 (recursively), then sub2 (recursively)
     /// - `Other`: lexicographic by descriptor string
     #[rustfmt::skip]
     fn display_cmp(&self, other: &Self) -> core::cmp::Ordering {
@@ -136,53 +168,12 @@ impl TapleafClass {
                 TC::Multisig { threshold: t2, keys: k2 },
             ) => k1.len().cmp(&k2.len()).then(t1.cmp(t2)),
             (
-                TC::RelativeHeightlockSingleSig { key: k1, blocks: b1 },
-                TC::RelativeHeightlockSingleSig { key: k2, blocks: b2 },
-            ) => cmp_key(k1, k2).then(b1.cmp(b2)),
-            (
-                TC::RelativeHeightlockBothMustSign { key1: a1, key2: b1, blocks: bl1 },
-                TC::RelativeHeightlockBothMustSign { key1: a2, key2: b2, blocks: bl2 },
-            ) => cmp_key(a1, a2).then(cmp_key(b1, b2)).then(bl1.cmp(bl2)),
-            (
-                TC::RelativeHeightlockMultiSig { threshold: t1, keys: k1, blocks: b1 },
-                TC::RelativeHeightlockMultiSig { threshold: t2, keys: k2, blocks: b2 },
-            ) => k1.len().cmp(&k2.len()).then(t1.cmp(t2)).then(b1.cmp(b2)),
-            (
-                TC::RelativeTimelockSingleSig { key: k1, relative_time: t1 },
-                TC::RelativeTimelockSingleSig { key: k2, relative_time: t2 },
-            ) => cmp_key(k1, k2).then(t1.cmp(t2)),
-            (
-                TC::RelativeTimelockBothMustSign { key1: a1, key2: b1, relative_time: t1 },
-                TC::RelativeTimelockBothMustSign { key1: a2, key2: b2, relative_time: t2 },
-            ) => cmp_key(a1, a2).then(cmp_key(b1, b2)).then(t1.cmp(t2)),
-            (
-                TC::RelativeTimelockMultiSig { threshold: t1, keys: k1, relative_time: tm1 },
-                TC::RelativeTimelockMultiSig { threshold: t2, keys: k2, relative_time: tm2 },
-            ) => k1.len().cmp(&k2.len()).then(t1.cmp(t2)).then(tm1.cmp(tm2)),
-            (
-                TC::AbsoluteHeightlockSingleSig { key: k1, block_height: h1 },
-                TC::AbsoluteHeightlockSingleSig { key: k2, block_height: h2 },
-            ) => cmp_key(k1, k2).then(h1.cmp(h2)),
-            (
-                TC::AbsoluteHeightlockBothMustSign { key1: a1, key2: b1, block_height: h1 },
-                TC::AbsoluteHeightlockBothMustSign { key1: a2, key2: b2, block_height: h2 },
-            ) => cmp_key(a1, a2).then(cmp_key(b1, b2)).then(h1.cmp(h2)),
-            (
-                TC::AbsoluteHeightlockMultiSig { threshold: t1, keys: k1, block_height: h1 },
-                TC::AbsoluteHeightlockMultiSig { threshold: t2, keys: k2, block_height: h2 },
-            ) => k1.len().cmp(&k2.len()).then(t1.cmp(t2)).then(h1.cmp(h2)),
-            (
-                TC::AbsoluteTimelockSingleSig { key: k1, timestamp: ts1 },
-                TC::AbsoluteTimelockSingleSig { key: k2, timestamp: ts2 },
-            ) => cmp_key(k1, k2).then(ts1.cmp(ts2)),
-            (
-                TC::AbsoluteTimelockBothMustSign { key1: a1, key2: b1, timestamp: ts1 },
-                TC::AbsoluteTimelockBothMustSign { key1: a2, key2: b2, timestamp: ts2 },
-            ) => cmp_key(a1, a2).then(cmp_key(b1, b2)).then(ts1.cmp(ts2)),
-            (
-                TC::AbsoluteTimelockMultiSig { threshold: t1, keys: k1, timestamp: ts1 },
-                TC::AbsoluteTimelockMultiSig { threshold: t2, keys: k2, timestamp: ts2 },
-            ) => k1.len().cmp(&k2.len()).then(t1.cmp(t2)).then(ts1.cmp(ts2)),
+                TC::Timelocked { sub: s1, timelock: t1 },
+                TC::Timelocked { sub: s2, timelock: t2 },
+            ) => s1.display_cmp(s2).then(t1.cmp(t2)),
+            (TC::AndV { sub1: a1, sub2: a2 }, TC::AndV { sub1: b1, sub2: b2 }) => {
+                a1.display_cmp(b1).then_with(|| a2.display_cmp(b2))
+            }
             (TC::Other(s1), TC::Other(s2)) => s1.cmp(s2),
             // Same order() value implies same variant; this arm is unreachable.
             _ => Ordering::Equal,
@@ -230,6 +221,28 @@ fn format_relative_time(time: u32) -> String {
     format_seconds((time & !SEQUENCE_LOCKTIME_TYPE_FLAG) * 512)
 }
 
+/// Render a timelock as the tail of an "<signer> after ..." description, picking
+/// the form from the lock kind and value: relative block count, relative
+/// duration, absolute block height, or absolute date.
+fn format_timelock(lock: Timelock) -> String {
+    match lock {
+        Timelock::Relative(n) => {
+            if n & SEQUENCE_LOCKTIME_TYPE_FLAG != 0 {
+                format_relative_time(n)
+            } else {
+                format!("{} blocks", n)
+            }
+        }
+        Timelock::Absolute(n) => {
+            if n < LOCKTIME_THRESHOLD {
+                format!("block height {}", n)
+            } else {
+                format!("date {}", format_utc_date(n))
+            }
+        }
+    }
+}
+
 /// Classify every leaf of a tap-tree and collect the results in tree-traversal
 /// order. Used by the generated `classify` for `tr(...)` patterns.
 fn tree_to_leaves(t: &super::TapTree) -> Vec<TapleafClass> {
@@ -260,10 +273,10 @@ fn format_cleartext_value(
         (CleartextPart::KeyIndices, CleartextValue::KeyIndices(ks)) => {
             format_key_indices(ks, canonical)
         }
-        (CleartextPart::Blocks, CleartextValue::Blocks(b)) => b.to_string(),
-        (CleartextPart::RelativeTime, CleartextValue::RelativeTime(t)) => format_relative_time(*t),
-        (CleartextPart::BlockHeight, CleartextValue::BlockHeight(h)) => h.to_string(),
-        (CleartextPart::Timestamp, CleartextValue::Timestamp(t)) => format_utc_date(*t),
+        (CleartextPart::Timelock, CleartextValue::Timelock(lock)) => format_timelock(*lock),
+        (CleartextPart::Subpolicy, CleartextValue::Subpolicy(leaf)) => {
+            leaf.to_cleartext_string(canonical)?
+        }
         _ => {
             debug_assert!(false, "cleartext part/value mismatch (codegen invariant violated)");
             return None;
