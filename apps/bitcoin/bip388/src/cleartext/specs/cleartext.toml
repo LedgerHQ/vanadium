@@ -103,4 +103,4 @@ cleartext = ["$sub", " after ", "$timelock"]
 [[tapleaf]]
 name = "AndV"
 patterns = ["and_v(v:$sub1, $sub2)"]
-cleartext = ["$sub1", " AND ", "$sub2"]
+cleartext = ["$sub1", ", and ", "$sub2"]
