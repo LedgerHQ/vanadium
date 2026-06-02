@@ -108,5 +108,5 @@ async fn test_e2e_sign_transaction() {
 
     // we don't check the actual signatures here, just that we got something back
     // more detailed tests are in the unit tests of the handlers
-    assert!(result.len() == 1);
+    assert!(result.signatures.len() == 1);
 }

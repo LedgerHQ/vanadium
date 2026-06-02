@@ -425,15 +425,47 @@ async fn handle_cli_command(
                     .map_err(|_| "Failed to convert PSBTv0 to PSBTv2")?;
             }
 
-            let partial_sigs = bitcoin_client.sign_psbt(&psbt).await?;
+            let signed = bitcoin_client.sign_psbt(&psbt).await?;
 
-            println!("{} signatures returned", partial_sigs.len());
-            for part_sig in &partial_sigs {
+            println!("{} partial signatures returned", signed.signatures.len());
+            for part_sig in &signed.signatures {
                 println!("Input index: {}", part_sig.input_index);
                 println!("Public key: {}", hex::encode(&part_sig.pubkey));
                 println!("Signature: {}", hex::encode(&part_sig.signature));
                 if let Some(leaf_hash) = &part_sig.leaf_hash {
                     println!("Leaf hash: {}", hex::encode(leaf_hash));
+                }
+            }
+
+            if !signed.musig_pubnonces.is_empty() {
+                println!(
+                    "\n{} MuSig2 pubnonce(s) returned (round 1)",
+                    signed.musig_pubnonces.len()
+                );
+                for pn in &signed.musig_pubnonces {
+                    println!("Input index: {}", pn.input_index);
+                    println!("Participant pubkey: {}", hex::encode(pn.participant_pk));
+                    println!("Aggregate pubkey:   {}", hex::encode(pn.aggregate_pubkey));
+                    println!("Pubnonce: {}", hex::encode(pn.pubnonce));
+                    if let Some(lh) = pn.leaf_hash {
+                        println!("Leaf hash: {}", hex::encode(lh));
+                    }
+                }
+            }
+
+            if !signed.musig_partial_sigs.is_empty() {
+                println!(
+                    "\n{} MuSig2 partial signature(s) returned (round 2)",
+                    signed.musig_partial_sigs.len()
+                );
+                for ps in &signed.musig_partial_sigs {
+                    println!("Input index: {}", ps.input_index);
+                    println!("Participant pubkey: {}", hex::encode(ps.participant_pk));
+                    println!("Aggregate pubkey:   {}", hex::encode(ps.aggregate_pubkey));
+                    println!("Partial signature: {}", hex::encode(ps.signature));
+                    if let Some(lh) = ps.leaf_hash {
+                        println!("Leaf hash: {}", hex::encode(lh));
+                    }
                 }
             }
         }
