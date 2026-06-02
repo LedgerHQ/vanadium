@@ -525,17 +525,7 @@ has_cleartext = true
 # Taproot AndV leaves: and_v(v:SUBPOLICY_1, SUBPOLICY_2)
 # =============================================================================
 
-# SingleSig AND SortedMultisig: score = 1 * 1 = 1
-[[vector]]
-template = "tr(@0/**,and_v(v:pk(@1/**),sortedmulti_a(2,@2/**,@3/**)))"
-confusion_score = 1
-cleartext = [
-    "Primary path: @0",
-    "Single-signature (@1), and 2 of @2 and @3 (sorted)",
-]
-has_cleartext = true
-
-# SingleSig AND Multisig (threshold == keys): score = 1 * 2 = 2
+# SingleSig AND Multisig (plain multisig): score = 1 * 2 = 2
 [[vector]]
 template = "tr(@0/**,and_v(v:pk(@1/**),multi_a(2,@2/**,@3/**)))"
 confusion_score = 2
@@ -545,13 +535,24 @@ cleartext = [
 ]
 has_cleartext = true
 
-# SortedMultisig AND Multisig (threshold == keys): score = 1 * 2 = 2
+# SingleSig AND Multisig (using Musig2): score = 1 * 2 = 2
 [[vector]]
-template = "tr(@0/**,and_v(v:sortedmulti_a(2,@1/**,@2/**),multi_a(2,@3/**,@4/**)))"
+template = "tr(@0/**,and_v(v:pk(@1/**),pk(musig(@2,@3)/**)))"
 confusion_score = 2
 cleartext = [
     "Primary path: @0",
-    "2 of @1 and @2 (sorted), and 2 of @3 and @4",
+    "Single-signature (@1), and 2 of @2 and @3",
+]
+has_cleartext = true
+
+
+# SingleSig AND Multisig (threshold == keys): score = 1 * 2 = 2
+[[vector]]
+template = "tr(@0/**,and_v(v:pk(@1/**),multi_a(2,@2/**,@3/**)))"
+confusion_score = 2
+cleartext = [
+    "Primary path: @0",
+    "Single-signature (@1), and 2 of @2 and @3",
 ]
 has_cleartext = true
 
@@ -565,24 +566,24 @@ cleartext = [
 ]
 has_cleartext = true
 
-# BothMustSign AND SortedMultisig: score = 1 * 1 = 1
+# BothMustSign AND Multisig: score = 1 * 2 = 2
 [[vector]]
-template = "tr(@0/**,and_v(v:and_v(v:pk(@1/**),pk(@2/**)),sortedmulti_a(2,@3/**,@4/**)))"
-confusion_score = 1
+template = "tr(@0/**,and_v(v:and_v(v:pk(@1/**),pk(@2/**)),multi_a(2,@3/**,@4/**)))"
+confusion_score = 2
 cleartext = [
     "Primary path: @0",
-    "Both @1 and @2 must sign, and 2 of @3 and @4 (sorted)",
+    "Both @1 and @2 must sign, and 2 of @3 and @4",
 ]
 has_cleartext = true
 
 # AndV leaf alongside a normal leaf: SingleSig sorts before AndV
 [[vector]]
-template = "tr(@0/**,{pk(@1/**),and_v(v:pk(@2/**),sortedmulti_a(2,@3/**,@4/**))})"
-confusion_score = 1
+template = "tr(@0/**,{pk(@1/**),and_v(v:pk(@2/**),multi_a(2,@3/**,@4/**))})"
+confusion_score = 2
 cleartext = [
     "Primary path: @0",
     "Single-signature (@1)",
-    "Single-signature (@2), and 2 of @3 and @4 (sorted)",
+    "Single-signature (@2), and 2 of @3 and @4",
 ]
 has_cleartext = true
 
