@@ -507,6 +507,36 @@ mod tests {
             .unwrap_or_else(|e| panic!("parse failed for {:?}: {:?}", s, e))
     }
 
+    /// Return a copy of `dt` with every tap-tree `Branch` rewritten so its two
+    /// children are in a deterministic order (by canonical `Display` string).
+    /// A BIP341 `TapBranch` sorts its two child hashes, so `{A,B}` and `{B,A}`
+    /// denote the same tree; this lets us compare descriptors up to that
+    /// (semantically irrelevant) child ordering.
+    fn canonicalize_taptree_order(dt: &DescriptorTemplate) -> DescriptorTemplate {
+        use crate::TapTree;
+
+        fn canon_tree(t: &TapTree) -> TapTree {
+            match t {
+                TapTree::Script(d) => TapTree::Script(d.clone()),
+                TapTree::Branch(l, r) => {
+                    let (cl, cr) = (canon_tree(l), canon_tree(r));
+                    if cl.to_string() <= cr.to_string() {
+                        TapTree::Branch(alloc::boxed::Box::new(cl), alloc::boxed::Box::new(cr))
+                    } else {
+                        TapTree::Branch(alloc::boxed::Box::new(cr), alloc::boxed::Box::new(cl))
+                    }
+                }
+            }
+        }
+
+        match dt {
+            DescriptorTemplate::Tr(key, tree) => {
+                DescriptorTemplate::Tr(key.clone(), tree.as_ref().map(canon_tree))
+            }
+            other => other.clone(),
+        }
+    }
+
     /// One entry from `specs/test_vectors.toml`. Every field except
     /// `template` is optional so the same data file can carry partial
     /// vectors (e.g. confusion-score-only) for cases that historically
@@ -609,6 +639,25 @@ mod tests {
                 variants.len() as u64,
                 score,
                 "variant count != confusion_score for {:?}",
+                v.template
+            );
+
+            // The decoded candidates must include the template we started from.
+            // Parsing normalizes derivations (`/**` == `<0;1>/*`) and
+            // `has_cleartext == true` guarantees canonical derivation pairs, so
+            // the original matches one of the enumerated variants up to tap-tree
+            // branch reordering: BIP341 sorts the two child hashes of a
+            // TapBranch, so `{A,B}` and `{B,A}` are the same tree, and the
+            // decoder deliberately emits a single canonical representative (the
+            // confusion score counts *unordered* trees). We therefore compare
+            // after canonicalizing branch child order.
+            let original = canonicalize_taptree_order(&dt(&v.template));
+            assert!(
+                variants
+                    .iter()
+                    .any(|variant| canonicalize_taptree_order(variant) == original),
+                "from_cleartext for {:?} did not yield the original template back \
+                 (up to tap-tree branch reordering)",
                 v.template
             );
 
