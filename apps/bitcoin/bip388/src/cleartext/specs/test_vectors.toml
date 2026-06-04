@@ -611,3 +611,23 @@ has_cleartext = false
 template = "tr(@0/**,pk(@1/<2;3>/*))"
 cleartext = ["tr(@0/**,pk(@1/<2;3>/*))"]
 has_cleartext = false
+
+# =============================================================================
+# Bounded combinator nesting: a timelock over an AndV (`TimelockedAndV`) and a
+# `thresh(...)` of simple signer leaves plus a timelock branch. The three leaves
+# exercise `Timelocked`, `AndV` (with a nested `Thresh` sub-policy), and
+# `TimelockedAndV`. The confusion score is the product of: 3 distinct tap-tree
+# shapes T(3), the thresh leaf's 4! = 24 branch orderings, and 2!*2!*2! = 8
+# derivation-pair orderings for keys @1/@2/@3 (each appearing twice).
+# =============================================================================
+
+[[vector]]
+template = "tr(@0/**,{and_v(v:and_v(v:pk(@4/**),multi_a(2,@1/**,@2/**,@3/**)),after(1688000400)),{and_v(v:multi_a(2,@1/<2;3>/*,@2/<2;3>/*,@3/<2;3>/*),thresh(2,pk(@5/**),s:pk(@6/**),s:pk(@7/**),snl:after(1704067200))),and_v(v:multi_a(2,@8/**,@9/**,@10/**),after(1735689600))}})"
+confusion_score = 576
+cleartext = [
+    "Primary path: @0",
+    "2 of @8, @9 and @10 after date 2025-01-01",
+    "2 of @1, @2 and @3, and 2 of: Single-signature (@5); Single-signature (@6); Single-signature (@7); after date 2024-01-01",
+    "Single-signature (@4), and 2 of @1, @2 and @3, after date 2023-06-29 01:00:00",
+]
+has_cleartext = true

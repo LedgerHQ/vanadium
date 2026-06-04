@@ -19,7 +19,7 @@ use super::super::time::{parse_relative_time_to_seconds, parse_utc_date_to_times
 use super::super::{DescriptorTemplate, KeyExpression, KeyExpressionType, TapTree};
 use super::{
     CleartextPart, CleartextSpec, CleartextValue, DescriptorClass, TapleafClass, TapleafPattern,
-    Timelock, TopLevelPattern, LOCKTIME_THRESHOLD, RELATIVE_LOCK_LIMIT,
+    ThreshBranch, Timelock, TopLevelPattern, LOCKTIME_THRESHOLD, RELATIVE_LOCK_LIMIT,
     SEQUENCE_LOCKTIME_TYPE_FLAG, TAPLEAF_SPECS, TOP_LEVEL_SPECS,
 };
 
@@ -169,6 +169,13 @@ impl CleartextValueCursor {
         }
     }
 
+    fn branches(&mut self) -> Option<Vec<ThreshBranch>> {
+        match self.values.next()? {
+            CleartextValue::Branches(value) => Some(value),
+            _ => None,
+        }
+    }
+
     fn finish(mut self) -> Option<()> {
         if self.values.next().is_none() {
             Some(())
@@ -205,7 +212,29 @@ fn parse_cleartext_value(part: CleartextPart, input: &str) -> Option<CleartextVa
         CleartextPart::Subpolicy => {
             parse_tapleaf_cleartext(input).map(CleartextValue::Subpolicy)
         }
+        CleartextPart::Branches => parse_thresh_branches(input).map(CleartextValue::Branches),
     }
+}
+
+/// Parse a rendered `thresh(...)` branch list (as produced by
+/// `format_thresh_branches`) back into a canonical `Vec<ThreshBranch>`.
+/// Branches are separated by "; "; a branch beginning with "after " is a
+/// timelock, otherwise it is a non-combinator signer leaf.
+fn parse_thresh_branches(s: &str) -> Option<Vec<ThreshBranch>> {
+    let mut branches = Vec::new();
+    for piece in s.split("; ") {
+        let branch = if let Some(tail) = piece.strip_prefix("after ") {
+            ThreshBranch::Timelock(parse_timelock(tail)?)
+        } else {
+            ThreshBranch::Leaf(*parse_tapleaf_cleartext(piece)?)
+        };
+        branches.push(branch);
+    }
+    if branches.is_empty() {
+        return None;
+    }
+    branches.sort_by(|a, b| a.cmp_canonical(b));
+    Some(branches)
 }
 
 fn parse_with_specs<K: Copy>(
@@ -287,6 +316,71 @@ fn parse_spec_parts(
                 }
             }
         },
+    }
+}
+
+/// Reconstruct every `thresh(...)` descriptor template that maps to the given
+/// (canonical) branch list. The cleartext displays branches in canonical order,
+/// so each distinct branch *ordering* is a separate template; within an
+/// ordering, branches are the Cartesian product of their own template variants.
+/// Branches past the first are re-wrapped to a canonical W-type form (the exact
+/// wrappers are irrelevant to re-encoding, which strips them).
+fn thresh_to_descriptors(
+    threshold: u32,
+    branches: &[ThreshBranch],
+) -> Result<Vec<DescriptorTemplate>, CleartextDecodeError> {
+    let mut per_branch: Vec<Vec<DescriptorTemplate>> = Vec::with_capacity(branches.len());
+    for branch in branches {
+        per_branch.push(match branch {
+            ThreshBranch::Leaf(leaf) => tapleaf_to_descriptors(leaf)?,
+            ThreshBranch::Timelock(lock) => vec![lock.to_descriptor()],
+        });
+    }
+    let mut out: Vec<DescriptorTemplate> = Vec::new();
+    for perm in PermutationIter::new(branches.len()) {
+        thresh_cartesian(threshold, &perm, &per_branch, &mut Vec::new(), &mut out);
+    }
+    Ok(out)
+}
+
+fn thresh_cartesian(
+    threshold: u32,
+    perm: &[usize],
+    per_branch: &[Vec<DescriptorTemplate>],
+    chosen: &mut Vec<DescriptorTemplate>,
+    out: &mut Vec<DescriptorTemplate>,
+) {
+    if chosen.len() == perm.len() {
+        let scripts: Vec<DescriptorTemplate> = chosen
+            .iter()
+            .enumerate()
+            .map(|(i, d)| {
+                if i == 0 {
+                    d.clone()
+                } else {
+                    wrap_thresh_branch(d.clone())
+                }
+            })
+            .collect();
+        push_unique(out, DescriptorTemplate::Thresh(threshold, scripts));
+        return;
+    }
+    let idx = perm[chosen.len()];
+    for variant in &per_branch[idx] {
+        chosen.push(variant.clone());
+        thresh_cartesian(threshold, perm, per_branch, chosen, out);
+        chosen.pop();
+    }
+}
+
+/// Wrap a non-first thresh branch into a canonical W-type form: signer leaves
+/// get `s:`, bare timelocks get `snl:` (the standard way to place a timelock in
+/// a thresh). These wrappers are stripped again at classification time.
+fn wrap_thresh_branch(d: DescriptorTemplate) -> DescriptorTemplate {
+    use DescriptorTemplate::*;
+    match &d {
+        After(_) | Older(_) => S(Box::new(N(Box::new(L(Box::new(d)))))),
+        _ => S(Box::new(d)),
     }
 }
 

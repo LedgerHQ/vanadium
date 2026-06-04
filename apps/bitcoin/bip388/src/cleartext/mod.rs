@@ -100,6 +100,7 @@ pub(super) enum CleartextPart {
     KeyIndices,
     Timelock,
     Subpolicy,
+    Branches,
 }
 
 pub(super) struct CleartextSpec<K> {
@@ -114,6 +115,32 @@ enum CleartextValue {
     KeyIndices(Vec<KeyExpression>),
     Timelock(Timelock),
     Subpolicy(alloc::boxed::Box<TapleafClass>),
+    Branches(Vec<ThreshBranch>),
+}
+
+/// A single branch of a recognized `thresh(...)` tapleaf. Branches are either a
+/// non-combinator signer leaf (classified recursively, like a `Subpolicy`) or a
+/// bare spending timelock (`older`/`after`). Combinators and nested `thresh`
+/// are rejected at classification time, so the nesting is bounded.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) enum ThreshBranch {
+    Leaf(TapleafClass),
+    Timelock(Timelock),
+}
+
+impl ThreshBranch {
+    /// Canonical display order for thresh branches: signer leaves first
+    /// (ordered by `TapleafClass::display_cmp`), then timelocks (ordered by
+    /// lock value).
+    fn cmp_canonical(&self, other: &Self) -> core::cmp::Ordering {
+        use core::cmp::Ordering;
+        match (self, other) {
+            (ThreshBranch::Leaf(a), ThreshBranch::Leaf(b)) => a.display_cmp(b),
+            (ThreshBranch::Leaf(_), ThreshBranch::Timelock(_)) => Ordering::Less,
+            (ThreshBranch::Timelock(_), ThreshBranch::Leaf(_)) => Ordering::Greater,
+            (ThreshBranch::Timelock(a), ThreshBranch::Timelock(b)) => a.cmp(b),
+        }
+    }
 }
 
 /// Compares two key placeholders for canonical display ordering:
@@ -174,6 +201,27 @@ impl TapleafClass {
             (TC::AndV { sub1: a1, sub2: a2 }, TC::AndV { sub1: b1, sub2: b2 }) => {
                 a1.display_cmp(b1).then_with(|| a2.display_cmp(b2))
             }
+            (
+                TC::TimelockedAndV { sub1: a1, sub2: a2, timelock: t1 },
+                TC::TimelockedAndV { sub1: b1, sub2: b2, timelock: t2 },
+            ) => a1
+                .display_cmp(b1)
+                .then_with(|| a2.display_cmp(b2))
+                .then(t1.cmp(t2)),
+            (
+                TC::Thresh { threshold: t1, branches: b1 },
+                TC::Thresh { threshold: t2, branches: b2 },
+            ) => b1
+                .len()
+                .cmp(&b2.len())
+                .then(t1.cmp(t2))
+                .then_with(|| {
+                    b1.iter()
+                        .zip(b2.iter())
+                        .map(|(x, y)| x.cmp_canonical(y))
+                        .find(|o| *o != Ordering::Equal)
+                        .unwrap_or(Ordering::Equal)
+                }),
             (TC::Other(s1), TC::Other(s2)) => s1.cmp(s2),
             // Same order() value implies same variant; this arm is unreachable.
             _ => Ordering::Equal,
@@ -249,6 +297,51 @@ fn tree_to_leaves(t: &super::TapTree) -> Vec<TapleafClass> {
     t.tapleaves().map(|l| l.classify_as_tapleaf()).collect()
 }
 
+/// Render the branch list of a recognized `thresh(...)`. Branches are joined
+/// with `"; "` — a separator that appears in no leaf rendering, so the reverse
+/// parser can split unambiguously. Each `Leaf` branch is rendered by its own
+/// cleartext; each `Timelock` branch as `"after <timelock>"` (mirroring the
+/// `Timelocked` tail). Returns `None` if any leaf branch lacks a cleartext.
+fn format_thresh_branches(branches: &[ThreshBranch], canonical: bool) -> Option<String> {
+    let mut parts: Vec<String> = Vec::with_capacity(branches.len());
+    for branch in branches {
+        parts.push(match branch {
+            ThreshBranch::Leaf(leaf) => leaf.to_cleartext_string(canonical)?,
+            ThreshBranch::Timelock(lock) => format!("after {}", format_timelock(*lock)),
+        });
+    }
+    Some(parts.join("; "))
+}
+
+/// Number of distinct orderings of a (canonically sorted) thresh branch list:
+/// `n! / Π(multiplicity!)`. Mirrors the key-derivation-ordering and tap-tree
+/// factors in `confusion_score` — the cleartext displays branches in canonical
+/// order, so every distinct permutation of the original is a separate template
+/// that maps to the same cleartext.
+pub(super) fn thresh_branch_orderings(branches: &[ThreshBranch]) -> u64 {
+    let n = branches.len();
+    let mut numerator = 1u64;
+    for i in 1..=n as u64 {
+        numerator = numerator.saturating_mul(i);
+    }
+    // `branches` is sorted, so identical branches are adjacent.
+    let mut denominator = 1u64;
+    let mut i = 0;
+    while i < n {
+        let mut j = i + 1;
+        while j < n && branches[j] == branches[i] {
+            j += 1;
+        }
+        let mut fact = 1u64;
+        for k in 1..=(j - i) as u64 {
+            fact = fact.saturating_mul(k);
+        }
+        denominator = denominator.saturating_mul(fact);
+        i = j;
+    }
+    numerator / denominator
+}
+
 fn cleartext_spec<K: Copy + Eq>(
     specs: &'static [CleartextSpec<K>],
     kind: K,
@@ -277,8 +370,14 @@ fn format_cleartext_value(
         (CleartextPart::Subpolicy, CleartextValue::Subpolicy(leaf)) => {
             leaf.to_cleartext_string(canonical)?
         }
+        (CleartextPart::Branches, CleartextValue::Branches(branches)) => {
+            format_thresh_branches(branches, canonical)?
+        }
         _ => {
-            debug_assert!(false, "cleartext part/value mismatch (codegen invariant violated)");
+            debug_assert!(
+                false,
+                "cleartext part/value mismatch (codegen invariant violated)"
+            );
             return None;
         }
     })
@@ -432,7 +531,8 @@ impl ClearText for DescriptorTemplate {
         // Helper: a classifier match without a corresponding cleartext spec
         // would indicate the build-time spec is out of sync with `classify()`.
         // We fall back to the raw descriptor instead of panicking on the VM.
-        let render = |class: &DescriptorClass| -> Option<String> { class.to_cleartext_string(true) };
+        let render =
+            |class: &DescriptorClass| -> Option<String> { class.to_cleartext_string(true) };
 
         match self.classify() {
             class @ (DescriptorClass::LegacySingleSig { .. }
@@ -475,7 +575,11 @@ impl ClearText for DescriptorTemplate {
                             // descriptor as a defensive placeholder rather than
                             // panicking on the VM.
                             other => {
-                                debug_assert!(false, "classified leaf has no cleartext: {:?}", other);
+                                debug_assert!(
+                                    false,
+                                    "classified leaf has no cleartext: {:?}",
+                                    other
+                                );
                                 descriptions.push(self.to_string());
                             }
                         }
@@ -498,13 +602,97 @@ impl ClearText for DescriptorTemplate {
 
 #[cfg(test)]
 mod tests {
+    use super::super::{KeyExpression, KeyExpressionType, TapTree};
     use super::{ClearText, DescriptorTemplate};
-    use alloc::{string::String, vec::Vec};
+    use alloc::{boxed::Box, format, string::String, vec::Vec};
     use core::str::FromStr;
 
     fn dt(s: &str) -> DescriptorTemplate {
         DescriptorTemplate::from_str(s)
             .unwrap_or_else(|e| panic!("parse failed for {:?}: {:?}", s, e))
+    }
+
+    /// Canonicalize a key expression for equivalence comparison: musig key
+    /// argument order is script-irrelevant, so sort the musig key indices.
+    fn norm_key(k: &KeyExpression) -> KeyExpression {
+        let mut k = k.clone();
+        if let KeyExpressionType::Musig(ref mut ids) = k.key_type {
+            ids.sort();
+        }
+        k
+    }
+
+    /// Normalize the keys of a `sortedmulti`/`sortedmulti_a`: their order is
+    /// script-irrelevant (the script sorts them), so sort by (type, derivation).
+    fn norm_sorted_keys(ks: &[KeyExpression]) -> Vec<KeyExpression> {
+        let mut v: Vec<KeyExpression> = ks.iter().map(norm_key).collect();
+        v.sort_by(|a, b| {
+            a.key_type
+                .cmp(&b.key_type)
+                .then(a.num1.cmp(&b.num1))
+                .then(a.num2.cmp(&b.num2))
+        });
+        v
+    }
+
+    fn norm_tree(t: &TapTree) -> TapTree {
+        match t {
+            TapTree::Script(b) => TapTree::Script(Box::new(norm_dt(b))),
+            // Swapping a branch's two children leaves the Merkle root (and thus
+            // the address) unchanged, so order them canonically.
+            TapTree::Branch(l, r) => {
+                let (nl, nr) = (norm_tree(l), norm_tree(r));
+                if format!("{:?}", nl) <= format!("{:?}", nr) {
+                    TapTree::Branch(Box::new(nl), Box::new(nr))
+                } else {
+                    TapTree::Branch(Box::new(nr), Box::new(nl))
+                }
+            }
+        }
+    }
+
+    /// Canonicalize a descriptor template modulo script-irrelevant reorderings
+    /// (musig key order, sortedmulti key order, taproot branch left/right), so
+    /// that two templates producing the same address compare equal. Note that
+    /// `multi`/`multi_a`/`thresh` argument order IS script-relevant and is left
+    /// untouched.
+    fn norm_dt(d: &DescriptorTemplate) -> DescriptorTemplate {
+        use DescriptorTemplate as D;
+        let bx = |x: D| Box::new(x);
+        match d {
+            D::Sh(b) => D::Sh(bx(norm_dt(b))),
+            D::Wsh(b) => D::Wsh(bx(norm_dt(b))),
+            D::Pkh(k) => D::Pkh(norm_key(k)),
+            D::Wpkh(k) => D::Wpkh(norm_key(k)),
+            D::Tr(k, tree) => D::Tr(norm_key(k), tree.as_ref().map(norm_tree)),
+            D::Pk(k) => D::Pk(norm_key(k)),
+            D::Pk_k(k) => D::Pk_k(norm_key(k)),
+            D::Pk_h(k) => D::Pk_h(norm_key(k)),
+            D::Multi(n, ks) => D::Multi(*n, ks.iter().map(norm_key).collect()),
+            D::Multi_a(n, ks) => D::Multi_a(*n, ks.iter().map(norm_key).collect()),
+            D::Sortedmulti(n, ks) => D::Sortedmulti(*n, norm_sorted_keys(ks)),
+            D::Sortedmulti_a(n, ks) => D::Sortedmulti_a(*n, norm_sorted_keys(ks)),
+            D::Andor(a, b, c) => D::Andor(bx(norm_dt(a)), bx(norm_dt(b)), bx(norm_dt(c))),
+            D::And_v(a, b) => D::And_v(bx(norm_dt(a)), bx(norm_dt(b))),
+            D::And_b(a, b) => D::And_b(bx(norm_dt(a)), bx(norm_dt(b))),
+            D::And_n(a, b) => D::And_n(bx(norm_dt(a)), bx(norm_dt(b))),
+            D::Or_b(a, b) => D::Or_b(bx(norm_dt(a)), bx(norm_dt(b))),
+            D::Or_c(a, b) => D::Or_c(bx(norm_dt(a)), bx(norm_dt(b))),
+            D::Or_d(a, b) => D::Or_d(bx(norm_dt(a)), bx(norm_dt(b))),
+            D::Or_i(a, b) => D::Or_i(bx(norm_dt(a)), bx(norm_dt(b))),
+            D::Thresh(n, subs) => D::Thresh(*n, subs.iter().map(norm_dt).collect()),
+            D::A(b) => D::A(bx(norm_dt(b))),
+            D::S(b) => D::S(bx(norm_dt(b))),
+            D::C(b) => D::C(bx(norm_dt(b))),
+            D::T(b) => D::T(bx(norm_dt(b))),
+            D::D(b) => D::D(bx(norm_dt(b))),
+            D::V(b) => D::V(bx(norm_dt(b))),
+            D::J(b) => D::J(bx(norm_dt(b))),
+            D::N(b) => D::N(bx(norm_dt(b))),
+            D::L(b) => D::L(bx(norm_dt(b))),
+            D::U(b) => D::U(bx(norm_dt(b))),
+            other => other.clone(),
+        }
     }
 
     /// One entry from `specs/test_vectors.toml`. Every field except
@@ -626,6 +814,17 @@ mod tests {
                 );
             }
 
+            // The decoded variants must include the *original* descriptor (so a
+            // signer is guaranteed its actual descriptor is among the enumerated
+            // candidates), up to script-irrelevant reorderings.
+            let original = norm_dt(&dt(&v.template));
+            let normalized: Vec<DescriptorTemplate> = variants.iter().map(norm_dt).collect();
+            assert!(
+                normalized.contains(&original),
+                "original {:?} is not among the decoded variants",
+                v.template
+            );
+
             for i in 0..variants.len() {
                 for j in (i + 1)..variants.len() {
                     assert_ne!(
@@ -636,6 +835,45 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// `thresh(...)` is recognized only in its exact canonical form (bare first
+    /// branch; `s:<signer>` / `snl:<timelock>` for the rest). Any other wrapping
+    /// changes the script, so it must fall back to the raw template (rather than
+    /// being shown under a cleartext it doesn't uniquely correspond to).
+    #[test]
+    fn test_thresh_requires_canonical_wrappers() {
+        // Canonical: bare first branch, `s:` on the rest → recognized.
+        let ok = dt("tr(@0/**,thresh(2,pk(@1/**),s:pk(@2/**),s:pk(@3/**)))");
+        assert!(ok.to_cleartext().1, "canonical thresh should have cleartext");
+
+        // Canonical with a `snl:` timelock branch → recognized.
+        let ok_lock = dt("tr(@0/**,thresh(2,pk(@1/**),s:pk(@2/**),snl:after(1704067200)))");
+        assert!(
+            ok_lock.to_cleartext().1,
+            "canonical thresh with timelock should have cleartext"
+        );
+
+        // `a:` instead of `s:` on a later branch → different script → Other.
+        let bad_wrap = dt("tr(@0/**,thresh(2,pk(@1/**),a:pk(@2/**),s:pk(@3/**)))");
+        assert!(
+            !bad_wrap.to_cleartext().1,
+            "a:-wrapped branch must not be recognized"
+        );
+
+        // First branch must be bare (here it is `s:`-wrapped) → Other.
+        let first_wrapped = dt("tr(@0/**,thresh(2,s:pk(@1/**),s:pk(@2/**),s:pk(@3/**)))");
+        assert!(
+            !first_wrapped.to_cleartext().1,
+            "wrapped first branch must not be recognized"
+        );
+
+        // Timelock branch with the wrong wrapper (`s:` instead of `snl:`) → Other.
+        let bad_lock = dt("tr(@0/**,thresh(2,pk(@1/**),s:pk(@2/**),s:after(1704067200)))");
+        assert!(
+            !bad_lock.to_cleartext().1,
+            "s:-wrapped timelock branch must not be recognized"
+        );
     }
 
     #[test]

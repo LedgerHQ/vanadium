@@ -104,3 +104,23 @@ cleartext = ["$sub", " after ", "$timelock"]
 name = "AndV"
 patterns = ["and_v(v:$sub1, $sub2)"]
 cleartext = ["$sub1", ", and ", "$sub2"]
+
+# A k-of-n `thresh(...)` over simple branches. `$branches` is a variadic list:
+# each branch is wrapper-stripped (thresh branches carry structural `s:`/`snl:`
+# wrappers) and classified as a non-combinator signer leaf or a bare timelock;
+# nested combinators and nested thresh are rejected. Branches are rendered in
+# canonical order joined by "; " (a separator no leaf rendering contains). The
+# `$threshold of: ` shape is distinct from the `$threshold of ` multisig shapes.
+[[tapleaf]]
+name = "Thresh"
+patterns = ["thresh($threshold, $branches)"]
+cleartext = ["$threshold", " of: ", "$branches"]
+
+# A timelock over an AndV of two simple (non-combinator) signers. This is the
+# single bounded exception to the "no combinator nesting" rule: the `$sub1`/
+# `$sub2` are still classified as non-combinator leaves, so nesting stops at
+# depth 2 (it does not recurse into further combinators).
+[[tapleaf]]
+name = "TimelockedAndV"
+patterns = ["and_v(v:and_v(v:$sub1, $sub2), $timelock)"]
+cleartext = ["$sub1", ", and ", "$sub2", ", after ", "$timelock"]

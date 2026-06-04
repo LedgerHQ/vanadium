@@ -159,6 +159,10 @@ enum BindingKind {
     /// Bound to a sub-expression that is classified as a `TapleafClass`.
     /// Host type is `Box<TapleafClass>`.
     Subpolicy,
+    /// Bound to the variadic argument list of a `thresh(...)`. Each element is
+    /// classified (after stripping miniscript wrappers) as a non-combinator
+    /// signer leaf or a bare timelock. Host type is `Vec<ThreshBranch>`.
+    ThreshBranches,
 }
 
 /// Static metadata for a binding kind: the host-language type, the matching
@@ -203,6 +207,11 @@ impl BindingKind {
                 cleartext_variant: Some("Subpolicy"),
                 cursor_method: Some("subpolicy"),
             },
+            BindingKind::ThreshBranches => KindInfo {
+                rust_type: "alloc::vec::Vec<ThreshBranch>",
+                cleartext_variant: Some("Branches"),
+                cursor_method: Some("branches"),
+            },
         }
     }
 }
@@ -218,6 +227,7 @@ fn binding_name_kind(name: &str) -> Option<BindingKind> {
         "timelock" => BindingKind::Timelock,
         "leaves" => BindingKind::Leaves,
         "sub" => BindingKind::Subpolicy,
+        "branches" => BindingKind::ThreshBranches,
         _ => return None,
     })
 }
@@ -280,6 +290,9 @@ enum ArgKind {
     /// Special: the second argument of `tr(...)` — `Option<TapTree>` lowered
     /// to a `Vec<TapleafClass>`.
     Tree,
+    /// Special: the variadic tail of `thresh(...)` — `Vec<DescriptorTemplate>`
+    /// lowered to a `Vec<ThreshBranch>`.
+    BranchList,
 }
 
 fn variant_arg_kinds(variant: &str) -> &'static [ArgKind] {
@@ -288,6 +301,7 @@ fn variant_arg_kinds(variant: &str) -> &'static [ArgKind] {
         "Pk" | "Pk_k" | "Pk_h" | "Pkh" | "Wpkh" => &[Key],
         "Older" | "After" => &[Num],
         "Multi" | "Multi_a" | "Sortedmulti" | "Sortedmulti_a" => &[Num, KeyList],
+        "Thresh" => &[Num, BranchList],
         "Tr" => &[Key, Tree],
         "And_v" | "And_b" | "And_n" | "Or_b" | "Or_c" | "Or_d" | "Or_i" => &[Sub, Sub],
         "Andor" => &[Sub, Sub, Sub],
@@ -502,6 +516,7 @@ fn check_kind_matches(name: &str, binding: BindingKind, positional: ArgKind) -> 
         | (BindingKind::KeyList, ArgKind::KeyList)
         | (BindingKind::Threshold, ArgKind::Num)
         | (BindingKind::Leaves, ArgKind::Tree)
+        | (BindingKind::ThreshBranches, ArgKind::BranchList)
         | (BindingKind::Subpolicy | BindingKind::Timelock, ArgKind::Sub) => Ok(()),
         _ => Err(format!(
             "binding '${}' (kind {:?}) doesn't match the AST position kind {:?}",
@@ -832,6 +847,17 @@ enum MatchStep {
         classified: Ident,
         combinator_variants: Vec<Ident>,
     },
+    /// Classify the variadic `thresh(...)` argument list (`<expr>`, a
+    /// `&Vec<DescriptorTemplate>`) into a `Vec<ThreshBranch>` bound to `bound`.
+    /// Each element is wrapper-stripped, then matched as a bare timelock or
+    /// classified as a non-combinator signer leaf; any element that classifies
+    /// to `Other`, a combinator, or a nested `thresh` (`reject_variants`) fails
+    /// the whole match. The resulting branches are sorted canonically.
+    ClassifyThreshBranches {
+        expr: TokenStream,
+        bound: Ident,
+        reject_variants: Vec<Ident>,
+    },
 }
 
 struct Counter(usize);
@@ -851,14 +877,25 @@ struct Lowered {
     bindings: BTreeMap<String, TokenStream>,
 }
 
-fn lower_pattern(pat: &Pattern, combinator_variants: &[Ident]) -> Lowered {
+fn lower_pattern(
+    pat: &Pattern,
+    combinator_variants: &[Ident],
+    thresh_reject_variants: &[Ident],
+) -> Lowered {
     let mut counter = Counter(0);
     let mut l = Lowered {
         steps: Vec::new(),
         preamble: Vec::new(),
         bindings: BTreeMap::new(),
     };
-    lower(pat, quote!(__m), &mut counter, &mut l, combinator_variants);
+    lower(
+        pat,
+        quote!(__m),
+        &mut counter,
+        &mut l,
+        combinator_variants,
+        thresh_reject_variants,
+    );
     l
 }
 
@@ -868,6 +905,7 @@ fn lower(
     c: &mut Counter,
     l: &mut Lowered,
     combinator_variants: &[Ident],
+    thresh_reject_variants: &[Ident],
 ) {
     let variant_str = keyword_to_variant(&pat.keyword).expect("keyword validated");
     let variant = id(variant_str);
@@ -915,6 +953,18 @@ fn lower(
                     l.steps.push(MatchStep::ClassifyTimelock {
                         expr: quote!(#tv.as_ref()),
                         bound: bound.clone(),
+                    });
+                    l.bindings.insert(name.clone(), quote!(#bound));
+                }
+                // The variadic `thresh(...)` argument list: classify each branch
+                // (wrapper-stripped) into a `Vec<ThreshBranch>` or fail the match.
+                ArgKind::BranchList => {
+                    debug_assert_eq!(*bkind, BindingKind::ThreshBranches);
+                    let bound = format_ident!("__br_{}", name);
+                    l.steps.push(MatchStep::ClassifyThreshBranches {
+                        expr: quote!(#tv),
+                        bound: bound.clone(),
+                        reject_variants: thresh_reject_variants.to_vec(),
                     });
                     l.bindings.insert(name.clone(), quote!(#bound));
                 }
@@ -967,7 +1017,14 @@ fn lower(
                 } else {
                     current
                 };
-                lower(inner, next_matchee, c, l, combinator_variants);
+                lower(
+                    inner,
+                    next_matchee,
+                    c,
+                    l,
+                    combinator_variants,
+                    thresh_reject_variants,
+                );
             }
             PatternArg::SubpolicyRef { wrappers, name } => {
                 // Unwrap through each wrapper in the AST (e.g. `v:` → V node).
@@ -1052,6 +1109,97 @@ fn fold_steps(steps: &[MatchStep], inner: TokenStream) -> TokenStream {
                     if !matches!(#classified, #reject_pat) { #code }
                 }
             }
+            MatchStep::ClassifyThreshBranches {
+                expr,
+                bound,
+                reject_variants,
+            } => {
+                // Reject Other, combinators, and nested thresh as branch leaves.
+                let reject_pat = if reject_variants.is_empty() {
+                    quote!(TapleafClass::Other(_))
+                } else {
+                    quote!(TapleafClass::Other(_) #(| TapleafClass::#reject_variants { .. })*)
+                };
+                // Classification is *exact* and position-aware so that the
+                // original descriptor is reproducible from the cleartext (the
+                // wrappers carry no display info but DO change the script):
+                //   - the first branch is the bare B-type fragment;
+                //   - every later branch is canonically W-wrapped: `s:<leaf>`
+                //     for a recognized non-combinator signer, or `snl:<lock>`
+                //     for a bare timelock.
+                // Anything else fails the whole match (→ raw `Other`).
+                quote! {
+                    if let Some(#bound) = {
+                        let __classify_bare = |__d: &DescriptorTemplate| -> Option<ThreshBranch> {
+                            match __d {
+                                DescriptorTemplate::Older(__n)
+                                    if is_valid_relative_locktime(*__n) =>
+                                {
+                                    Some(ThreshBranch::Timelock(Timelock::Relative(*__n)))
+                                }
+                                DescriptorTemplate::After(__n)
+                                    if is_valid_absolute_locktime(*__n) =>
+                                {
+                                    Some(ThreshBranch::Timelock(Timelock::Absolute(*__n)))
+                                }
+                                __other => {
+                                    let __cls = __other.classify_as_tapleaf();
+                                    if matches!(__cls, #reject_pat) {
+                                        None
+                                    } else {
+                                        Some(ThreshBranch::Leaf(__cls))
+                                    }
+                                }
+                            }
+                        };
+                        let mut __branches: alloc::vec::Vec<ThreshBranch> = alloc::vec::Vec::new();
+                        let mut __ok = true;
+                        for (__i, __sub) in #expr.iter().enumerate() {
+                            let __branch = if __i == 0 {
+                                // First branch: bare B-type fragment.
+                                __classify_bare(__sub)
+                            } else {
+                                // Later branches: exact canonical W-wrapping.
+                                match __sub {
+                                    DescriptorTemplate::S(__inner) => match __inner.as_ref() {
+                                        // `snl:<timelock>` == S(N(L(..)))
+                                        DescriptorTemplate::N(__nl) => match __nl.as_ref() {
+                                            DescriptorTemplate::L(__t) => {
+                                                match __classify_bare(__t) {
+                                                    Some(__b @ ThreshBranch::Timelock(_)) => {
+                                                        Some(__b)
+                                                    }
+                                                    _ => None,
+                                                }
+                                            }
+                                            _ => None,
+                                        },
+                                        // `s:<signer leaf>`
+                                        __other => match __classify_bare(__other) {
+                                            Some(__b @ ThreshBranch::Leaf(_)) => Some(__b),
+                                            _ => None,
+                                        },
+                                    },
+                                    _ => None,
+                                }
+                            };
+                            match __branch {
+                                Some(__b) => __branches.push(__b),
+                                None => {
+                                    __ok = false;
+                                    break;
+                                }
+                            }
+                        }
+                        if __ok && !__branches.is_empty() {
+                            __branches.sort_by(|__a, __b| __a.cmp_canonical(__b));
+                            Some(__branches)
+                        } else {
+                            None
+                        }
+                    } { #code }
+                }
+            }
         };
     }
     code
@@ -1080,6 +1228,8 @@ fn build_innermost(
                     quote!(#bound.as_ref().map(tree_to_leaves).unwrap_or_default())
                 }
                 BindingKind::Subpolicy => quote!(alloc::boxed::Box::new(#bound)),
+                // The classified `Vec<ThreshBranch>` is already an owned local.
+                BindingKind::ThreshBranches => quote!(#bound),
             };
             quote!(#f: #value)
         });
@@ -1099,6 +1249,8 @@ fn emit_classify(entries: &[ProcessedEntry], ck: ClassKind, fn_name: &str) -> To
 
     // Collect all TapleafClass variant names that contain Subpolicy fields.
     // These are excluded from sub-policy classification to prevent nesting.
+    // Note `thresh` (a ThreshBranches field, not Subpolicy) is intentionally NOT
+    // here, so it remains a valid `and_v`/timelocked sub-policy.
     let combinator_variants: Vec<Ident> = entries
         .iter()
         .filter(|e| {
@@ -1110,11 +1262,23 @@ fn emit_classify(entries: &[ProcessedEntry], ck: ClassKind, fn_name: &str) -> To
         .map(|e| id(&e.name))
         .collect();
 
+    // Variants rejected as `thresh` branches: combinators plus `thresh` itself
+    // (no thresh-in-thresh). `Other` is rejected separately.
+    let thresh_reject_variants: Vec<Ident> = entries
+        .iter()
+        .filter(|e| {
+            e.fields.kinds.values().any(|k| {
+                *k == BindingKind::Subpolicy || *k == BindingKind::ThreshBranches
+            })
+        })
+        .map(|e| id(&e.name))
+        .collect();
+
     let blocks: Vec<TokenStream> = entries
         .iter()
         .flat_map(|entry| {
             entry.patterns.iter().map(|pat| {
-                let l = lower_pattern(pat, &combinator_variants);
+                let l = lower_pattern(pat, &combinator_variants, &thresh_reject_variants);
                 let variant = id(&entry.name);
                 let inner = build_innermost(&l, &entry.fields, ck, &variant, &label);
                 fold_steps(&l.steps, inner)
@@ -1239,7 +1403,10 @@ fn emit_cleartext_pattern(entries: &[ProcessedEntry], ck: ClassKind) -> TokenStr
                     let ctor = cleartext_variant(*kind);
                     let n = id(name);
                     let arg: TokenStream = match kind {
-                        BindingKind::Key | BindingKind::KeyList | BindingKind::Subpolicy => {
+                        BindingKind::Key
+                        | BindingKind::KeyList
+                        | BindingKind::Subpolicy
+                        | BindingKind::ThreshBranches => {
                             quote!(#n.clone())
                         }
                         _ => quote!(*#n),
@@ -1348,6 +1515,30 @@ fn emit_score_arm(entry: &ProcessedEntry, class_enum: &str) -> TokenStream {
             |acc, n| quote!(#acc.saturating_mul(#n.per_leaf_score())),
         );
         return quote!(#class::#variant #destructure => #product,);
+    }
+
+    // A `thresh(...)` leaf: the cleartext displays branches in canonical order,
+    // so the score is the number of distinct branch orderings times the product
+    // of each branch's own score (a timelock branch contributes 1).
+    if let Some(branches_field) = entry
+        .fields
+        .order
+        .iter()
+        .find(|n| entry.fields.kinds[*n] == BindingKind::ThreshBranches)
+    {
+        let branches = id(branches_field);
+        return quote! {
+            #class::#variant { #branches, .. } => {
+                let mut __s = thresh_branch_orderings(#branches);
+                for __b in #branches.iter() {
+                    __s = __s.saturating_mul(match __b {
+                        ThreshBranch::Leaf(__l) => __l.per_leaf_score(),
+                        ThreshBranch::Timelock(_) => 1,
+                    });
+                }
+                __s
+            },
+        };
     }
 
     let plain: u64 = entry
@@ -1626,6 +1817,21 @@ fn build_subpolicy_arg_expr(
             name,
             kind: BindingKind::Subpolicy,
         } => (&[], name.as_str()),
+        // A nested literal pattern (e.g. the inner `and_v` of `TimelockedAndV`)
+        // may itself contain sub-policy bindings, so recurse with `sub_vars`
+        // threaded through rather than delegating to `build_arg_expr` (which
+        // panics on `SubpolicyRef` and has no access to the loop variables).
+        PatternArg::Sub { wrappers, inner } => {
+            let mut expr = build_subpolicy_construction_expr(inner, sub_vars);
+            for w in wrappers.iter().rev() {
+                let wv = id(w);
+                expr = quote!(DescriptorTemplate::#wv(alloc::boxed::Box::new(#expr)));
+            }
+            return match kind {
+                ArgKind::Sub => quote!(alloc::boxed::Box::new(#expr)),
+                _ => expr,
+            };
+        }
         // Non-subpolicy args delegate to the standard builder.
         _ => return build_arg_expr(arg, kind, /*owned=*/ false),
     };
@@ -1668,7 +1874,26 @@ fn emit_tapleaf_to_descriptors(tapleaf: &[ProcessedEntry]) -> TokenStream {
                 .map(String::as_str)
                 .collect();
 
-            let block = if !subpolicy_names.is_empty() {
+            // A `thresh(...)` entry reverses via the bespoke
+            // `thresh_to_descriptors` helper (branch-permutation enumeration +
+            // canonical wrapper reconstruction).
+            let thresh_branches_field: Option<&str> = e
+                .fields
+                .order
+                .iter()
+                .find(|n| e.fields.kinds[*n] == BindingKind::ThreshBranches)
+                .map(String::as_str);
+
+            let block = if let Some(branches) = thresh_branches_field {
+                let threshold = id(e
+                    .fields
+                    .order
+                    .iter()
+                    .find(|n| e.fields.kinds[*n] == BindingKind::Threshold)
+                    .expect("thresh entry has a threshold field"));
+                let branches = id(branches);
+                quote!(thresh_to_descriptors(*#threshold, #branches))
+            } else if !subpolicy_names.is_empty() {
                 emit_subpolicy_construction_block(e, &subpolicy_names)
             } else {
                 let b = emit_pattern_construction_block(e, /*owned=*/ false);
@@ -1781,6 +2006,11 @@ fn build_arg_expr(arg: &PatternArg, kind: ArgKind, owned: bool) -> TokenStream {
                 }
                 ArgKind::Sub => quote!(#n),
                 ArgKind::Tree => quote!(None),
+                // `thresh` reverse-construction uses the bespoke
+                // `thresh_to_descriptors` helper, not this builder.
+                ArgKind::BranchList => {
+                    panic!("BranchList must be handled by the thresh-specific reverse path")
+                }
             }
         }
         PatternArg::Musig { keys, .. } => {
