@@ -133,12 +133,30 @@ fn cmp_key(a: &KeyExpression, b: &KeyExpression) -> core::cmp::Ordering {
     }
 }
 
+/// Compare two key lists element by element with [`cmp_key`]. Used as a
+/// tie-breaker once the lists are known to be the same length, so trailing
+/// elements never decide the result. `cmp_key` ignores derivations, so this
+/// keeps multisig leaf ordering derivation-independent while still being
+/// *key-sensitive*: without it, two same-size, same-threshold `multi_a` leaves
+/// that differ only in their keys would compare equal, leaving their cleartext
+/// order to depend on tap-tree position — which is unstable across descriptors
+/// that share a cleartext rendering.
+fn cmp_keys(a: &[KeyExpression], b: &[KeyExpression]) -> core::cmp::Ordering {
+    for (x, y) in a.iter().zip(b.iter()) {
+        let ord = cmp_key(x, y);
+        if ord != core::cmp::Ordering::Equal {
+            return ord;
+        }
+    }
+    core::cmp::Ordering::Equal
+}
+
 impl TapleafClass {
     /// Full canonical display order. Categories come from `order()` (generated);
     /// within a category, ties are broken by:
     /// - `SingleSig`: key_index
     /// - `BothMustSign`: key_index1, then key_index2
-    /// - `SortedMultisig` / `Multisig`: number of keys, then threshold
+    /// - `SortedMultisig` / `Multisig`: number of keys, then threshold, then keys
     /// - `Timelocked`: signer sub-policy (recursively), then the lock value
     /// - `AndV`: sub1 (recursively), then sub2 (recursively)
     /// - `Other`: lexicographic by descriptor string
@@ -162,11 +180,11 @@ impl TapleafClass {
             (
                 TC::SortedMultisig { threshold: t1, keys: k1 },
                 TC::SortedMultisig { threshold: t2, keys: k2 },
-            ) => k1.len().cmp(&k2.len()).then(t1.cmp(t2)),
+            ) => k1.len().cmp(&k2.len()).then(t1.cmp(t2)).then_with(|| cmp_keys(k1, k2)),
             (
                 TC::Multisig { threshold: t1, keys: k1 },
                 TC::Multisig { threshold: t2, keys: k2 },
-            ) => k1.len().cmp(&k2.len()).then(t1.cmp(t2)),
+            ) => k1.len().cmp(&k2.len()).then(t1.cmp(t2)).then_with(|| cmp_keys(k1, k2)),
             (
                 TC::Timelocked { sub: s1, timelock: t1 },
                 TC::Timelocked { sub: s2, timelock: t2 },
