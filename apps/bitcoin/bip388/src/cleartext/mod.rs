@@ -41,8 +41,18 @@ pub use decode::CleartextDecodeError;
 #[cfg(any(test, feature = "cleartext-decode"))]
 use alloc::boxed::Box;
 
-// Maximum confusion score for which cleartext descriptions are shown instead of the raw descriptor template.
-pub const MAX_CONFUSION_SCORE: u64 = 3600;
+// Maximum confusion score for which cleartext descriptions are shown instead of
+// the raw descriptor template.
+//
+// `confusion_score` is a deliberate over-count (see `key_derivation_orderings_count`):
+// it expands every musig group to plain keys and takes the most-permutable
+// interpretation, so a legitimate policy can score far higher than its true
+// ambiguity (e.g. a musig key path with three shared 2-of-2 fallback leaves scores
+// 5184 versus 54 actual decodings). The previous limit of 3600 was a conservative
+// estimate that such policies overshoot, so the threshold is set well above them.
+// Over-counting only ever hides a cleartext we could have shown, never shows one
+// we shouldn't, so a generous limit stays on the safe side.
+pub const MAX_CONFUSION_SCORE: u64 = 100_000;
 
 pub(super) const SEQUENCE_LOCKTIME_TYPE_FLAG: u32 = 1 << 22;
 
@@ -296,7 +306,10 @@ fn format_cleartext_value(
             leaf.to_cleartext_string(canonical)?
         }
         _ => {
-            debug_assert!(false, "cleartext part/value mismatch (codegen invariant violated)");
+            debug_assert!(
+                false,
+                "cleartext part/value mismatch (codegen invariant violated)"
+            );
             return None;
         }
     })
@@ -392,14 +405,60 @@ impl DescriptorTemplate {
         true
     }
 
-    // For each distinct key expression that appears k times in the placeholders, returns the product of
-    // k! across all keys. This is the number of distinct ways the canonical derivation pairs
-    // (0,1), (2,3), ... can be permuted across the k occurrences.
+    // Upper bound on the number of ways the canonical derivation pairs
+    // (0,1), (2,3), ... can be permuted across repeated keys. The cleartext omits
+    // derivations, so descriptors that differ only in how those pairs are assigned
+    // re-encode to the same cleartext and are "confusable"; this bounds how many
+    // such assignments exist (a factor in `confusion_score`).
+    //
+    // We count by individual key *index*, expanding every `musig(@i, @j, ...)`
+    // group into its members `@i, @j, ...`. This deliberately over-counts, for two
+    // reasons, both of which keep us on the safe (conservative) side of the
+    // `confusion_score <= MAX_CONFUSION_SCORE` display gate:
+    //
+    //   * A tap-leaf "k of @i, @j, ..." renders identically as `multi_a(k, ...)`
+    //     (separate plain keys, which can repeat across leaves and be permuted) or,
+    //     when k == n, as `pk(musig(...))`. Expanding musig members to plain keys
+    //     captures the most-permutable (multi_a) interpretation for every group,
+    //     and counting by index automatically lets a member permute with the same
+    //     index wherever else it appears — in another leaf or in the key path.
+    //
+    //   * The taproot internal key is never actually rendered as `multi_a`, yet we
+    //     expand its musig members too. This inflates the count but needs no
+    //     special-casing.
+    //
+    // Why this never *under*-counts. Fix any single decoded descriptor. Its true
+    // ordering count is the product, over its key expressions `e`, of `count(e)!`,
+    // where `count(e)` is how many times `e` occurs (a plain key, or a whole musig
+    // group kept in `pk(musig(...))` form). We must show our index-wise product
+    // `∏_i occ(i)!` is `>=` that, where `occ(i)` is `i`'s total occurrences after
+    // expanding every group. Consider one index `i`: the key expressions that
+    // contain `i` (the plain key `@i`, and any musig group with `i` as a member)
+    // occupy disjoint occurrence slots, and every such slot is one of `i`'s `occ(i)`
+    // expanded occurrences, so the sum of their `count(e)` is `<= occ(i)`. By the
+    // multinomial inequality `a! * b! * ... <= (a + b + ...)!`, the contribution of
+    // all those key expressions is `<= occ(i)!`. Assign each key expression to one
+    // of its member indices and take the product over indices: every `count(e)!`
+    // is absorbed into some `occ(i)!`, so `∏_e count(e)! <= ∏_i occ(i)!`. Hence the
+    // result bounds the true count for *every* interpretation — including, e.g., a
+    // key-path musig that reappears verbatim in a leaf: both occurrences expand to
+    // the same indices, so their shared `c!` group permutations are dominated by
+    // the `(>= c)!` we already count per member index.
     fn key_derivation_orderings_count(&self) -> u64 {
-        let mut counts: alloc::collections::BTreeMap<super::KeyExpressionType, u32> =
+        // Occurrences of each plain key index, with musig groups expanded.
+        let mut counts: alloc::collections::BTreeMap<u32, u32> =
             alloc::collections::BTreeMap::new();
         for (kp, _) in self.placeholders() {
-            *counts.entry(kp.key_type.clone()).or_insert(0) += 1;
+            match &kp.key_type {
+                super::KeyExpressionType::PlainKey(i) => {
+                    *counts.entry(*i).or_insert(0) += 1;
+                }
+                super::KeyExpressionType::Musig(group) => {
+                    for &m in group {
+                        *counts.entry(m).or_insert(0) += 1;
+                    }
+                }
+            }
         }
         let mut product = 1u64;
         for &k in counts.values() {
@@ -450,7 +509,8 @@ impl ClearText for DescriptorTemplate {
         // Helper: a classifier match without a corresponding cleartext spec
         // would indicate the build-time spec is out of sync with `classify()`.
         // We fall back to the raw descriptor instead of panicking on the VM.
-        let render = |class: &DescriptorClass| -> Option<String> { class.to_cleartext_string(true) };
+        let render =
+            |class: &DescriptorClass| -> Option<String> { class.to_cleartext_string(true) };
 
         match self.classify() {
             class @ (DescriptorClass::LegacySingleSig { .. }
@@ -493,7 +553,11 @@ impl ClearText for DescriptorTemplate {
                             // descriptor as a defensive placeholder rather than
                             // panicking on the VM.
                             other => {
-                                debug_assert!(false, "classified leaf has no cleartext: {:?}", other);
+                                debug_assert!(
+                                    false,
+                                    "classified leaf has no cleartext: {:?}",
+                                    other
+                                );
                                 descriptions.push(self.to_string());
                             }
                         }
