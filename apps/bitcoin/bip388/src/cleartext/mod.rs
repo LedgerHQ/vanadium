@@ -717,10 +717,16 @@ mod tests {
                 .unwrap_or_else(|e| panic!("from_cleartext failed for {:?}: {:?}", v.template, e))
                 .collect();
 
-            assert_eq!(
-                variants.len() as u64,
+            // `confusion_score` is an upper bound on the number of distinct
+            // decodings, not necessarily exact: `key_derivation_orderings_count`
+            // deliberately over-counts (it takes the most-permutable, multi_a,
+            // interpretation of every musig key). So the decoder must yield no
+            // more variants than the score.
+            assert!(
+                variants.len() as u64 <= score,
+                "variant count {} exceeds confusion_score {} for {:?}",
+                variants.len(),
                 score,
-                "variant count != confusion_score for {:?}",
                 v.template
             );
 
