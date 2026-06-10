@@ -80,70 +80,67 @@ pub(super) fn parse_utc_date_to_timestamp(s: &str) -> Option<u32> {
     Some(timestamp)
 }
 
-/// Formats a number of seconds as a human-readable duration string.
-/// Uses units `d` (days), `h` (hours), `m` (minutes), `s` (seconds).
-/// Returns `"0s"` for zero. Example: `"1d 2h 30m"`.
+/// Formats a number of seconds as a human-readable duration string with
+/// spelled-out units (so a non-technical reader can't mistake "m" for months).
+/// Units are pluralized; returns `"0 seconds"` for zero.
+/// Example: `"1 day 2 hours 30 minutes"`.
 pub(super) fn format_seconds(secs: u32) -> String {
     let days = secs / 86400;
     let hours = (secs % 86400) / 3600;
     let minutes = (secs % 3600) / 60;
     let seconds = secs % 60;
     let mut parts: Vec<String> = Vec::new();
-    if days > 0 {
-        parts.push(format!("{}d", days));
-    }
-    if hours > 0 {
-        parts.push(format!("{}h", hours));
-    }
-    if minutes > 0 {
-        parts.push(format!("{}m", minutes));
-    }
-    if seconds > 0 {
-        parts.push(format!("{}s", seconds));
+    for (value, singular, plural) in [
+        (days, "day", "days"),
+        (hours, "hour", "hours"),
+        (minutes, "minute", "minutes"),
+        (seconds, "second", "seconds"),
+    ] {
+        if value > 0 {
+            let unit = if value == 1 { singular } else { plural };
+            parts.push(format!("{} {}", value, unit));
+        }
     }
     if parts.is_empty() {
-        "0s".to_string()
+        "0 seconds".to_string()
     } else {
         parts.join(" ")
     }
 }
 
 /// Parses a human-readable duration string as produced by [`format_seconds`].
-/// Accepts strings like `"0s"`, `"1d 2h 3m 4s"`, `"1h 30m"`, etc.
-/// Parts must appear in decreasing order (d, h, m, s) without duplicates.
-/// Returns `None` if the string is malformed or the total would overflow `u32`.
+/// Accepts strings like `"1 day 2 hours 3 minutes 4 seconds"`, `"1 hour 30 minutes"`, etc.
+/// Each `<number> <unit>` pair must appear in decreasing-unit order (day, hour,
+/// minute, second) without duplicates. Singular and plural unit spellings are
+/// both accepted regardless of the number. Returns `None` if the string is
+/// malformed or the total would overflow `u32`.
 #[cfg(any(test, feature = "cleartext-decode"))]
 pub(super) fn parse_relative_time_to_seconds(s: &str) -> Option<u32> {
     if s.is_empty() {
         return None;
     }
     let mut total: u32 = 0;
-    let mut last_unit: u8 = 0; // d=1, h=2, m=3, s=4; enforces ordering
-    for token in s.split_ascii_whitespace() {
-        // Use the last byte (must be an ASCII unit letter) to identify the unit.
-        let unit_byte = *token.as_bytes().last()?;
-        let unit: u8 = match unit_byte {
-            b'd' => 1,
-            b'h' => 2,
-            b'm' => 3,
-            b's' => 4,
+    let mut last_unit: u8 = 0; // day=1, hour=2, minute=3, second=4; enforces ordering
+    let mut tokens = s.split_ascii_whitespace();
+    loop {
+        let Some(num_str) = tokens.next() else {
+            break;
+        };
+        // A number must be followed by a unit word.
+        let unit_str = tokens.next()?;
+        let n: u32 = num_str.parse().ok()?;
+        let (unit, secs_per): (u8, u32) = match unit_str {
+            "day" | "days" => (1, 86400),
+            "hour" | "hours" => (2, 3600),
+            "minute" | "minutes" => (3, 60),
+            "second" | "seconds" => (4, 1),
             _ => return None,
         };
         if unit <= last_unit {
             return None; // out of order or duplicate unit
         }
         last_unit = unit;
-        // The number occupies all bytes except the last (which is the ASCII unit letter).
-        let num_str = &token[..token.len() - 1];
-        let n: u32 = num_str.parse().ok()?;
-        let secs = match unit_byte {
-            b'd' => n.checked_mul(86400)?,
-            b'h' => n.checked_mul(3600)?,
-            b'm' => n.checked_mul(60)?,
-            b's' => n,
-            _ => unreachable!(),
-        };
-        total = total.checked_add(secs)?;
+        total = total.checked_add(n.checked_mul(secs_per)?)?;
     }
     if last_unit == 0 {
         return None; // nothing was parsed
@@ -254,44 +251,57 @@ mod tests {
 
     #[test]
     fn test_format_seconds_known() {
-        assert_eq!(format_seconds(0), "0s");
-        assert_eq!(format_seconds(1), "1s");
-        assert_eq!(format_seconds(60), "1m");
-        assert_eq!(format_seconds(3600), "1h");
-        assert_eq!(format_seconds(86400), "1d");
-        assert_eq!(format_seconds(512), "8m 32s");
-        assert_eq!(format_seconds(92160), "1d 1h 36m");
-        assert_eq!(format_seconds(90061), "1d 1h 1m 1s");
-        assert_eq!(format_seconds(93784), "1d 2h 3m 4s");
+        assert_eq!(format_seconds(0), "0 seconds");
+        assert_eq!(format_seconds(1), "1 second");
+        assert_eq!(format_seconds(60), "1 minute");
+        assert_eq!(format_seconds(3600), "1 hour");
+        assert_eq!(format_seconds(86400), "1 day");
+        assert_eq!(format_seconds(512), "8 minutes 32 seconds");
+        assert_eq!(format_seconds(92160), "1 day 1 hour 36 minutes");
+        assert_eq!(format_seconds(90061), "1 day 1 hour 1 minute 1 second");
+        assert_eq!(format_seconds(93784), "1 day 2 hours 3 minutes 4 seconds");
         // only hours and seconds, no days or minutes
-        assert_eq!(format_seconds(3601), "1h 1s");
+        assert_eq!(format_seconds(3601), "1 hour 1 second");
     }
 
     // ── parse_relative_time_to_seconds ───────────────────────────────────────
 
     #[test]
     fn test_parse_relative_time_known() {
-        assert_eq!(parse_relative_time_to_seconds("0s"), Some(0));
-        assert_eq!(parse_relative_time_to_seconds("1s"), Some(1));
-        assert_eq!(parse_relative_time_to_seconds("1m"), Some(60));
-        assert_eq!(parse_relative_time_to_seconds("1h"), Some(3600));
-        assert_eq!(parse_relative_time_to_seconds("1d"), Some(86400));
-        assert_eq!(parse_relative_time_to_seconds("8m 32s"), Some(512));
-        assert_eq!(parse_relative_time_to_seconds("1d 1h 36m"), Some(92160));
-        assert_eq!(parse_relative_time_to_seconds("1d 1h 1m 1s"), Some(90061));
-        assert_eq!(parse_relative_time_to_seconds("1d 2h 3m 4s"), Some(93784));
-        assert_eq!(parse_relative_time_to_seconds("1h 1s"), Some(3601));
+        assert_eq!(parse_relative_time_to_seconds("0 seconds"), Some(0));
+        assert_eq!(parse_relative_time_to_seconds("1 second"), Some(1));
+        assert_eq!(parse_relative_time_to_seconds("1 minute"), Some(60));
+        assert_eq!(parse_relative_time_to_seconds("1 hour"), Some(3600));
+        assert_eq!(parse_relative_time_to_seconds("1 day"), Some(86400));
+        assert_eq!(parse_relative_time_to_seconds("8 minutes 32 seconds"), Some(512));
+        assert_eq!(
+            parse_relative_time_to_seconds("1 day 1 hour 36 minutes"),
+            Some(92160)
+        );
+        assert_eq!(
+            parse_relative_time_to_seconds("1 day 1 hour 1 minute 1 second"),
+            Some(90061)
+        );
+        assert_eq!(
+            parse_relative_time_to_seconds("1 day 2 hours 3 minutes 4 seconds"),
+            Some(93784)
+        );
+        assert_eq!(parse_relative_time_to_seconds("1 hour 1 second"), Some(3601));
+        // Singular/plural spellings are interchangeable regardless of the number.
+        assert_eq!(parse_relative_time_to_seconds("2 day"), Some(172800));
+        assert_eq!(parse_relative_time_to_seconds("1 seconds"), Some(1));
     }
 
     #[test]
     fn test_parse_relative_time_invalid() {
         assert_eq!(parse_relative_time_to_seconds(""), None);
-        assert_eq!(parse_relative_time_to_seconds("1x"), None); // unknown unit
-        assert_eq!(parse_relative_time_to_seconds("1h 1d"), None); // wrong order
-        assert_eq!(parse_relative_time_to_seconds("1h 1h"), None); // duplicate unit
-        assert_eq!(parse_relative_time_to_seconds("abc"), None); // no unit
-        assert_eq!(parse_relative_time_to_seconds("d"), None); // missing number
-        assert_eq!(parse_relative_time_to_seconds("1d2h"), None); // no space between tokens
+        assert_eq!(parse_relative_time_to_seconds("1 fortnight"), None); // unknown unit
+        assert_eq!(parse_relative_time_to_seconds("1 hour 1 day"), None); // wrong order
+        assert_eq!(parse_relative_time_to_seconds("1 hour 1 hour"), None); // duplicate unit
+        assert_eq!(parse_relative_time_to_seconds("abc"), None); // no number/unit
+        assert_eq!(parse_relative_time_to_seconds("day"), None); // missing number
+        assert_eq!(parse_relative_time_to_seconds("1 day 2"), None); // number without unit
+        assert_eq!(parse_relative_time_to_seconds("1day"), None); // no space between number and unit
     }
 
     // ── format_seconds roundtrip ─────────────────────────────────────────────

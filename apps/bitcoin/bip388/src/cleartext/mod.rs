@@ -249,23 +249,28 @@ fn format_relative_time(time: u32) -> String {
     format_seconds((time & !SEQUENCE_LOCKTIME_TYPE_FLAG) * 512)
 }
 
-/// Render a timelock as the tail of an "<signer> after ..." description, picking
-/// the form from the lock kind and value: relative block count, relative
-/// duration, absolute block height, or absolute date.
+/// Render a timelock as the tail of a "<signer>, ..." description, picking the
+/// form from the lock kind and value. Relative locks (counted from when the
+/// coins were received) end in "after receiving"; absolute locks (a fixed point)
+/// read "not before ...":
+///   relative block count  -> "<n> blocks after receiving"
+///   relative duration     -> "<duration> after receiving"
+///   absolute block height -> "not before block <n>"
+///   absolute date         -> "not before <date> UTC"
 fn format_timelock(lock: Timelock) -> String {
     match lock {
         Timelock::Relative(n) => {
             if n & SEQUENCE_LOCKTIME_TYPE_FLAG != 0 {
-                format_relative_time(n)
+                format!("{} after receiving", format_relative_time(n))
             } else {
-                format!("{} blocks", n)
+                format!("{} blocks after receiving", n)
             }
         }
         Timelock::Absolute(n) => {
             if n < LOCKTIME_THRESHOLD {
-                format!("block height {}", n)
+                format!("not before block {}", n)
             } else {
-                format!("date {}", format_utc_date(n))
+                format!("not before {} UTC", format_utc_date(n))
             }
         }
     }
@@ -333,6 +338,31 @@ fn format_with_spec<K>(
     }
     debug_assert!(values.next().is_none(), "unused cleartext values");
     Some(result)
+}
+
+/// Prefix applied to a tap-leaf whose spending policy has no cleartext form: the
+/// raw descriptor fragment is shown verbatim after this label so it is clearly
+/// set apart from the plain-language leaves. The reverse parser strips it back
+/// off (see `decode::parse_leaf_candidates`).
+pub(super) const UNRECOGNIZED_LEAF_PREFIX: &str = "Raw policy: ";
+
+/// Capitalize the first character of a finished top-level cleartext element if
+/// it is a lowercase ASCII letter. Tapleaf specs are written lowercase so they
+/// read correctly when composed inside other leaves (e.g. as the second operand
+/// of an `AndV`); this fixes up only the leading character once the whole
+/// element has been assembled, leaving any composed sub-policies lowercase. The
+/// reverse parser undoes this per leaf (see `decode::parse_leaf_candidates`).
+fn capitalize_first(s: &str) -> String {
+    let mut chars = s.chars();
+    match chars.next() {
+        Some(first) if first.is_ascii_lowercase() => {
+            let mut out = String::with_capacity(s.len());
+            out.push(first.to_ascii_uppercase());
+            out.push_str(chars.as_str());
+            out
+        }
+        _ => s.to_string(),
+    }
 }
 
 impl DescriptorClass {
@@ -515,8 +545,9 @@ impl ClearText for DescriptorTemplate {
         match self.classify() {
             class @ (DescriptorClass::LegacySingleSig { .. }
             | DescriptorClass::SegwitSingleSig { .. }
-            | DescriptorClass::SegwitMultisig { .. }) => match render(&class) {
-                Some(s) => (vec![s], true),
+            | DescriptorClass::Multisig { .. }
+            | DescriptorClass::TaprootKeyOnly { .. }) => match render(&class) {
+                Some(s) => (vec![capitalize_first(&s)], true),
                 None => {
                     debug_assert!(false, "missing cleartext for {:?}", class);
                     (vec![self.to_string()], false)
@@ -524,7 +555,7 @@ impl ClearText for DescriptorTemplate {
             },
             class @ (DescriptorClass::Taproot { .. } | DescriptorClass::TaprootMusig { .. }) => {
                 let primary_path = match render(&class) {
-                    Some(s) => s,
+                    Some(s) => capitalize_first(&s),
                     None => {
                         debug_assert!(false, "missing cleartext for {:?}", class);
                         return (vec![self.to_string()], false);
@@ -544,10 +575,12 @@ impl ClearText for DescriptorTemplate {
                 let mut all_leaves_have_cleartext = true;
                 for leaf in leaves {
                     if let Some(description) = leaf.to_cleartext_string(true) {
-                        descriptions.push(description);
+                        descriptions.push(capitalize_first(&description));
                     } else {
                         match leaf {
-                            TapleafClass::Other(raw) => descriptions.push(raw),
+                            TapleafClass::Other(raw) => {
+                                descriptions.push(format!("{}{}", UNRECOGNIZED_LEAF_PREFIX, raw))
+                            }
                             // A classified leaf with no cleartext indicates a
                             // spec/classifier mismatch. Push the parent
                             // descriptor as a defensive placeholder rather than
@@ -775,18 +808,58 @@ mod tests {
         }
     }
 
+    /// Decoding is case-insensitive: an all-uppercase rendering of a cleartext
+    /// must decode to the same templates as the canonical (mixed-case) one.
+    #[test]
+    fn test_from_cleartext_case_insensitive() {
+        // Representative shapes exercising the case-sensitive literals: top-level
+        // qualifiers (Legacy/SegWit/Taproot), "Main path:", the "UTC" timelock
+        // suffix, "All"/"Any" thresholds, and a composed "and also" leaf.
+        let templates = [
+            "pkh(@0/**)",
+            "wsh(sortedmulti(2,@0/**,@1/**))",
+            "tr(musig(@0,@1)/**)",
+            "tr(@0/**,and_v(v:pk(@1/<0;1>/*),older(4194305)))",
+            "tr(@0/**,and_v(v:multi_a(2,@1/<0;1>/*,@2/<0;1>/*),after(1700000000)))",
+            "tr(@0/**,and_v(v:pk(@1/**),multi_a(2,@2/**,@3/**)))",
+        ];
+        for t in templates {
+            let original = canonicalize_taptree_order(&dt(t));
+            let (ct, has_cleartext) = dt(t).to_cleartext();
+            assert!(has_cleartext, "expected cleartext for {:?}", t);
+
+            // Decode an UPPERCASED rendering; it must yield the original template.
+            let upper: Vec<String> = ct.iter().map(|s| s.to_uppercase()).collect();
+            let upper_refs: Vec<&str> = upper.iter().map(|s| s.as_str()).collect();
+            let variants: Vec<_> = DescriptorTemplate::from_cleartext(&upper_refs)
+                .unwrap_or_else(|e| panic!("from_cleartext failed for uppercased {:?}: {:?}", t, e))
+                .collect();
+            assert!(
+                variants
+                    .iter()
+                    .any(|variant| canonicalize_taptree_order(variant) == original),
+                "uppercased decode of {:?} did not yield the original template",
+                t
+            );
+        }
+    }
+
     #[test]
     fn test_spec_shape_uniqueness() {
         // For each spec, build a "shape string" by concatenating its parts, replacing
         // literals with their text and every dynamic field with a fixed non-ASCII
         // placeholder. Two specs that map to the same shape string would be
         // indistinguishable by the parser.
+        //
+        // Literals are lower-cased because the reverse parser decodes on
+        // lower-cased input (see `decode::from_cleartext_impl`), so patterns that
+        // differ only in letter case would be ambiguous when decoding.
         fn shape_string(parts: &[super::CleartextPart]) -> alloc::string::String {
             const PLACEHOLDER: char = '\u{A7}'; // '§'
             let mut s = alloc::string::String::new();
             for part in parts {
                 match part {
-                    super::CleartextPart::Literal(lit) => s.push_str(lit),
+                    super::CleartextPart::Literal(lit) => s.push_str(&lit.to_ascii_lowercase()),
                     _ => s.push(PLACEHOLDER),
                 }
             }
@@ -823,6 +896,25 @@ mod tests {
                 .collect::<Vec<_>>(),
             "TAPLEAF_SPECS",
         );
+
+        // The "Raw policy: " label is a reserved marker, defined outside the spec
+        // table (see `UNRECOGNIZED_LEAF_PREFIX`), that the decoder relies on to
+        // tell an unrecognized leaf apart from a recognized one
+        // (`decode::parse_leaf_candidates` strips it only when no spec matched).
+        // That only works if no recognized tap-leaf can render into a string that
+        // begins with the marker, so guard the invariant here: it would otherwise
+        // be silently broken by a future spec edit. (Raw policies only ever appear
+        // as tap-leaves, so the top-level table needs no such guard.)
+        let reserved = super::UNRECOGNIZED_LEAF_PREFIX.to_ascii_lowercase();
+        for spec in super::TAPLEAF_SPECS {
+            let shape = shape_string(spec.parts);
+            assert!(
+                !shape.starts_with(&reserved),
+                "tap-leaf spec shape {:?} collides with the reserved {:?} prefix",
+                shape,
+                super::UNRECOGNIZED_LEAF_PREFIX
+            );
+        }
     }
 
     /// Verify that the `musig` spec primitive preserves the full key-expression
@@ -880,23 +972,20 @@ mod tests {
         }
 
         // Standard derivation musig internal key (sanity check: num1=0, num2=1).
+        // A leaf-less taproot musig key-path is folded into the `Multisig` class
+        // (inherently n-of-n: threshold == number of keys).
         let desc3 = dt("tr(musig(@0,@1)/**)");
         let class3 = desc3.classify();
         match class3 {
-            DescriptorClass::TaprootMusig {
-                threshold,
-                keys,
-                leaves,
-            } => {
+            DescriptorClass::Multisig { threshold, keys } => {
                 assert_eq!(threshold, 2);
                 assert_eq!(keys.len(), 2);
                 for k in &keys {
                     assert_eq!(k.num1, 0);
                     assert_eq!(k.num2, 1);
                 }
-                assert!(leaves.is_empty());
             }
-            other => panic!("expected TaprootMusig, got {:?}", other),
+            other => panic!("expected Multisig, got {:?}", other),
         }
     }
 }

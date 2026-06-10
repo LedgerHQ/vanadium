@@ -88,27 +88,36 @@ fn parse_relative_time(s: &str) -> Option<u32> {
 /// Parse the tail of a timelock description (as produced by `format_timelock`)
 /// back into a `Timelock`. Each branch accepts only the value range its display
 /// form encodes, so it is the exact inverse of `format_timelock`:
-///   "<n> blocks"        -> relative block count (`1..RELATIVE_LOCK_LIMIT`)
-///   "<duration>"        -> relative 512-second duration (type flag set)
-///   "block height <n>"  -> absolute block height (`1..LOCKTIME_THRESHOLD`)
-///   "date <utc>"        -> absolute timestamp (`>= LOCKTIME_THRESHOLD`)
+///   "<n> blocks after receiving" -> relative block count (`1..RELATIVE_LOCK_LIMIT`)
+///   "<duration> after receiving" -> relative 512-second duration (type flag set)
+///   "not before block <n>"       -> absolute block height (`1..LOCKTIME_THRESHOLD`)
+///   "not before <utc> utc"       -> absolute timestamp (`>= LOCKTIME_THRESHOLD`)
+///
+/// Decoding operates on lower-cased input (see `from_cleartext_impl`), so the
+/// encoder's "UTC" suffix is matched here in lower case. The block-count branch
+/// is checked before the duration branch because both end in "after receiving".
 fn parse_timelock(s: &str) -> Option<Timelock> {
-    if let Some(num) = s.strip_suffix(" blocks") {
+    if let Some(num) = s.strip_suffix(" blocks after receiving") {
         let n: u32 = num.parse().ok()?;
         return (1..RELATIVE_LOCK_LIMIT).contains(&n).then_some(Timelock::Relative(n));
     }
-    if let Some(num) = s.strip_prefix("block height ") {
+    if let Some(duration) = s.strip_suffix(" after receiving") {
+        let n = parse_relative_time(duration)?;
+        return ((SEQUENCE_LOCKTIME_TYPE_FLAG + 1)
+            ..(SEQUENCE_LOCKTIME_TYPE_FLAG + RELATIVE_LOCK_LIMIT))
+            .contains(&n)
+            .then_some(Timelock::Relative(n));
+    }
+    if let Some(num) = s.strip_prefix("not before block ") {
         let n: u32 = num.parse().ok()?;
         return (1..LOCKTIME_THRESHOLD).contains(&n).then_some(Timelock::Absolute(n));
     }
-    if let Some(date) = s.strip_prefix("date ") {
+    if let Some(rest) = s.strip_prefix("not before ") {
+        let date = rest.strip_suffix(" utc")?;
         let n = parse_utc_date_to_timestamp(date)?;
         return (n >= LOCKTIME_THRESHOLD).then_some(Timelock::Absolute(n));
     }
-    let n = parse_relative_time(s)?;
-    ((SEQUENCE_LOCKTIME_TYPE_FLAG + 1)..(SEQUENCE_LOCKTIME_TYPE_FLAG + RELATIVE_LOCK_LIMIT))
-        .contains(&n)
-        .then_some(Timelock::Relative(n))
+    None
 }
 
 impl Timelock {
@@ -250,14 +259,18 @@ fn parse_spec_parts(
 
     match parts[part_index] {
         CleartextPart::Literal(literal) => {
-            if let Some(rest) = input.strip_prefix(literal) {
+            // Input is lower-cased up front (see `from_cleartext_impl`); match the
+            // pattern literals case-insensitively by lower-casing them too.
+            let literal = literal.to_ascii_lowercase();
+            if let Some(rest) = input.strip_prefix(literal.as_str()) {
                 parse_spec_parts(parts, part_index + 1, rest, values, matches);
             }
         }
         field => match parts.get(part_index + 1) {
             Some(CleartextPart::Literal(next_literal)) => {
+                let next_literal = next_literal.to_ascii_lowercase();
                 let mut search_start = 0;
-                while let Some(offset) = input[search_start..].find(next_literal) {
+                while let Some(offset) = input[search_start..].find(next_literal.as_str()) {
                     let split = search_start + offset;
                     if let Some(value) = parse_cleartext_value(field, &input[..split]) {
                         let mut next_values = values.clone();
@@ -422,6 +435,8 @@ fn expand_derivation_orderings_rec(
 }
 
 fn parse_leaf_candidates(s: &str) -> Result<Vec<TapleafClass>, CleartextDecodeError> {
+    // `s` is already lower-cased (see `from_cleartext_impl`), matching the
+    // lower-cased pattern literals.
     let mut leaves = Vec::new();
     for (kind, values) in parse_with_specs(TAPLEAF_SPECS, s) {
         push_unique(
@@ -432,7 +447,11 @@ fn parse_leaf_candidates(s: &str) -> Result<Vec<TapleafClass>, CleartextDecodeEr
         );
     }
     if leaves.is_empty() {
-        leaves.push(TapleafClass::Other(s.to_string()));
+        // Unrecognized leaf: strip the encoder's "Raw policy: " label (lower-cased,
+        // like the rest of the input) to recover the raw descriptor fragment.
+        let prefix = super::UNRECOGNIZED_LEAF_PREFIX.to_ascii_lowercase();
+        let raw = s.strip_prefix(prefix.as_str()).unwrap_or(s);
+        leaves.push(TapleafClass::Other(raw.to_string()));
     }
     Ok(leaves)
 }
@@ -610,7 +629,14 @@ fn enumerate_taptrees_indices(
 pub(super) fn from_cleartext_impl(
     descriptions: &[&str],
 ) -> Result<Box<dyn Iterator<Item = DescriptorTemplate>>, CleartextDecodeError> {
-    let classes = parse_top_level_candidates(descriptions)?;
+    // Decoding is case-insensitive: lower-case the whole input here, and the
+    // pattern literals in `parse_spec_parts` / `parse_timelock`, so the encoder's
+    // `capitalize_first` (and any other case variation) is undone uniformly. The
+    // patterns are unambiguous when lower-cased, which `test_spec_shape_uniqueness`
+    // and the build-time uniqueness check both enforce.
+    let lowered: Vec<String> = descriptions.iter().map(|d| d.to_ascii_lowercase()).collect();
+    let lowered_refs: Vec<&str> = lowered.iter().map(|s| s.as_str()).collect();
+    let classes = parse_top_level_candidates(&lowered_refs)?;
     // `top_level_variants` only fails for `DescriptorClass::Other`; surface that
     // upfront so the chain below can call it lazily, one class at a time.
     if classes.iter().any(|c| matches!(c, DescriptorClass::Other)) {

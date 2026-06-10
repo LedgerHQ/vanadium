@@ -36,7 +36,7 @@
 //! Pattern    := Keyword '(' Args? ')' | Keyword
 //! Args       := Arg (',' Arg)*
 //! Arg        := '$' Name                                   // binding
-//!             | 'musig' '(' '$' Name ',' '$' Name ')'      // only in Key positions
+//!             | 'musig' '(' '$' Name ')'                   // only in Key positions
 //!             | (WrapperChars ':')? Pattern                // nested sub-template
 //! Keyword      := one of the descriptor fragments in `keyword_to_variant`
 //! WrapperChars := any non-empty run of:  a s c t d v j n l u
@@ -113,6 +113,11 @@ struct Entry {
     name: String,
     patterns: Vec<String>,
     cleartext: Vec<String>,
+    /// Optional alternate template used when `threshold == number of keys`
+    /// (n-of-n). It omits `$threshold` (implied by the key count) and renders
+    /// e.g. "each of <keys> ...". See `parse_cleartext` / `emit_cleartext_pattern`.
+    #[serde(default)]
+    cleartext_all: Option<Vec<String>>,
 }
 
 // ---------------------------------------------------------------------------
@@ -129,8 +134,10 @@ struct Pattern {
 enum PatternArg {
     /// `$name` — a normal binding.
     Binding { name: String, kind: BindingKind },
-    /// `musig($threshold, $keys)` — only valid in a Key position. The two
-    /// inner bindings are always Threshold + KeyList by construction.
+    /// `musig($keys)` — only valid in a Key position. musig is n-of-n, so the
+    /// threshold is implied by the key count; `threshold` is a synthesized
+    /// Threshold binding name (see `synthesize_threshold_name`) whose value is
+    /// set to `keys.len()` during lowering. `keys` is a KeyList binding.
     Musig { threshold: String, keys: String },
     /// A nested pattern, optionally preceded by miniscript wrappers (e.g. `v:`).
     Sub {
@@ -304,7 +311,7 @@ fn variant_arg_kinds(variant: &str) -> &'static [ArgKind] {
 //   Pattern    := Ident '(' Args? ')' | Ident
 //   Args       := Arg (',' Arg)*
 //   Arg        := '$' Name                                   // binding
-//               | 'musig' '(' '$' Name ',' '$' Name ')'      // only in Key
+//               | 'musig' '(' '$' Name ')'                   // only in Key
 //               | (WrapperChars ':')? Pattern                // sub
 //   Name       := [a-z_][a-z0-9_]*
 // ---------------------------------------------------------------------------
@@ -427,22 +434,21 @@ impl<'a> PatternParser<'a> {
                     ));
                 }
                 self.bump(b'(')?;
-                let threshold = self.parse_binding_name()?;
-                if binding_name_kind(&threshold) != Some(BindingKind::Threshold) {
-                    return Err(format!(
-                        "first arg of musig(...) must be a $threshold binding, got '${}'",
-                        threshold
-                    ));
-                }
-                self.bump(b',')?;
                 let keys = self.parse_binding_name()?;
                 if binding_name_kind(&keys) != Some(BindingKind::KeyList) {
                     return Err(format!(
-                        "second arg of musig(...) must be a $keys binding, got '${}'",
+                        "the arg of musig(...) must be a $keys binding, got '${}'",
                         keys
                     ));
                 }
                 self.bump(b')')?;
+                // musig is n-of-n: the threshold is implied by the number of keys
+                // (there is no `musig(2, @0, @1, @2)`). We synthesize a Threshold
+                // binding -- named like the keys binding with the "keys" base
+                // swapped for "threshold" -- so the shared cleartext can still
+                // reference `$threshold` (its value is set to `keys.len()` in
+                // `lower`).
+                let threshold = synthesize_threshold_name(&keys);
                 return Ok(PatternArg::Musig { threshold, keys });
             }
             // Otherwise rewind: it's a keyword for a (possibly wrapped) sub-pattern.
@@ -494,6 +500,15 @@ impl<'a> PatternParser<'a> {
             inner: Box::new(inner),
         })
     }
+}
+
+/// Synthesize the Threshold binding name paired with a musig `$keys` binding.
+/// The "keys" base is swapped for "threshold", preserving any trailing digit
+/// suffix so it stays consistent with a sibling pattern's explicit `$threshold`
+/// (e.g. `keys` -> `threshold`, `keys1` -> `threshold1`).
+fn synthesize_threshold_name(keys: &str) -> String {
+    let base_len = keys.trim_end_matches(|c: char| c.is_ascii_digit()).len();
+    format!("threshold{}", &keys[base_len..])
 }
 
 fn check_kind_matches(name: &str, binding: BindingKind, positional: ArgKind) -> Result<(), String> {
@@ -635,11 +650,59 @@ fn parse_cleartext(items: &[String], fields: &ClassFields) -> Result<Vec<Clearte
     Ok(out)
 }
 
+/// The (first) field name of a given kind in an entry, if any.
+fn field_of_kind(fields: &ClassFields, want: BindingKind) -> Option<String> {
+    fields
+        .order
+        .iter()
+        .find(|n| fields.kinds[n.as_str()] == want)
+        .cloned()
+}
+
+/// Lower the optional `cleartext_all = [...]` array: the n-of-n rendering used
+/// when `threshold == keys.len()`. It is parsed like `cleartext` but must omit
+/// `$threshold` (which is implied by the key count and re-synthesized on decode)
+/// while still referencing the `$keys` binding it is derived from. The entry must
+/// bind both a Threshold and a KeyList for this to make sense.
+fn parse_cleartext_all(
+    items: &[String],
+    fields: &ClassFields,
+) -> Result<Vec<CleartextToken>, String> {
+    let tokens = parse_cleartext(items, fields)?;
+    let threshold = field_of_kind(fields, BindingKind::Threshold).ok_or_else(|| {
+        "cleartext_all requires the entry to bind a $threshold (it is the n-of-n form)".to_string()
+    })?;
+    let keys = field_of_kind(fields, BindingKind::KeyList)
+        .ok_or_else(|| "cleartext_all requires the entry to bind a $keys list".to_string())?;
+    let references = |field: &str| {
+        tokens
+            .iter()
+            .any(|t| matches!(t, CleartextToken::Field { name, .. } if name == field))
+    };
+    if references(&threshold) {
+        return Err(format!(
+            "cleartext_all must omit '${}' (it is implied by the key count)",
+            threshold
+        ));
+    }
+    if !references(&keys) {
+        return Err(format!(
+            "cleartext_all must reference '${}' (threshold is synthesized from it on decode)",
+            keys
+        ));
+    }
+    Ok(tokens)
+}
+
 struct ProcessedEntry {
     name: String,
     patterns: Vec<Pattern>,
     fields: ClassFields,
     cleartext: Vec<CleartextToken>,
+    /// Alternate n-of-n template (used when `threshold == keys.len()`), parsed
+    /// from the entry's `cleartext_all`. When present it omits `$threshold`, and
+    /// a synthetic `<Name>All` pattern-kind variant carries it in the spec table.
+    cleartext_all: Option<Vec<CleartextToken>>,
     /// True iff the class has a `$leaves` field — i.e., classification recurses
     /// into a tap-tree.
     recurses: bool,
@@ -669,12 +732,20 @@ fn process_entries(entries: &[Entry]) -> Result<Vec<ProcessedEntry>, String> {
         let fields = class_fields_for_entry(entry, &patterns)?;
         let cleartext = parse_cleartext(&entry.cleartext, &fields)
             .map_err(|e| format!("entry '{}': {}", entry.name, e))?;
+        let cleartext_all = match &entry.cleartext_all {
+            None => None,
+            Some(items) => Some(
+                parse_cleartext_all(items, &fields)
+                    .map_err(|e| format!("entry '{}': cleartext_all: {}", entry.name, e))?,
+            ),
+        };
         let recurses = fields.kinds.values().any(|k| *k == BindingKind::Leaves);
         processed.push(ProcessedEntry {
             name: entry.name.clone(),
             patterns,
             fields,
             cleartext,
+            cleartext_all,
             recurses,
         });
     }
@@ -700,21 +771,36 @@ fn check_entry_names_unique(entries: &[Entry], scope: &str) -> Result<(), String
 /// Inter-entry uniqueness: each entry's literal-sequence (the concatenation
 /// of its `Literal` tokens, with dynamic fields replaced by a sentinel) must
 /// be unique. This is the invariant on which the runtime parser relies for
-/// unambiguous reverse parsing.
+/// unambiguous reverse parsing. Literals are lower-cased because the reverse
+/// parser decodes on lower-cased input, so two entries differing only in letter
+/// case would be ambiguous when decoding.
 fn check_cleartext_uniqueness(entries: &[ProcessedEntry], scope: &str) -> Result<(), String> {
-    let mut seen: BTreeMap<String, String> = BTreeMap::new();
-    for e in entries {
+    fn signature(tokens: &[CleartextToken]) -> String {
         let mut sig = String::new();
-        for tok in &e.cleartext {
+        for tok in tokens {
             match tok {
-                CleartextToken::Literal(s) => sig.push_str(s),
+                CleartextToken::Literal(s) => sig.push_str(&s.to_ascii_lowercase()),
                 CleartextToken::Field { .. } => sig.push('\u{1}'),
             }
         }
-        if let Some(prev) = seen.insert(sig.clone(), e.name.clone()) {
+        sig
+    }
+    let mut seen: BTreeMap<String, String> = BTreeMap::new();
+    // Each rendered form gets its own signature: the primary `cleartext` and, when
+    // present, the n-of-n `cleartext_all` (which the reverse parser must also be
+    // able to tell apart from every other form).
+    let mut forms: Vec<(String, &[CleartextToken])> = Vec::new();
+    for e in entries {
+        forms.push((e.name.clone(), e.cleartext.as_slice()));
+        if let Some(all) = &e.cleartext_all {
+            forms.push((format!("{}All", e.name), all.as_slice()));
+        }
+    }
+    for (label, tokens) in &forms {
+        if let Some(prev) = seen.insert(signature(tokens), label.clone()) {
             return Err(format!(
-                "{} entries '{}' and '{}' produce indistinguishable cleartext literal sequences",
-                scope, prev, e.name
+                "{} forms '{}' and '{}' produce indistinguishable cleartext literal sequences",
+                scope, prev, label
             ));
         }
     }
@@ -1010,6 +1096,11 @@ fn fold_steps(steps: &[MatchStep], inner: TokenStream) -> TokenStream {
             } => {
                 if temps.is_empty() {
                     quote!(if let DescriptorTemplate::#variant = #matchee { #code })
+                } else if variant == "Tr" && temps.len() == 1 {
+                    // A `tr($key)` pattern (no tree arg) matches only a leaf-less
+                    // taproot: `Tr(key, None)`.
+                    let key = &temps[0];
+                    quote!(if let DescriptorTemplate::Tr(#key, None) = #matchee { #code })
                 } else {
                     quote!(if let DescriptorTemplate::#variant(#(#temps),*) = #matchee { #code })
                 }
@@ -1137,9 +1228,27 @@ fn emit_classify(entries: &[ProcessedEntry], ck: ClassKind, fn_name: &str) -> To
 // Enums and constants
 // ---------------------------------------------------------------------------
 
+/// The synthetic pattern-kind variant name carrying an entry's n-of-n
+/// (`cleartext_all`) form, e.g. `Multisig` -> `MultisigAll`.
+fn all_variant_name(entry: &ProcessedEntry) -> String {
+    format!("{}All", entry.name)
+}
+
 fn emit_pattern_kind_enum(name: &str, entries: &[ProcessedEntry]) -> TokenStream {
     let ident = id(name);
-    let variants: Vec<Ident> = entries.iter().map(|e| id(&e.name)).collect();
+    // One variant per entry, plus a synthetic `<Name>All` variant for each entry
+    // that declares an n-of-n (`cleartext_all`) rendering. These extra variants
+    // are spec-table tags only; they map back to the *base* class variant.
+    let variants: Vec<Ident> = entries
+        .iter()
+        .flat_map(|e| {
+            let mut v = vec![id(&e.name)];
+            if e.cleartext_all.is_some() {
+                v.push(id(&all_variant_name(e)));
+            }
+            v
+        })
+        .collect();
     quote! {
         #[derive(Clone, Copy, Debug, PartialEq, Eq)]
         pub(super) enum #ident {
@@ -1183,23 +1292,29 @@ fn emit_class_enum(ck: ClassKind, entries: &[ProcessedEntry]) -> TokenStream {
 fn emit_specs_const(name: &str, ck: ClassKind, entries: &[ProcessedEntry]) -> TokenStream {
     let const_name = id(name);
     let pattern = ck.pattern();
+    let spec = |kind: Ident, tokens: &[CleartextToken]| -> TokenStream {
+        let parts = tokens.iter().map(|t| match t {
+            CleartextToken::Literal(s) => quote!(CleartextPart::Literal(#s)),
+            CleartextToken::Field { kind, .. } => {
+                let v = cleartext_variant(*kind);
+                quote!(CleartextPart::#v)
+            }
+        });
+        quote! {
+            CleartextSpec {
+                kind: #pattern::#kind,
+                parts: &[#(#parts),*],
+            }
+        }
+    };
     let items: Vec<TokenStream> = entries
         .iter()
-        .map(|e| {
-            let kind = id(&e.name);
-            let parts = e.cleartext.iter().map(|t| match t {
-                CleartextToken::Literal(s) => quote!(CleartextPart::Literal(#s)),
-                CleartextToken::Field { kind, .. } => {
-                    let v = cleartext_variant(*kind);
-                    quote!(CleartextPart::#v)
-                }
-            });
-            quote! {
-                CleartextSpec {
-                    kind: #pattern::#kind,
-                    parts: &[#(#parts),*],
-                }
+        .flat_map(|e| {
+            let mut specs = vec![spec(id(&e.name), &e.cleartext)];
+            if let Some(all) = &e.cleartext_all {
+                specs.push(spec(id(&all_variant_name(e)), all));
             }
+            specs
         })
         .collect();
     quote! {
@@ -1211,6 +1326,28 @@ fn emit_specs_const(name: &str, ck: ClassKind, entries: &[ProcessedEntry]) -> To
 // cleartext_pattern (forward: class -> (PatternKind, Vec<CleartextValue>))
 // ---------------------------------------------------------------------------
 
+/// The `CleartextValue::*` constructors for a token list, in order — the encode
+/// side of `parse_cleartext_value`.
+fn cleartext_values(tokens: &[CleartextToken]) -> Vec<TokenStream> {
+    tokens
+        .iter()
+        .filter_map(|t| match t {
+            CleartextToken::Field { name, kind } => {
+                let ctor = cleartext_variant(*kind);
+                let n = id(name);
+                let arg: TokenStream = match kind {
+                    BindingKind::Key | BindingKind::KeyList | BindingKind::Subpolicy => {
+                        quote!(#n.clone())
+                    }
+                    _ => quote!(*#n),
+                };
+                Some(quote!(CleartextValue::#ctor(#arg)))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
 fn emit_cleartext_pattern(entries: &[ProcessedEntry], ck: ClassKind) -> TokenStream {
     let class = ck.class();
     let pattern = ck.pattern();
@@ -1220,37 +1357,61 @@ fn emit_cleartext_pattern(entries: &[ProcessedEntry], ck: ClassKind) -> TokenStr
         .iter()
         .map(|e| {
             let variant = id(&e.name);
-            let referenced: Vec<Ident> = e
-                .cleartext
-                .iter()
-                .filter_map(|t| match t {
-                    CleartextToken::Field { name, .. } => Some(id(name)),
-                    _ => None,
-                })
-                .collect();
-            let destructure: TokenStream = match (e.fields.order.is_empty(), referenced.is_empty())
-            {
-                (true, _) => quote!(),
-                (false, true) => quote!({ .. }),
-                (false, false) => quote!({ #(#referenced),*, .. }),
-            };
-            let values = e.cleartext.iter().filter_map(|t| match t {
-                CleartextToken::Field { name, kind } => {
-                    let ctor = cleartext_variant(*kind);
-                    let n = id(name);
-                    let arg: TokenStream = match kind {
-                        BindingKind::Key | BindingKind::KeyList | BindingKind::Subpolicy => {
-                            quote!(#n.clone())
+            match &e.cleartext_all {
+                // No n-of-n form: a single arm rendering the only template.
+                None => {
+                    let referenced: Vec<Ident> = e
+                        .cleartext
+                        .iter()
+                        .filter_map(|t| match t {
+                            CleartextToken::Field { name, .. } => Some(id(name)),
+                            _ => None,
+                        })
+                        .collect();
+                    let destructure: TokenStream =
+                        match (e.fields.order.is_empty(), referenced.is_empty()) {
+                            (true, _) => quote!(),
+                            (false, true) => quote!({ .. }),
+                            (false, false) => quote!({ #(#referenced),*, .. }),
+                        };
+                    let values = cleartext_values(&e.cleartext);
+                    quote! {
+                        #class::#variant #destructure => {
+                            Some((#pattern::#variant, alloc::vec![#(#values),*]))
                         }
-                        _ => quote!(*#n),
-                    };
-                    Some(quote!(CleartextValue::#ctor(#arg)))
+                    }
                 }
-                _ => None,
-            });
-            quote! {
-                #class::#variant #destructure => {
-                    Some((#pattern::#variant, alloc::vec![#(#values),*]))
+                // Has an n-of-n form: pick it when `threshold == keys.len()`,
+                // otherwise the primary form (same idiom as `emit_score_arm`).
+                Some(all_tokens) => {
+                    let variant_all = id(&all_variant_name(e));
+                    let thr = id(&field_of_kind(&e.fields, BindingKind::Threshold)
+                        .expect("cleartext_all validated to require a Threshold field"));
+                    let keys = id(&field_of_kind(&e.fields, BindingKind::KeyList)
+                        .expect("cleartext_all validated to require a KeyList field"));
+                    // Bind the union of fields referenced by either form, plus the
+                    // threshold/keys the condition needs. Dedup, preserving none of
+                    // the order (irrelevant in a struct destructure).
+                    let mut names: BTreeMap<String, ()> = BTreeMap::new();
+                    for t in e.cleartext.iter().chain(all_tokens.iter()) {
+                        if let CleartextToken::Field { name, .. } = t {
+                            names.insert(name.clone(), ());
+                        }
+                    }
+                    names.insert(thr.to_string(), ());
+                    names.insert(keys.to_string(), ());
+                    let bound: Vec<Ident> = names.keys().map(|n| id(n)).collect();
+                    let any_values = cleartext_values(&e.cleartext);
+                    let all_values = cleartext_values(all_tokens);
+                    quote! {
+                        #class::#variant { #(#bound),*, .. } => {
+                            if *#thr as usize == #keys.len() {
+                                Some((#pattern::#variant_all, alloc::vec![#(#all_values),*]))
+                            } else {
+                                Some((#pattern::#variant, alloc::vec![#(#any_values),*]))
+                            }
+                        }
+                    }
                 }
             }
         })
@@ -1387,9 +1548,22 @@ fn emit_score_arm(entry: &ProcessedEntry, class_enum: &str) -> TokenStream {
 fn emit_from_cleartext_pattern(entries: &[ProcessedEntry], ck: ClassKind) -> TokenStream {
     let class = ck.class();
     let pattern = ck.pattern();
+    // One arm per pattern-kind variant: the base form, plus the synthetic
+    // `<Name>All` form (which reconstructs the same base class variant).
     let arms: Vec<TokenStream> = entries
         .iter()
-        .map(|e| emit_from_cleartext_arm(e, ck))
+        .flat_map(|e| {
+            let mut arms = vec![emit_from_cleartext_arm(e, ck, &id(&e.name), &e.cleartext)];
+            if let Some(all) = &e.cleartext_all {
+                arms.push(emit_from_cleartext_arm(
+                    e,
+                    ck,
+                    &id(&all_variant_name(e)),
+                    all,
+                ));
+            }
+            arms
+        })
         .collect();
     quote! {
         impl #class {
@@ -1408,38 +1582,77 @@ fn emit_from_cleartext_pattern(entries: &[ProcessedEntry], ck: ClassKind) -> Tok
     }
 }
 
-fn emit_from_cleartext_arm(entry: &ProcessedEntry, ck: ClassKind) -> TokenStream {
+/// Emit one `from_cleartext_pattern` match arm. `src_variant` is the pattern-kind
+/// being matched (the base entry name, or its synthetic `<Name>All`); `tokens` is
+/// the corresponding template. The arm always reconstructs the *base* class
+/// variant (`entry.name`). A class field absent from `tokens` is filled in:
+///   - `$leaves` -> empty Vec (the caller fills it via the per-leaf product);
+///   - `$threshold` -> `keys.len()` (n-of-n forms that omit the count; the value
+///     is bound up front so struct-field order can't move `keys` before the read).
+fn emit_from_cleartext_arm(
+    entry: &ProcessedEntry,
+    ck: ClassKind,
+    src_variant: &Ident,
+    tokens: &[CleartextToken],
+) -> TokenStream {
     let class = ck.class();
     let pattern = ck.pattern();
     let variant = id(&entry.name);
 
-    let mut popped: BTreeMap<String, ()> = BTreeMap::new();
-    let pops: Vec<TokenStream> = entry
-        .cleartext
+    let mut available: BTreeMap<String, ()> = BTreeMap::new();
+    let pops: Vec<TokenStream> = tokens
         .iter()
         .filter_map(|t| match t {
             CleartextToken::Field { name, kind } => {
                 let m = cursor_method(*kind);
                 let n = id(name);
-                popped.insert(name.clone(), ());
+                available.insert(name.clone(), ());
                 Some(quote!(let #n = __cur.#m()?;))
             }
             _ => None,
         })
         .collect();
 
+    // Synthesize a missing Threshold from its paired KeyList. Emitted as a binding
+    // (not inline in the struct) so it reads `keys` before the struct moves it.
+    let mut synth: Vec<TokenStream> = Vec::new();
+    for name in &entry.fields.order {
+        if available.contains_key(name) {
+            continue;
+        }
+        if entry.fields.kinds[name.as_str()] == BindingKind::Threshold {
+            let keys = field_of_kind(&entry.fields, BindingKind::KeyList).unwrap_or_else(|| {
+                panic!(
+                    "entry '{}': template omits '${}' but has no $keys to synthesize it from",
+                    entry.name, name
+                )
+            });
+            assert!(
+                available.contains_key(&keys),
+                "entry '{}': cannot synthesize '${}' because '${}' is not in the template",
+                entry.name,
+                name,
+                keys
+            );
+            let n = id(name);
+            let k = id(&keys);
+            synth.push(quote!(let #n = #k.len() as u32;));
+            available.insert(name.clone(), ());
+        }
+    }
+
     let body = if entry.fields.order.is_empty() {
         quote!(Some(#class::#variant))
     } else {
         let fields = entry.fields.order.iter().map(|name| {
             let n = id(name);
-            if popped.contains_key(name) {
+            if available.contains_key(name) {
                 quote!(#n)
             } else {
-                // The only field not in cleartext is `$leaves`; it's filled in
+                // The only remaining unfilled field is `$leaves`; it's filled in
                 // by the caller (`parse_top_level_candidates`) via Cartesian
                 // product over per-leaf candidates, so initialize it empty.
-                debug_assert_eq!(entry.fields.kinds[name], BindingKind::Leaves);
+                debug_assert_eq!(entry.fields.kinds[name.as_str()], BindingKind::Leaves);
                 quote!(#n: alloc::vec::Vec::new())
             }
         });
@@ -1447,8 +1660,9 @@ fn emit_from_cleartext_arm(entry: &ProcessedEntry, ck: ClassKind) -> TokenStream
     };
 
     quote! {
-        #pattern::#variant => {
+        #pattern::#src_variant => {
             #(#pops)*
+            #(#synth)*
             #body
         },
     }
@@ -1751,10 +1965,17 @@ fn build_construction_expr(pat: &Pattern, owned: bool) -> TokenStream {
     if pat.args.is_empty() {
         return quote!(DescriptorTemplate::#variant);
     }
-    let args =
-        pat.args.iter().enumerate().map(|(i, a)| {
-            build_arg_expr(a, arg_kinds.get(i).copied().unwrap_or(ArgKind::Sub), owned)
-        });
+    let args: Vec<TokenStream> = pat
+        .args
+        .iter()
+        .enumerate()
+        .map(|(i, a)| build_arg_expr(a, arg_kinds.get(i).copied().unwrap_or(ArgKind::Sub), owned))
+        .collect();
+    // A `tr($key)` pattern (no tree arg) reconstructs a leaf-less taproot, whose
+    // runtime AST still carries the `Option<TapTree>` field as `None`.
+    if variant_str == "Tr" && pat.args.len() == 1 {
+        return quote!(DescriptorTemplate::Tr(#(#args),*, None));
+    }
     quote!(DescriptorTemplate::#variant(#(#args),*))
 }
 
