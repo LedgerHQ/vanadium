@@ -2008,8 +2008,136 @@ fn emit_ref_tapleaf_score(tapleaf: &[ProcessedEntry]) -> TokenStream {
     }
 }
 
+/// `TapleafClassRef::order()` — the leaf's spec-table index, for canonical
+/// display ordering (mirrors the owned `TapleafClass::order`).
+fn emit_ref_tapleaf_order(tapleaf: &[ProcessedEntry]) -> TokenStream {
+    let order_arms = tapleaf.iter().enumerate().map(|(i, e)| {
+        let v = id(&e.name);
+        let pat: TokenStream = if e.fields.order.is_empty() {
+            quote!()
+        } else {
+            quote!({ .. })
+        };
+        let idx = i as u32;
+        quote!(TapleafClassRef::#v #pat => #idx)
+    });
+    let last = tapleaf.len() as u32;
+    quote! {
+        #[allow(dead_code)]
+        impl<'a, A: ArenaRead> TapleafClassRef<'a, A> {
+            fn order(&self) -> u32 {
+                match self {
+                    #(#order_arms,)*
+                    TapleafClassRef::Other(..) => #last,
+                }
+            }
+        }
+    }
+}
+
+/// Emit the unrolled write sequence for one cleartext token list.
+fn emit_render_tokens(tokens: &[CleartextToken]) -> TokenStream {
+    let stmts = tokens.iter().map(|t| match t {
+        CleartextToken::Literal(s) => quote!(sink.write_str(#s)?;),
+        CleartextToken::Field { name, kind } => {
+            let n = id(name);
+            match kind {
+                BindingKind::Threshold => quote!(write!(sink, "{}", #n)?;),
+                BindingKind::Key => quote!(format_key_to(sink, *#n, canonical)?;),
+                BindingKind::KeyList => quote!(format_key_indices_to(sink, *#n, canonical)?;),
+                BindingKind::Timelock => quote!(format_timelock_to(sink, *#n)?;),
+                BindingKind::Subpolicy => {
+                    quote!(classify_as_tapleaf_ref(*#n).cleartext_render(sink, canonical)?;)
+                }
+                // Structural; never rendered (recursed into instead).
+                BindingKind::Leaves => quote!(),
+            }
+        }
+    });
+    quote!(#(#stmts)*)
+}
+
+/// Streaming cleartext renderer for a borrowed class: writes directly into a
+/// `core::fmt::Write` sink (no `Vec<CleartextValue>`), unrolled per variant.
+fn emit_cleartext_render_ref(entries: &[ProcessedEntry], ck: ClassKind) -> TokenStream {
+    let class = ck.class_ref();
+    let other_arm = if ck.other_has_string {
+        quote!(#class::Other(_) => {})
+    } else {
+        quote!(#class::Other => {})
+    };
+
+    let arms: Vec<TokenStream> = entries
+        .iter()
+        .map(|e| {
+            let variant = id(&e.name);
+            match &e.cleartext_all {
+                None => {
+                    let referenced: Vec<Ident> = e
+                        .cleartext
+                        .iter()
+                        .filter_map(|t| match t {
+                            CleartextToken::Field { name, .. } => Some(id(name)),
+                            _ => None,
+                        })
+                        .collect();
+                    let destructure: TokenStream =
+                        match (e.fields.order.is_empty(), referenced.is_empty()) {
+                            (true, _) => quote!(),
+                            (false, true) => quote!({ .. }),
+                            (false, false) => quote!({ #(#referenced),*, .. }),
+                        };
+                    let body = emit_render_tokens(&e.cleartext);
+                    quote! {
+                        #class::#variant #destructure => { #body }
+                    }
+                }
+                Some(all_tokens) => {
+                    let thr = id(&field_of_kind(&e.fields, BindingKind::Threshold)
+                        .expect("cleartext_all requires a Threshold field"));
+                    let keys = id(&field_of_kind(&e.fields, BindingKind::KeyList)
+                        .expect("cleartext_all requires a KeyList field"));
+                    let mut names: BTreeMap<String, ()> = BTreeMap::new();
+                    for t in e.cleartext.iter().chain(all_tokens.iter()) {
+                        if let CleartextToken::Field { name, .. } = t {
+                            names.insert(name.clone(), ());
+                        }
+                    }
+                    names.insert(thr.to_string(), ());
+                    names.insert(keys.to_string(), ());
+                    let bound: Vec<Ident> = names.keys().map(|n| id(n)).collect();
+                    let any_body = emit_render_tokens(&e.cleartext);
+                    let all_body = emit_render_tokens(all_tokens);
+                    quote! {
+                        #class::#variant { #(#bound),*, .. } => {
+                            if *#thr as usize == #keys.len() { #all_body } else { #any_body }
+                        }
+                    }
+                }
+            }
+        })
+        .collect();
+
+    quote! {
+        #[allow(dead_code)]
+        impl<'a, A: ArenaRead> #class<'a, A> {
+            fn cleartext_render(
+                &self,
+                sink: &mut dyn core::fmt::Write,
+                canonical: bool,
+            ) -> core::fmt::Result {
+                match self {
+                    #(#arms,)*
+                    #other_arm,
+                }
+                Ok(())
+            }
+        }
+    }
+}
+
 /// Assemble the cursor-based classifier code (borrowed classes + classify +
-/// scores). Added to the always-compiled generated file.
+/// scores + streaming renderer). Added to the always-compiled generated file.
 fn emit_cursor_classifier(top_level: &[ProcessedEntry], tapleaf: &[ProcessedEntry]) -> TokenStream {
     let class_top = emit_ref_class_enum(TOP_LEVEL, top_level);
     let class_tap = emit_ref_class_enum(TAPLEAF, tapleaf);
@@ -2017,6 +2145,9 @@ fn emit_cursor_classifier(top_level: &[ProcessedEntry], tapleaf: &[ProcessedEntr
     let classify_tap = emit_ref_classify(tapleaf, TAPLEAF, "classify_as_tapleaf_ref");
     let outer = emit_ref_outer_score(top_level);
     let per_leaf = emit_ref_tapleaf_score(tapleaf);
+    let order = emit_ref_tapleaf_order(tapleaf);
+    let render_top = emit_cleartext_render_ref(top_level, TOP_LEVEL);
+    let render_tap = emit_cleartext_render_ref(tapleaf, TAPLEAF);
     quote! {
         #class_top
         #class_tap
@@ -2024,6 +2155,9 @@ fn emit_cursor_classifier(top_level: &[ProcessedEntry], tapleaf: &[ProcessedEntr
         #classify_tap
         #outer
         #per_leaf
+        #order
+        #render_top
+        #render_tap
     }
 }
 

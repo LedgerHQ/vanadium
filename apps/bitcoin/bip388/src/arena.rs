@@ -1069,6 +1069,40 @@ pub trait LineSink: fmt::Write {
     fn flush_line(&mut self);
 }
 
+/// A `fmt::Write` adapter that upper-cases the first ASCII-lowercase character
+/// written through it, then passes everything else through unchanged. Used to
+/// capitalize the first letter of each standalone cleartext line (composed
+/// sub-policies, written after the first character, stay lowercase) — the
+/// streaming equivalent of the owned `capitalize_first`.
+pub struct CapWrite<'w> {
+    inner: &'w mut dyn fmt::Write,
+    done: bool,
+}
+
+impl<'w> CapWrite<'w> {
+    pub fn new(inner: &'w mut dyn fmt::Write) -> Self {
+        CapWrite { inner, done: false }
+    }
+}
+
+impl<'w> fmt::Write for CapWrite<'w> {
+    fn write_str(&mut self, s: &str) -> fmt::Result {
+        if self.done || s.is_empty() {
+            return self.inner.write_str(s);
+        }
+        let first = s.chars().next().expect("non-empty");
+        self.done = true;
+        if first.is_ascii_lowercase() {
+            let mut buf = [0u8; 4];
+            self.inner
+                .write_str(first.to_ascii_uppercase().encode_utf8(&mut buf))?;
+            self.inner.write_str(&s[first.len_utf8()..])
+        } else {
+            self.inner.write_str(s)
+        }
+    }
+}
+
 pub use vec_sink::VecLineSink;
 
 mod vec_sink {

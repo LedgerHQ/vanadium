@@ -34,7 +34,10 @@ use super::{DescriptorTemplate, KeyExpression, KeyExpressionType};
 
 // Arena cursor types used by the generated cursor-based classifier
 // (`cleartext_generated.rs`).
-use crate::arena::{ArenaRead, ClassKeyList, Cursor, DescriptorNode, KeyView, TapCursor};
+use crate::arena::{
+    ArenaRead, CapWrite, ClassKeyList, Cursor, DescriptorNode, KeyExprRec, KeyView, LineSink,
+    NodeId, TapCursor,
+};
 
 #[cfg(any(test, feature = "cleartext-decode"))]
 mod decode;
@@ -284,6 +287,72 @@ fn format_timelock(lock: Timelock) -> String {
 /// order. Used by the generated `classify` for `tr(...)` patterns.
 fn tree_to_leaves(t: &super::TapTree) -> Vec<TapleafClass> {
     t.tapleaves().map(|l| l.classify_as_tapleaf()).collect()
+}
+
+// ── Streaming (cursor, no-alloc) cleartext formatting ──────────────────────
+// These mirror `format_key` / `format_key_indices` / `format_timelock` exactly
+// but write into a `core::fmt::Write` sink and take arena views.
+
+fn format_key_to<A: ArenaRead>(
+    sink: &mut dyn core::fmt::Write,
+    kv: KeyView<'_, A>,
+    canonical: bool,
+) -> core::fmt::Result {
+    let write_musig = |sink: &mut dyn core::fmt::Write, members: &[u32]| -> core::fmt::Result {
+        sink.write_str("musig(")?;
+        for (i, idx) in members.iter().enumerate() {
+            if i > 0 {
+                sink.write_char(',')?;
+            }
+            write!(sink, "@{}", idx)?;
+        }
+        sink.write_char(')')
+    };
+    match (kv.plain_key_index(), canonical) {
+        (Some(i), true) => write!(sink, "@{}", i),
+        (Some(i), false) => write!(sink, "@{}/<{};{}>/*", i, kv.num1(), kv.num2()),
+        (None, true) => write_musig(sink, kv.musig_key_indices().expect("musig")),
+        (None, false) => {
+            write_musig(sink, kv.musig_key_indices().expect("musig"))?;
+            write!(sink, "/<{};{}>/*", kv.num1(), kv.num2())
+        }
+    }
+}
+
+fn format_key_indices_to<A: ArenaRead>(
+    sink: &mut dyn core::fmt::Write,
+    keys: ClassKeyList<'_, A>,
+    canonical: bool,
+) -> core::fmt::Result {
+    let n = keys.len();
+    for (i, kv) in keys.iter().enumerate() {
+        if i > 0 {
+            sink.write_str(if i + 1 == n { " and " } else { ", " })?;
+        }
+        format_key_to(sink, kv, canonical)?;
+    }
+    Ok(())
+}
+
+fn format_timelock_to(sink: &mut dyn core::fmt::Write, lock: Timelock) -> core::fmt::Result {
+    match lock {
+        Timelock::Relative(n) => {
+            if n & SEQUENCE_LOCKTIME_TYPE_FLAG != 0 {
+                // format_relative_time(n) followed by " after receiving"
+                sink.write_str(&format_relative_time(n))?;
+                sink.write_str(" after receiving")
+            } else {
+                write!(sink, "{} blocks after receiving", n)
+            }
+        }
+        Timelock::Absolute(n) => {
+            if n < LOCKTIME_THRESHOLD {
+                write!(sink, "not before block {}", n)
+            } else {
+                write!(sink, "not before {} UTC", format_utc_date(n))
+            }
+        }
+    }
 }
 
 fn cleartext_spec<K: Copy + Eq>(
@@ -651,6 +720,183 @@ impl<'a, A: ArenaRead> Cursor<'a, A> {
     }
 }
 
+// ── Cursor leaf display ordering (mirrors `cmp_key`/`cmp_keys`/`display_cmp`) ──
+
+fn cmp_key_view<A: ArenaRead>(a: &KeyView<'_, A>, b: &KeyView<'_, A>) -> core::cmp::Ordering {
+    use core::cmp::Ordering;
+    match (a.plain_key_index(), b.plain_key_index()) {
+        (Some(i1), Some(i2)) => i1.cmp(&i2),
+        (Some(_), None) => Ordering::Less,
+        (None, Some(_)) => Ordering::Greater,
+        (None, None) => {
+            let m1 = a.musig_key_indices().expect("musig");
+            let m2 = b.musig_key_indices().expect("musig");
+            m1.len().cmp(&m2.len()).then_with(|| m1.cmp(m2))
+        }
+    }
+}
+
+fn cmp_keys_view<A: ArenaRead>(
+    a: &ClassKeyList<'_, A>,
+    b: &ClassKeyList<'_, A>,
+) -> core::cmp::Ordering {
+    for (x, y) in a.iter().zip(b.iter()) {
+        let ord = cmp_key_view(&x, &y);
+        if ord != core::cmp::Ordering::Equal {
+            return ord;
+        }
+    }
+    core::cmp::Ordering::Equal
+}
+
+/// Canonical display ordering of two classified tap leaves (mirrors the owned
+/// `TapleafClass::display_cmp`): by spec-table `order()`, then structurally.
+fn tapleaf_ref_display_cmp<A: ArenaRead>(
+    a: &TapleafClassRef<'_, A>,
+    b: &TapleafClassRef<'_, A>,
+) -> core::cmp::Ordering {
+    use core::cmp::Ordering;
+    use TapleafClassRef as TC;
+    let by_order = a.order().cmp(&b.order());
+    if by_order != Ordering::Equal {
+        return by_order;
+    }
+    match (a, b) {
+        (TC::SingleSig { key: k1 }, TC::SingleSig { key: k2 }) => cmp_key_view(k1, k2),
+        (TC::BothMustSign { key1: a1, key2: b1 }, TC::BothMustSign { key1: a2, key2: b2 }) => {
+            cmp_key_view(a1, a2).then_with(|| cmp_key_view(b1, b2))
+        }
+        (
+            TC::SortedMultisig { threshold: t1, keys: k1 },
+            TC::SortedMultisig { threshold: t2, keys: k2 },
+        )
+        | (TC::Multisig { threshold: t1, keys: k1 }, TC::Multisig { threshold: t2, keys: k2 }) => k1
+            .len()
+            .cmp(&k2.len())
+            .then(t1.cmp(t2))
+            .then_with(|| cmp_keys_view(k1, k2)),
+        (TC::Timelocked { sub: s1, timelock: t1 }, TC::Timelocked { sub: s2, timelock: t2 }) => {
+            tapleaf_ref_display_cmp(
+                &classify_as_tapleaf_ref(*s1),
+                &classify_as_tapleaf_ref(*s2),
+            )
+            .then(t1.cmp(t2))
+        }
+        (TC::AndV { sub1: a1, sub2: a2 }, TC::AndV { sub1: b1, sub2: b2 }) => {
+            tapleaf_ref_display_cmp(&classify_as_tapleaf_ref(*a1), &classify_as_tapleaf_ref(*b1))
+                .then_with(|| {
+                    tapleaf_ref_display_cmp(
+                        &classify_as_tapleaf_ref(*a2),
+                        &classify_as_tapleaf_ref(*b2),
+                    )
+                })
+        }
+        (TC::Other(c1), TC::Other(c2)) => {
+            let (mut s1, mut s2) = (String::new(), String::new());
+            let _ = c1.write_template(&mut s1);
+            let _ = c2.write_template(&mut s2);
+            s1.cmp(&s2)
+        }
+        // Equal `order()` implies the same variant; other pairings are unreachable.
+        _ => core::cmp::Ordering::Equal,
+    }
+}
+
+#[allow(dead_code)] // wired into production in a later phase; used by the C build
+impl<'a, A: ArenaRead> Cursor<'a, A> {
+    /// Number of tap leaves (for sizing the leaf scratch); 0 if not a taproot
+    /// descriptor with a tree.
+    pub fn tapleaf_count(&self) -> usize {
+        match self.view() {
+            DescriptorNode::Tr(_, Some(tree)) => tree.tapleaves().count(),
+            _ => 0,
+        }
+    }
+
+    /// Cursor analogue of [`ClearText::to_cleartext`]: writes one line per
+    /// description into `sink`, returning whether every part has a cleartext
+    /// form. `canon_scratch` must hold `placeholder_count()` records;
+    /// `leaf_scratch` must hold `tapleaf_count()` entries. The same canonical
+    /// leaf ordering as the owned implementation is applied.
+    pub fn to_cleartext<S: LineSink>(
+        &self,
+        sink: &mut S,
+        canon_scratch: &mut [KeyExprRec],
+        leaf_scratch: &mut [u32],
+    ) -> bool {
+        if !self.are_key_derivations_canonical(canon_scratch) {
+            let _ = self.write_template(sink);
+            sink.flush_line();
+            return false;
+        }
+        let class = classify_ref(*self);
+        match &class {
+            DescriptorClassRef::Other => {
+                let _ = self.write_template(sink);
+                sink.flush_line();
+                false
+            }
+            DescriptorClassRef::Taproot { leaves, .. }
+            | DescriptorClassRef::TaprootMusig { leaves, .. } => {
+                {
+                    let mut cw = CapWrite::new(sink);
+                    let _ = class.cleartext_render(&mut cw, true);
+                }
+                sink.flush_line();
+
+                let arena = self.arena();
+                let mut n = 0usize;
+                let mut overflow = false;
+                if let Some(tree) = leaves {
+                    for leaf in tree.tapleaves() {
+                        if n < leaf_scratch.len() {
+                            leaf_scratch[n] = leaf.id().0;
+                        } else {
+                            overflow = true;
+                        }
+                        n += 1;
+                    }
+                }
+                if overflow {
+                    let _ = self.write_template(sink);
+                    sink.flush_line();
+                    return false;
+                }
+                let s = &mut leaf_scratch[..n];
+                s.sort_by(|&x, &y| {
+                    tapleaf_ref_display_cmp(
+                        &classify_as_tapleaf_ref(Cursor::new(arena, NodeId(x))),
+                        &classify_as_tapleaf_ref(Cursor::new(arena, NodeId(y))),
+                    )
+                });
+                let mut all_recognized = true;
+                for &leaf_id in s.iter() {
+                    let leaf_cur = Cursor::new(arena, NodeId(leaf_id));
+                    let lc = classify_as_tapleaf_ref(leaf_cur);
+                    if let TapleafClassRef::Other(c) = &lc {
+                        let _ = sink.write_str(UNRECOGNIZED_LEAF_PREFIX);
+                        let _ = c.write_template(sink);
+                        all_recognized = false;
+                    } else {
+                        let mut cw = CapWrite::new(sink);
+                        let _ = lc.cleartext_render(&mut cw, true);
+                    }
+                    sink.flush_line();
+                }
+                all_recognized
+            }
+            _ => {
+                {
+                    let mut cw = CapWrite::new(sink);
+                    let _ = class.cleartext_render(&mut cw, true);
+                }
+                sink.flush_line();
+                true
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{ClearText, DescriptorTemplate};
@@ -762,6 +1008,27 @@ mod tests {
             assert_eq!(
                 actual_hct, expected_hct,
                 "has_cleartext flag mismatch for {:?}",
+                v.template
+            );
+
+            // The cursor (no-alloc) renderer must produce identical lines + flag.
+            let mut a = crate::arena::VecArena::new();
+            let root = crate::parser::parse_descriptor_template(&v.template, &mut a).unwrap();
+            let cur = crate::arena::Cursor::new(&a, root);
+            let mut canon =
+                alloc::vec![crate::arena::KeyExprRec::plain(0, 0, 1); cur.placeholder_count()];
+            let mut leaf = alloc::vec![0u32; cur.tapleaf_count()];
+            let mut sink = crate::arena::VecLineSink::new();
+            let cur_hct = cur.to_cleartext(&mut sink, &mut canon, &mut leaf);
+            assert_eq!(
+                sink.into_lines(),
+                *expected_ct,
+                "cursor cleartext mismatch for {:?}",
+                v.template
+            );
+            assert_eq!(
+                cur_hct, expected_hct,
+                "cursor has_cleartext mismatch for {:?}",
                 v.template
             );
         }
