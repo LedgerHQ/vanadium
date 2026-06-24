@@ -7,6 +7,7 @@ extern crate alloc;
 // - add malleability checks
 // - add stack limits and other safety checks
 
+mod arena;
 mod cleartext;
 mod time;
 
