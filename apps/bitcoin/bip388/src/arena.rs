@@ -1230,6 +1230,10 @@ impl<'a> BufLineSink<'a> {
     pub fn line_count(&self) -> usize {
         self.n_lines
     }
+    /// The recorded line spans.
+    pub fn lines(&self) -> &[LineSpan] {
+        &self.lines[..self.n_lines]
+    }
     /// Whether the output buffer or the line array was exhausted.
     pub fn overflowed(&self) -> bool {
         self.overflow
