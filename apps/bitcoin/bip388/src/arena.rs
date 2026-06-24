@@ -494,6 +494,15 @@ impl<'a, A: ArenaRead> Cursor<'a, A> {
     }
 }
 
+/// Construct a [`KeyView`] for a key id (used when materializing an owned
+/// `KeyExpression` from a parsed `KeyId`).
+pub fn key_view<A: ArenaRead>(arena: &A, id: KeyId) -> KeyView<'_, A> {
+    KeyView {
+        arena,
+        rec: arena.key(id),
+    }
+}
+
 /// A borrowed key expression.
 pub struct KeyView<'a, A: ArenaRead> {
     arena: &'a A,
