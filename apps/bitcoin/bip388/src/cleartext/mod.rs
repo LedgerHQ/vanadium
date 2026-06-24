@@ -32,6 +32,10 @@ use alloc::{format, string::String, string::ToString, vec, vec::Vec};
 use super::time::{format_seconds, format_utc_date};
 use super::{DescriptorTemplate, KeyExpression, KeyExpressionType};
 
+// Arena cursor types used by the generated cursor-based classifier
+// (`cleartext_generated.rs`).
+use crate::arena::{ArenaRead, ClassKeyList, Cursor, DescriptorNode, KeyView, TapCursor};
+
 #[cfg(any(test, feature = "cleartext-decode"))]
 mod decode;
 
@@ -611,6 +615,42 @@ impl ClearText for DescriptorTemplate {
     }
 }
 
+// Cursor-based confusion score (no allocation), using the generated cursor
+// classifier. This is the single source of truth for the no-alloc / C build;
+// it is differential-tested against the owned `ClearText::confusion_score`.
+#[allow(dead_code)] // wired into production in a later phase; used by the C build
+impl<'a, A: ArenaRead> Cursor<'a, A> {
+    /// Upper bound on the number of descriptor templates that map to the same
+    /// cleartext (see [`ClearText::confusion_score`]). `scratch` must hold at
+    /// least `expanded_key_occurrences()` entries (an over-small scratch yields
+    /// a safe over-count).
+    pub fn confusion_score(&self, scratch: &mut [u32]) -> u64 {
+        let class = classify_ref(*self);
+        let base = match &class {
+            DescriptorClassRef::Taproot { leaves, .. }
+            | DescriptorClassRef::TaprootMusig { leaves, .. } => {
+                let mut score = class.outer_score();
+                let mut n_leaves = 0usize;
+                if let Some(tree) = leaves {
+                    for leaf in tree.tapleaves() {
+                        score = score.saturating_mul(classify_as_tapleaf_ref(leaf).per_leaf_score());
+                        n_leaves += 1;
+                    }
+                }
+                // T(n) = (2n - 3)!! for n > 1, and T(1) = 1.
+                if n_leaves > 1 {
+                    for i in (1..=(2 * n_leaves - 3)).step_by(2) {
+                        score = score.saturating_mul(i as u64);
+                    }
+                }
+                score
+            }
+            _ => class.outer_score(),
+        };
+        base.saturating_mul(self.key_derivation_orderings_count(scratch))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{ClearText, DescriptorTemplate};
@@ -689,6 +729,19 @@ mod tests {
                 dt(&v.template).confusion_score(),
                 expected,
                 "confusion_score mismatch for {:?}",
+                v.template
+            );
+
+            // The cursor (no-alloc) confusion score must agree with the owned one
+            // across the whole corpus.
+            let mut a = crate::arena::VecArena::new();
+            let root = crate::parser::parse_descriptor_template(&v.template, &mut a).unwrap();
+            let cur = crate::arena::Cursor::new(&a, root);
+            let mut scratch = alloc::vec![0u32; cur.expanded_key_occurrences()];
+            assert_eq!(
+                cur.confusion_score(&mut scratch),
+                expected,
+                "cursor confusion_score mismatch for {:?}",
                 v.template
             );
         }

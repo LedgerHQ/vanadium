@@ -839,6 +839,20 @@ impl ClassKind {
     fn class(self) -> Ident {
         format_ident!("{}", self.class_enum)
     }
+    /// The borrowed/arena-cursor class enum name, e.g. `DescriptorClassRef`.
+    fn class_ref(self) -> Ident {
+        format_ident!("{}Ref", self.class_enum)
+    }
+    /// `Other` constructor for the borrowed class. Top-level is a unit variant;
+    /// tap-leaf carries the matched cursor (for rendering the raw sub-descriptor).
+    fn other_ctor_ref(self) -> TokenStream {
+        let c = self.class_ref();
+        if self.other_has_string {
+            quote!(#c::Other(__m))
+        } else {
+            quote!(#c::Other)
+        }
+    }
     fn pattern(self) -> Ident {
         format_ident!("{}", self.pattern_enum)
     }
@@ -1542,6 +1556,478 @@ fn emit_score_arm(entry: &ProcessedEntry, class_enum: &str) -> TokenStream {
 }
 
 // ---------------------------------------------------------------------------
+// Cursor-based classify (arena, no-alloc) — additive: emits borrowed
+// `*Ref` classes + `classify_ref`/`classify_as_tapleaf_ref` + their scores,
+// alongside the owned ones (which the decode path still needs). The match
+// chains mirror the owned ones via `Cursor::view()`.
+// ---------------------------------------------------------------------------
+
+/// Map an owned `DescriptorTemplate` variant name to the `DescriptorNode` view
+/// variant name (they differ only in casing for `Pk_k`/`Multi_a`/`And_v`/…).
+fn node_variant_name(owned: &str) -> &'static str {
+    match owned {
+        "Pk_k" => "PkK",
+        "Pk_h" => "PkH",
+        "Multi_a" => "MultiA",
+        "Sortedmulti_a" => "SortedmultiA",
+        "And_v" => "AndV",
+        "And_b" => "AndB",
+        "And_n" => "AndN",
+        "Or_b" => "OrB",
+        "Or_c" => "OrC",
+        "Or_d" => "OrD",
+        "Or_i" => "OrI",
+        // Same name in both enums.
+        "Sh" => "Sh",
+        "Wsh" => "Wsh",
+        "Pkh" => "Pkh",
+        "Wpkh" => "Wpkh",
+        "Pk" => "Pk",
+        "Sortedmulti" => "Sortedmulti",
+        "Multi" => "Multi",
+        "Tr" => "Tr",
+        "Older" => "Older",
+        "After" => "After",
+        "Andor" => "Andor",
+        "Thresh" => "Thresh",
+        "A" => "A",
+        "S" => "S",
+        "C" => "C",
+        "T" => "T",
+        "D" => "D",
+        "V" => "V",
+        "J" => "J",
+        "N" => "N",
+        "L" => "L",
+        "U" => "U",
+        other => panic!("no DescriptorNode variant for {other}"),
+    }
+}
+
+/// Borrowed field type for a class field of the given kind.
+fn rust_type_ref(k: BindingKind) -> TokenStream {
+    match k {
+        BindingKind::Key => quote!(KeyView<'a, A>),
+        BindingKind::KeyList => quote!(ClassKeyList<'a, A>),
+        BindingKind::Threshold => quote!(u32),
+        BindingKind::Timelock => quote!(Timelock),
+        BindingKind::Subpolicy => quote!(Cursor<'a, A>),
+        BindingKind::Leaves => quote!(Option<TapCursor<'a, A>>),
+    }
+}
+
+/// Cursor analogue of `MatchStep`.
+enum CStep {
+    Variant {
+        matchee: TokenStream,
+        node_variant: Ident,
+        temps: Vec<Ident>,
+        tr_no_tree: bool,
+    },
+    PlainKey {
+        expr: Ident,
+    },
+    PlainKeyList {
+        expr: Ident,
+    },
+    MusigKey {
+        expr: Ident,
+        temp: Ident,
+    },
+    ClassifyTimelock {
+        expr: TokenStream,
+        bound: Ident,
+    },
+    ClassifySubpolicy {
+        expr: TokenStream,
+        classified: Ident,
+        combinator_variants: Vec<Ident>,
+    },
+}
+
+struct CLowered {
+    steps: Vec<CStep>,
+    bindings: BTreeMap<String, TokenStream>,
+}
+
+fn lower_pattern_cursor(pat: &Pattern, combinator_variants: &[Ident]) -> CLowered {
+    let mut counter = Counter(0);
+    let mut l = CLowered {
+        steps: Vec::new(),
+        bindings: BTreeMap::new(),
+    };
+    lower_cursor(pat, quote!(__m), &mut counter, &mut l, combinator_variants);
+    l
+}
+
+fn lower_cursor(
+    pat: &Pattern,
+    matchee: TokenStream,
+    c: &mut Counter,
+    l: &mut CLowered,
+    combinator_variants: &[Ident],
+) {
+    let variant_str = keyword_to_variant(&pat.keyword).expect("keyword validated");
+    let node_variant = id(node_variant_name(variant_str));
+    let arg_kinds = variant_arg_kinds(variant_str);
+
+    let temps: Vec<Ident> = pat.args.iter().map(|_| c.next()).collect();
+    let tr_no_tree = variant_str == "Tr" && pat.args.len() == 1;
+    l.steps.push(CStep::Variant {
+        matchee,
+        node_variant,
+        temps: temps.clone(),
+        tr_no_tree,
+    });
+
+    for (i, (arg, tv)) in pat.args.iter().zip(temps.iter()).enumerate() {
+        let kind = arg_kinds.get(i).copied().unwrap_or(ArgKind::Sub);
+        match arg {
+            PatternArg::Binding { name, kind: bkind } => match kind {
+                ArgKind::Key => {
+                    l.steps.push(CStep::PlainKey { expr: tv.clone() });
+                    l.bindings.insert(name.clone(), quote!(#tv));
+                }
+                ArgKind::Num => {
+                    l.bindings.insert(name.clone(), quote!(#tv));
+                }
+                ArgKind::KeyList => {
+                    l.steps.push(CStep::PlainKeyList { expr: tv.clone() });
+                    l.bindings
+                        .insert(name.clone(), quote!(ClassKeyList::Explicit(#tv)));
+                }
+                ArgKind::Sub if *bkind == BindingKind::Subpolicy => {
+                    let classified = format_ident!("__cls_{}", name);
+                    l.steps.push(CStep::ClassifySubpolicy {
+                        expr: quote!(#tv),
+                        classified,
+                        combinator_variants: combinator_variants.to_vec(),
+                    });
+                    // The Subpolicy field stores the cursor (re-classified lazily).
+                    l.bindings.insert(name.clone(), quote!(#tv));
+                }
+                ArgKind::Sub if *bkind == BindingKind::Timelock => {
+                    let bound = format_ident!("__tl_{}", name);
+                    l.steps.push(CStep::ClassifyTimelock {
+                        expr: quote!(#tv),
+                        bound: bound.clone(),
+                    });
+                    l.bindings.insert(name.clone(), quote!(#bound));
+                }
+                // Sub (plain) or Tree (Option<TapCursor>): bind the temp directly.
+                ArgKind::Sub | ArgKind::Tree => {
+                    l.bindings.insert(name.clone(), quote!(#tv));
+                }
+            },
+            PatternArg::Musig { threshold, keys } => {
+                let m = c.next();
+                l.steps.push(CStep::MusigKey {
+                    expr: tv.clone(),
+                    temp: m.clone(),
+                });
+                l.bindings.insert(
+                    threshold.clone(),
+                    quote!(#m.musig_key_indices().map(|__x| __x.len() as u32).unwrap_or(0)),
+                );
+                l.bindings
+                    .insert(keys.clone(), quote!(ClassKeyList::MusigExpanded(#m)));
+            }
+            PatternArg::Sub { wrappers, inner } => {
+                let mut current: TokenStream = quote!(#tv);
+                for w in wrappers {
+                    let wv = id(w);
+                    let wt = c.next();
+                    l.steps.push(CStep::Variant {
+                        matchee: current,
+                        node_variant: wv,
+                        temps: vec![wt.clone()],
+                        tr_no_tree: false,
+                    });
+                    current = quote!(#wt);
+                }
+                lower_cursor(inner, current, c, l, combinator_variants);
+            }
+            PatternArg::SubpolicyRef { wrappers, name } => {
+                let mut current: TokenStream = quote!(#tv);
+                for w in wrappers {
+                    let wv = id(w);
+                    let wt = c.next();
+                    l.steps.push(CStep::Variant {
+                        matchee: current,
+                        node_variant: wv,
+                        temps: vec![wt.clone()],
+                        tr_no_tree: false,
+                    });
+                    current = quote!(#wt);
+                }
+                let classified = format_ident!("__cls_{}", name);
+                l.steps.push(CStep::ClassifySubpolicy {
+                    expr: current.clone(),
+                    classified,
+                    combinator_variants: combinator_variants.to_vec(),
+                });
+                l.bindings.insert(name.clone(), current);
+            }
+        }
+    }
+}
+
+fn fold_cursor_steps(steps: &[CStep], inner: TokenStream) -> TokenStream {
+    let mut code = inner;
+    for step in steps.iter().rev() {
+        code = match step {
+            CStep::Variant {
+                matchee,
+                node_variant,
+                temps,
+                tr_no_tree,
+            } => {
+                if temps.is_empty() {
+                    quote!(if let DescriptorNode::#node_variant = #matchee.view() { #code })
+                } else if *tr_no_tree {
+                    let key = &temps[0];
+                    quote!(if let DescriptorNode::Tr(#key, None) = #matchee.view() { #code })
+                } else {
+                    quote!(if let DescriptorNode::#node_variant(#(#temps),*) = #matchee.view() { #code })
+                }
+            }
+            CStep::PlainKey { expr } => quote!(if #expr.is_plain() { #code }),
+            CStep::PlainKeyList { expr } => {
+                quote!(if #expr.iter().all(|__k| __k.is_plain()) { #code })
+            }
+            CStep::MusigKey { expr, temp } => quote! {
+                if #expr.is_musig() {
+                    let #temp = #expr;
+                    #code
+                }
+            },
+            CStep::ClassifyTimelock { expr, bound } => quote! {
+                let __tl = match #expr.view() {
+                    DescriptorNode::Older(__n) if is_valid_relative_locktime(__n) => {
+                        Some(Timelock::Relative(__n))
+                    }
+                    DescriptorNode::After(__n) if is_valid_absolute_locktime(__n) => {
+                        Some(Timelock::Absolute(__n))
+                    }
+                    _ => None,
+                };
+                if let Some(#bound) = __tl { #code }
+            },
+            CStep::ClassifySubpolicy {
+                expr,
+                classified,
+                combinator_variants,
+            } => {
+                let reject_pat = if combinator_variants.is_empty() {
+                    quote!(TapleafClassRef::Other(..))
+                } else {
+                    quote!(TapleafClassRef::Other(..) #(| TapleafClassRef::#combinator_variants { .. })*)
+                };
+                quote! {
+                    let #classified = classify_as_tapleaf_ref(#expr);
+                    if !matches!(#classified, #reject_pat) { #code }
+                }
+            }
+        };
+    }
+    code
+}
+
+fn build_cursor_innermost(
+    l: &CLowered,
+    fields: &ClassFields,
+    ck: ClassKind,
+    variant: &Ident,
+    label: &TokenStream,
+) -> TokenStream {
+    let class = ck.class_ref();
+    if fields.order.is_empty() {
+        quote!(break #label #class::#variant;)
+    } else {
+        let assigns = fields.order.iter().map(|fname| {
+            let bound = l.bindings.get(fname).expect("binding present");
+            let f = id(fname);
+            quote!(#f: #bound)
+        });
+        quote!(break #label #class::#variant { #(#assigns),* };)
+    }
+}
+
+fn emit_ref_class_enum(ck: ClassKind, entries: &[ProcessedEntry]) -> TokenStream {
+    let ident = ck.class_ref();
+    let variants: Vec<TokenStream> = entries
+        .iter()
+        .map(|e| {
+            let v = id(&e.name);
+            if e.fields.order.is_empty() {
+                quote!(#v)
+            } else {
+                let fields = e.fields.order.iter().map(|fname| {
+                    let f = id(fname);
+                    let ty = rust_type_ref(e.fields.kinds[fname]);
+                    quote!(#f: #ty)
+                });
+                quote!(#v { #(#fields),* })
+            }
+        })
+        .collect();
+    let other = if ck.other_has_string {
+        quote!(Other(Cursor<'a, A>))
+    } else {
+        quote!(Other)
+    };
+    quote! {
+        #[allow(dead_code)]
+        pub(super) enum #ident<'a, A: ArenaRead> {
+            #(#variants,)*
+            #other,
+        }
+    }
+}
+
+fn emit_ref_classify(entries: &[ProcessedEntry], ck: ClassKind, fn_name: &str) -> TokenStream {
+    let fn_id = id(fn_name);
+    let class = ck.class_ref();
+    let label: TokenStream = format!("'{fn_name}").parse().unwrap();
+    let other = ck.other_ctor_ref();
+
+    let combinator_variants: Vec<Ident> = entries
+        .iter()
+        .filter(|e| {
+            e.fields
+                .kinds
+                .values()
+                .any(|k| *k == BindingKind::Subpolicy)
+        })
+        .map(|e| id(&e.name))
+        .collect();
+
+    let blocks: Vec<TokenStream> = entries
+        .iter()
+        .flat_map(|entry| {
+            entry.patterns.iter().map(|pat| {
+                let l = lower_pattern_cursor(pat, &combinator_variants);
+                let variant = id(&entry.name);
+                let inner = build_cursor_innermost(&l, &entry.fields, ck, &variant, &label);
+                fold_cursor_steps(&l.steps, inner)
+            })
+        })
+        .collect();
+
+    quote! {
+        #[allow(dead_code)]
+        fn #fn_id<'a, A: ArenaRead>(__m: Cursor<'a, A>) -> #class<'a, A> {
+            #label: {
+                #(#blocks)*
+                #other
+            }
+        }
+    }
+}
+
+/// One score arm for the borrowed classes (mirrors `emit_score_arm`, but
+/// sub-policy fields are cursors re-classified via `classify_as_tapleaf_ref`).
+fn emit_ref_score_arm(entry: &ProcessedEntry, ck: ClassKind) -> TokenStream {
+    let class = ck.class_ref();
+    let variant = id(&entry.name);
+
+    let subpolicy_names: Vec<&str> = entry
+        .fields
+        .order
+        .iter()
+        .filter(|n| entry.fields.kinds[*n] == BindingKind::Subpolicy)
+        .map(String::as_str)
+        .collect();
+
+    if !subpolicy_names.is_empty() {
+        let sub_idents: Vec<Ident> = subpolicy_names.iter().map(|n| id(n)).collect();
+        let destructure = quote!({ #(#sub_idents),*, .. });
+        let product = sub_idents.iter().fold(quote!(1u64), |acc, n| {
+            quote!(#acc.saturating_mul(classify_as_tapleaf_ref(*#n).per_leaf_score()))
+        });
+        return quote!(#class::#variant #destructure => #product,);
+    }
+
+    let plain: u64 = entry
+        .patterns
+        .iter()
+        .filter(|p| !pattern_uses_musig(p))
+        .count() as u64;
+    let musig: u64 = entry
+        .patterns
+        .iter()
+        .filter(|p| pattern_uses_musig(p))
+        .count() as u64;
+
+    let destructure: TokenStream = if entry.fields.order.is_empty() {
+        quote!()
+    } else if musig > 0 {
+        quote!({ threshold, keys, .. })
+    } else {
+        quote!({ .. })
+    };
+
+    let body: TokenStream = if musig == 0 {
+        quote!(#plain)
+    } else if musig == 1 {
+        quote!(#plain + if *threshold as usize == keys.len() { 1 } else { 0 })
+    } else {
+        quote!(#plain + if *threshold as usize == keys.len() { #musig } else { 0 })
+    };
+
+    quote!(#class::#variant #destructure => #body,)
+}
+
+fn emit_ref_outer_score(top_level: &[ProcessedEntry]) -> TokenStream {
+    let arms = top_level.iter().map(|e| emit_ref_score_arm(e, TOP_LEVEL));
+    quote! {
+        #[allow(dead_code)]
+        impl<'a, A: ArenaRead> DescriptorClassRef<'a, A> {
+            fn outer_score(&self) -> u64 {
+                match self {
+                    #(#arms)*
+                    DescriptorClassRef::Other => 1,
+                }
+            }
+        }
+    }
+}
+
+fn emit_ref_tapleaf_score(tapleaf: &[ProcessedEntry]) -> TokenStream {
+    let arms = tapleaf.iter().map(|e| emit_ref_score_arm(e, TAPLEAF));
+    quote! {
+        #[allow(dead_code)]
+        impl<'a, A: ArenaRead> TapleafClassRef<'a, A> {
+            fn per_leaf_score(&self) -> u64 {
+                match self {
+                    #(#arms)*
+                    TapleafClassRef::Other(..) => 1,
+                }
+            }
+        }
+    }
+}
+
+/// Assemble the cursor-based classifier code (borrowed classes + classify +
+/// scores). Added to the always-compiled generated file.
+fn emit_cursor_classifier(top_level: &[ProcessedEntry], tapleaf: &[ProcessedEntry]) -> TokenStream {
+    let class_top = emit_ref_class_enum(TOP_LEVEL, top_level);
+    let class_tap = emit_ref_class_enum(TAPLEAF, tapleaf);
+    let classify_top = emit_ref_classify(top_level, TOP_LEVEL, "classify_ref");
+    let classify_tap = emit_ref_classify(tapleaf, TAPLEAF, "classify_as_tapleaf_ref");
+    let outer = emit_ref_outer_score(top_level);
+    let per_leaf = emit_ref_tapleaf_score(tapleaf);
+    quote! {
+        #class_top
+        #class_tap
+        #classify_top
+        #classify_tap
+        #outer
+        #per_leaf
+    }
+}
+
+// ---------------------------------------------------------------------------
 // from_cleartext_pattern (reverse: (PatternKind, Vec<CleartextValue>) -> class)
 // ---------------------------------------------------------------------------
 
@@ -2076,6 +2562,7 @@ fn emit_common(top_level: &[ProcessedEntry], tapleaf: &[ProcessedEntry]) -> Stri
     let cleartext_tap = emit_cleartext_pattern(tapleaf, TAPLEAF);
     let tap_helpers = emit_tapleaf_helpers(tapleaf);
     let outer = emit_outer_score(top_level);
+    let cursor_classifier = emit_cursor_classifier(top_level, tapleaf);
 
     pretty_file(quote! {
         #pat_kind_top
@@ -2094,6 +2581,8 @@ fn emit_common(top_level: &[ProcessedEntry], tapleaf: &[ProcessedEntry]) -> Stri
         #cleartext_tap
         #tap_helpers
         #outer
+
+        #cursor_classifier
     })
 }
 
