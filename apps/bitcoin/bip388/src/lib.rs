@@ -137,24 +137,28 @@ impl ParseContext {
     }
 }
 
+#[cfg(feature = "wallet-policy")]
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub struct KeyOrigin {
     pub fingerprint: u32,
     pub derivation_path: Vec<ChildNumber>,
 }
 
+#[cfg(feature = "wallet-policy")]
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub struct KeyInformation {
     pub pubkey: Xpub,
     pub origin_info: Option<KeyOrigin>,
 }
 
+#[cfg(feature = "alloc")]
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone)]
 pub enum KeyExpressionType {
     PlainKey(u32),
     Musig(Vec<u32>),
 }
 
+#[cfg(feature = "alloc")]
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub struct KeyExpression {
     pub key_type: KeyExpressionType,
@@ -162,6 +166,7 @@ pub struct KeyExpression {
     pub num2: u32,
 }
 
+#[cfg(feature = "alloc")]
 impl KeyExpression {
     pub fn plain(key_index: u32, num1: u32, num2: u32) -> Self {
         KeyExpression {
@@ -206,6 +211,7 @@ impl KeyExpression {
     }
 }
 
+#[cfg(feature = "alloc")]
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[allow(non_camel_case_types)]
 pub enum DescriptorTemplate {
