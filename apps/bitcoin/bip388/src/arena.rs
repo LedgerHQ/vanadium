@@ -805,6 +805,84 @@ impl<'a, A: ArenaRead> Iterator for KeyListIter<'a, A> {
     }
 }
 
+/// The `keys` field of a classified `Multisig`/`TaprootMusig` class. It is
+/// either an explicit `multi*`/`sortedmulti*` key list, or a single musig key
+/// expanded into one synthetic plain key per member (mirroring how the owned
+/// classifier expands `tr(musig($keys))` into `Multisig { keys: Vec<…> }`).
+pub enum ClassKeyList<'a, A: ArenaRead> {
+    Explicit(KeyListView<'a, A>),
+    /// A musig key; yields one synthetic plain key per member, carrying the
+    /// musig's shared `num1`/`num2`.
+    MusigExpanded(KeyView<'a, A>),
+}
+
+impl<'a, A: ArenaRead> Clone for ClassKeyList<'a, A> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl<'a, A: ArenaRead> Copy for ClassKeyList<'a, A> {}
+
+impl<'a, A: ArenaRead> ClassKeyList<'a, A> {
+    pub fn len(&self) -> usize {
+        match self {
+            ClassKeyList::Explicit(l) => l.len(),
+            ClassKeyList::MusigExpanded(kv) => {
+                kv.musig_key_indices().map(|m| m.len()).unwrap_or(0)
+            }
+        }
+    }
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+    pub fn iter(&self) -> ClassKeyIter<'a, A> {
+        match self {
+            ClassKeyList::Explicit(l) => ClassKeyIter::Explicit(l.iter()),
+            ClassKeyList::MusigExpanded(kv) => ClassKeyIter::Musig {
+                arena: kv.arena,
+                members: kv.musig_key_indices().unwrap_or(&[]),
+                pos: 0,
+                num1: kv.num1(),
+                num2: kv.num2(),
+            },
+        }
+    }
+}
+
+pub enum ClassKeyIter<'a, A: ArenaRead> {
+    Explicit(KeyListIter<'a, A>),
+    Musig {
+        arena: &'a A,
+        members: &'a [u32],
+        pos: usize,
+        num1: u32,
+        num2: u32,
+    },
+}
+
+impl<'a, A: ArenaRead> Iterator for ClassKeyIter<'a, A> {
+    type Item = KeyView<'a, A>;
+    fn next(&mut self) -> Option<Self::Item> {
+        match self {
+            ClassKeyIter::Explicit(it) => it.next(),
+            ClassKeyIter::Musig {
+                arena,
+                members,
+                pos,
+                num1,
+                num2,
+            } => {
+                let &idx = members.get(*pos)?;
+                *pos += 1;
+                Some(KeyView {
+                    arena,
+                    rec: KeyExprRec::plain(idx, *num1, *num2),
+                })
+            }
+        }
+    }
+}
+
 /// A borrowed list of sub-script nodes (for `thresh`).
 pub struct NodeList<'a, A: ArenaRead> {
     arena: &'a A,
@@ -1329,6 +1407,47 @@ mod tests {
             }
             _ => panic!("expected Pk(musig)"),
         }
+    }
+
+    #[test]
+    fn class_key_list_explicit_and_musig_expanded() {
+        let mut a = VecArena::new();
+
+        // Explicit list: multi(_, @5, @6)
+        let mut list = ListBuilder::new();
+        for i in [5u32, 6] {
+            let k = a.push_key(KeyExprRec::plain(i, 0, 1)).unwrap();
+            list.push(&mut a, k.0).unwrap();
+        }
+        let explicit = KeyListView {
+            arena: &a,
+            head: list.head(),
+            count: list.count(),
+        };
+        let ckl = ClassKeyList::Explicit(explicit);
+        assert_eq!(ckl.len(), 2);
+        let got: alloc::vec::Vec<(u32, u32, u32)> = ckl
+            .iter()
+            .map(|kv| (kv.plain_key_index().unwrap(), kv.num1(), kv.num2()))
+            .collect();
+        assert_eq!(got, alloc::vec![(5, 0, 1), (6, 0, 1)]);
+
+        // Musig expanded: musig(@1,@2,@3)/<4;5> -> three synthetic plain keys
+        // carrying the shared (4,5) derivation.
+        let start = a.members_begin();
+        for m in [1u32, 2, 3] {
+            a.members_push(m).unwrap();
+        }
+        let span = a.members_end(start);
+        let mk = a.push_key(KeyExprRec::musig(span, 4, 5)).unwrap();
+        let kv = key_view(&a, mk);
+        let ckl = ClassKeyList::MusigExpanded(kv);
+        assert_eq!(ckl.len(), 3);
+        let got: alloc::vec::Vec<(u32, u32, u32)> = ckl
+            .iter()
+            .map(|kv| (kv.plain_key_index().unwrap(), kv.num1(), kv.num2()))
+            .collect();
+        assert_eq!(got, alloc::vec![(1, 4, 5), (2, 4, 5), (3, 4, 5)]);
     }
 
     // Build a tap tree `{leaf(@0), {leaf(@1), leaf(@2)}}` and check left-to-right leaf order.
