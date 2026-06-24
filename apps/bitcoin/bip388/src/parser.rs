@@ -4,8 +4,6 @@
 //! the *same* parser serves both the `alloc` (`VecArena`) and the future
 //! no-alloc (`SliceArena`) backings. No `Box`/`Vec`/`String` is used here.
 
-use hex::FromHex;
-
 use crate::arena::{ArenaFull, ArenaStore, KeyExprRec, ListBuilder, Node, NodeId, NodeTag, NONE};
 use crate::{
     ParseContext, ParseError, HARDENED_INDEX, MAX_KEYS_MULTI_A, MAX_OLDER_AFTER, MAX_PARSE_DEPTH,
@@ -17,6 +15,29 @@ pub(crate) type ParseResult<'a, T> = Result<(&'a str, T), ParseError>;
 #[inline]
 fn full(_: ArenaFull) -> ParseError {
     ParseError::ArenaFull
+}
+
+/// Decode exactly `N` bytes from a `2*N`-char lowercase/uppercase hex string.
+/// Allocation-free replacement for `hex::FromHex` (so the parser needs no `hex`
+/// dependency in the minimal build).
+fn decode_hex<const N: usize>(s: &str) -> Option<[u8; N]> {
+    fn nibble(b: u8) -> Option<u8> {
+        match b {
+            b'0'..=b'9' => Some(b - b'0'),
+            b'a'..=b'f' => Some(b - b'a' + 10),
+            b'A'..=b'F' => Some(b - b'A' + 10),
+            _ => None,
+        }
+    }
+    let bytes = s.as_bytes();
+    if bytes.len() != 2 * N {
+        return None;
+    }
+    let mut out = [0u8; N];
+    for (i, slot) in out.iter_mut().enumerate() {
+        *slot = (nibble(bytes[2 * i])? << 4) | nibble(bytes[2 * i + 1])?;
+    }
+    Some(out)
 }
 
 // ── Pure (allocation-free) scalar helpers ──────────────────────────────────
@@ -397,7 +418,7 @@ fn parse_hex20_fragment<'a, A: ArenaStore>(
     if rest.len() < 40 {
         return Err(ParseError::InvalidLength);
     }
-    let bytes = <[u8; 20]>::from_hex(&rest[..40]).map_err(|_| ParseError::InvalidHex)?;
+    let bytes = decode_hex::<20>(&rest[..40]).ok_or(ParseError::InvalidHex)?;
     let rest = &rest[40..];
     if !rest.starts_with(')') {
         return Err(ParseError::InvalidSyntax);
@@ -418,7 +439,7 @@ fn parse_hex32_fragment<'a, A: ArenaStore>(
     if rest.len() < 64 {
         return Err(ParseError::InvalidLength);
     }
-    let bytes = <[u8; 32]>::from_hex(&rest[..64]).map_err(|_| ParseError::InvalidHex)?;
+    let bytes = decode_hex::<32>(&rest[..64]).ok_or(ParseError::InvalidHex)?;
     let rest = &rest[64..];
     if !rest.starts_with(')') {
         return Err(ParseError::InvalidSyntax);

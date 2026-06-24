@@ -1,9 +1,10 @@
-use alloc::{format, string::String, string::ToString, vec::Vec};
+use alloc::string::String;
+use core::fmt;
 
-/// Formats a Unix timestamp as a UTC date or datetime string.
-/// When the time component is midnight (00:00:00 UTC), returns `"YYYY-MM-DD"`.
-/// Otherwise returns `"YYYY-MM-DD HH:MM:SS"`.
-pub(super) fn format_utc_date(timestamp: u32) -> String {
+/// Writes a Unix timestamp as a UTC date or datetime into `sink` (allocation-free).
+/// Midnight (00:00:00 UTC) renders as `"YYYY-MM-DD"`, otherwise
+/// `"YYYY-MM-DD HH:MM:SS"`.
+pub(super) fn write_utc_date(sink: &mut dyn fmt::Write, timestamp: u32) -> fmt::Result {
     // Uses Howard Hinnant's civil-from-days algorithm.
     let days = timestamp / 86400;
     let time_of_day = timestamp % 86400;
@@ -18,13 +19,20 @@ pub(super) fn format_utc_date(timestamp: u32) -> String {
     let m = if mp < 10 { mp + 3 } else { mp - 9 };
     let y = if m <= 2 { y + 1 } else { y };
     if time_of_day == 0 {
-        format!("{:04}-{:02}-{:02}", y, m, d)
+        write!(sink, "{:04}-{:02}-{:02}", y, m, d)
     } else {
         let h = time_of_day / 3600;
         let min = (time_of_day % 3600) / 60;
         let sec = time_of_day % 60;
-        format!("{:04}-{:02}-{:02} {:02}:{:02}:{:02}", y, m, d, h, min, sec)
+        write!(sink, "{:04}-{:02}-{:02} {:02}:{:02}:{:02}", y, m, d, h, min, sec)
     }
+}
+
+/// `String`-returning wrapper over [`write_utc_date`].
+pub(super) fn format_utc_date(timestamp: u32) -> String {
+    let mut s = String::new();
+    let _ = write_utc_date(&mut s, timestamp);
+    s
 }
 
 /// Parses a UTC date/datetime string as produced by [`format_utc_date`].
@@ -84,12 +92,12 @@ pub(super) fn parse_utc_date_to_timestamp(s: &str) -> Option<u32> {
 /// spelled-out units (so a non-technical reader can't mistake "m" for months).
 /// Units are pluralized; returns `"0 seconds"` for zero.
 /// Example: `"1 day 2 hours 30 minutes"`.
-pub(super) fn format_seconds(secs: u32) -> String {
+pub(super) fn write_seconds(sink: &mut dyn fmt::Write, secs: u32) -> fmt::Result {
     let days = secs / 86400;
     let hours = (secs % 86400) / 3600;
     let minutes = (secs % 3600) / 60;
     let seconds = secs % 60;
-    let mut parts: Vec<String> = Vec::new();
+    let mut wrote = false;
     for (value, singular, plural) in [
         (days, "day", "days"),
         (hours, "hour", "hours"),
@@ -97,15 +105,25 @@ pub(super) fn format_seconds(secs: u32) -> String {
         (seconds, "second", "seconds"),
     ] {
         if value > 0 {
+            if wrote {
+                sink.write_char(' ')?;
+            }
             let unit = if value == 1 { singular } else { plural };
-            parts.push(format!("{} {}", value, unit));
+            write!(sink, "{} {}", value, unit)?;
+            wrote = true;
         }
     }
-    if parts.is_empty() {
-        "0 seconds".to_string()
-    } else {
-        parts.join(" ")
+    if !wrote {
+        sink.write_str("0 seconds")?;
     }
+    Ok(())
+}
+
+/// `String`-returning wrapper over [`write_seconds`].
+pub(super) fn format_seconds(secs: u32) -> String {
+    let mut s = String::new();
+    let _ = write_seconds(&mut s, secs);
+    s
 }
 
 /// Parses a human-readable duration string as produced by [`format_seconds`].

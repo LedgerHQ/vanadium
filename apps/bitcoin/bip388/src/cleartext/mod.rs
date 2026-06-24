@@ -29,7 +29,7 @@
 
 use alloc::{format, string::String, string::ToString, vec, vec::Vec};
 
-use super::time::{format_seconds, format_utc_date};
+use super::time::{format_seconds, format_utc_date, write_seconds, write_utc_date};
 use super::{DescriptorTemplate, KeyExpression, KeyExpressionType};
 
 // Arena cursor types used by the generated cursor-based classifier
@@ -338,8 +338,8 @@ fn format_timelock_to(sink: &mut dyn core::fmt::Write, lock: Timelock) -> core::
     match lock {
         Timelock::Relative(n) => {
             if n & SEQUENCE_LOCKTIME_TYPE_FLAG != 0 {
-                // format_relative_time(n) followed by " after receiving"
-                sink.write_str(&format_relative_time(n))?;
+                // relative duration: same value as `format_relative_time`, streamed
+                write_seconds(sink, (n & !SEQUENCE_LOCKTIME_TYPE_FLAG) * 512)?;
                 sink.write_str(" after receiving")
             } else {
                 write!(sink, "{} blocks after receiving", n)
@@ -349,7 +349,9 @@ fn format_timelock_to(sink: &mut dyn core::fmt::Write, lock: Timelock) -> core::
             if n < LOCKTIME_THRESHOLD {
                 write!(sink, "not before block {}", n)
             } else {
-                write!(sink, "not before {} UTC", format_utc_date(n))
+                sink.write_str("not before ")?;
+                write_utc_date(sink, n)?;
+                sink.write_str(" UTC")
             }
         }
     }
