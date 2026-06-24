@@ -1878,6 +1878,90 @@ mod tests {
         }
     }
 
+    // Reference implementations mirroring the owned (private) confusion-score
+    // helpers, computed from the public `placeholders()` iterator.
+    #[cfg(test)]
+    fn ref_orderings_count(dt: &DescriptorTemplate) -> u64 {
+        let mut counts: alloc::collections::BTreeMap<u32, u32> = alloc::collections::BTreeMap::new();
+        for (kp, _) in dt.placeholders() {
+            match &kp.key_type {
+                KeyExpressionType::PlainKey(i) => *counts.entry(*i).or_insert(0) += 1,
+                KeyExpressionType::Musig(g) => {
+                    for &m in g {
+                        *counts.entry(m).or_insert(0) += 1;
+                    }
+                }
+            }
+        }
+        let mut product = 1u64;
+        for &k in counts.values() {
+            let mut f = 1u64;
+            for i in 1..=k as u64 {
+                f = f.saturating_mul(i);
+            }
+            product = product.saturating_mul(f);
+        }
+        product
+    }
+
+    #[cfg(test)]
+    fn ref_canonical(dt: &DescriptorTemplate) -> bool {
+        let mut pairs: alloc::collections::BTreeMap<KeyExpressionType, Vec<(u32, u32)>> =
+            alloc::collections::BTreeMap::new();
+        for (kp, _) in dt.placeholders() {
+            pairs
+                .entry(kp.key_type.clone())
+                .or_default()
+                .push((kp.num1, kp.num2));
+        }
+        for v in pairs.values_mut() {
+            v.sort();
+            for (i, &(n1, n2)) in v.iter().enumerate() {
+                if (n1, n2) != (2 * i as u32, 2 * i as u32 + 1) {
+                    return false;
+                }
+            }
+        }
+        true
+    }
+
+    #[test]
+    fn test_cursor_confusion_helpers_match_owned() {
+        let cases = vec![
+            "wsh(multi(2,@0/**,@1/**))",
+            // index 0 repeated 3x across key path + two leaves -> 3! = 6
+            "tr(@0/**,{pk(@0/<2;3>/*),pk(@0/<4;5>/*)})",
+            // non-canonical: a single key with pair (2,3) instead of (0,1)
+            "wpkh(@0/<2;3>/*)",
+            // canonical musig + repeated members
+            "tr(musig(@0,@1)/**,{multi_a(1,@0/<2;3>/*,@1/<2;3>/*),pk(@2/**)})",
+            "wsh(or_i(and_v(v:pkh(@4/<3;7>/*),older(65535)),or_d(multi(2,@0/**,@3/**),and_v(v:thresh(1,pkh(@5/<99;101>/*),a:pkh(@1/**)),older(64231)))))",
+        ];
+        for s in cases {
+            let owned = DescriptorTemplate::from_str(s).unwrap();
+            let mut a = arena::VecArena::new();
+            let root = parser::parse_descriptor_template(s, &mut a).unwrap();
+            let cur = arena::Cursor::new(&a, root);
+
+            let mut ord_scratch = vec![0u32; cur.expanded_key_occurrences()];
+            assert_eq!(
+                cur.key_derivation_orderings_count(&mut ord_scratch),
+                ref_orderings_count(&owned),
+                "orderings count mismatch for {:?}",
+                s
+            );
+
+            let mut can_scratch =
+                vec![arena::KeyExprRec::plain(0, 0, 1); cur.placeholder_count()];
+            assert_eq!(
+                cur.are_key_derivations_canonical(&mut can_scratch),
+                ref_canonical(&owned),
+                "canonical mismatch for {:?}",
+                s
+            );
+        }
+    }
+
     #[test]
     fn test_cursor_segwit_version_matches_owned() {
         // get_segwit_version only inspects the top-level template, so an empty

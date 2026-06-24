@@ -20,6 +20,7 @@
 //! the migration phases; until then several items are intentionally unused.
 #![allow(dead_code, unused_imports)]
 
+use core::cmp::Ordering;
 use core::fmt;
 
 /// Sentinel for "no node" / "no link" in a `u32` reference.
@@ -726,6 +727,10 @@ impl<'a, A: ArenaRead> Clone for KeyView<'a, A> {
 impl<'a, A: ArenaRead> Copy for KeyView<'a, A> {}
 
 impl<'a, A: ArenaRead> KeyView<'a, A> {
+    /// The underlying record (used by confusion-score grouping).
+    pub fn record(&self) -> KeyExprRec {
+        self.rec
+    }
     pub fn num1(&self) -> u32 {
         self.rec.num1
     }
@@ -1124,6 +1129,133 @@ impl<'a, A: ArenaRead> Cursor<'a, A> {
             | DN::Hash160(_)
             | DN::TapNode(_) => {}
         }
+    }
+}
+
+/// Total order over key *values* (derivation indices ignored), so equal key
+/// expressions sort adjacently — matches the `KeyExpressionType` equality the
+/// owned canonical check groups by.
+fn cmp_key_value<A: ArenaRead>(arena: &A, a: &KeyExprRec, b: &KeyExprRec) -> Ordering {
+    match (a.kind, b.kind) {
+        (KeyKind::Plain, KeyKind::Plain) => a.plain_index.cmp(&b.plain_index),
+        (KeyKind::Plain, KeyKind::Musig) => Ordering::Less,
+        (KeyKind::Musig, KeyKind::Plain) => Ordering::Greater,
+        (KeyKind::Musig, KeyKind::Musig) => {
+            arena.members(a.musig_members).cmp(arena.members(b.musig_members))
+        }
+    }
+}
+
+impl<'a, A: ArenaRead> Cursor<'a, A> {
+    /// Number of key placeholders (sizing for the canonical-check scratch).
+    pub fn placeholder_count(&self) -> usize {
+        let mut n = 0usize;
+        self.for_each_placeholder(&mut |_, _| n += 1);
+        n
+    }
+
+    /// Number of musig-expanded key-index occurrences (sizing for the
+    /// orderings-count scratch).
+    pub fn expanded_key_occurrences(&self) -> usize {
+        let mut n = 0usize;
+        self.for_each_placeholder(&mut |kv, _| {
+            n += kv.musig_key_indices().map(|m| m.len()).unwrap_or(1);
+        });
+        n
+    }
+
+    /// Whether each distinct key expression's occurrences carry the canonical
+    /// derivation pairs `(0,1),(2,3),…` (in some order). Mirrors the owned
+    /// `are_key_derivations_canonical`. `scratch` must hold at least
+    /// `placeholder_count()` records; if too small, returns `false`
+    /// (conservatively falling back to the raw descriptor).
+    pub fn are_key_derivations_canonical(&self, scratch: &mut [KeyExprRec]) -> bool {
+        let mut n = 0usize;
+        let mut overflow = false;
+        self.for_each_placeholder(&mut |kv, _| {
+            if n < scratch.len() {
+                scratch[n] = kv.record();
+            } else {
+                overflow = true;
+            }
+            n += 1;
+        });
+        if overflow {
+            return false;
+        }
+        let arena = self.arena;
+        let s = &mut scratch[..n];
+        s.sort_by(|a, b| {
+            cmp_key_value(arena, a, b)
+                .then(a.num1.cmp(&b.num1))
+                .then(a.num2.cmp(&b.num2))
+        });
+        let mut i = 0;
+        while i < s.len() {
+            let mut j = i + 1;
+            while j < s.len() && cmp_key_value(arena, &s[i], &s[j]) == Ordering::Equal {
+                j += 1;
+            }
+            for (idx, e) in s[i..j].iter().enumerate() {
+                if (e.num1, e.num2) != (2 * idx as u32, 2 * idx as u32 + 1) {
+                    return false;
+                }
+            }
+            i = j;
+        }
+        true
+    }
+
+    /// Upper bound on the number of canonical derivation-pair orderings across
+    /// repeated keys: the product, over each key *index* (musig groups
+    /// expanded), of `occurrences!`. Mirrors the owned
+    /// `key_derivation_orderings_count`. `scratch` must hold at least
+    /// `expanded_key_occurrences()` entries; if too small, returns `u64::MAX`
+    /// (a safe over-count that only ever hides cleartext, never shows it).
+    pub fn key_derivation_orderings_count(&self, scratch: &mut [u32]) -> u64 {
+        let mut n = 0usize;
+        let mut overflow = false;
+        self.for_each_placeholder(&mut |kv, _| match kv.musig_key_indices() {
+            Some(members) => {
+                for &m in members {
+                    if n < scratch.len() {
+                        scratch[n] = m;
+                    } else {
+                        overflow = true;
+                    }
+                    n += 1;
+                }
+            }
+            None => {
+                let i = kv.plain_key_index().expect("plain or musig key");
+                if n < scratch.len() {
+                    scratch[n] = i;
+                } else {
+                    overflow = true;
+                }
+                n += 1;
+            }
+        });
+        if overflow {
+            return u64::MAX;
+        }
+        let s = &mut scratch[..n];
+        s.sort_unstable();
+        let mut product = 1u64;
+        let mut i = 0;
+        while i < s.len() {
+            let mut j = i + 1;
+            while j < s.len() && s[j] == s[i] {
+                j += 1;
+            }
+            let mut f = 1u64;
+            for k in 1..=(j - i) as u64 {
+                f = f.saturating_mul(k);
+            }
+            product = product.saturating_mul(f);
+            i = j;
+        }
+        product
     }
 }
 
