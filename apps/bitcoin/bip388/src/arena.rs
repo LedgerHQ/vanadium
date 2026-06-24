@@ -1337,7 +1337,7 @@ impl<'a, A: ArenaRead> Cursor<'a, A> {
         }
         let arena = self.arena;
         let s = &mut scratch[..n];
-        s.sort_by(|a, b| {
+        s.sort_unstable_by(|a, b| {
             cmp_key_value(arena, a, b)
                 .then(a.num1.cmp(&b.num1))
                 .then(a.num2.cmp(&b.num2))

@@ -27,9 +27,13 @@
 //!    so the cleartext output is deterministic regardless of the original tree shape. The number
 //!    of structurally distinct trees is taken into account in the confusion score.
 
+#[cfg(feature = "alloc")]
 use alloc::{format, string::String, string::ToString, vec, vec::Vec};
 
-use super::time::{format_seconds, format_utc_date, write_seconds, write_utc_date};
+use super::time::{write_seconds, write_utc_date};
+#[cfg(feature = "alloc")]
+use super::time::{format_seconds, format_utc_date};
+#[cfg(feature = "alloc")]
 use super::{DescriptorTemplate, KeyExpression, KeyExpressionType};
 
 // Arena cursor types used by the generated cursor-based classifier
@@ -110,6 +114,7 @@ include!(concat!(env!("OUT_DIR"), "/cleartext_generated.rs"));
 // Represents a part of a clear-text representation of a descriptor template or tapleaf. A sequence of cleartext parts
 // fully defines the structure of the cleartext representation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg(feature = "alloc")]
 pub(super) enum CleartextPart {
     Literal(&'static str),
     Threshold,
@@ -119,12 +124,14 @@ pub(super) enum CleartextPart {
     Subpolicy,
 }
 
+#[cfg(feature = "alloc")]
 pub(super) struct CleartextSpec<K> {
     pub(super) kind: K,
     pub(super) parts: &'static [CleartextPart],
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg(feature = "alloc")]
 enum CleartextValue {
     Threshold(u32),
     KeyIndex(KeyExpression),
@@ -137,6 +144,7 @@ enum CleartextValue {
 /// - plain key vs plain key: ordered by key index
 /// - plain key vs musig: plain key comes first
 /// - musig vs musig: ordered by number of keys, then left-to-right by key index
+#[cfg(feature = "alloc")]
 fn cmp_key(a: &KeyExpression, b: &KeyExpression) -> core::cmp::Ordering {
     match (&a.key_type, &b.key_type) {
         (KeyExpressionType::PlainKey(i1), KeyExpressionType::PlainKey(i2)) => i1.cmp(i2),
@@ -158,6 +166,7 @@ fn cmp_key(a: &KeyExpression, b: &KeyExpression) -> core::cmp::Ordering {
 /// that differ only in their keys would compare equal, leaving their cleartext
 /// order to depend on tap-tree position — which is unstable across descriptors
 /// that share a cleartext rendering.
+#[cfg(feature = "alloc")]
 fn cmp_keys(a: &[KeyExpression], b: &[KeyExpression]) -> core::cmp::Ordering {
     for (x, y) in a.iter().zip(b.iter()) {
         let ord = cmp_key(x, y);
@@ -168,6 +177,7 @@ fn cmp_keys(a: &[KeyExpression], b: &[KeyExpression]) -> core::cmp::Ordering {
     core::cmp::Ordering::Equal
 }
 
+#[cfg(feature = "alloc")]
 impl TapleafClass {
     /// Full canonical display order. Categories come from `order()` (generated);
     /// within a category, ties are broken by:
@@ -216,6 +226,7 @@ impl TapleafClass {
     }
 }
 
+#[cfg(feature = "alloc")]
 fn format_key(kp: &KeyExpression, canonical: bool) -> String {
     if canonical {
         match &kp.key_type {
@@ -241,6 +252,7 @@ fn format_key(kp: &KeyExpression, canonical: bool) -> String {
     }
 }
 
+#[cfg(feature = "alloc")]
 fn format_key_indices(keys: &[KeyExpression], canonical: bool) -> String {
     match keys {
         [] => String::new(),
@@ -252,6 +264,7 @@ fn format_key_indices(keys: &[KeyExpression], canonical: bool) -> String {
     }
 }
 
+#[cfg(feature = "alloc")]
 fn format_relative_time(time: u32) -> String {
     format_seconds((time & !SEQUENCE_LOCKTIME_TYPE_FLAG) * 512)
 }
@@ -264,6 +277,7 @@ fn format_relative_time(time: u32) -> String {
 ///   relative duration     -> "<duration> after receiving"
 ///   absolute block height -> "not before block <n>"
 ///   absolute date         -> "not before <date> UTC"
+#[cfg(feature = "alloc")]
 fn format_timelock(lock: Timelock) -> String {
     match lock {
         Timelock::Relative(n) => {
@@ -285,6 +299,7 @@ fn format_timelock(lock: Timelock) -> String {
 
 /// Classify every leaf of a tap-tree and collect the results in tree-traversal
 /// order. Used by the generated `classify` for `tr(...)` patterns.
+#[cfg(feature = "alloc")]
 fn tree_to_leaves(t: &super::TapTree) -> Vec<TapleafClass> {
     t.tapleaves().map(|l| l.classify_as_tapleaf()).collect()
 }
@@ -357,6 +372,7 @@ fn format_timelock_to(sink: &mut dyn core::fmt::Write, lock: Timelock) -> core::
     }
 }
 
+#[cfg(feature = "alloc")]
 fn cleartext_spec<K: Copy + Eq>(
     specs: &'static [CleartextSpec<K>],
     kind: K,
@@ -369,6 +385,7 @@ fn cleartext_spec<K: Copy + Eq>(
 /// (part, value) pairing represents a codegen-side bug since the two are
 /// produced in lockstep; we return `None` and let the caller fall back to a
 /// safe default rather than panic on the VM.
+#[cfg(feature = "alloc")]
 fn format_cleartext_value(
     part: CleartextPart,
     value: &CleartextValue,
@@ -395,6 +412,7 @@ fn format_cleartext_value(
     })
 }
 
+#[cfg(feature = "alloc")]
 fn format_with_spec<K>(
     spec: &CleartextSpec<K>,
     values: &[CleartextValue],
@@ -427,6 +445,7 @@ pub(super) const UNRECOGNIZED_LEAF_PREFIX: &str = "Raw policy: ";
 /// of an `AndV`); this fixes up only the leading character once the whole
 /// element has been assembled, leaving any composed sub-policies lowercase. The
 /// reverse parser undoes this per leaf (see `decode::parse_leaf_candidates`).
+#[cfg(feature = "alloc")]
 fn capitalize_first(s: &str) -> String {
     let mut chars = s.chars();
     match chars.next() {
@@ -440,6 +459,7 @@ fn capitalize_first(s: &str) -> String {
     }
 }
 
+#[cfg(feature = "alloc")]
 impl DescriptorClass {
     fn to_cleartext_string(&self, canonical: bool) -> Option<String> {
         let (kind, values) = self.cleartext_pattern()?;
@@ -447,6 +467,7 @@ impl DescriptorClass {
     }
 }
 
+#[cfg(feature = "alloc")]
 impl TapleafClass {
     fn to_cleartext_string(&self, canonical: bool) -> Option<String> {
         let (kind, values) = self.cleartext_pattern()?;
@@ -454,6 +475,7 @@ impl TapleafClass {
     }
 }
 
+#[cfg(feature = "alloc")]
 pub trait ClearText {
     /// Returns an upper bound on the number of different descriptor templates
     /// that would be mapped to the same cleartext description. u64::MAX is returned
@@ -478,6 +500,7 @@ pub trait ClearText {
         Self: Sized;
 }
 
+#[cfg(feature = "alloc")]
 impl DescriptorTemplate {
     // Verify that, for each distinct key expression in placeholders, its k occurrences carry derivations
     // (in some order) equal to <0;1>/*, <2;3>/*, ..., <2k-2;2k-1>/*. That is, after sorting the (num1, num2)
@@ -577,6 +600,7 @@ impl DescriptorTemplate {
     }
 }
 
+#[cfg(feature = "alloc")]
 impl ClearText for DescriptorTemplate {
     fn confusion_score(&self) -> u64 {
         let class = self.classify();
@@ -868,7 +892,7 @@ impl<'a, A: ArenaRead> Cursor<'a, A> {
                     return false;
                 }
                 let s = &mut leaf_scratch[..n];
-                s.sort_by(|&x, &y| {
+                s.sort_unstable_by(|&x, &y| {
                     tapleaf_ref_display_cmp(
                         &classify_as_tapleaf_ref(Cursor::new(arena, NodeId(x))),
                         &classify_as_tapleaf_ref(Cursor::new(arena, NodeId(y))),

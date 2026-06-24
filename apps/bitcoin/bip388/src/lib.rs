@@ -263,11 +263,13 @@ pub enum DescriptorTemplate {
     U(Box<DescriptorTemplate>),
 }
 
+#[cfg(feature = "alloc")]
 pub struct DescriptorTemplateIter<'a> {
     fragments: Vec<(&'a DescriptorTemplate, Option<&'a DescriptorTemplate>)>, // Store DescriptorTemplate and its associated leaf context
     placeholders: Vec<(&'a KeyExpression, Option<&'a DescriptorTemplate>)>, // Placeholders also carry the leaf context
 }
 
+#[cfg(feature = "alloc")]
 impl<'a> From<&'a DescriptorTemplate> for DescriptorTemplateIter<'a> {
     fn from(desc: &'a DescriptorTemplate) -> Self {
         DescriptorTemplateIter {
@@ -277,6 +279,7 @@ impl<'a> From<&'a DescriptorTemplate> for DescriptorTemplateIter<'a> {
     }
 }
 
+#[cfg(feature = "alloc")]
 impl<'a> Iterator for DescriptorTemplateIter<'a> {
     type Item = (&'a KeyExpression, Option<&'a DescriptorTemplate>);
 
@@ -386,12 +389,14 @@ impl<'a> Iterator for DescriptorTemplateIter<'a> {
 ///
 /// Uses raw pointers internally to satisfy Rust's aliasing rules while still
 /// providing a safe interface through the `placeholders_mut` method.
+#[cfg(feature = "alloc")]
 pub struct DescriptorTemplateIterMut<'a> {
     fragments: Vec<*mut DescriptorTemplate>,
     placeholders: Vec<*mut KeyExpression>,
     _marker: core::marker::PhantomData<&'a mut DescriptorTemplate>,
 }
 
+#[cfg(feature = "alloc")]
 impl<'a> Iterator for DescriptorTemplateIterMut<'a> {
     type Item = &'a mut KeyExpression;
 
@@ -512,6 +517,7 @@ impl<'a> Iterator for DescriptorTemplateIterMut<'a> {
     }
 }
 
+#[cfg(feature = "alloc")]
 impl DescriptorTemplate {
     /// Determines if root fragment is a wrapper.
     fn is_wrapper(&self) -> bool {
@@ -542,27 +548,32 @@ impl DescriptorTemplate {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg(feature = "alloc")]
 pub enum TapTree {
     Script(Box<DescriptorTemplate>),
     Branch(Box<TapTree>, Box<TapTree>),
 }
 
+#[cfg(feature = "alloc")]
 impl TapTree {
     pub fn tapleaves(&self) -> TapleavesIter<'_> {
         TapleavesIter::new(self)
     }
 }
 
+#[cfg(feature = "alloc")]
 pub struct TapleavesIter<'a> {
     stack: Vec<&'a TapTree>,
 }
 
+#[cfg(feature = "alloc")]
 impl<'a> TapleavesIter<'a> {
     fn new(root: &'a TapTree) -> Self {
         TapleavesIter { stack: vec![root] }
     }
 }
 
+#[cfg(feature = "alloc")]
 impl<'a> Iterator for TapleavesIter<'a> {
     type Item = &'a DescriptorTemplate;
 
@@ -580,6 +591,7 @@ impl<'a> Iterator for TapleavesIter<'a> {
     }
 }
 
+#[cfg(feature = "alloc")]
 impl core::fmt::Display for TapTree {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
@@ -589,6 +601,7 @@ impl core::fmt::Display for TapTree {
     }
 }
 
+#[cfg(feature = "wallet-policy")]
 impl core::fmt::Display for KeyOrigin {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(f, "{:08x}", self.fingerprint)?;
@@ -599,6 +612,7 @@ impl core::fmt::Display for KeyOrigin {
     }
 }
 
+#[cfg(feature = "wallet-policy")]
 impl core::convert::TryFrom<&str> for KeyOrigin {
     type Error = ParseError;
 
@@ -624,6 +638,7 @@ impl core::convert::TryFrom<&str> for KeyOrigin {
     }
 }
 
+#[cfg(feature = "wallet-policy")]
 impl core::fmt::Display for KeyInformation {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match &self.origin_info {
@@ -633,6 +648,7 @@ impl core::fmt::Display for KeyInformation {
     }
 }
 
+#[cfg(feature = "alloc")]
 impl core::fmt::Display for KeyExpression {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match &self.key_type {
@@ -661,6 +677,7 @@ impl core::fmt::Display for KeyExpression {
     }
 }
 
+#[cfg(feature = "wallet-policy")]
 impl TryFrom<&str> for KeyInformation {
     type Error = ParseError;
 
@@ -682,6 +699,7 @@ impl TryFrom<&str> for KeyInformation {
     }
 }
 
+#[cfg(feature = "alloc")]
 pub trait ToDescriptor {
     fn to_descriptor(
         &self,
@@ -691,6 +709,7 @@ pub trait ToDescriptor {
     ) -> Result<String, ParseError>;
 }
 
+#[cfg(feature = "alloc")]
 impl FromStr for DescriptorTemplate {
     type Err = ParseError;
 
@@ -706,10 +725,12 @@ impl FromStr for DescriptorTemplate {
 /// This bridge keeps the historical owned-AST consumers working while the
 /// parser builds the flat arena representation. It is removed once all
 /// consumers operate directly on arena cursors.
+#[cfg(feature = "alloc")]
 fn arena_to_owned(arena: &arena::VecArena, root: arena::NodeId) -> DescriptorTemplate {
     node_to_owned(arena::Cursor::new(arena, root))
 }
 
+#[cfg(feature = "alloc")]
 fn node_to_owned<A: arena::ArenaRead>(cur: arena::Cursor<'_, A>) -> DescriptorTemplate {
     use arena::DescriptorNode as DN;
     // Peel a linear wrapper spine iteratively so a long wrapper chain (e.g.
@@ -743,6 +764,7 @@ fn node_to_owned<A: arena::ArenaRead>(cur: arena::Cursor<'_, A>) -> DescriptorTe
     }
 }
 
+#[cfg(feature = "alloc")]
 fn build_owned<A: arena::ArenaRead>(view: arena::DescriptorNode<'_, A>) -> DescriptorTemplate {
     use arena::DescriptorNode as DN;
     use DescriptorTemplate as DT;
@@ -796,6 +818,7 @@ fn build_owned<A: arena::ArenaRead>(view: arena::DescriptorNode<'_, A>) -> Descr
     }
 }
 
+#[cfg(feature = "alloc")]
 fn keyview_to_owned<A: arena::ArenaRead>(kv: arena::KeyView<'_, A>) -> KeyExpression {
     if let Some(idx) = kv.plain_key_index() {
         KeyExpression::plain(idx, kv.num1(), kv.num2())
@@ -805,6 +828,7 @@ fn keyview_to_owned<A: arena::ArenaRead>(kv: arena::KeyView<'_, A>) -> KeyExpres
     }
 }
 
+#[cfg(feature = "alloc")]
 fn taptree_to_owned<A: arena::ArenaRead>(tc: arena::TapCursor<'_, A>) -> TapTree {
     if let Some(script) = tc.leaf_script() {
         TapTree::Script(Box::new(node_to_owned(script)))
@@ -899,6 +923,7 @@ fn parse_sortedmulti(input: &str) -> Result<(&str, DescriptorTemplate), ParseErr
 }
 
 
+#[cfg(feature = "alloc")]
 fn write_display_wrapper(
     f: &mut core::fmt::Formatter<'_>,
     ch: char,
@@ -911,6 +936,7 @@ fn write_display_wrapper(
     write!(f, "{}", inner)
 }
 
+#[cfg(feature = "alloc")]
 impl core::fmt::Display for DescriptorTemplate {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
@@ -996,6 +1022,7 @@ impl core::fmt::Display for DescriptorTemplate {
 /// parsed template cannot drift from the raw string used to compute the
 /// registration HMAC.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg(feature = "wallet-policy")]
 pub struct WalletPolicy {
     descriptor_template: DescriptorTemplate,
     key_information: Vec<KeyInformation>,
@@ -1015,6 +1042,7 @@ impl SegwitVersion {
     }
 }
 
+#[cfg(feature = "wallet-policy")]
 impl WalletPolicy {
     pub fn new(
         descriptor_template_str: &str,
@@ -1178,6 +1206,7 @@ impl WalletPolicy {
     }
 }
 
+#[cfg(feature = "alloc")]
 fn write_key_expression(
     w: &mut String,
     key_information: &[KeyInformation],
@@ -1212,6 +1241,7 @@ fn write_key_expression(
 }
 
 // Writes a comma-separated list of key expressions to a buffer.
+#[cfg(feature = "alloc")]
 fn write_key_expressions(
     w: &mut String,
     key_information: &[KeyInformation],
@@ -1229,6 +1259,7 @@ fn write_key_expressions(
 }
 
 // Writes a wrapper fragment to a buffer.
+#[cfg(feature = "alloc")]
 fn write_wrapper(
     w: &mut String,
     name: &str,
@@ -1244,6 +1275,7 @@ fn write_wrapper(
     inner.write_to(w, key_information, is_change, address_index)
 }
 
+#[cfg(feature = "alloc")]
 impl TapTree {
     fn write_to(
         &self,
@@ -1266,6 +1298,7 @@ impl TapTree {
     }
 }
 
+#[cfg(feature = "alloc")]
 impl DescriptorTemplate {
     fn write_to(
         &self,
@@ -1470,6 +1503,7 @@ impl DescriptorTemplate {
     }
 }
 
+#[cfg(feature = "alloc")]
 impl ToDescriptor for TapTree {
     fn to_descriptor(
         &self,
@@ -1483,6 +1517,7 @@ impl ToDescriptor for TapTree {
     }
 }
 
+#[cfg(feature = "alloc")]
 impl ToDescriptor for DescriptorTemplate {
     fn to_descriptor(
         &self,
