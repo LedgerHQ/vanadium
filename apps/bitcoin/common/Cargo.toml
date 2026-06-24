@@ -24,7 +24,7 @@ minicbor = { version = "2.2", default-features = false, features = ["alloc", "de
 sdk = { package = "vanadium-app-sdk", path = "../../../app-sdk", default-features = false }
 subtle = { version="2.6.1", default-features = false }
 zeroize = { version = "1.8.1", default-features = false }
-bip388 = { path = "../bip388", default-features = false }
+bip388 = { path = "../bip388", default-features = false, features = ["wallet-policy"] }
 
 [dev-dependencies]
 hex-literal = "0.4.1"
