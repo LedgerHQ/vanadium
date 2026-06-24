@@ -1,5 +1,6 @@
 #![cfg_attr(not(test), no_std)]
 
+#[cfg(feature = "alloc")]
 extern crate alloc;
 
 // TODO:
@@ -14,13 +15,16 @@ mod time;
 
 pub use cleartext::*;
 
+#[cfg(feature = "alloc")]
 use alloc::{boxed::Box, string::String, vec, vec::Vec};
 
 #[cfg(test)]
 use alloc::{format, string::ToString};
 
+#[cfg(feature = "alloc")]
 use core::str::FromStr;
 
+#[cfg(feature = "wallet-policy")]
 use bitcoin::{
     bip32::{ChildNumber, Xpub},
     consensus::{encode, Decodable, Encodable},
@@ -1959,6 +1963,41 @@ mod tests {
                 "canonical mismatch for {:?}",
                 s
             );
+        }
+    }
+
+    #[test]
+    fn test_cursor_confusion_score_matches_owned() {
+        let cases = vec![
+            "pkh(@0/**)",
+            "wpkh(@0/**)",
+            "sh(wpkh(@0/**))",
+            "wsh(multi(2,@0/**,@1/**,@2/**))",
+            "wsh(multi(3,@0/**,@1/**,@2/**))",
+            "sh(wsh(sortedmulti(2,@0/**,@1/**)))",
+            "tr(@0/**)",
+            "tr(@0/**,pk(@1/**))",
+            "tr(@0/**,{pk(@1/**),pk(@2/**)})",
+            "tr(@0/**,{pk(@1/**),{pk(@2/**),pk(@3/**)}})",
+            "tr(musig(@0,@1)/**)",
+            "tr(musig(@0,@1)/**,{pk(@2/**),multi_a(2,@3/**,@4/**)})",
+            "tr(@0/**,{pk(@0/<2;3>/*),pk(@0/<4;5>/*)})",
+            "tr(@0/**,and_v(v:pk(@1/**),older(144)))",
+            "tr(@0/**,multi_a(2,@1/**,@2/**))",
+            "tr(@0/**,sortedmulti_a(1,@1/**,@2/**))",
+            "wsh(or_i(and_v(v:pkh(@4/<3;7>/*),older(65535)),or_d(multi(2,@0/**,@3/**),and_v(v:thresh(1,pkh(@5/<99;101>/*),a:pkh(@1/**)),older(64231)))))",
+        ];
+        for s in cases {
+            let owned = DescriptorTemplate::from_str(s).unwrap();
+            let expected = owned.confusion_score();
+
+            let mut a = arena::VecArena::new();
+            let root = parser::parse_descriptor_template(s, &mut a).unwrap();
+            let cur = arena::Cursor::new(&a, root);
+            let mut scratch = vec![0u32; cur.expanded_key_occurrences()];
+            let got = cur.confusion_score(&mut scratch);
+
+            assert_eq!(got, expected, "confusion score mismatch for {:?}", s);
         }
     }
 

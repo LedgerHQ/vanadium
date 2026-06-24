@@ -2699,22 +2699,25 @@ fn emit_common(top_level: &[ProcessedEntry], tapleaf: &[ProcessedEntry]) -> Stri
     let cursor_classifier = emit_cursor_classifier(top_level, tapleaf);
 
     pretty_file(quote! {
-        #pat_kind_top
-        #pat_kind_tap
-        #class_top
-        #class_tap
-        #specs_top
-        #specs_tap
+        // Owned classes + classify + specs + scores are needed only by the
+        // alloc/decode paths; the cursor classifier below is always built.
+        #[cfg(feature = "alloc")] #pat_kind_top
+        #[cfg(feature = "alloc")] #pat_kind_tap
+        #[cfg(feature = "alloc")] #class_top
+        #[cfg(feature = "alloc")] #class_tap
+        #[cfg(feature = "alloc")] #specs_top
+        #[cfg(feature = "alloc")] #specs_tap
 
+        #[cfg(feature = "alloc")]
         impl DescriptorTemplate {
             #classify_top
             #classify_tap
         }
 
-        #cleartext_top
-        #cleartext_tap
-        #tap_helpers
-        #outer
+        #[cfg(feature = "alloc")] #cleartext_top
+        #[cfg(feature = "alloc")] #cleartext_tap
+        #[cfg(feature = "alloc")] #tap_helpers
+        #[cfg(feature = "alloc")] #outer
 
         #cursor_classifier
     })

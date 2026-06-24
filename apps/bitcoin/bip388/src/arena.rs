@@ -284,10 +284,10 @@ impl Default for ListBuilder {
 // VecArena (alloc-backed)
 // ---------------------------------------------------------------------------
 
-// The default build currently always has `alloc`; the explicit `alloc` feature
-// gate (and the no-alloc `SliceArena`) are introduced in later phases.
+#[cfg(feature = "alloc")]
 pub use vec_arena::VecArena;
 
+#[cfg(feature = "alloc")]
 mod vec_arena {
     use super::*;
     use alloc::vec::Vec;
@@ -1103,8 +1103,48 @@ impl<'w> fmt::Write for CapWrite<'w> {
     }
 }
 
+/// A `fmt::Write` sink that captures up to `N` bytes into a fixed stack buffer
+/// (excess is dropped). Used for the allocation-free lexicographic comparison of
+/// two rendered "raw policy" tap leaves (a rare case), avoiding a heap `String`.
+pub struct FixedBuf<const N: usize> {
+    buf: [u8; N],
+    len: usize,
+}
+
+impl<const N: usize> FixedBuf<N> {
+    pub fn new() -> Self {
+        FixedBuf {
+            buf: [0u8; N],
+            len: 0,
+        }
+    }
+    pub fn as_slice(&self) -> &[u8] {
+        &self.buf[..self.len]
+    }
+}
+
+impl<const N: usize> Default for FixedBuf<N> {
+    fn default() -> Self {
+        FixedBuf::new()
+    }
+}
+
+impl<const N: usize> fmt::Write for FixedBuf<N> {
+    fn write_str(&mut self, s: &str) -> fmt::Result {
+        for &b in s.as_bytes() {
+            if self.len < N {
+                self.buf[self.len] = b;
+                self.len += 1;
+            }
+        }
+        Ok(())
+    }
+}
+
+#[cfg(feature = "alloc")]
 pub use vec_sink::VecLineSink;
 
+#[cfg(feature = "alloc")]
 mod vec_sink {
     use super::*;
     use alloc::string::String;

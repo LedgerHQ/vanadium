@@ -1,4 +1,7 @@
+#[cfg(feature = "alloc")]
 use alloc::string::String;
+#[cfg(any(test, feature = "cleartext-decode"))]
+use alloc::vec::Vec;
 use core::fmt;
 
 /// Writes a Unix timestamp as a UTC date or datetime into `sink` (allocation-free).
@@ -29,6 +32,7 @@ pub(super) fn write_utc_date(sink: &mut dyn fmt::Write, timestamp: u32) -> fmt::
 }
 
 /// `String`-returning wrapper over [`write_utc_date`].
+#[cfg(feature = "alloc")]
 pub(super) fn format_utc_date(timestamp: u32) -> String {
     let mut s = String::new();
     let _ = write_utc_date(&mut s, timestamp);
@@ -120,6 +124,7 @@ pub(super) fn write_seconds(sink: &mut dyn fmt::Write, secs: u32) -> fmt::Result
 }
 
 /// `String`-returning wrapper over [`write_seconds`].
+#[cfg(feature = "alloc")]
 pub(super) fn format_seconds(secs: u32) -> String {
     let mut s = String::new();
     let _ = write_seconds(&mut s, secs);

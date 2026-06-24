@@ -794,10 +794,13 @@ fn tapleaf_ref_display_cmp<A: ArenaRead>(
                 })
         }
         (TC::Other(c1), TC::Other(c2)) => {
-            let (mut s1, mut s2) = (String::new(), String::new());
-            let _ = c1.write_template(&mut s1);
-            let _ = c2.write_template(&mut s2);
-            s1.cmp(&s2)
+            // Lexicographic by rendered descriptor, allocation-free. Raw-policy
+            // leaves are short; capture a bounded prefix for the comparison.
+            let mut b1 = crate::arena::FixedBuf::<256>::new();
+            let mut b2 = crate::arena::FixedBuf::<256>::new();
+            let _ = c1.write_template(&mut b1);
+            let _ = c2.write_template(&mut b2);
+            b1.as_slice().cmp(b2.as_slice())
         }
         // Equal `order()` implies the same variant; other pairings are unreachable.
         _ => core::cmp::Ordering::Equal,
