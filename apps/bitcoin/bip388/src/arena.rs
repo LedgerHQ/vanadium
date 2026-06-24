@@ -380,6 +380,131 @@ mod vec_arena {
 }
 
 // ---------------------------------------------------------------------------
+// SliceArena (no-alloc, caller-provided slices)
+// ---------------------------------------------------------------------------
+
+/// Arena backed by caller-provided slices (one per pool), with bump cursors.
+/// No allocation; `push_*` returns [`ArenaFull`] when a pool is exhausted. This
+/// is the backing used by the no-alloc / C build.
+pub struct SliceArena<'a> {
+    nodes: &'a mut [Node],
+    n_nodes: usize,
+    keys: &'a mut [KeyExprRec],
+    n_keys: usize,
+    links: &'a mut [Link],
+    n_links: usize,
+    members: &'a mut [u32],
+    n_members: usize,
+    bytes: &'a mut [u8],
+    n_bytes: usize,
+}
+
+impl<'a> SliceArena<'a> {
+    pub fn new(
+        nodes: &'a mut [Node],
+        keys: &'a mut [KeyExprRec],
+        links: &'a mut [Link],
+        members: &'a mut [u32],
+        bytes: &'a mut [u8],
+    ) -> Self {
+        SliceArena {
+            nodes,
+            n_nodes: 0,
+            keys,
+            n_keys: 0,
+            links,
+            n_links: 0,
+            members,
+            n_members: 0,
+            bytes,
+            n_bytes: 0,
+        }
+    }
+}
+
+impl<'a> ArenaRead for SliceArena<'a> {
+    fn node(&self, id: NodeId) -> Node {
+        self.nodes[id.0 as usize]
+    }
+    fn key(&self, id: KeyId) -> KeyExprRec {
+        self.keys[id.0 as usize]
+    }
+    fn link(&self, idx: u32) -> Link {
+        self.links[idx as usize]
+    }
+    fn members(&self, span: Span) -> &[u32] {
+        &self.members[span.start as usize..(span.start + span.len) as usize]
+    }
+    fn bytes(&self, span: Span) -> &[u8] {
+        &self.bytes[span.start as usize..(span.start + span.len) as usize]
+    }
+}
+
+impl<'a> ArenaStore for SliceArena<'a> {
+    fn push_node(&mut self, node: Node) -> Result<NodeId, ArenaFull> {
+        if self.n_nodes >= self.nodes.len() {
+            return Err(ArenaFull);
+        }
+        self.nodes[self.n_nodes] = node;
+        self.n_nodes += 1;
+        Ok(NodeId((self.n_nodes - 1) as u32))
+    }
+    fn push_key(&mut self, key: KeyExprRec) -> Result<KeyId, ArenaFull> {
+        if self.n_keys >= self.keys.len() {
+            return Err(ArenaFull);
+        }
+        self.keys[self.n_keys] = key;
+        self.n_keys += 1;
+        Ok(KeyId((self.n_keys - 1) as u32))
+    }
+    fn push_link(&mut self, link: Link) -> Result<u32, ArenaFull> {
+        if self.n_links >= self.links.len() {
+            return Err(ArenaFull);
+        }
+        self.links[self.n_links] = link;
+        self.n_links += 1;
+        Ok((self.n_links - 1) as u32)
+    }
+    fn set_link_next(&mut self, idx: u32, next: u32) {
+        self.links[idx as usize].next = next;
+    }
+    fn members_begin(&self) -> u32 {
+        self.n_members as u32
+    }
+    fn members_push(&mut self, value: u32) -> Result<(), ArenaFull> {
+        if self.n_members >= self.members.len() {
+            return Err(ArenaFull);
+        }
+        self.members[self.n_members] = value;
+        self.n_members += 1;
+        Ok(())
+    }
+    fn members_end(&self, start: u32) -> Span {
+        Span {
+            start,
+            len: self.n_members as u32 - start,
+        }
+    }
+    fn push_bytes(&mut self, bytes: &[u8]) -> Result<Span, ArenaFull> {
+        let start = self.n_bytes;
+        if start + bytes.len() > self.bytes.len() {
+            return Err(ArenaFull);
+        }
+        self.bytes[start..start + bytes.len()].copy_from_slice(bytes);
+        self.n_bytes += bytes.len();
+        Ok(Span {
+            start: start as u32,
+            len: bytes.len() as u32,
+        })
+    }
+    fn set_key_derivation(&mut self, id: KeyId, num1: u32, num2: u32) {
+        let k = &mut self.keys[id.0 as usize];
+        k.num1 = num1;
+        k.num2 = num2;
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Cursors / views (backing-agnostic traversal)
 // ---------------------------------------------------------------------------
 
@@ -1067,6 +1192,77 @@ pub enum DescriptorNode<'a, A: ArenaRead> {
 pub trait LineSink: fmt::Write {
     /// Finish the current line and start a new one.
     fn flush_line(&mut self);
+}
+
+/// A `(offset, len)` slice of a cleartext line within a [`BufLineSink`]'s output
+/// buffer. The C layer turns `offset` into a pointer into the caller's buffer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub struct LineSpan {
+    pub offset: u32,
+    pub len: u32,
+}
+
+/// No-alloc [`LineSink`] writing line bytes into a caller `&mut [u8]` and
+/// recording each line's `(offset, len)` into a caller `&mut [LineSpan]`.
+/// `overflowed()` reports whether either buffer was exhausted. Used by the C
+/// build.
+pub struct BufLineSink<'a> {
+    buf: &'a mut [u8],
+    pos: usize,
+    line_start: usize,
+    lines: &'a mut [LineSpan],
+    n_lines: usize,
+    overflow: bool,
+}
+
+impl<'a> BufLineSink<'a> {
+    pub fn new(buf: &'a mut [u8], lines: &'a mut [LineSpan]) -> Self {
+        BufLineSink {
+            buf,
+            pos: 0,
+            line_start: 0,
+            lines,
+            n_lines: 0,
+            overflow: false,
+        }
+    }
+    /// Number of completed lines.
+    pub fn line_count(&self) -> usize {
+        self.n_lines
+    }
+    /// Whether the output buffer or the line array was exhausted.
+    pub fn overflowed(&self) -> bool {
+        self.overflow
+    }
+}
+
+impl<'a> fmt::Write for BufLineSink<'a> {
+    fn write_str(&mut self, s: &str) -> fmt::Result {
+        for &b in s.as_bytes() {
+            if self.pos < self.buf.len() {
+                self.buf[self.pos] = b;
+                self.pos += 1;
+            } else {
+                self.overflow = true;
+            }
+        }
+        Ok(())
+    }
+}
+
+impl<'a> LineSink for BufLineSink<'a> {
+    fn flush_line(&mut self) {
+        if self.n_lines < self.lines.len() {
+            self.lines[self.n_lines] = LineSpan {
+                offset: self.line_start as u32,
+                len: (self.pos - self.line_start) as u32,
+            };
+            self.n_lines += 1;
+        } else {
+            self.overflow = true;
+        }
+        self.line_start = self.pos;
+    }
 }
 
 /// A `fmt::Write` adapter that upper-cases the first ASCII-lowercase character

@@ -2043,6 +2043,91 @@ mod tests {
     }
 
     #[test]
+    fn test_slice_arena_matches_vec_arena() {
+        // The no-alloc SliceArena backing must produce identical confusion
+        // scores and cleartext to the alloc VecArena backing.
+        let cases = vec![
+            "pkh(@0/**)",
+            "wsh(multi(2,@0/**,@1/**,@2/**))",
+            "wsh(multi(3,@0/**,@1/**,@2/**))",
+            "sh(wsh(sortedmulti(2,@0/**,@1/**)))",
+            "tr(@0/**)",
+            "tr(@0/**,{pk(@1/**),{pk(@2/**),pk(@3/**)}})",
+            "tr(musig(@0,@1)/**,{pk(@2/**),multi_a(2,@3/**,@4/**)})",
+            "tr(@0/**,and_v(v:pk(@1/**),older(144)))",
+            "wsh(or_i(and_v(v:pkh(@4/<3;7>/*),older(65535)),or_d(multi(2,@0/**,@3/**),and_v(v:thresh(1,pkh(@5/<99;101>/*),a:pkh(@1/**)),older(64231)))))",
+        ];
+        for s in cases {
+            // VecArena (alloc) reference.
+            let mut va = arena::VecArena::new();
+            let vroot = parser::parse_descriptor_template(s, &mut va).unwrap();
+            let vc = arena::Cursor::new(&va, vroot);
+            let mut vsc = vec![0u32; vc.expanded_key_occurrences()];
+            let v_score = vc.confusion_score(&mut vsc);
+            let mut vcanon = vec![arena::KeyExprRec::plain(0, 0, 1); vc.placeholder_count()];
+            let mut vleaf = vec![0u32; vc.tapleaf_count()];
+            let mut vsink = arena::VecLineSink::new();
+            let v_hct = vc.to_cleartext(&mut vsink, &mut vcanon, &mut vleaf);
+            let v_lines = vsink.into_lines();
+
+            // SliceArena (no-alloc backing) over caller-provided slices.
+            let mut nodes = vec![arena::Node::new(arena::NodeTag::Zero); 1024];
+            let mut keys = vec![arena::KeyExprRec::plain(0, 0, 1); 1024];
+            let mut links = vec![arena::Link { val: 0, next: 0 }; 1024];
+            let mut members = vec![0u32; 1024];
+            let mut bytes = vec![0u8; 1024];
+            let mut sa =
+                arena::SliceArena::new(&mut nodes, &mut keys, &mut links, &mut members, &mut bytes);
+            let sroot = parser::parse_descriptor_template(s, &mut sa).unwrap();
+            let sc = arena::Cursor::new(&sa, sroot);
+            let mut ssc = vec![0u32; sc.expanded_key_occurrences()];
+            let s_score = sc.confusion_score(&mut ssc);
+            let mut scanon = vec![arena::KeyExprRec::plain(0, 0, 1); sc.placeholder_count()];
+            let mut sleaf = vec![0u32; sc.tapleaf_count()];
+            let mut ssink = arena::VecLineSink::new();
+            let s_hct = sc.to_cleartext(&mut ssink, &mut scanon, &mut sleaf);
+            let s_lines = ssink.into_lines();
+
+            assert_eq!(v_score, s_score, "confusion score backing mismatch for {:?}", s);
+            assert_eq!(v_lines, s_lines, "cleartext lines backing mismatch for {:?}", s);
+            assert_eq!(v_hct, s_hct, "has_cleartext backing mismatch for {:?}", s);
+        }
+    }
+
+    #[test]
+    fn test_buf_line_sink_matches_vec_sink() {
+        let s = "tr(@0/**,{pk(@1/**),and_v(v:pk(@2/**),older(144))})";
+        let mut a = arena::VecArena::new();
+        let root = parser::parse_descriptor_template(s, &mut a).unwrap();
+        let cur = arena::Cursor::new(&a, root);
+
+        let mut canon = vec![arena::KeyExprRec::plain(0, 0, 1); cur.placeholder_count()];
+        let mut leaf = vec![0u32; cur.tapleaf_count()];
+        let mut vsink = arena::VecLineSink::new();
+        cur.to_cleartext(&mut vsink, &mut canon, &mut leaf);
+        let v_lines = vsink.into_lines();
+
+        let mut buf = vec![0u8; 4096];
+        let mut spans = vec![arena::LineSpan::default(); 64];
+        let mut canon2 = vec![arena::KeyExprRec::plain(0, 0, 1); cur.placeholder_count()];
+        let mut leaf2 = vec![0u32; cur.tapleaf_count()];
+        let n = {
+            let mut bsink = arena::BufLineSink::new(&mut buf, &mut spans);
+            cur.to_cleartext(&mut bsink, &mut canon2, &mut leaf2);
+            assert!(!bsink.overflowed());
+            bsink.line_count()
+        };
+        let buf_lines: Vec<String> = (0..n)
+            .map(|i| {
+                let sp = spans[i];
+                String::from_utf8(buf[sp.offset as usize..(sp.offset + sp.len) as usize].to_vec())
+                    .unwrap()
+            })
+            .collect();
+        assert_eq!(buf_lines, v_lines);
+    }
+
+    #[test]
     fn test_cursor_segwit_version_matches_owned() {
         // get_segwit_version only inspects the top-level template, so an empty
         // key-information list is fine here.
