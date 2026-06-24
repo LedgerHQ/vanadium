@@ -10,6 +10,7 @@ extern crate alloc;
 
 mod arena;
 mod cleartext;
+pub mod embedded;
 mod parser;
 mod time;
 
@@ -45,11 +46,14 @@ pub(crate) const MAX_KEYS_MULTI_A: usize = 999;
 pub(crate) const MAX_PARSE_DEPTH: usize = 64;
 // Maximum byte length of a serialized descriptor template accepted by
 // `WalletPolicy::deserialize`. Practical policies are far below this.
+#[cfg(feature = "wallet-policy")]
 const MAX_SERIALIZED_DESCRIPTORTEMPLATE_LEN: usize = 4096;
 // Maximum number of key information entries accepted by `WalletPolicy::deserialize`.
 // Matches the largest multi-key fragment we can produce (`multi_a`/`sortedmulti_a`).
+#[cfg(feature = "wallet-policy")]
 const MAX_SERIALIZED_KEY_COUNT: usize = MAX_KEYS_MULTI_A;
 // Maximum length of a serialized BIP-32 derivation path.
+#[cfg(feature = "wallet-policy")]
 const MAX_BIP32_DERIVATION_PATH_LEN: usize = 32;
 
 /// Error type for descriptor template / wallet policy parsing and serialization.
@@ -2091,6 +2095,37 @@ mod tests {
             assert_eq!(v_score, s_score, "confusion score backing mismatch for {:?}", s);
             assert_eq!(v_lines, s_lines, "cleartext lines backing mismatch for {:?}", s);
             assert_eq!(v_hct, s_hct, "has_cleartext backing mismatch for {:?}", s);
+        }
+    }
+
+    #[test]
+    fn test_embedded_public_api() {
+        // Drive the public no-alloc API: measure -> size pools -> parse ->
+        // confusion_score, and check it matches the owned implementation.
+        let cases = vec![
+            "wsh(multi(2,@0/**,@1/**,@2/**))",
+            "tr(musig(@0,@1)/**,{pk(@2/**),multi_a(2,@3/**,@4/**)})",
+            "tr(@0/**,and_v(v:pk(@1/**),older(144)))",
+            "wsh(thresh(2,pk(@0/**),s:pk(@1/**),sln:older(10)))",
+        ];
+        for s in cases {
+            let c = crate::embedded::measure(s).unwrap();
+            let mut nodes = vec![arena::Node::new(arena::NodeTag::Zero); c.nodes as usize];
+            let mut keys = vec![arena::KeyExprRec::plain(0, 0, 1); c.keys as usize];
+            let mut links = vec![arena::Link { val: 0, next: 0 }; c.links as usize];
+            let mut members = vec![0u32; c.members as usize];
+            let mut bytes = vec![0u8; c.bytes as usize];
+            let mut sa =
+                arena::SliceArena::new(&mut nodes, &mut keys, &mut links, &mut members, &mut bytes);
+            let root = crate::embedded::parse(s, &mut sa).unwrap();
+            let cur = arena::Cursor::new(&sa, root);
+            let mut scratch = vec![0u32; cur.expanded_key_occurrences()];
+            assert_eq!(
+                cur.confusion_score(&mut scratch),
+                DescriptorTemplate::from_str(s).unwrap().confusion_score(),
+                "embedded confusion score mismatch for {:?}",
+                s
+            );
         }
     }
 
