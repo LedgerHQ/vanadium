@@ -1833,6 +1833,80 @@ mod tests {
     }
 
     #[test]
+    fn test_cursor_placeholders_match_owned() {
+        let cases = vec![
+            "pkh(@0/**)",
+            "wsh(multi(2,@0/**,@1/**,@2/**))",
+            "wsh(or_d(pk(@0/**),pkh(@1/**)))",
+            "tr(@0/**)",
+            "tr(@0/**,pkh(@1/**))",
+            "tr(@0/<2;1>/*,{pkh(@1/<2;7>/*),pk(@2/**)})",
+            "tr(musig(@0,@1)/**,{multi_a(1,@2/**,@3/**),pk(@4/**)})",
+            "wsh(or_i(and_v(v:pkh(@4/<3;7>/*),older(65535)),or_d(multi(2,@0/**,@3/**),and_v(v:thresh(1,pkh(@5/<99;101>/*),a:pkh(@1/**)),older(64231)))))",
+        ];
+
+        for s in cases {
+            let owned = DescriptorTemplate::from_str(s).unwrap();
+            let mut owned_keys: Vec<String> = Vec::new();
+            let mut owned_ctx: Vec<Option<String>> = Vec::new();
+            for (kp, ctx) in owned.placeholders() {
+                owned_keys.push(kp.to_string());
+                owned_ctx.push(ctx.map(|c| c.to_string()));
+            }
+
+            let mut a = arena::VecArena::new();
+            let root = parser::parse_descriptor_template(s, &mut a).unwrap();
+            let mut cur_keys: Vec<String> = Vec::new();
+            let mut cur_ctx: Vec<Option<String>> = Vec::new();
+            arena::Cursor::new(&a, root).for_each_placeholder(&mut |kv, leaf| {
+                let mut ks = String::new();
+                kv.write_to(&mut ks).unwrap();
+                cur_keys.push(ks);
+                cur_ctx.push(leaf.map(|c| {
+                    let mut s = String::new();
+                    c.write_template(&mut s).unwrap();
+                    s
+                }));
+            });
+
+            assert_eq!(cur_keys, owned_keys, "placeholder keys mismatch for {:?}", s);
+            assert_eq!(
+                cur_ctx, owned_ctx,
+                "placeholder leaf-context mismatch for {:?}",
+                s
+            );
+        }
+    }
+
+    #[test]
+    fn test_cursor_segwit_version_matches_owned() {
+        // get_segwit_version only inspects the top-level template, so an empty
+        // key-information list is fine here.
+        let cases = vec![
+            ("pkh(@0/**)", SegwitVersion::Legacy),
+            ("wpkh(@0/**)", SegwitVersion::SegwitV0),
+            ("wsh(multi(2,@0/**,@1/**))", SegwitVersion::SegwitV0),
+            ("sh(wpkh(@0/**))", SegwitVersion::SegwitV0),
+            ("sh(wsh(multi(2,@0/**,@1/**)))", SegwitVersion::SegwitV0),
+            ("tr(@0/**)", SegwitVersion::Taproot),
+        ];
+        for (s, expected) in cases {
+            let wp_version = WalletPolicy::new(s, vec![]).unwrap().get_segwit_version();
+            assert_eq!(wp_version, Ok(expected));
+
+            let mut a = arena::VecArena::new();
+            let root = parser::parse_descriptor_template(s, &mut a).unwrap();
+            let got = arena::Cursor::new(&a, root).segwit_version();
+            assert_eq!(got, Ok(expected), "segwit version mismatch for {:?}", s);
+            assert_eq!(
+                got, wp_version,
+                "cursor vs WalletPolicy segwit version for {:?}",
+                s
+            );
+        }
+    }
+
+    #[test]
     fn test_musig_inside_tr_parses() {
         // musig() as the internal key of tr()
         let result = DescriptorTemplate::from_str("tr(musig(@0,@1)/**)");

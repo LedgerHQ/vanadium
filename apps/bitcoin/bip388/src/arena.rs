@@ -1027,6 +1027,106 @@ mod vec_sink {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Cursor-based traversals shared by both builds (no allocation)
+// ---------------------------------------------------------------------------
+
+impl<'a, A: ArenaRead> KeyView<'a, A> {
+    /// Renders this key expression into `w` (mirrors `KeyExpression` `Display`).
+    pub fn write_to(&self, w: &mut dyn fmt::Write) -> fmt::Result {
+        write_key(w, *self)
+    }
+}
+
+impl<'a, A: ArenaRead> Cursor<'a, A> {
+    /// Determines the segwit version of a *top-level* descriptor node, matching
+    /// the owned `WalletPolicy::get_segwit_version`.
+    pub fn segwit_version(&self) -> Result<crate::SegwitVersion, crate::ParseError> {
+        use crate::SegwitVersion as SV;
+        use NodeTag::*;
+        let n = self.arena.node(self.id);
+        match n.tag {
+            Tr => Ok(SV::Taproot),
+            Pkh => Ok(SV::Legacy),
+            Wpkh | Wsh => Ok(SV::SegwitV0),
+            Sh => match self.arena.node(NodeId(n.a)).tag {
+                Wpkh | Wsh => Ok(SV::SegwitV0),
+                _ => Ok(SV::Legacy),
+            },
+            _ => Err(crate::ParseError::InvalidTopLevelPolicy),
+        }
+    }
+
+    /// Visits every key placeholder in document order (left-to-right), passing
+    /// the enclosing tap-leaf script cursor (or `None` outside a tap leaf / for
+    /// the taproot internal key). Matches the order of the owned
+    /// `DescriptorTemplate::placeholders` iterator. Recursion is bounded by the
+    /// parser depth limit.
+    pub fn for_each_placeholder<F>(&self, f: &mut F)
+    where
+        F: FnMut(KeyView<'a, A>, Option<Cursor<'a, A>>),
+    {
+        self.visit_placeholders(None, f);
+    }
+
+    fn visit_placeholders<F>(&self, leaf: Option<Cursor<'a, A>>, f: &mut F)
+    where
+        F: FnMut(KeyView<'a, A>, Option<Cursor<'a, A>>),
+    {
+        use DescriptorNode as DN;
+        match self.view() {
+            DN::Pkh(kv) | DN::Wpkh(kv) | DN::Pk(kv) | DN::PkK(kv) | DN::PkH(kv) => f(kv, leaf),
+            DN::Multi(_, keys)
+            | DN::MultiA(_, keys)
+            | DN::Sortedmulti(_, keys)
+            | DN::SortedmultiA(_, keys) => {
+                for kv in keys.iter() {
+                    f(kv, leaf);
+                }
+            }
+            DN::Tr(kv, tree) => {
+                f(kv, None);
+                if let Some(t) = tree {
+                    for leaf_script in t.tapleaves() {
+                        leaf_script.visit_placeholders(Some(leaf_script), f);
+                    }
+                }
+            }
+            DN::Sh(c) | DN::Wsh(c) | DN::A(c) | DN::S(c) | DN::C(c) | DN::T(c) | DN::D(c)
+            | DN::V(c) | DN::J(c) | DN::N(c) | DN::L(c) | DN::U(c) => c.visit_placeholders(leaf, f),
+            DN::Andor(x, y, z) => {
+                x.visit_placeholders(leaf, f);
+                y.visit_placeholders(leaf, f);
+                z.visit_placeholders(leaf, f);
+            }
+            DN::AndV(x, y)
+            | DN::AndB(x, y)
+            | DN::AndN(x, y)
+            | DN::OrB(x, y)
+            | DN::OrC(x, y)
+            | DN::OrD(x, y)
+            | DN::OrI(x, y) => {
+                x.visit_placeholders(leaf, f);
+                y.visit_placeholders(leaf, f);
+            }
+            DN::Thresh(_, list) => {
+                for c in list.iter() {
+                    c.visit_placeholders(leaf, f);
+                }
+            }
+            DN::Zero
+            | DN::One
+            | DN::Older(_)
+            | DN::After(_)
+            | DN::Sha256(_)
+            | DN::Hash256(_)
+            | DN::Ripemd160(_)
+            | DN::Hash160(_)
+            | DN::TapNode(_) => {}
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
