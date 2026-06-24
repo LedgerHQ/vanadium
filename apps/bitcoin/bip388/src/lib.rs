@@ -1791,6 +1791,48 @@ mod tests {
     }
 
     #[test]
+    fn test_cursor_render_matches_owned_display() {
+        // The arena cursor renderer (used by the no-alloc build) must produce
+        // byte-identical output to the owned `Display` for every shape.
+        let cases = vec![
+            "0",
+            "1",
+            "pkh(@0/**)",
+            "wpkh(@0/<11;67>/*)",
+            "sh(wsh(sortedmulti(2,@0/**,@1/**)))",
+            "wsh(c:pk_k(@0/**))",
+            "wsh(or_d(pk(@0/**),pkh(@1/**)))",
+            "wsh(thresh(3,pk(@0/**),s:pk(@1/**),s:pk(@2/**),sln:older(12960)))",
+            "tr(@0/**)",
+            "tr(@0/<2;1>/*,{pkh(@1/<2;7>/*),pk(@2/**)})",
+            "tr(musig(@0,@1)/**)",
+            "tr(@0/**,pk(musig(@1,@2,@3)/<5;6>/*))",
+            "sha256(aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa)",
+            "ripemd160(aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa)",
+            "wsh(andor(pk(@0/**),older(1),pk(@1/**)))",
+            "wsh(or_i(and_v(v:pkh(@4/<3;7>/*),older(65535)),or_d(multi(2,@0/**,@3/**),and_v(v:thresh(1,pkh(@5/<99;101>/*),a:pkh(@1/**)),older(64231)))))",
+            "tr(@0/**,{sortedmulti_a(1,@1/**,@2/**),or_b(pk(@3/**),s:pk(@4/**))})",
+        ];
+
+        for s in cases {
+            let mut a = arena::VecArena::new();
+            let root = parser::parse_descriptor_template(s, &mut a)
+                .unwrap_or_else(|e| panic!("parse failed for {:?}: {:?}", s, e));
+            let mut rendered = String::new();
+            arena::Cursor::new(&a, root)
+                .write_template(&mut rendered)
+                .expect("render");
+            assert_eq!(rendered, s, "cursor render mismatch for {:?}", s);
+            assert_eq!(
+                rendered,
+                DescriptorTemplate::from_str(s).unwrap().to_string(),
+                "cursor render disagrees with owned Display for {:?}",
+                s
+            );
+        }
+    }
+
+    #[test]
     fn test_musig_inside_tr_parses() {
         // musig() as the internal key of tr()
         let result = DescriptorTemplate::from_str("tr(musig(@0,@1)/**)");

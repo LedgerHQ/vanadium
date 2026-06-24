@@ -494,6 +494,216 @@ impl<'a, A: ArenaRead> Cursor<'a, A> {
     }
 }
 
+impl NodeTag {
+    /// Whether this is a single-letter miniscript wrapper (`a:`…`u:`).
+    pub fn is_wrapper(self) -> bool {
+        use NodeTag::*;
+        matches!(self, A | S | C | T | D | U | V | J | N | L)
+    }
+
+    /// The wrapper character for a wrapper tag, else `None`.
+    pub fn wrapper_char(self) -> Option<char> {
+        use NodeTag::*;
+        Some(match self {
+            A => 'a',
+            S => 's',
+            C => 'c',
+            T => 't',
+            D => 'd',
+            V => 'v',
+            J => 'j',
+            N => 'n',
+            L => 'l',
+            U => 'u',
+            _ => return None,
+        })
+    }
+}
+
+/// Writes `bytes` as lowercase hex into `w` (allocation-free; mirrors
+/// `hex::encode` used by the owned `Display`).
+fn write_hex(w: &mut dyn fmt::Write, bytes: &[u8]) -> fmt::Result {
+    const DIGITS: &[u8; 16] = b"0123456789abcdef";
+    for &byte in bytes {
+        w.write_char(DIGITS[(byte >> 4) as usize] as char)?;
+        w.write_char(DIGITS[(byte & 0x0f) as usize] as char)?;
+    }
+    Ok(())
+}
+
+/// Writes a key expression in descriptor-template syntax (mirrors the owned
+/// `KeyExpression` `Display`): `@i/**`, `@i/<a;b>/*`, or `musig(@i,@j,…)/…`.
+fn write_key<A: ArenaRead>(w: &mut dyn fmt::Write, kv: KeyView<'_, A>) -> fmt::Result {
+    let (num1, num2) = (kv.num1(), kv.num2());
+    if let Some(idx) = kv.plain_key_index() {
+        if num1 == 0 && num2 == 1 {
+            write!(w, "@{}/**", idx)
+        } else {
+            write!(w, "@{}/<{};{}>/*", idx, num1, num2)
+        }
+    } else {
+        let members = kv.musig_key_indices().expect("musig key");
+        w.write_str("musig(")?;
+        for (i, idx) in members.iter().enumerate() {
+            if i > 0 {
+                w.write_char(',')?;
+            }
+            write!(w, "@{}", idx)?;
+        }
+        if num1 == 0 && num2 == 1 {
+            write!(w, ")/**")
+        } else {
+            write!(w, ")/<{};{}>/*", num1, num2)
+        }
+    }
+}
+
+impl<'a, A: ArenaRead> Cursor<'a, A> {
+    /// Renders this node as a descriptor-template string into `w`, byte-for-byte
+    /// identical to the owned `DescriptorTemplate` `Display`.
+    pub fn write_template(&self, w: &mut dyn fmt::Write) -> fmt::Result {
+        use DescriptorNode as DN;
+        match self.view() {
+            DN::Sh(c) => bracket(w, "sh(", c),
+            DN::Wsh(c) => bracket(w, "wsh(", c),
+            DN::Pkh(kv) => kp(w, "pkh(", kv),
+            DN::Wpkh(kv) => kp(w, "wpkh(", kv),
+            DN::Pk(kv) => kp(w, "pk(", kv),
+            DN::PkK(kv) => kp(w, "pk_k(", kv),
+            DN::PkH(kv) => kp(w, "pk_h(", kv),
+            DN::Sortedmulti(k, keys) => multi(w, "sortedmulti(", k, keys),
+            DN::SortedmultiA(k, keys) => multi(w, "sortedmulti_a(", k, keys),
+            DN::Multi(k, keys) => multi(w, "multi(", k, keys),
+            DN::MultiA(k, keys) => multi(w, "multi_a(", k, keys),
+            DN::Tr(kv, None) => {
+                w.write_str("tr(")?;
+                write_key(w, kv)?;
+                w.write_char(')')
+            }
+            DN::Tr(kv, Some(tree)) => {
+                w.write_str("tr(")?;
+                write_key(w, kv)?;
+                w.write_char(',')?;
+                tree.write_template(w)?;
+                w.write_char(')')
+            }
+            DN::Zero => w.write_char('0'),
+            DN::One => w.write_char('1'),
+            DN::Older(n) => write!(w, "older({})", n),
+            DN::After(n) => write!(w, "after({})", n),
+            DN::Sha256(b) => hash(w, "sha256(", b),
+            DN::Hash256(b) => hash(w, "hash256(", b),
+            DN::Ripemd160(b) => hash(w, "ripemd160(", b),
+            DN::Hash160(b) => hash(w, "hash160(", b),
+            DN::Andor(x, y, z) => {
+                w.write_str("andor(")?;
+                x.write_template(w)?;
+                w.write_char(',')?;
+                y.write_template(w)?;
+                w.write_char(',')?;
+                z.write_template(w)?;
+                w.write_char(')')
+            }
+            DN::AndV(x, y) => binary(w, "and_v(", x, y),
+            DN::AndB(x, y) => binary(w, "and_b(", x, y),
+            DN::AndN(x, y) => binary(w, "and_n(", x, y),
+            DN::OrB(x, y) => binary(w, "or_b(", x, y),
+            DN::OrC(x, y) => binary(w, "or_c(", x, y),
+            DN::OrD(x, y) => binary(w, "or_d(", x, y),
+            DN::OrI(x, y) => binary(w, "or_i(", x, y),
+            DN::Thresh(k, list) => {
+                write!(w, "thresh({}", k)?;
+                for c in list.iter() {
+                    w.write_char(',')?;
+                    c.write_template(w)?;
+                }
+                w.write_char(')')
+            }
+            DN::A(c) => wrapper(w, 'a', c),
+            DN::S(c) => wrapper(w, 's', c),
+            DN::C(c) => wrapper(w, 'c', c),
+            DN::T(c) => wrapper(w, 't', c),
+            DN::D(c) => wrapper(w, 'd', c),
+            DN::V(c) => wrapper(w, 'v', c),
+            DN::J(c) => wrapper(w, 'j', c),
+            DN::N(c) => wrapper(w, 'n', c),
+            DN::L(c) => wrapper(w, 'l', c),
+            DN::U(c) => wrapper(w, 'u', c),
+            DN::TapNode(_) => unreachable!("tap-tree node reached via write_template"),
+        }
+    }
+}
+
+fn bracket<A: ArenaRead>(w: &mut dyn fmt::Write, open: &str, c: Cursor<'_, A>) -> fmt::Result {
+    w.write_str(open)?;
+    c.write_template(w)?;
+    w.write_char(')')
+}
+
+fn kp<A: ArenaRead>(w: &mut dyn fmt::Write, open: &str, kv: KeyView<'_, A>) -> fmt::Result {
+    w.write_str(open)?;
+    write_key(w, kv)?;
+    w.write_char(')')
+}
+
+fn multi<A: ArenaRead>(
+    w: &mut dyn fmt::Write,
+    open: &str,
+    k: u32,
+    keys: KeyListView<'_, A>,
+) -> fmt::Result {
+    write!(w, "{}{}", open, k)?;
+    for kv in keys.iter() {
+        w.write_char(',')?;
+        write_key(w, kv)?;
+    }
+    w.write_char(')')
+}
+
+fn binary<A: ArenaRead>(
+    w: &mut dyn fmt::Write,
+    open: &str,
+    x: Cursor<'_, A>,
+    y: Cursor<'_, A>,
+) -> fmt::Result {
+    w.write_str(open)?;
+    x.write_template(w)?;
+    w.write_char(',')?;
+    y.write_template(w)?;
+    w.write_char(')')
+}
+
+fn hash(w: &mut dyn fmt::Write, open: &str, bytes: &[u8]) -> fmt::Result {
+    w.write_str(open)?;
+    write_hex(w, bytes)?;
+    w.write_char(')')
+}
+
+fn wrapper<A: ArenaRead>(w: &mut dyn fmt::Write, ch: char, inner: Cursor<'_, A>) -> fmt::Result {
+    w.write_char(ch)?;
+    if !inner.tag().is_wrapper() {
+        w.write_char(':')?;
+    }
+    inner.write_template(w)
+}
+
+impl<'a, A: ArenaRead> TapCursor<'a, A> {
+    /// Renders this tap-tree node as `{left,right}` / leaf script, matching the
+    /// owned `TapTree` `Display`.
+    pub fn write_template(&self, w: &mut dyn fmt::Write) -> fmt::Result {
+        if let Some(script) = self.leaf_script() {
+            script.write_template(w)
+        } else {
+            let (l, r) = self.branch().expect("tap node is leaf or branch");
+            w.write_char('{')?;
+            l.write_template(w)?;
+            w.write_char(',')?;
+            r.write_template(w)?;
+            w.write_char('}')
+        }
+    }
+}
+
 /// Construct a [`KeyView`] for a key id (used when materializing an owned
 /// `KeyExpression` from a parsed `KeyId`).
 pub fn key_view<A: ArenaRead>(arena: &A, id: KeyId) -> KeyView<'_, A> {
