@@ -1031,12 +1031,11 @@ impl core::fmt::Display for DescriptorTemplate {
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg(feature = "wallet-policy")]
 pub struct WalletPolicy {
-    // Flat arena form of the parsed template + its root, used by the cursor
-    // (no-alloc-shaped) computation path. The owned `descriptor_template` is
-    // kept during the migration of consumers to cursors.
+    // Flat arena form of the parsed template + its root. All computation
+    // (script derivation, taproot hashing, placeholders, cleartext/confusion
+    // score) runs over this via cursors; there is no owned AST representation.
     arena: arena::VecArena,
     root: arena::NodeId,
-    descriptor_template: DescriptorTemplate,
     key_information: Vec<KeyInformation>,
     descriptor_template_raw: String,
 }
@@ -1062,25 +1061,18 @@ impl WalletPolicy {
     ) -> Result<Self, ParseError> {
         let mut arena = arena::VecArena::new();
         let root = parser::parse_descriptor_template(descriptor_template_str, &mut arena)?;
-        let descriptor_template = arena_to_owned(&arena, root);
 
         Ok(Self {
             arena,
             root,
-            descriptor_template,
             key_information,
             descriptor_template_raw: String::from(descriptor_template_str),
         })
     }
 
-    /// The parsed descriptor template AST.
-    pub fn descriptor_template(&self) -> &DescriptorTemplate {
-        &self.descriptor_template
-    }
-
-    /// A cursor over the flat (arena) form of the parsed template — the
-    /// representation the cursor-based computation (and eventually the
-    /// consensus consumers) operate on.
+    /// A cursor over the flat (arena) form of the parsed template — the single
+    /// representation that all computation (script derivation, taproot hashing,
+    /// placeholders, cleartext/confusion score) operates on.
     pub fn descriptor_cursor(&self) -> arena::Cursor<'_, arena::VecArena> {
         arena::Cursor::new(&self.arena, self.root)
     }
@@ -1235,18 +1227,7 @@ impl WalletPolicy {
     }
 
     pub fn get_segwit_version(&self) -> Result<SegwitVersion, ParseError> {
-        match &self.descriptor_template {
-            DescriptorTemplate::Tr(_, _) => Ok(SegwitVersion::Taproot),
-            DescriptorTemplate::Pkh(_) => Ok(SegwitVersion::Legacy),
-            DescriptorTemplate::Wpkh(_) | DescriptorTemplate::Wsh(_) => Ok(SegwitVersion::SegwitV0),
-            DescriptorTemplate::Sh(inner) => match inner.as_ref() {
-                DescriptorTemplate::Wpkh(_) | DescriptorTemplate::Wsh(_) => {
-                    Ok(SegwitVersion::SegwitV0)
-                }
-                _ => Ok(SegwitVersion::Legacy),
-            },
-            _ => Err(ParseError::InvalidTopLevelPolicy),
-        }
+        self.descriptor_cursor().segwit_version()
     }
 }
 

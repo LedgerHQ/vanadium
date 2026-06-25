@@ -1082,13 +1082,16 @@ mod tests {
                 .collect();
             let wp = WalletPolicy::new(template, key_info)
                 .unwrap_or_else(|e| panic!("failed to parse {template}: {e:?}"));
+            // Owned reference AST (oracle), parsed independently of the policy.
+            let owned_tmpl: DescriptorTemplate = template
+                .parse()
+                .unwrap_or_else(|e| panic!("failed to parse owned {template}: {e:?}"));
 
             for &(is_change, address_index) in &coords {
                 // Compare the full Result (success bytes *and* rejection variant)
                 // via Debug, so the cursor path matches the owned path on both
                 // valid scripts and rejected contexts.
-                let owned = wp
-                    .descriptor_template()
+                let owned = owned_tmpl
                     .to_script(
                         wp.key_information(),
                         is_change,
