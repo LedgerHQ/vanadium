@@ -18,7 +18,7 @@ async fn display_wallet_policy(
     show_cleartext: bool,
 ) -> bool {
     use alloc::{format, string::ToString, vec::Vec};
-    use common::bip388::{ClearText, MAX_CONFUSION_SCORE};
+    use common::bip388::MAX_CONFUSION_SCORE;
     use sdk::ux::TagValue;
 
     let mut pairs = Vec::with_capacity(2 + wallet_policy.key_information().len());
@@ -28,12 +28,11 @@ async fn display_wallet_policy(
         value: name.into(),
     });
 
-    let use_cleartext = show_cleartext
-        && wallet_policy.descriptor_template().confusion_score() <= MAX_CONFUSION_SCORE;
+    let use_cleartext =
+        show_cleartext && wallet_policy.confusion_score() <= MAX_CONFUSION_SCORE;
 
     if use_cleartext {
-        let (descriptions, _all_have_cleartext) =
-            wallet_policy.descriptor_template().to_cleartext();
+        let (descriptions, _all_have_cleartext) = wallet_policy.to_cleartext();
         for (i, desc) in descriptions.iter().enumerate() {
             let tag = format!("Spending path #{}", i + 1);
             pairs.push(TagValue {

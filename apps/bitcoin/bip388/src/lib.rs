@@ -1098,6 +1098,27 @@ impl WalletPolicy {
         &self.descriptor_template_raw
     }
 
+    /// Upper bound on how many descriptor templates map to the same cleartext
+    /// (see the `cleartext` module). Computed over the arena via the cursor
+    /// path; mirrors the historical `descriptor_template().confusion_score()`.
+    pub fn confusion_score(&self) -> u64 {
+        let cur = self.descriptor_cursor();
+        let mut scratch = alloc::vec![0u32; cur.expanded_key_occurrences()];
+        cur.confusion_score(&mut scratch)
+    }
+
+    /// Human-readable description lines for this policy, plus whether every
+    /// part has a cleartext form. Computed over the arena via the cursor path;
+    /// mirrors the historical `descriptor_template().to_cleartext()`.
+    pub fn to_cleartext(&self) -> (Vec<String>, bool) {
+        let cur = self.descriptor_cursor();
+        let mut canon = alloc::vec![arena::KeyExprRec::plain(0, 0, 0); cur.placeholder_count()];
+        let mut leaf = alloc::vec![0u32; cur.tapleaf_count()];
+        let mut sink = arena::VecLineSink::new();
+        let all_have_cleartext = cur.to_cleartext(&mut sink, &mut canon, &mut leaf);
+        (sink.into_lines(), all_have_cleartext)
+    }
+
     pub fn serialize(&self) -> Vec<u8> {
         // `consensus_encode` only fails when its writer fails. Writing to a `Vec`
         // is infallible, so all `expect`s below are unreachable in practice.
