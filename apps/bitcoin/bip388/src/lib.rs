@@ -822,8 +822,11 @@ fn build_owned<A: arena::ArenaRead>(view: arena::DescriptorNode<'_, A>) -> Descr
     }
 }
 
+/// Materializes an owned [`KeyExpression`] from a borrowed arena [`KeyView`].
+/// Used at API boundaries where an owned key value is required (e.g. collecting
+/// a wallet policy's placeholders for PSBT filling).
 #[cfg(feature = "alloc")]
-fn keyview_to_owned<A: arena::ArenaRead>(kv: arena::KeyView<'_, A>) -> KeyExpression {
+pub fn keyview_to_owned<A: arena::ArenaRead>(kv: arena::KeyView<'_, A>) -> KeyExpression {
     if let Some(idx) = kv.plain_key_index() {
         KeyExpression::plain(idx, kv.num1(), kv.num2())
     } else {
@@ -2587,5 +2590,70 @@ mod tests {
         let out = dt.to_descriptor(&keys, true, 3).unwrap();
         let expected = format!("wsh(thresh(1,pk({}/1/3),s:pk({}/1/3)))", xpub_str, xpub_str);
         assert_eq!(out, expected);
+    }
+
+    /// The cursor-based `placeholders()` iterator must visit placeholders in the
+    /// exact same order as the owned `DescriptorTemplateIter`, with the same
+    /// per-placeholder tap-leaf context. Compared via the key/leaf `Display`
+    /// (cursor side uses the byte-identical `write_to` / `write_template`).
+    #[test]
+    fn cursor_placeholders_match_owned_order() {
+        use core::fmt::Write;
+
+        let corpus = [
+            "pkh(@0/**)",
+            "wsh(multi(2,@0/**,@1/**,@2/**))",
+            "wsh(sortedmulti(2,@0/**,@1/**))",
+            "tr(@0/**)",
+            "tr(@0/**,pk(@1/**))",
+            "tr(@0/**,{pk(@1/**),{pk(@2/**),pk(@3/**)}})",
+            "tr(@0/**,multi_a(2,@1/**,@2/**))",
+            "wsh(or_d(pk(@0/**),and_v(v:pk(@1/**),older(65535))))",
+            "wsh(andor(pk(@0/**),older(144),pk(@1/**)))",
+            "wsh(thresh(2,pk(@0/**),s:pk(@1/**),s:pk(@2/**)))",
+            "tr(musig(@0,@1)/**)",
+            "tr(@0/**,pk(musig(@1,@2)/**))",
+            "tr(@0/**,{multi_a(2,@1/**,@2/**),pk(@3/**)})",
+        ];
+
+        let render_cursor_key = |kv: arena::KeyView<'_, arena::VecArena>| -> alloc::string::String {
+            let mut s = alloc::string::String::new();
+            kv.write_to(&mut s).unwrap();
+            s
+        };
+        let render_cursor_leaf =
+            |leaf: Option<arena::Cursor<'_, arena::VecArena>>| -> Option<alloc::string::String> {
+                leaf.map(|c| {
+                    let mut s = alloc::string::String::new();
+                    c.write_template(&mut s).unwrap();
+                    s
+                })
+            };
+
+        for template in corpus {
+            let mut a = arena::VecArena::new();
+            let root = parser::parse_descriptor_template(template, &mut a).unwrap();
+            let owned = arena_to_owned(&a, root);
+            let cursor = arena::Cursor::new(&a, root);
+
+            let owned_seq: Vec<(String, Option<String>)> = owned
+                .placeholders()
+                .map(|(kp, leaf)| {
+                    let mut k = String::new();
+                    write!(k, "{}", kp).unwrap();
+                    (k, leaf.map(|d| format!("{}", d)))
+                })
+                .collect();
+
+            let cursor_seq: Vec<(String, Option<String>)> = cursor
+                .placeholders()
+                .map(|(kv, leaf)| (render_cursor_key(kv), render_cursor_leaf(leaf)))
+                .collect();
+
+            assert_eq!(
+                owned_seq, cursor_seq,
+                "placeholder order/context mismatch for {template}"
+            );
+        }
     }
 }

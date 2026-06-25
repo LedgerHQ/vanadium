@@ -1611,6 +1611,130 @@ impl<'a, A: ArenaRead> Cursor<'a, A> {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Placeholder iterator (alloc-only pull-style traversal)
+// ---------------------------------------------------------------------------
+//
+// The no-alloc computation paths use the recursive `for_each_placeholder`
+// callback above. Consumers that need a pull-style iterator (the PSBT/signing
+// handlers) use this `Vec`-backed iterator, which mirrors the owned
+// `DescriptorTemplateIter` arm-for-arm (same traversal order), but yields
+// `(KeyView, Option<Cursor>)` over the arena instead of borrowed owned nodes.
+
+#[cfg(feature = "alloc")]
+pub use placeholder_iter::PlaceholderIter;
+
+#[cfg(feature = "alloc")]
+mod placeholder_iter {
+    use super::*;
+    use alloc::vec;
+    use alloc::vec::Vec;
+
+    /// Pull-style iterator over a descriptor's key placeholders, in the same
+    /// order as the historical owned `DescriptorTemplateIter`. Each item is the
+    /// key expression and the enclosing tap-leaf script cursor (`None` outside a
+    /// tap leaf / for the taproot internal key).
+    pub struct PlaceholderIter<'a, A: ArenaRead> {
+        fragments: Vec<(Cursor<'a, A>, Option<Cursor<'a, A>>)>,
+        placeholders: Vec<(KeyView<'a, A>, Option<Cursor<'a, A>>)>,
+    }
+
+    impl<'a, A: ArenaRead> PlaceholderIter<'a, A> {
+        pub fn new(root: Cursor<'a, A>) -> Self {
+            PlaceholderIter {
+                fragments: vec![(root, None)],
+                placeholders: Vec::new(),
+            }
+        }
+    }
+
+    impl<'a, A: ArenaRead> Iterator for PlaceholderIter<'a, A> {
+        type Item = (KeyView<'a, A>, Option<Cursor<'a, A>>);
+
+        fn next(&mut self) -> Option<Self::Item> {
+            use DescriptorNode as DN;
+            while !self.placeholders.is_empty() || !self.fragments.is_empty() {
+                // If there are pending placeholders, pop and return one.
+                if let Some(item) = self.placeholders.pop() {
+                    return Some(item);
+                }
+
+                let (frag, leaf) = self.fragments.pop()?;
+                match frag.view() {
+                    DN::Sh(c) | DN::Wsh(c) | DN::A(c) | DN::S(c) | DN::C(c) | DN::T(c)
+                    | DN::D(c) | DN::V(c) | DN::J(c) | DN::N(c) | DN::L(c) | DN::U(c) => {
+                        self.fragments.push((c, leaf));
+                    }
+                    DN::Andor(x, y, z) => {
+                        self.fragments.push((z, leaf));
+                        self.fragments.push((y, leaf));
+                        self.fragments.push((x, leaf));
+                    }
+                    DN::OrB(x, y)
+                    | DN::OrC(x, y)
+                    | DN::OrD(x, y)
+                    | DN::OrI(x, y)
+                    | DN::AndV(x, y)
+                    | DN::AndB(x, y)
+                    | DN::AndN(x, y) => {
+                        self.fragments.push((y, leaf));
+                        self.fragments.push((x, leaf));
+                    }
+                    DN::Tr(key, tree) => {
+                        self.placeholders.push((key, None));
+                        if let Some(t) = tree {
+                            let mut leaves: Vec<Cursor<'a, A>> = t.tapleaves().collect();
+                            leaves.reverse();
+                            for leaf_script in leaves {
+                                self.fragments.push((leaf_script, Some(leaf_script)));
+                            }
+                        }
+                    }
+                    DN::Pkh(key) | DN::Wpkh(key) | DN::Pk(key) | DN::PkK(key) | DN::PkH(key) => {
+                        return Some((key, leaf));
+                    }
+                    DN::Sortedmulti(_, keys)
+                    | DN::SortedmultiA(_, keys)
+                    | DN::Multi(_, keys)
+                    | DN::MultiA(_, keys) => {
+                        // Push keys in reverse so the first key is yielded first.
+                        let kvs: Vec<KeyView<'a, A>> = keys.iter().collect();
+                        for kv in kvs.into_iter().rev() {
+                            self.placeholders.push((kv, leaf));
+                        }
+                    }
+                    DN::Thresh(_, list) => {
+                        let subs: Vec<Cursor<'a, A>> = list.iter().collect();
+                        for c in subs.into_iter().rev() {
+                            self.fragments.push((c, leaf));
+                        }
+                    }
+                    DN::Zero
+                    | DN::One
+                    | DN::Older(_)
+                    | DN::After(_)
+                    | DN::Sha256(_)
+                    | DN::Hash256(_)
+                    | DN::Ripemd160(_)
+                    | DN::Hash160(_)
+                    | DN::TapNode(_) => {
+                        // No placeholders for these.
+                    }
+                }
+            }
+            None
+        }
+    }
+
+    impl<'a, A: ArenaRead> Cursor<'a, A> {
+        /// Pull-style iterator over this node's key placeholders (see
+        /// [`PlaceholderIter`]). Matches the owned `placeholders()` order.
+        pub fn placeholders(&self) -> PlaceholderIter<'a, A> {
+            PlaceholderIter::new(*self)
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
