@@ -8,7 +8,7 @@ extern crate alloc;
 // - add malleability checks
 // - add stack limits and other safety checks
 
-mod arena;
+pub mod arena;
 mod cleartext;
 pub mod embedded;
 mod parser;
@@ -1028,6 +1028,11 @@ impl core::fmt::Display for DescriptorTemplate {
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg(feature = "wallet-policy")]
 pub struct WalletPolicy {
+    // Flat arena form of the parsed template + its root, used by the cursor
+    // (no-alloc-shaped) computation path. The owned `descriptor_template` is
+    // kept during the migration of consumers to cursors.
+    arena: arena::VecArena,
+    root: arena::NodeId,
     descriptor_template: DescriptorTemplate,
     key_information: Vec<KeyInformation>,
     descriptor_template_raw: String,
@@ -1052,9 +1057,13 @@ impl WalletPolicy {
         descriptor_template_str: &str,
         key_information: Vec<KeyInformation>,
     ) -> Result<Self, ParseError> {
-        let descriptor_template = DescriptorTemplate::from_str(descriptor_template_str)?;
+        let mut arena = arena::VecArena::new();
+        let root = parser::parse_descriptor_template(descriptor_template_str, &mut arena)?;
+        let descriptor_template = arena_to_owned(&arena, root);
 
         Ok(Self {
+            arena,
+            root,
             descriptor_template,
             key_information,
             descriptor_template_raw: String::from(descriptor_template_str),
@@ -1064,6 +1073,13 @@ impl WalletPolicy {
     /// The parsed descriptor template AST.
     pub fn descriptor_template(&self) -> &DescriptorTemplate {
         &self.descriptor_template
+    }
+
+    /// A cursor over the flat (arena) form of the parsed template — the
+    /// representation the cursor-based computation (and eventually the
+    /// consensus consumers) operate on.
+    pub fn descriptor_cursor(&self) -> arena::Cursor<'_, arena::VecArena> {
+        arena::Cursor::new(&self.arena, self.root)
     }
 
     /// The list of key information entries referenced by the template's

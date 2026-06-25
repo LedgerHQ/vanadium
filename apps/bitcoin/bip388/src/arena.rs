@@ -293,7 +293,7 @@ mod vec_arena {
     use alloc::vec::Vec;
 
     /// Growable, `Vec`-backed arena. Allocation only fails on `u32` overflow.
-    #[derive(Clone, Debug, Default)]
+    #[derive(Clone, Debug, Default, PartialEq, Eq)]
     pub struct VecArena {
         nodes: Vec<Node>,
         keys: Vec<KeyExprRec>,
