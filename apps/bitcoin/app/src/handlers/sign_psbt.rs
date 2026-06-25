@@ -7,7 +7,10 @@ use alloc::{
 
 use common::{
     account::Account,
-    bip388::{DescriptorTemplate, KeyExpression, SegwitVersion},
+    bip388::{
+        arena::{Cursor, DescriptorNode, VecArena},
+        keyview_to_owned, KeyExpression, SegwitVersion,
+    },
     errors::Error,
     identity::{build_identity_message, IdentityKey, MSG_TYPE_OUTPUT},
     message::{MuSig2PartialSignature, MuSig2Pubnonce, PartialSignature, Response},
@@ -764,9 +767,8 @@ fn taptree_hash_for(
     wallet_policy: &common::bip388::WalletPolicy,
     coords: &common::message::WalletPolicyCoordinates,
 ) -> Result<Option<[u8; 32]>, Error> {
-    match wallet_policy.descriptor_template() {
-        DescriptorTemplate::Tr(_, tree) => tree
-            .as_ref()
+    match wallet_policy.descriptor_cursor().view() {
+        DescriptorNode::Tr(_, tree) => tree
             .map(|t| {
                 t.get_taptree_hash(
                     wallet_policy.key_information(),
@@ -783,13 +785,13 @@ fn taptree_hash_for(
 /// Computes the tapleaf hash for a script-path placeholder, or `None` for
 /// keypath / non-taproot placeholders.
 fn leaf_hash_for(
-    tapleaf_desc: Option<&DescriptorTemplate>,
+    tapleaf: Option<Cursor<'_, VecArena>>,
     wallet_policy: &common::bip388::WalletPolicy,
     coords: &common::message::WalletPolicyCoordinates,
 ) -> Result<Option<TapLeafHash>, Error> {
-    tapleaf_desc
-        .map(|desc| {
-            desc.get_tapleaf_hash(
+    tapleaf
+        .map(|leaf| {
+            leaf.get_tapleaf_hash(
                 wallet_policy.key_information(),
                 coords.is_change,
                 coords.address_index,
@@ -840,11 +842,12 @@ fn sign_all_inputs(
         let wallet_id = wallet_policy.get_id(account_name);
         let session_id = musig_signing::compute_psbt_session_id(&wallet_id, &unsigned_tx_id);
 
-        for (placeholder_index, (kp, tapleaf_desc)) in wallet_policy
-            .descriptor_template()
+        for (placeholder_index, (kv, tapleaf)) in wallet_policy
+            .descriptor_cursor()
             .placeholders()
             .enumerate()
         {
+            let kp = keyview_to_owned(kv);
             let change_step: ChildNumber = if !coords.is_change {
                 kp.num1.into()
             } else {
@@ -857,8 +860,8 @@ fn sign_all_inputs(
                     input,
                     input_index,
                     placeholder_index,
-                    kp,
-                    tapleaf_desc,
+                    &kp,
+                    tapleaf,
                     wallet_policy,
                     coords,
                     session_id,
@@ -899,7 +902,7 @@ fn sign_all_inputs(
                     }
                     Ok(SegwitVersion::Taproot) => {
                         let taptree_hash = taptree_hash_for(wallet_policy, coords)?;
-                        let leaf_hash = leaf_hash_for(tapleaf_desc, wallet_policy, coords)?;
+                        let leaf_hash = leaf_hash_for(tapleaf, wallet_policy, coords)?;
                         let prev = ensure_prevouts(&mut prevouts, psbt);
                         out.signatures.push(sign_input_schnorr(
                             input_index,
@@ -934,7 +937,7 @@ fn handle_musig_placeholder(
     input_index: usize,
     placeholder_index: usize,
     kp: &KeyExpression,
-    tapleaf_desc: Option<&DescriptorTemplate>,
+    tapleaf: Option<Cursor<'_, VecArena>>,
     wallet_policy: &common::bip388::WalletPolicy,
     coords: &common::message::WalletPolicyCoordinates,
     session_id: [u8; 32],
@@ -948,7 +951,7 @@ fn handle_musig_placeholder(
 ) -> Result<(), Error> {
     // musig() can only appear inside tr() per BIP-388.
     let taptree_hash = taptree_hash_for(wallet_policy, coords)?;
-    let leaf_hash = leaf_hash_for(tapleaf_desc, wallet_policy, coords)?;
+    let leaf_hash = leaf_hash_for(tapleaf, wallet_policy, coords)?;
     let leaf_hash_bytes: Option<[u8; 32]> = leaf_hash.map(|l| l.to_byte_array());
 
     let spend = match leaf_hash_bytes.as_ref() {
@@ -1663,13 +1666,14 @@ mod tests {
         // ---- Off-device: cosigner's partial signature ----
         // Reproduce the per-input info to get tweaks/keys/order; the cosigner
         // and device run the exact same protocol, so they share the SessionContext.
-        let placeholder = wallet_policy
-            .descriptor_template()
-            .placeholders()
-            .next()
-            .unwrap()
-            .0
-            .clone();
+        let placeholder = keyview_to_owned(
+            wallet_policy
+                .descriptor_cursor()
+                .placeholders()
+                .next()
+                .unwrap()
+                .0,
+        );
         let info = musig_signing::compute_per_input_info(
             wallet_policy.key_information(),
             &placeholder,
@@ -1740,13 +1744,14 @@ mod tests {
 
         // Compute what the agg_pk would be so we can inject pubnonces under
         // the right BIP-373 key — the device will *try* to enter round 2.
-        let placeholder = wallet_policy
-            .descriptor_template()
-            .placeholders()
-            .next()
-            .unwrap()
-            .0
-            .clone();
+        let placeholder = keyview_to_owned(
+            wallet_policy
+                .descriptor_cursor()
+                .placeholders()
+                .next()
+                .unwrap()
+                .0,
+        );
         let info = musig_signing::compute_per_input_info(
             wallet_policy.key_information(),
             &placeholder,

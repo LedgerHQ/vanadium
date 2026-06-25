@@ -526,6 +526,7 @@ fn map_musig_err(err: MusigError) -> Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use common::bip388::keyview_to_owned;
 
     const ID_A: [u8; 32] = [0xAAu8; 32];
     const ID_B: [u8; 32] = [0xBBu8; 32];
@@ -728,13 +729,14 @@ mod tests {
     #[test]
     fn compute_per_input_info_keypath_matches_script_derivation() {
         let policy = make_musig_keypath_policy();
-        let placeholder = policy
-            .descriptor_template()
-            .placeholders()
-            .next()
-            .unwrap()
-            .0
-            .clone();
+        let placeholder = keyview_to_owned(
+            policy
+                .descriptor_cursor()
+                .placeholders()
+                .next()
+                .unwrap()
+                .0,
+        );
 
         let info = compute_per_input_info(
             policy.key_information(),
@@ -779,13 +781,14 @@ mod tests {
 
         // Find the musig placeholder (it's the second one yielded; the first
         // is the outer plain @0).
-        let placeholder = policy
-            .descriptor_template()
-            .placeholders()
-            .find(|(kp, _)| kp.is_musig())
-            .expect("musig placeholder present")
-            .0
-            .clone();
+        let placeholder = keyview_to_owned(
+            policy
+                .descriptor_cursor()
+                .placeholders()
+                .find(|(kv, _)| kv.is_musig())
+                .expect("musig placeholder present")
+                .0,
+        );
 
         // Tapscript: we don't strictly need a real leaf_hash for this shape
         // check; any 32-byte value works.
@@ -817,13 +820,14 @@ mod tests {
             vec![COSIGNER_1_XPUB.try_into().unwrap()],
         )
         .unwrap();
-        let placeholder = policy
-            .descriptor_template()
-            .placeholders()
-            .next()
-            .unwrap()
-            .0
-            .clone();
+        let placeholder = keyview_to_owned(
+            policy
+                .descriptor_cursor()
+                .placeholders()
+                .next()
+                .unwrap()
+                .0,
+        );
 
         let err = compute_per_input_info(
             policy.key_information(),
@@ -839,13 +843,14 @@ mod tests {
     #[test]
     fn produce_pubnonce_shape_and_session_dependence() {
         let policy = make_musig_keypath_policy();
-        let placeholder = policy
-            .descriptor_template()
-            .placeholders()
-            .next()
-            .unwrap()
-            .0
-            .clone();
+        let placeholder = keyview_to_owned(
+            policy
+                .descriptor_cursor()
+                .placeholders()
+                .next()
+                .unwrap()
+                .0,
+        );
         let info = compute_per_input_info(
             policy.key_information(),
             &placeholder,
@@ -916,13 +921,14 @@ mod tests {
             ],
         )
         .unwrap();
-        let placeholder = policy
-            .descriptor_template()
-            .placeholders()
-            .find(|(kp, _)| kp.is_musig())
-            .unwrap()
-            .0
-            .clone();
+        let placeholder = keyview_to_owned(
+            policy
+                .descriptor_cursor()
+                .placeholders()
+                .find(|(kv, _)| kv.is_musig())
+                .unwrap()
+                .0,
+        );
         let leaf_hash = hex!("F0F0F0F0F0F0F0F0F0F0F0F0F0F0F0F0F0F0F0F0F0F0F0F0F0F0F0F0F0F0F0F0");
         let info = compute_per_input_info(
             policy.key_information(),

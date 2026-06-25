@@ -1,6 +1,6 @@
 use crate::{
     account::{AccountCoordinates, WalletPolicy, WalletPolicyCoordinates},
-    bip388::KeyExpression,
+    bip388::{keyview_to_owned, KeyExpression},
 };
 
 use alloc::{collections::btree_map::BTreeMap, string::String, vec::Vec};
@@ -540,9 +540,9 @@ pub fn prepare_psbt(
     assert!(named_accounts.len() == 1);
     for (wallet_policy, account_name, por) in named_accounts {
         let placeholders: Vec<KeyExpression> = wallet_policy
-            .descriptor_template()
+            .descriptor_cursor()
             .placeholders()
-            .map(|(k, _)| k.clone())
+            .map(|(kv, _)| keyview_to_owned(kv))
             .collect();
 
         for key_placeholder in &placeholders {
@@ -691,9 +691,9 @@ mod tests {
         let mut psbt = psbt_from_str(psbt_str).unwrap();
 
         let placeholders: Vec<KeyExpression> = wallet_policy
-            .descriptor_template()
+            .descriptor_cursor()
             .placeholders()
-            .map(|(k, _)| k.clone())
+            .map(|(kv, _)| keyview_to_owned(kv))
             .collect();
         assert!(placeholders.len() == 1);
         let key_placeholder = &placeholders[0];
@@ -775,13 +775,14 @@ mod tests {
             .tap_key_origins
             .insert(xonly, (vec![], (xpub1.fingerprint(), path)));
 
-        let key_placeholder = wallet_policy
-            .descriptor_template()
-            .placeholders()
-            .next()
-            .unwrap()
-            .0
-            .clone();
+        let key_placeholder = keyview_to_owned(
+            wallet_policy
+                .descriptor_cursor()
+                .placeholders()
+                .next()
+                .unwrap()
+                .0,
+        );
 
         fill_psbt_with_bip388_coordinates(&mut psbt, &wallet_policy, None, None, &key_placeholder, 0)
             .unwrap();
