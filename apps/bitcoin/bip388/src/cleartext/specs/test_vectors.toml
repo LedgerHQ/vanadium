@@ -215,7 +215,15 @@ cleartext = [
 ]
 has_cleartext = true
 
-# Tie-break: two Multisig leaves -- fewer keys first, then smaller threshold
+# Canonical ordering of multisig tap-leaves. Two same-category multisig leaves
+# are ordered by: number of keys, then threshold, then key indices (the
+# `cmp_keys` tie-break). The vectors below pin each level. In every one the
+# leaves are written in a tap-tree order that differs from the display order, so
+# a regression that made the order depend on tap-tree position (rather than on
+# the leaf contents) would change the rendered output and fail the assertion.
+
+# Fewer keys first: the 2-key leaf sorts before the 3-key leaf even
+# though it is written second in the tree.
 [[vector]]
 template = "tr(@0/**,{multi_a(2,@1/**,@2/**,@3/**),multi_a(2,@4/**,@5/**)})"
 confusion_score = 2
@@ -223,6 +231,56 @@ cleartext = [
     "Main path: spendable by @0",
     "Each of @4 and @5 must sign",
     "Any 2 of @1, @2 and @3 must sign",
+]
+has_cleartext = true
+
+# Same key count, different threshold: threshold outranks the keys,
+# so the 2-of-3 leaf sorts before the 3-of-3 leaf even though its keys (@4..)
+# are "larger" than the other leaf's (@1..).
+[[vector]]
+template = "tr(@0/**,{multi_a(3,@1/**,@2/**,@3/**),multi_a(2,@4/**,@5/**,@6/**)})"
+confusion_score = 2
+cleartext = [
+    "Main path: spendable by @0",
+    "Any 2 of @4, @5 and @6 must sign",
+    "Each of @1, @2 and @3 must sign",
+]
+has_cleartext = true
+
+# Same key count and threshold, leaves differ only in their keys:
+# ordered element-by-element by key index (the `cmp_keys` tie-break), so the
+# @1.. leaf displays before the @4.. leaf even though the @4.. leaf is written
+# first in the tree. Without this tie-break the two leaves would compare equal
+# and their order would silently depend on tap-tree position.
+[[vector]]
+template = "tr(@0/**,{multi_a(2,@4/**,@5/**,@6/**),multi_a(2,@1/**,@2/**,@3/**)})"
+confusion_score = 1
+cleartext = [
+    "Main path: spendable by @0",
+    "Any 2 of @1, @2 and @3 must sign",
+    "Any 2 of @4, @5 and @6 must sign",
+]
+has_cleartext = true
+
+[[vector]]
+template = "tr(@0/**,{sortedmulti_a(2,@4/**,@5/**),sortedmulti_a(2,@1/**,@2/**)})"
+confusion_score = 1
+cleartext = [
+    "Main path: spendable by @0",
+    "Each of @1 and @2 must sign (sorted)",
+    "Each of @4 and @5 must sign (sorted)",
+]
+has_cleartext = true
+
+[[vector]]
+template = "tr(@0/**,{multi_a(3,@7/**,@8/**,@9/**),{multi_a(2,@4/**,@5/**,@6/**),{multi_a(2,@1/**,@2/**,@3/**),multi_a(2,@10/**,@11/**)}}})"
+confusion_score = 60
+cleartext = [
+    "Main path: spendable by @0",
+    "Each of @10 and @11 must sign",
+    "Any 2 of @1, @2 and @3 must sign",
+    "Any 2 of @4, @5 and @6 must sign",
+    "Each of @7, @8 and @9 must sign",
 ]
 has_cleartext = true
 
@@ -277,6 +335,15 @@ cleartext = [
     "Main path: spendable by @0",
     "@1 must sign",
     "@2 must sign, 1008 blocks after receiving",
+]
+has_cleartext = true
+
+[[vector]]
+template = "tr(@0/**,{multi_a(3,@1/**,@2/**,@3/**),multi_a(2,@4/**,@5/**,@6/**,@7/**,@8/**)})"
+cleartext = [
+    "Main path: spendable by @0",
+    "Each of @1, @2 and @3 must sign",          # 3-of-3: 3 keys, threshold 3
+    "Any 2 of @4, @5, @6, @7 and @8 must sign", # 2-of-5: 5 keys, threshold 2
 ]
 has_cleartext = true
 
