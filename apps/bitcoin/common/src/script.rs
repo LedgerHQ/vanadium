@@ -7,6 +7,8 @@ use bitcoin::opcodes::{all::*, OP_0};
 use bitcoin::script::Builder;
 use bitcoin::{PubkeyHash, ScriptBuf, ScriptHash, TapNodeHash, WPubkeyHash, WScriptHash};
 
+use bip388::arena::{ArenaRead, Cursor, DescriptorNode, KeyListView, KeyView};
+
 use crate::errors::Error;
 use crate::taproot::GetTapTreeHash;
 
@@ -492,9 +494,516 @@ impl ToScriptWithKeyInfo for DescriptorTemplate {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Cursor-based script derivation (arena form).
+//
+// This mirrors the owned `to_script_inner` above arm-for-arm, but recurses over
+// arena `Cursor`s instead of the owned `DescriptorTemplate` tree. It is the path
+// used in production (`WalletPolicy::to_script` below); the owned path is kept
+// during the migration and exercised by the differential test in this module.
+// Both must produce byte-identical scripts.
+// ---------------------------------------------------------------------------
+
+/// Resolves a key expression cursor to its derived `Xpub` at the given
+/// coordinates (mirrors the `derive` closure in the owned `to_script_inner`).
+fn derive_key<A: ArenaRead>(
+    kv: KeyView<'_, A>,
+    key_information: &[KeyInformation],
+    is_change: bool,
+    address_index: u32,
+) -> Result<Xpub, Error> {
+    let change_step = ChildNumber::from(if is_change { kv.num2() } else { kv.num1() });
+    let path = [change_step, ChildNumber::from(address_index)];
+    let secp = bitcoin::secp256k1::Secp256k1::new();
+
+    // Resolve the root xpub of the key expression: either a single participant's
+    // xpub (plain) or the BIP-388 aggregate of several participants' (musig).
+    let root_xpub: Xpub = if let Some(idx) = kv.plain_key_index() {
+        key_information
+            .get(idx as usize)
+            .ok_or(Error::InvalidKeyIndex)?
+            .pubkey
+    } else if let Some(indices) = kv.musig_key_indices() {
+        let participant_xpubs: Vec<Xpub> = indices
+            .iter()
+            .map(|&i| {
+                key_information
+                    .get(i as usize)
+                    .map(|ki| ki.pubkey)
+                    .ok_or(Error::InvalidKeyIndex)
+            })
+            .collect::<Result<_, _>>()?;
+        crate::musig::aggregate_xpub(&participant_xpubs).map_err(|_| Error::InvalidKey)?
+    } else {
+        return Err(Error::UnsupportedWalletPolicy);
+    };
+
+    root_xpub
+        .derive_pub(&secp, &path)
+        .map_err(|_| Error::InvalidKey)
+}
+
+/// `pk_k(key)`: push the (x-only in taproot) serialized public key.
+fn push_pk_k<A: ArenaRead>(
+    builder: Builder,
+    kv: KeyView<'_, A>,
+    key_information: &[KeyInformation],
+    is_change: bool,
+    address_index: u32,
+    ctx: ScriptContext,
+) -> Result<Builder, Error> {
+    let key = derive_key(kv, key_information, is_change, address_index)?;
+    Ok(if ctx == ScriptContext::Tr {
+        builder.push_slice(key.to_x_only_pub().serialize())
+    } else {
+        builder.push_slice(key.to_pub().to_bytes())
+    })
+}
+
+/// `multi`/`sortedmulti` (legacy/segwit-v0 `OP_CHECKMULTISIG`).
+fn push_multi<A: ArenaRead>(
+    mut builder: Builder,
+    k: u32,
+    keys: KeyListView<'_, A>,
+    sorted: bool,
+    ctx: ScriptContext,
+    key_information: &[KeyInformation],
+    is_change: bool,
+    address_index: u32,
+) -> Result<Builder, Error> {
+    if ctx == ScriptContext::Tr {
+        return Err(Error::InvalidScriptContext);
+    }
+    if keys.len() > MAX_PUBKEYS_PER_MULTISIG {
+        return Err(Error::TooManyKeys);
+    }
+    if k == 0 || (k as usize) > keys.len() {
+        return Err(Error::InvalidMultisigQuorum);
+    }
+
+    builder = builder.push_int(k as i64);
+
+    let mut derived = keys
+        .iter()
+        .map(|kv| {
+            derive_key(kv, key_information, is_change, address_index)
+                .map(|extended_pub_key| extended_pub_key.to_pub().to_bytes())
+        })
+        .collect::<Result<Vec<[u8; 33]>, Error>>()?;
+
+    if sorted {
+        // O(n^2) sorting, better for small arrays
+        derived.bubble_sort();
+    }
+
+    for key in derived {
+        builder = builder.push_slice(&key);
+    }
+
+    Ok(builder
+        .push_int(keys.len() as i64)
+        .push_opcode(OP_CHECKMULTISIG))
+}
+
+/// `multi_a`/`sortedmulti_a` (taproot `OP_CHECKSIGADD`).
+fn push_multi_a<A: ArenaRead>(
+    mut builder: Builder,
+    k: u32,
+    keys: KeyListView<'_, A>,
+    sorted: bool,
+    ctx: ScriptContext,
+    key_information: &[KeyInformation],
+    is_change: bool,
+    address_index: u32,
+) -> Result<Builder, Error> {
+    if ctx != ScriptContext::Tr {
+        return Err(Error::InvalidScriptContext);
+    }
+    if keys.len() > MAX_PUBKEYS_PER_MULTI_A {
+        return Err(Error::TooManyKeys);
+    }
+    if k == 0 || (k as usize) > keys.len() {
+        return Err(Error::InvalidMultisigQuorum);
+    }
+
+    let mut derived = keys
+        .iter()
+        .map(|kv| {
+            derive_key(kv, key_information, is_change, address_index).map(|extended_pub_key| {
+                extended_pub_key.public_key.x_only_public_key().0.serialize()
+            })
+        })
+        .collect::<Result<Vec<[u8; 32]>, Error>>()?;
+
+    if sorted {
+        // O(n^2) sorting, better for small arrays
+        derived.bubble_sort();
+    }
+
+    for (idx, key) in derived.iter().enumerate() {
+        builder = builder.push_slice(key);
+
+        if idx == 0 {
+            builder = builder.push_opcode(OP_CHECKSIG);
+        } else {
+            builder = builder.push_opcode(OP_CHECKSIGADD);
+        }
+    }
+
+    Ok(builder.push_int(k as i64).push_opcode(OP_NUMEQUAL))
+}
+
+/// Builder-chaining helper mirroring `CanPushInnerScript` for arena cursors.
+trait CanPushCursorScript {
+    fn push_cursor<A: ArenaRead>(
+        self,
+        c: Cursor<'_, A>,
+        key_information: &[KeyInformation],
+        is_change: bool,
+        address_index: u32,
+        ctx: ScriptContext,
+    ) -> Result<Builder, Error>;
+}
+
+impl CanPushCursorScript for Builder {
+    fn push_cursor<A: ArenaRead>(
+        self,
+        c: Cursor<'_, A>,
+        key_information: &[KeyInformation],
+        is_change: bool,
+        address_index: u32,
+        ctx: ScriptContext,
+    ) -> Result<Builder, Error> {
+        cursor_to_script_inner(c, key_information, is_change, address_index, self, ctx)
+    }
+}
+
+fn cursor_to_script_inner<A: ArenaRead>(
+    cursor: Cursor<'_, A>,
+    key_information: &[KeyInformation],
+    is_change: bool,
+    address_index: u32,
+    mut builder: Builder,
+    ctx: ScriptContext,
+) -> Result<Builder, Error> {
+    use DescriptorNode as DN;
+
+    builder = match cursor.view() {
+        DN::Sh(inner) => {
+            if ctx != ScriptContext::None && ctx != ScriptContext::Wsh {
+                return Err(Error::InvalidScriptContext);
+            }
+
+            let inner_builder = cursor_to_script_inner(
+                inner,
+                key_information,
+                is_change,
+                address_index,
+                Builder::new(),
+                ScriptContext::Sh,
+            )?;
+
+            let script_hash =
+                ScriptHash::from_raw_hash(hash160::Hash::hash(&inner_builder.as_bytes()));
+
+            builder
+                .push_opcode(OP_HASH160)
+                .push_slice(script_hash)
+                .push_opcode(OP_EQUAL)
+        }
+        DN::Wsh(inner) => {
+            if ctx != ScriptContext::None {
+                return Err(Error::InvalidScriptContext);
+            }
+
+            let inner_builder = cursor_to_script_inner(
+                inner,
+                key_information,
+                is_change,
+                address_index,
+                Builder::new(),
+                ScriptContext::Wsh,
+            )?;
+            let script_hash =
+                WScriptHash::from_raw_hash(sha256::Hash::hash(&inner_builder.as_bytes()));
+            builder.push_int(0).push_slice(script_hash)
+        }
+        DN::Pkh(kv) => {
+            let key = derive_key(kv, key_information, is_change, address_index)?;
+            let pubkey: Vec<u8> = if ctx == ScriptContext::Tr {
+                key.to_x_only_pub().serialize().to_vec()
+            } else {
+                key.to_pub().to_bytes().to_vec()
+            };
+
+            let pubkey_hash = PubkeyHash::from_raw_hash(hash160::Hash::hash(&pubkey));
+
+            builder
+                .push_opcode(OP_DUP)
+                .push_opcode(OP_HASH160)
+                .push_slice(pubkey_hash)
+                .push_opcode(OP_EQUALVERIFY)
+                .push_opcode(OP_CHECKSIG)
+        }
+        DN::Wpkh(kv) => {
+            if ctx != ScriptContext::None && ctx != ScriptContext::Sh {
+                return Err(Error::InvalidScriptContext);
+            }
+
+            let pubkey = derive_key(kv, key_information, is_change, address_index)?
+                .public_key
+                .serialize();
+            let pubkey_hash = WPubkeyHash::from_raw_hash(hash160::Hash::hash(&pubkey));
+            builder.push_int(0).push_slice(pubkey_hash)
+        }
+        DN::Multi(k, keys) => push_multi(
+            builder,
+            k,
+            keys,
+            false,
+            ctx,
+            key_information,
+            is_change,
+            address_index,
+        )?,
+        DN::Sortedmulti(k, keys) => push_multi(
+            builder,
+            k,
+            keys,
+            true,
+            ctx,
+            key_information,
+            is_change,
+            address_index,
+        )?,
+        DN::MultiA(k, keys) => push_multi_a(
+            builder,
+            k,
+            keys,
+            false,
+            ctx,
+            key_information,
+            is_change,
+            address_index,
+        )?,
+        DN::SortedmultiA(k, keys) => push_multi_a(
+            builder,
+            k,
+            keys,
+            true,
+            ctx,
+            key_information,
+            is_change,
+            address_index,
+        )?,
+        DN::Tr(kv, tree) => {
+            let secp = bitcoin::secp256k1::Secp256k1::new();
+            let internal_key: UntweakedPublicKey =
+                derive_key(kv, key_information, is_change, address_index)?.to_x_only_pub();
+
+            let tree_hash = tree
+                .map(|t| {
+                    t.get_taptree_hash(key_information, is_change, address_index)
+                        .map(TapNodeHash::from_byte_array)
+                        .map_err(|_| Error::InvalidKey)
+                })
+                .transpose()?;
+
+            let taproot_key = internal_key.tap_tweak(&secp, tree_hash).0;
+
+            builder
+                .push_int(1)
+                .push_slice(taproot_key.to_x_only_public_key().serialize())
+        }
+        DN::Zero => builder.push_opcode(OP_0),
+        DN::One => builder.push_opcode(OP_PUSHNUM_1),
+        DN::Pk(kv) => {
+            // c:pk_k(key)
+            push_pk_k(
+                builder,
+                kv,
+                key_information,
+                is_change,
+                address_index,
+                ctx,
+            )?
+            .push_opcode(OP_CHECKSIG)
+        }
+        DN::PkK(kv) => push_pk_k(
+            builder,
+            kv,
+            key_information,
+            is_change,
+            address_index,
+            ctx,
+        )?,
+        DN::PkH(kv) => {
+            let key = derive_key(kv, key_information, is_change, address_index)?;
+            let rip = if ctx == ScriptContext::Tr {
+                hash160::Hash::hash(&key.to_x_only_pub().serialize())
+            } else {
+                hash160::Hash::hash(&key.to_pub().to_bytes())
+            };
+
+            builder
+                .push_opcode(OP_DUP)
+                .push_opcode(OP_HASH160)
+                .push_slice(rip.to_byte_array())
+                .push_opcode(OP_EQUALVERIFY)
+        }
+        DN::Older(n) => builder.push_int(n as i64).push_opcode(OP_CSV),
+        DN::After(n) => builder.push_int(n as i64).push_opcode(OP_CLTV),
+        DN::Sha256(h) => builder
+            .push_opcode(OP_SIZE)
+            .push_int(32)
+            .push_opcode(OP_EQUALVERIFY)
+            .push_opcode(OP_SHA256)
+            .push_slice(<&[u8; 32]>::try_from(h).expect("sha256 fragment is 32 bytes"))
+            .push_opcode(OP_EQUAL),
+        DN::Hash256(h) => builder
+            .push_opcode(OP_SIZE)
+            .push_int(32)
+            .push_opcode(OP_EQUALVERIFY)
+            .push_opcode(OP_HASH256)
+            .push_slice(<&[u8; 32]>::try_from(h).expect("hash256 fragment is 32 bytes"))
+            .push_opcode(OP_EQUAL),
+        DN::Ripemd160(h) => builder
+            .push_opcode(OP_SIZE)
+            .push_int(32)
+            .push_opcode(OP_EQUALVERIFY)
+            .push_opcode(OP_RIPEMD160)
+            .push_slice(<&[u8; 20]>::try_from(h).expect("ripemd160 fragment is 20 bytes"))
+            .push_opcode(OP_EQUAL),
+        DN::Hash160(h) => builder
+            .push_opcode(OP_SIZE)
+            .push_int(32)
+            .push_opcode(OP_EQUALVERIFY)
+            .push_opcode(OP_HASH160)
+            .push_slice(<&[u8; 20]>::try_from(h).expect("hash160 fragment is 20 bytes"))
+            .push_opcode(OP_EQUAL),
+        DN::Andor(x, y, z) => builder
+            .push_cursor(x, key_information, is_change, address_index, ctx)?
+            .push_opcode(OP_NOTIF)
+            .push_cursor(y, key_information, is_change, address_index, ctx)?
+            .push_opcode(OP_ELSE)
+            .push_cursor(z, key_information, is_change, address_index, ctx)?
+            .push_opcode(OP_ENDIF),
+        DN::AndV(x, y) => builder
+            .push_cursor(x, key_information, is_change, address_index, ctx)?
+            .push_cursor(y, key_information, is_change, address_index, ctx)?,
+        DN::AndB(x, y) => builder
+            .push_cursor(x, key_information, is_change, address_index, ctx)?
+            .push_cursor(y, key_information, is_change, address_index, ctx)?
+            .push_opcode(OP_BOOLAND),
+        DN::AndN(x, y) => builder
+            .push_cursor(x, key_information, is_change, address_index, ctx)?
+            .push_opcode(OP_NOTIF)
+            .push_opcode(OP_0)
+            .push_opcode(OP_ELSE)
+            .push_cursor(y, key_information, is_change, address_index, ctx)?
+            .push_opcode(OP_ENDIF),
+        DN::OrB(x, z) => builder
+            .push_cursor(x, key_information, is_change, address_index, ctx)?
+            .push_cursor(z, key_information, is_change, address_index, ctx)?
+            .push_opcode(OP_BOOLOR),
+        DN::OrC(x, z) => builder
+            .push_cursor(x, key_information, is_change, address_index, ctx)?
+            .push_opcode(OP_NOTIF)
+            .push_cursor(z, key_information, is_change, address_index, ctx)?
+            .push_opcode(OP_ENDIF),
+        DN::OrD(x, z) => builder
+            .push_cursor(x, key_information, is_change, address_index, ctx)?
+            .push_opcode(OP_IFDUP)
+            .push_opcode(OP_NOTIF)
+            .push_cursor(z, key_information, is_change, address_index, ctx)?
+            .push_opcode(OP_ENDIF),
+        DN::OrI(x, z) => builder
+            .push_opcode(OP_IF)
+            .push_cursor(x, key_information, is_change, address_index, ctx)?
+            .push_opcode(OP_ELSE)
+            .push_cursor(z, key_information, is_change, address_index, ctx)?
+            .push_opcode(OP_ENDIF),
+        DN::Thresh(k, scripts) => {
+            for (i, x_i) in scripts.iter().enumerate() {
+                builder =
+                    builder.push_cursor(x_i, key_information, is_change, address_index, ctx)?;
+                if i > 0 {
+                    builder = builder.push_opcode(OP_ADD);
+                }
+            }
+
+            builder.push_int(k as i64).push_opcode(OP_EQUAL)
+        }
+
+        // wrappers
+        DN::A(x) => builder
+            .push_opcode(OP_TOALTSTACK)
+            .push_cursor(x, key_information, is_change, address_index, ctx)?
+            .push_opcode(OP_FROMALTSTACK),
+        DN::S(x) => builder
+            .push_opcode(OP_SWAP)
+            .push_cursor(x, key_information, is_change, address_index, ctx)?,
+        DN::C(x) => builder
+            .push_cursor(x, key_information, is_change, address_index, ctx)?
+            .push_opcode(OP_CHECKSIG),
+        DN::T(x) => builder
+            .push_cursor(x, key_information, is_change, address_index, ctx)?
+            .push_opcode(OP_PUSHNUM_1),
+        DN::D(x) => builder
+            .push_opcode(OP_DUP)
+            .push_opcode(OP_IF)
+            .push_cursor(x, key_information, is_change, address_index, ctx)?
+            .push_opcode(OP_ENDIF),
+        DN::V(x) => builder
+            .push_cursor(x, key_information, is_change, address_index, ctx)?
+            .push_verify(),
+        DN::J(x) => builder
+            .push_opcode(OP_SIZE)
+            .push_opcode(OP_0NOTEQUAL)
+            .push_opcode(OP_IF)
+            .push_cursor(x, key_information, is_change, address_index, ctx)?
+            .push_opcode(OP_ENDIF),
+        DN::N(x) => builder
+            .push_cursor(x, key_information, is_change, address_index, ctx)?
+            .push_opcode(OP_0NOTEQUAL),
+        DN::L(x) => builder
+            .push_opcode(OP_IF)
+            .push_opcode(OP_0)
+            .push_opcode(OP_ELSE)
+            .push_cursor(x, key_information, is_change, address_index, ctx)?
+            .push_opcode(OP_ENDIF),
+        DN::U(x) => builder
+            .push_opcode(OP_IF)
+            .push_cursor(x, key_information, is_change, address_index, ctx)?
+            .push_opcode(OP_ELSE)
+            .push_opcode(OP_0)
+            .push_opcode(OP_ENDIF),
+        DN::TapNode(_) => unreachable!("tap-tree node reached in script context"),
+    };
+
+    Ok(builder)
+}
+
+impl<'a, A: ArenaRead> ToScriptWithKeyInfo for Cursor<'a, A> {
+    fn to_script(
+        &self,
+        key_information: &[KeyInformation],
+        is_change: bool,
+        address_index: u32,
+        ctx: ScriptContext,
+    ) -> Result<ScriptBuf, Error> {
+        let builder = Builder::new();
+        Ok(
+            cursor_to_script_inner(*self, key_information, is_change, address_index, builder, ctx)?
+                .as_script()
+                .into(),
+        )
+    }
+}
+
 impl ToScript for WalletPolicy {
     fn to_script(&self, is_change: bool, address_index: u32) -> Result<ScriptBuf, Error> {
-        self.descriptor_template().to_script(
+        self.descriptor_cursor().to_script(
             self.key_information(),
             is_change,
             address_index,
@@ -508,6 +1017,102 @@ mod tests {
     use super::*;
     use crate::account::WalletPolicy;
     use hex_literal::hex;
+
+    // Four distinct, valid tpubs reused from elsewhere in the test corpus.
+    const K0: &str = "tpubDCwYjpDhUdPGP5rS3wgNg13mTrrjBuG8V9VpWbyptX6TRPbNoZVXsoVUSkCjmQ8jJycjuDKBb9eataSymXakTTaGifxR6kmVsfFehH1ZgJT";
+    const K1: &str = "tpubDCwYjpDhUdPGQWG6wG6hkBJuWFZEtrn7j3xwG3i8XcQabcGC53xWZm1hSXrUPFS5UvZ3QhdPSjXWNfWmFGTioARHuG5J7XguEjgg7p8PxAm";
+    const K2: &str = "tpubDCtKfsNyRhULjZ9XMS4VKKtVcPdVDi8MKUbcSD9MJDyjRu1A2ND5MiipozyyspBT9bg8upEp7a8EAgFxNxXn1d7QkdbL52Ty5jiSLcxPt1P";
+    const K3: &str = "tpubDD7URPdwnhN6XNWRkMLhaGvhp1xaZNTAqgn8qULdENfMrUbCUcV4Kd4FQzVSHkKx9nmU7sNjBMPa96b9g3KTSJTAvTsTcT5mYDz97fUppvd";
+
+    /// The cursor-based `to_script` (production path) must produce byte-identical
+    /// scripts to the owned `DescriptorTemplate::to_script` reference across a
+    /// broad corpus of templates and coordinates. This guards the consensus
+    /// rewrite of `to_script`/taproot hashing onto arena cursors.
+    #[test]
+    fn cursor_to_script_matches_owned() {
+        let keys = [K0, K1, K2, K3];
+        // (template, number of @i keys referenced)
+        let corpus: &[(&str, usize)] = &[
+            ("pkh(@0/**)", 1),
+            ("wpkh(@0/**)", 1),
+            ("sh(wpkh(@0/**))", 1),
+            ("sh(wsh(multi(2,@0/**,@1/**)))", 2),
+            ("wsh(multi(2,@0/**,@1/**,@2/**))", 3),
+            ("wsh(sortedmulti(2,@0/**,@1/**))", 2),
+            ("sh(sortedmulti(2,@0/**,@1/**))", 2),
+            ("sh(wsh(sortedmulti(2,@0/**,@1/**,@2/**)))", 3),
+            ("tr(@0/**)", 1),
+            ("tr(@0/**,pk(@1/**))", 2),
+            ("tr(@0/**,{pk(@1/**),pk(@2/**)})", 3),
+            ("tr(@0/**,{pk(@1/**),{pk(@2/**),pk(@3/**)}})", 4),
+            ("tr(@0/**,multi_a(2,@1/**,@2/**))", 3),
+            ("tr(@0/**,sortedmulti_a(2,@1/**,@2/**))", 3),
+            ("wsh(and_v(v:pk(@0/**),older(144)))", 1),
+            ("wsh(and_v(v:pk(@0/**),after(1000000)))", 1),
+            ("wsh(or_d(pk(@0/**),and_v(v:pk(@1/**),older(65535))))", 2),
+            ("wsh(andor(pk(@0/**),older(144),pk(@1/**)))", 2),
+            ("wsh(thresh(2,pk(@0/**),s:pk(@1/**),s:pk(@2/**)))", 3),
+            ("wsh(or_i(pk(@0/**),pk(@1/**)))", 2),
+            (
+                "wsh(and_v(v:pk(@0/**),sha256(00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff)))",
+                1,
+            ),
+            (
+                "wsh(and_v(v:pk(@0/**),hash160(0011223344556677889900112233445566778899)))",
+                1,
+            ),
+            (
+                "wsh(and_v(v:pk(@0/**),hash256(00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff)))",
+                1,
+            ),
+            (
+                "wsh(and_v(v:pk(@0/**),ripemd160(0011223344556677889900112233445566778899)))",
+                1,
+            ),
+            ("tr(musig(@0,@1)/**)", 2),
+            ("tr(@0/**,pk(musig(@1,@2)/**))", 3),
+        ];
+
+        let coords = [(false, 0u32), (false, 5), (true, 0), (true, 99)];
+
+        for (template, n_keys) in corpus {
+            let key_info: Vec<_> = keys[..*n_keys]
+                .iter()
+                .map(|k| (*k).try_into().unwrap())
+                .collect();
+            let wp = WalletPolicy::new(template, key_info)
+                .unwrap_or_else(|e| panic!("failed to parse {template}: {e:?}"));
+
+            for &(is_change, address_index) in &coords {
+                // Compare the full Result (success bytes *and* rejection variant)
+                // via Debug, so the cursor path matches the owned path on both
+                // valid scripts and rejected contexts.
+                let owned = wp
+                    .descriptor_template()
+                    .to_script(
+                        wp.key_information(),
+                        is_change,
+                        address_index,
+                        ScriptContext::None,
+                    )
+                    .map(|s| s.as_bytes().to_vec());
+                let cursor = wp
+                    .descriptor_cursor()
+                    .to_script(
+                        wp.key_information(),
+                        is_change,
+                        address_index,
+                        ScriptContext::None,
+                    )
+                    .map(|s| s.as_bytes().to_vec());
+                assert_eq!(
+                    format!("{owned:?}"),
+                    format!("{cursor:?}"),
+                    "script mismatch for {template} @ (is_change={is_change}, index={address_index})"
+                );
+            }
+        }
+    }
 
     /// `tr(musig(@0,@1)/**)` script derivation.
     ///

@@ -3,6 +3,8 @@
 use bitcoin::{hashes::Hash, taproot::LeafVersion};
 use bitcoin::{TapLeafHash, TapNodeHash};
 
+use bip388::arena::{ArenaRead, Cursor, TapCursor};
+
 use crate::{
     account::{DescriptorTemplate, KeyInformation, TapTree},
     errors::Error,
@@ -54,6 +56,55 @@ pub trait GetTapLeafHash {
 }
 
 impl GetTapLeafHash for DescriptorTemplate {
+    fn get_tapleaf_hash(
+        &self,
+        key_information: &[KeyInformation],
+        is_change: bool,
+        address_index: u32,
+    ) -> Result<TapLeafHash, Error> {
+        let script =
+            self.to_script(key_information, is_change, address_index, ScriptContext::Tr)?;
+        Ok(TapLeafHash::from_script(
+            script.as_script(),
+            LeafVersion::TapScript,
+        ))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Cursor-based taproot hashing (arena form).
+//
+// Mirrors the owned implementations above but walks arena `TapCursor`/`Cursor`s.
+// Used by the cursor `to_script` path; must produce identical hashes.
+// ---------------------------------------------------------------------------
+
+impl<'a, A: ArenaRead> GetTapTreeHash for TapCursor<'a, A> {
+    fn get_taptree_hash(
+        &self,
+        key_information: &[KeyInformation],
+        is_change: bool,
+        address_index: u32,
+    ) -> Result<[u8; 32], Error> {
+        if let Some(leaf_script) = self.leaf_script() {
+            Ok(leaf_script
+                .get_tapleaf_hash(key_information, is_change, address_index)?
+                .as_raw_hash()
+                .to_byte_array())
+        } else {
+            let (l, r) = self.branch().expect("tap node is leaf or branch");
+            let l_bytes = l.get_taptree_hash(key_information, is_change, address_index)?;
+            let r_bytes = r.get_taptree_hash(key_information, is_change, address_index)?;
+            let l_hash = TapNodeHash::from_slice(&l_bytes).map_err(|_| Error::InvalidKey)?;
+            let r_hash = TapNodeHash::from_slice(&r_bytes).map_err(|_| Error::InvalidKey)?;
+
+            Ok(TapNodeHash::from_node_hashes(l_hash, r_hash)
+                .as_raw_hash()
+                .to_byte_array())
+        }
+    }
+}
+
+impl<'a, A: ArenaRead> GetTapLeafHash for Cursor<'a, A> {
     fn get_tapleaf_hash(
         &self,
         key_information: &[KeyInformation],
