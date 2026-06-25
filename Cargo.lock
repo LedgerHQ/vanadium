@@ -345,6 +345,7 @@ dependencies = [
  "common",
  "env_logger",
  "git2",
+ "rhai_codegen",
  "tokio",
  "vanadium-client-sdk",
  "which",

@@ -11,7 +11,7 @@ use core::marker::PhantomData;
 use core::mem::{align_of, size_of};
 
 use bip388::embedded::{
-    measure, parse, ArenaCounts, BufLineSink, Cursor, KeyExprRec, Link, LineSpan, Node, SliceArena,
+    measure, parse, ArenaCounts, BufLineSink, Cursor, KeyExprRec, LineSpan, Link, Node, SliceArena,
 };
 
 #[cfg(not(test))]
@@ -113,12 +113,32 @@ fn layout(c: &ArenaCounts) -> usize {
         *off += size;
     }
     let mut off = 0usize;
-    bump(&mut off, align_of::<Node>(), size_of::<Node>() * c.nodes as usize);
-    bump(&mut off, align_of::<KeyExprRec>(), size_of::<KeyExprRec>() * c.keys as usize);
-    bump(&mut off, align_of::<Link>(), size_of::<Link>() * c.links as usize);
-    bump(&mut off, align_of::<u32>(), 4 * (c.keys + c.members) as usize); // orderings
+    bump(
+        &mut off,
+        align_of::<Node>(),
+        size_of::<Node>() * c.nodes as usize,
+    );
+    bump(
+        &mut off,
+        align_of::<KeyExprRec>(),
+        size_of::<KeyExprRec>() * c.keys as usize,
+    );
+    bump(
+        &mut off,
+        align_of::<Link>(),
+        size_of::<Link>() * c.links as usize,
+    );
+    bump(
+        &mut off,
+        align_of::<u32>(),
+        4 * (c.keys + c.members) as usize,
+    ); // orderings
     bump(&mut off, align_of::<u32>(), 4 * c.members as usize); // members
-    bump(&mut off, align_of::<KeyExprRec>(), size_of::<KeyExprRec>() * c.keys as usize); // canon
+    bump(
+        &mut off,
+        align_of::<KeyExprRec>(),
+        size_of::<KeyExprRec>() * c.keys as usize,
+    ); // canon
     bump(&mut off, align_of::<u32>(), 4 * c.nodes as usize); // leaf
     bump(&mut off, align_of::<u8>(), c.bytes as usize); // bytes
     bump(
@@ -226,7 +246,13 @@ pub unsafe extern "C" fn bip388_confusion_score(
         Some(p) => p,
         None => return BIP388_ARENA_TOO_SMALL,
     };
-    let mut sa = SliceArena::new(pools.nodes, pools.keys, pools.links, pools.members, pools.bytes);
+    let mut sa = SliceArena::new(
+        pools.nodes,
+        pools.keys,
+        pools.links,
+        pools.members,
+        pools.bytes,
+    );
     let root = match parse(s, &mut sa) {
         Ok(r) => r,
         Err(_) => return BIP388_PARSE_ERROR,
@@ -277,7 +303,13 @@ pub unsafe extern "C" fn bip388_to_cleartext(
     };
     let out_buf = core::slice::from_raw_parts_mut(out, out_len);
 
-    let mut sa = SliceArena::new(pools.nodes, pools.keys, pools.links, pools.members, pools.bytes);
+    let mut sa = SliceArena::new(
+        pools.nodes,
+        pools.keys,
+        pools.links,
+        pools.members,
+        pools.bytes,
+    );
     let root = match parse(s, &mut sa) {
         Ok(r) => r,
         Err(_) => return BIP388_PARSE_ERROR,

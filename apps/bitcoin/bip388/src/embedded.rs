@@ -15,7 +15,7 @@
 use crate::arena::{ArenaFull, ArenaRead, ArenaStore, KeyId, NodeTag, Span};
 use crate::ParseError;
 
-pub use crate::arena::{BufLineSink, Cursor, KeyExprRec, Link, LineSpan, Node, NodeId, SliceArena};
+pub use crate::arena::{BufLineSink, Cursor, KeyExprRec, LineSpan, Link, Node, NodeId, SliceArena};
 
 /// Number of records each arena pool must hold to parse a given template.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -28,10 +28,8 @@ pub struct ArenaCounts {
 }
 
 /// An [`ArenaStore`] that records pool sizes without storing anything, used by
-/// [`measure`]. Reads return harmless defaults: the parser only reads back the
-/// `members` pool (for the musig-distinctness check), and an empty slice there
-/// just skips the early-reject — the real parse still validates, and for valid
-/// templates the counts are identical.
+/// [`measure`]. Reads return harmless defaults; measurement only needs parser
+/// validation and final pool counts.
 struct CountingArena {
     counts: ArenaCounts,
 }
@@ -108,9 +106,6 @@ pub fn measure(template: &str) -> Result<ArenaCounts, ParseError> {
 /// Parse `template` into `arena`, returning the root node id. Build a
 /// [`Cursor`] with `Cursor::new(&arena, root)` afterwards to compute the
 /// confusion score / cleartext.
-pub fn parse<'a>(
-    template: &str,
-    arena: &mut SliceArena<'a>,
-) -> Result<NodeId, ParseError> {
+pub fn parse<'a>(template: &str, arena: &mut SliceArena<'a>) -> Result<NodeId, ParseError> {
     crate::parser::parse_descriptor_template(template, arena)
 }

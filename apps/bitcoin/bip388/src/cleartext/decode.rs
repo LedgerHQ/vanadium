@@ -99,7 +99,9 @@ fn parse_relative_time(s: &str) -> Option<u32> {
 fn parse_timelock(s: &str) -> Option<Timelock> {
     if let Some(num) = s.strip_suffix(" blocks after receiving") {
         let n: u32 = num.parse().ok()?;
-        return (1..RELATIVE_LOCK_LIMIT).contains(&n).then_some(Timelock::Relative(n));
+        return (1..RELATIVE_LOCK_LIMIT)
+            .contains(&n)
+            .then_some(Timelock::Relative(n));
     }
     if let Some(duration) = s.strip_suffix(" after receiving") {
         let n = parse_relative_time(duration)?;
@@ -110,7 +112,9 @@ fn parse_timelock(s: &str) -> Option<Timelock> {
     }
     if let Some(num) = s.strip_prefix("not before block ") {
         let n: u32 = num.parse().ok()?;
-        return (1..LOCKTIME_THRESHOLD).contains(&n).then_some(Timelock::Absolute(n));
+        return (1..LOCKTIME_THRESHOLD)
+            .contains(&n)
+            .then_some(Timelock::Absolute(n));
     }
     if let Some(rest) = s.strip_prefix("not before ") {
         let date = rest.strip_suffix(" utc")?;
@@ -192,7 +196,11 @@ impl CleartextValueCursor {
 /// to prevent nesting.
 fn parse_tapleaf_cleartext(s: &str) -> Option<alloc::boxed::Box<TapleafClass>> {
     for spec in TAPLEAF_SPECS {
-        if spec.parts.iter().any(|p| matches!(p, CleartextPart::Subpolicy)) {
+        if spec
+            .parts
+            .iter()
+            .any(|p| matches!(p, CleartextPart::Subpolicy))
+        {
             continue; // skip combinator specs to prevent nesting
         }
         for values in parse_with_spec(spec, s) {
@@ -211,9 +219,7 @@ fn parse_cleartext_value(part: CleartextPart, input: &str) -> Option<CleartextVa
         CleartextPart::KeyIndex => parse_key_index(input).map(CleartextValue::KeyIndex),
         CleartextPart::KeyIndices => parse_key_indices(input).map(CleartextValue::KeyIndices),
         CleartextPart::Timelock => parse_timelock(input).map(CleartextValue::Timelock),
-        CleartextPart::Subpolicy => {
-            parse_tapleaf_cleartext(input).map(CleartextValue::Subpolicy)
-        }
+        CleartextPart::Subpolicy => parse_tapleaf_cleartext(input).map(CleartextValue::Subpolicy),
     }
 }
 
@@ -634,7 +640,10 @@ pub(super) fn from_cleartext_impl(
     // `capitalize_first` (and any other case variation) is undone uniformly. The
     // patterns are unambiguous when lower-cased, which `test_spec_shape_uniqueness`
     // and the build-time uniqueness check both enforce.
-    let lowered: Vec<String> = descriptions.iter().map(|d| d.to_ascii_lowercase()).collect();
+    let lowered: Vec<String> = descriptions
+        .iter()
+        .map(|d| d.to_ascii_lowercase())
+        .collect();
     let lowered_refs: Vec<&str> = lowered.iter().map(|s| s.as_str()).collect();
     let classes = parse_top_level_candidates(&lowered_refs)?;
     // `top_level_variants` only fails for `DescriptorClass::Other`; surface that

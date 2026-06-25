@@ -27,7 +27,11 @@ pub(super) fn write_utc_date(sink: &mut dyn fmt::Write, timestamp: u32) -> fmt::
         let h = time_of_day / 3600;
         let min = (time_of_day % 3600) / 60;
         let sec = time_of_day % 60;
-        write!(sink, "{:04}-{:02}-{:02} {:02}:{:02}:{:02}", y, m, d, h, min, sec)
+        write!(
+            sink,
+            "{:04}-{:02}-{:02} {:02}:{:02}:{:02}",
+            y, m, d, h, min, sec
+        )
     }
 }
 
@@ -296,7 +300,10 @@ mod tests {
         assert_eq!(parse_relative_time_to_seconds("1 minute"), Some(60));
         assert_eq!(parse_relative_time_to_seconds("1 hour"), Some(3600));
         assert_eq!(parse_relative_time_to_seconds("1 day"), Some(86400));
-        assert_eq!(parse_relative_time_to_seconds("8 minutes 32 seconds"), Some(512));
+        assert_eq!(
+            parse_relative_time_to_seconds("8 minutes 32 seconds"),
+            Some(512)
+        );
         assert_eq!(
             parse_relative_time_to_seconds("1 day 1 hour 36 minutes"),
             Some(92160)
@@ -309,7 +316,10 @@ mod tests {
             parse_relative_time_to_seconds("1 day 2 hours 3 minutes 4 seconds"),
             Some(93784)
         );
-        assert_eq!(parse_relative_time_to_seconds("1 hour 1 second"), Some(3601));
+        assert_eq!(
+            parse_relative_time_to_seconds("1 hour 1 second"),
+            Some(3601)
+        );
         // Singular/plural spellings are interchangeable regardless of the number.
         assert_eq!(parse_relative_time_to_seconds("2 day"), Some(172800));
         assert_eq!(parse_relative_time_to_seconds("1 seconds"), Some(1));

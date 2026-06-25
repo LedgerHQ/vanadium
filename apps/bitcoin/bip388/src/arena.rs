@@ -135,7 +135,13 @@ impl Node {
         }
     }
     pub fn with_a(tag: NodeTag, a: u32) -> Node {
-        Node { tag, a, b: 0, c: 0, d: 0 }
+        Node {
+            tag,
+            a,
+            b: 0,
+            c: 0,
+            d: 0,
+        }
     }
 }
 
@@ -583,10 +589,22 @@ impl<'a, A: ArenaRead> Cursor<'a, A> {
             One => DescriptorNode::One,
             Older => DescriptorNode::Older(n.a),
             After => DescriptorNode::After(n.a),
-            Sha256 => DescriptorNode::Sha256(self.arena.bytes(Span { start: n.a, len: n.b })),
-            Hash256 => DescriptorNode::Hash256(self.arena.bytes(Span { start: n.a, len: n.b })),
-            Ripemd160 => DescriptorNode::Ripemd160(self.arena.bytes(Span { start: n.a, len: n.b })),
-            Hash160 => DescriptorNode::Hash160(self.arena.bytes(Span { start: n.a, len: n.b })),
+            Sha256 => DescriptorNode::Sha256(self.arena.bytes(Span {
+                start: n.a,
+                len: n.b,
+            })),
+            Hash256 => DescriptorNode::Hash256(self.arena.bytes(Span {
+                start: n.a,
+                len: n.b,
+            })),
+            Ripemd160 => DescriptorNode::Ripemd160(self.arena.bytes(Span {
+                start: n.a,
+                len: n.b,
+            })),
+            Hash160 => DescriptorNode::Hash160(self.arena.bytes(Span {
+                start: n.a,
+                len: n.b,
+            })),
             Andor => DescriptorNode::Andor(self.child(n.a), self.child(n.b), self.child(n.c)),
             AndV => DescriptorNode::AndV(self.child(n.a), self.child(n.b)),
             AndB => DescriptorNode::AndB(self.child(n.a), self.child(n.b)),
@@ -952,9 +970,7 @@ impl<'a, A: ArenaRead> ClassKeyList<'a, A> {
     pub fn len(&self) -> usize {
         match self {
             ClassKeyList::Explicit(l) => l.len(),
-            ClassKeyList::MusigExpanded(kv) => {
-                kv.musig_key_indices().map(|m| m.len()).unwrap_or(0)
-            }
+            ClassKeyList::MusigExpanded(kv) => kv.musig_key_indices().map(|m| m.len()).unwrap_or(0),
         }
     }
     pub fn is_empty(&self) -> bool {
@@ -1449,8 +1465,18 @@ impl<'a, A: ArenaRead> Cursor<'a, A> {
                     }
                 }
             }
-            DN::Sh(c) | DN::Wsh(c) | DN::A(c) | DN::S(c) | DN::C(c) | DN::T(c) | DN::D(c)
-            | DN::V(c) | DN::J(c) | DN::N(c) | DN::L(c) | DN::U(c) => c.visit_placeholders(leaf, f),
+            DN::Sh(c)
+            | DN::Wsh(c)
+            | DN::A(c)
+            | DN::S(c)
+            | DN::C(c)
+            | DN::T(c)
+            | DN::D(c)
+            | DN::V(c)
+            | DN::J(c)
+            | DN::N(c)
+            | DN::L(c)
+            | DN::U(c) => c.visit_placeholders(leaf, f),
             DN::Andor(x, y, z) => {
                 x.visit_placeholders(leaf, f);
                 y.visit_placeholders(leaf, f);
@@ -1492,9 +1518,9 @@ fn cmp_key_value<A: ArenaRead>(arena: &A, a: &KeyExprRec, b: &KeyExprRec) -> Ord
         (KeyKind::Plain, KeyKind::Plain) => a.plain_index.cmp(&b.plain_index),
         (KeyKind::Plain, KeyKind::Musig) => Ordering::Less,
         (KeyKind::Musig, KeyKind::Plain) => Ordering::Greater,
-        (KeyKind::Musig, KeyKind::Musig) => {
-            arena.members(a.musig_members).cmp(arena.members(b.musig_members))
-        }
+        (KeyKind::Musig, KeyKind::Musig) => arena
+            .members(a.musig_members)
+            .cmp(arena.members(b.musig_members)),
     }
 }
 
@@ -1661,8 +1687,18 @@ mod placeholder_iter {
 
                 let (frag, leaf) = self.fragments.pop()?;
                 match frag.view() {
-                    DN::Sh(c) | DN::Wsh(c) | DN::A(c) | DN::S(c) | DN::C(c) | DN::T(c)
-                    | DN::D(c) | DN::V(c) | DN::J(c) | DN::N(c) | DN::L(c) | DN::U(c) => {
+                    DN::Sh(c)
+                    | DN::Wsh(c)
+                    | DN::A(c)
+                    | DN::S(c)
+                    | DN::C(c)
+                    | DN::T(c)
+                    | DN::D(c)
+                    | DN::V(c)
+                    | DN::J(c)
+                    | DN::N(c)
+                    | DN::L(c)
+                    | DN::U(c) => {
                         self.fragments.push((c, leaf));
                     }
                     DN::Andor(x, y, z) => {
@@ -1778,8 +1814,10 @@ mod tests {
             DescriptorNode::Multi(k, keys) => {
                 assert_eq!(k, 2);
                 assert_eq!(keys.len(), 3);
-                let indices: alloc::vec::Vec<u32> =
-                    keys.iter().map(|kv| kv.plain_key_index().unwrap()).collect();
+                let indices: alloc::vec::Vec<u32> = keys
+                    .iter()
+                    .map(|kv| kv.plain_key_index().unwrap())
+                    .collect();
                 assert_eq!(indices, alloc::vec![0, 1, 2]);
             }
             _ => panic!("expected Multi"),
@@ -1855,7 +1893,8 @@ mod tests {
         let mk_leaf = |a: &mut VecArena, idx: u32| {
             let k = a.push_key(KeyExprRec::plain(idx, 0, 1)).unwrap();
             let script = a.push_node(Node::with_a(NodeTag::Pk, k.0)).unwrap();
-            a.push_node(Node::with_a(NodeTag::TapLeaf, script.0)).unwrap()
+            a.push_node(Node::with_a(NodeTag::TapLeaf, script.0))
+                .unwrap()
         };
         let l0 = mk_leaf(&mut a, 0);
         let l1 = mk_leaf(&mut a, 1);
@@ -1887,6 +1926,9 @@ mod tests {
         sink.flush_line();
         write!(sink, "second").unwrap();
         let lines = sink.into_lines();
-        assert_eq!(lines, alloc::vec!["first 1".to_string(), "second".to_string()]);
+        assert_eq!(
+            lines,
+            alloc::vec!["first 1".to_string(), "second".to_string()]
+        );
     }
 }

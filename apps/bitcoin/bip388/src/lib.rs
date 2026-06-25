@@ -841,10 +841,7 @@ fn taptree_to_owned<A: arena::ArenaRead>(tc: arena::TapCursor<'_, A>) -> TapTree
         TapTree::Script(Box::new(node_to_owned(script)))
     } else {
         let (l, r) = tc.branch().expect("tap node is leaf or branch");
-        TapTree::Branch(
-            Box::new(taptree_to_owned(l)),
-            Box::new(taptree_to_owned(r)),
-        )
+        TapTree::Branch(Box::new(taptree_to_owned(l)), Box::new(taptree_to_owned(r)))
     }
 }
 
@@ -928,7 +925,6 @@ fn parse_sortedmulti(input: &str) -> Result<(&str, DescriptorTemplate), ParseErr
     )?;
     Ok((rest, arena_to_owned(&a, id)))
 }
-
 
 #[cfg(feature = "alloc")]
 fn write_display_wrapper(
@@ -1939,7 +1935,11 @@ mod tests {
                 }));
             });
 
-            assert_eq!(cur_keys, owned_keys, "placeholder keys mismatch for {:?}", s);
+            assert_eq!(
+                cur_keys, owned_keys,
+                "placeholder keys mismatch for {:?}",
+                s
+            );
             assert_eq!(
                 cur_ctx, owned_ctx,
                 "placeholder leaf-context mismatch for {:?}",
@@ -1952,7 +1952,8 @@ mod tests {
     // helpers, computed from the public `placeholders()` iterator.
     #[cfg(test)]
     fn ref_orderings_count(dt: &DescriptorTemplate) -> u64 {
-        let mut counts: alloc::collections::BTreeMap<u32, u32> = alloc::collections::BTreeMap::new();
+        let mut counts: alloc::collections::BTreeMap<u32, u32> =
+            alloc::collections::BTreeMap::new();
         for (kp, _) in dt.placeholders() {
             match &kp.key_type {
                 KeyExpressionType::PlainKey(i) => *counts.entry(*i).or_insert(0) += 1,
@@ -2021,8 +2022,7 @@ mod tests {
                 s
             );
 
-            let mut can_scratch =
-                vec![arena::KeyExprRec::plain(0, 0, 1); cur.placeholder_count()];
+            let mut can_scratch = vec![arena::KeyExprRec::plain(0, 0, 1); cur.placeholder_count()];
             assert_eq!(
                 cur.are_key_derivations_canonical(&mut can_scratch),
                 ref_canonical(&owned),
@@ -2113,8 +2113,16 @@ mod tests {
             let s_hct = sc.to_cleartext(&mut ssink, &mut scanon, &mut sleaf);
             let s_lines = ssink.into_lines();
 
-            assert_eq!(v_score, s_score, "confusion score backing mismatch for {:?}", s);
-            assert_eq!(v_lines, s_lines, "cleartext lines backing mismatch for {:?}", s);
+            assert_eq!(
+                v_score, s_score,
+                "confusion score backing mismatch for {:?}",
+                s
+            );
+            assert_eq!(
+                v_lines, s_lines,
+                "cleartext lines backing mismatch for {:?}",
+                s
+            );
             assert_eq!(v_hct, s_hct, "has_cleartext backing mismatch for {:?}", s);
         }
     }
@@ -2123,6 +2131,11 @@ mod tests {
     fn test_embedded_public_api() {
         // Drive the public no-alloc API: measure -> size pools -> parse ->
         // confusion_score, and check it matches the owned implementation.
+        assert_eq!(
+            crate::embedded::measure("tr(musig(@0,@0)/**)"),
+            Err(ParseError::InvalidKey)
+        );
+
         let cases = vec![
             "wsh(multi(2,@0/**,@1/**,@2/**))",
             "tr(musig(@0,@1)/**,{pk(@2/**),multi_a(2,@3/**,@4/**)})",

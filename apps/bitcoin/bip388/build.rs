@@ -1942,9 +1942,10 @@ fn emit_ref_score_arm(entry: &ProcessedEntry, ck: ClassKind) -> TokenStream {
     if !subpolicy_names.is_empty() {
         let sub_idents: Vec<Ident> = subpolicy_names.iter().map(|n| id(n)).collect();
         let destructure = quote!({ #(#sub_idents),*, .. });
-        let product = sub_idents.iter().fold(quote!(1u64), |acc, n| {
-            quote!(#acc.saturating_mul(classify_as_tapleaf_ref(*#n).per_leaf_score()))
-        });
+        let product = sub_idents.iter().fold(
+            quote!(1u64),
+            |acc, n| quote!(#acc.saturating_mul(classify_as_tapleaf_ref(*#n).per_leaf_score())),
+        );
         return quote!(#class::#variant #destructure => #product,);
     }
 

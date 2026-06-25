@@ -30,9 +30,9 @@
 #[cfg(feature = "alloc")]
 use alloc::{format, string::String, string::ToString, vec, vec::Vec};
 
-use super::time::{write_seconds, write_utc_date};
 #[cfg(feature = "alloc")]
 use super::time::{format_seconds, format_utc_date};
+use super::time::{write_seconds, write_utc_date};
 #[cfg(feature = "alloc")]
 use super::{DescriptorTemplate, KeyExpression, KeyExpressionType};
 
@@ -728,7 +728,8 @@ impl<'a, A: ArenaRead> Cursor<'a, A> {
                 let mut n_leaves = 0usize;
                 if let Some(tree) = leaves {
                     for leaf in tree.tapleaves() {
-                        score = score.saturating_mul(classify_as_tapleaf_ref(leaf).per_leaf_score());
+                        score =
+                            score.saturating_mul(classify_as_tapleaf_ref(leaf).per_leaf_score());
                         n_leaves += 1;
                     }
                 }
@@ -793,21 +794,40 @@ fn tapleaf_ref_display_cmp<A: ArenaRead>(
             cmp_key_view(a1, a2).then_with(|| cmp_key_view(b1, b2))
         }
         (
-            TC::SortedMultisig { threshold: t1, keys: k1 },
-            TC::SortedMultisig { threshold: t2, keys: k2 },
+            TC::SortedMultisig {
+                threshold: t1,
+                keys: k1,
+            },
+            TC::SortedMultisig {
+                threshold: t2,
+                keys: k2,
+            },
         )
-        | (TC::Multisig { threshold: t1, keys: k1 }, TC::Multisig { threshold: t2, keys: k2 }) => k1
+        | (
+            TC::Multisig {
+                threshold: t1,
+                keys: k1,
+            },
+            TC::Multisig {
+                threshold: t2,
+                keys: k2,
+            },
+        ) => k1
             .len()
             .cmp(&k2.len())
             .then(t1.cmp(t2))
             .then_with(|| cmp_keys_view(k1, k2)),
-        (TC::Timelocked { sub: s1, timelock: t1 }, TC::Timelocked { sub: s2, timelock: t2 }) => {
-            tapleaf_ref_display_cmp(
-                &classify_as_tapleaf_ref(*s1),
-                &classify_as_tapleaf_ref(*s2),
-            )
-            .then(t1.cmp(t2))
-        }
+        (
+            TC::Timelocked {
+                sub: s1,
+                timelock: t1,
+            },
+            TC::Timelocked {
+                sub: s2,
+                timelock: t2,
+            },
+        ) => tapleaf_ref_display_cmp(&classify_as_tapleaf_ref(*s1), &classify_as_tapleaf_ref(*s2))
+            .then(t1.cmp(t2)),
         (TC::AndV { sub1: a1, sub2: a2 }, TC::AndV { sub1: b1, sub2: b2 }) => {
             tapleaf_ref_display_cmp(&classify_as_tapleaf_ref(*a1), &classify_as_tapleaf_ref(*b1))
                 .then_with(|| {

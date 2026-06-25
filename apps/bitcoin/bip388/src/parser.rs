@@ -125,14 +125,35 @@ pub(crate) fn parse_key_expression<'a, A: ArenaStore>(
     Ok((rest, id))
 }
 
+fn musig_previous_members_contains(mut previous: &str, idx: u32) -> Result<bool, ParseError> {
+    while !previous.is_empty() {
+        if !previous.starts_with('@') {
+            return Err(ParseError::InvalidSyntax);
+        }
+        let (rest, prev_idx) = parse_number_up_to(&previous[1..], u32::MAX)?;
+        if prev_idx == idx {
+            return Ok(true);
+        }
+        if rest.is_empty() {
+            return Ok(false);
+        }
+        if !rest.starts_with(',') {
+            return Err(ParseError::InvalidSyntax);
+        }
+        previous = &rest[1..];
+    }
+    Ok(false)
+}
+
 /// Parses `musig(@N1,@N2,...)/...`. Members are stored as a contiguous span in
 /// the `members` pool (no nested allocations interleave during the member loop).
-/// Per BIP-390, all participant key indices must be distinct.
+/// Per BIP-388, all participant key indices must be distinct.
 fn parse_musig_key_expression<'a, A: ArenaStore>(
     input: &'a str,
     arena: &mut A,
 ) -> ParseResult<'a, crate::arena::KeyId> {
-    let mut rest = &input[6..]; // skip "musig("
+    let members_input = &input[6..]; // skip "musig("
+    let mut rest = members_input;
     let start = arena.members_begin();
     let mut count = 0u32;
     loop {
@@ -140,9 +161,8 @@ fn parse_musig_key_expression<'a, A: ArenaStore>(
             return Err(ParseError::InvalidSyntax);
         }
         let (r, idx) = parse_number_up_to(&rest[1..], u32::MAX)?;
-        // distinctness against the members collected so far
-        let partial = arena.members_end(start);
-        if arena.members(partial).contains(&idx) {
+        let previous_len = members_input.len() - rest.len();
+        if musig_previous_members_contains(&members_input[..previous_len], idx)? {
             return Err(ParseError::InvalidKey);
         }
         arena.members_push(idx).map_err(full)?;
@@ -163,7 +183,9 @@ fn parse_musig_key_expression<'a, A: ArenaStore>(
     rest = &rest[1..]; // skip ')'
     let (rest, (num1, num2)) = parse_derivation_suffix(rest)?;
     let span = arena.members_end(start);
-    let id = arena.push_key(KeyExprRec::musig(span, num1, num2)).map_err(full)?;
+    let id = arena
+        .push_key(KeyExprRec::musig(span, num1, num2))
+        .map_err(full)?;
     Ok((rest, id))
 }
 
@@ -237,16 +259,44 @@ fn parse_inner_descriptor<'a, A: ArenaStore>(
 ) -> ParseResult<'a, NodeId> {
     // Longer names checked before shorter to avoid premature prefix matches.
     if input.starts_with("sortedmulti_a(") {
-        return parse_threshold_kp_fragment(input, "sortedmulti_a", NodeTag::SortedmultiA, ctx, MAX_KEYS_MULTI_A, arena);
+        return parse_threshold_kp_fragment(
+            input,
+            "sortedmulti_a",
+            NodeTag::SortedmultiA,
+            ctx,
+            MAX_KEYS_MULTI_A,
+            arena,
+        );
     }
     if input.starts_with("sortedmulti(") {
-        return parse_threshold_kp_fragment(input, "sortedmulti", NodeTag::Sortedmulti, ctx, crate::MAX_KEYS_MULTI, arena);
+        return parse_threshold_kp_fragment(
+            input,
+            "sortedmulti",
+            NodeTag::Sortedmulti,
+            ctx,
+            crate::MAX_KEYS_MULTI,
+            arena,
+        );
     }
     if input.starts_with("multi_a(") {
-        return parse_threshold_kp_fragment(input, "multi_a", NodeTag::MultiA, ctx, MAX_KEYS_MULTI_A, arena);
+        return parse_threshold_kp_fragment(
+            input,
+            "multi_a",
+            NodeTag::MultiA,
+            ctx,
+            MAX_KEYS_MULTI_A,
+            arena,
+        );
     }
     if input.starts_with("multi(") {
-        return parse_threshold_kp_fragment(input, "multi", NodeTag::Multi, ctx, crate::MAX_KEYS_MULTI, arena);
+        return parse_threshold_kp_fragment(
+            input,
+            "multi",
+            NodeTag::Multi,
+            ctx,
+            crate::MAX_KEYS_MULTI,
+            arena,
+        );
     }
     if input.starts_with("thresh(") {
         return parse_thresh(input, ctx, depth, arena);
@@ -261,15 +311,20 @@ fn parse_inner_descriptor<'a, A: ArenaStore>(
             _ => return Err(ParseError::InvalidScriptContext),
         };
         let (rest, [script]) = parse_n_subscripts::<1, A>(&input[4..], inner_ctx, depth, arena)?;
-        let id = arena.push_node(Node::with_a(NodeTag::Wsh, script.0)).map_err(full)?;
+        let id = arena
+            .push_node(Node::with_a(NodeTag::Wsh, script.0))
+            .map_err(full)?;
         return Ok((rest, id));
     }
     if input.starts_with("sh(") {
         if !ctx.sh_allowed() {
             return Err(ParseError::InvalidScriptContext);
         }
-        let (rest, [script]) = parse_n_subscripts::<1, A>(&input[3..], ParseContext::Legacy, depth, arena)?;
-        let id = arena.push_node(Node::with_a(NodeTag::Sh, script.0)).map_err(full)?;
+        let (rest, [script]) =
+            parse_n_subscripts::<1, A>(&input[3..], ParseContext::Legacy, depth, arena)?;
+        let id = arena
+            .push_node(Node::with_a(NodeTag::Sh, script.0))
+            .map_err(full)?;
         return Ok((rest, id));
     }
     if input.starts_with("wpkh(") {
@@ -626,7 +681,9 @@ fn parse_tap_tree<'a, A: ArenaStore>(
         Ok((&rest[1..], id))
     } else {
         let (rest, desc) = parse_descriptor(input, ParseContext::Taproot, depth, arena)?;
-        let id = arena.push_node(Node::with_a(NodeTag::TapLeaf, desc.0)).map_err(full)?;
+        let id = arena
+            .push_node(Node::with_a(NodeTag::TapLeaf, desc.0))
+            .map_err(full)?;
         Ok((rest, id))
     }
 }
