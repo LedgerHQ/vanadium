@@ -393,7 +393,7 @@ pub trait ClearText {
 
     /// Given cleartext descriptions (as produced by `to_cleartext`), returns a
     /// lazy iterator over all structurally distinct instances that would produce
-    /// the same cleartext output. The number of yielded instances equals
+    /// the same cleartext output. The number of yielded instances is at most
     /// `confusion_score()`.
     #[cfg(any(test, feature = "cleartext-decode"))]
     fn from_cleartext(
