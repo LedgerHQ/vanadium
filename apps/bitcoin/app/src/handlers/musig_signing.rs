@@ -1,8 +1,8 @@
 //! Per-PSBT MuSig2 session storage.
 //!
-//! Port of `src/musig/musig_sessions.{h,c}` from the C reference Bitcoin app
-//! (app-bitcoin-new). The initial cut supports a single concurrent session,
-//! occupying two persistent storage slots:
+//! Port of `src/musig/musig_sessions.{h,c}` from the C reference Bitcoin app.
+//! The initial cut supports a single concurrent session, occupying two
+//! persistent storage slots:
 //! - Slot [`MUSIG_SESSION_ID_SLOT`] (= 1): 32-byte session id.
 //! - Slot [`MUSIG_SESSION_RAND_SLOT`] (= 2): 32-byte root randomness.
 //!

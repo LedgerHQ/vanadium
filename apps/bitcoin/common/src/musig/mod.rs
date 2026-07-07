@@ -1,6 +1,6 @@
 //! BIP-327 (MuSig2) primitives.
 //!
-//! Port of `src/musig/musig.c` from the C reference Bitcoin app (app-bitcoin-new),
+//! Port of `src/musig/musig.c` from the C reference Ledger Bitcoin app,
 //! adapted to the Vanadium app SDK. The module exposes four public functions
 //! that mirror the C API one-to-one: [`key_agg`], [`nonce_gen`], [`nonce_agg`],
 //! [`sign`]. Helpers are kept private.

@@ -1,4 +1,4 @@
-This is the Bitcoin application for Vanadium. It (will be) a next-generation application that generalizes the functionality of the [Ledger Bitcoin application](https://github.com/LedgerHQ/app-bitcoin-new) with more general signing flows, and advanced use cases.
+This is the Bitcoin application for Vanadium. It (will be) a next-generation application that generalizes the functionality of the [Ledger Bitcoin application](https://github.com/LedgerHQ/app-bitcoin) with more general signing flows, and advanced use cases.
 
 It is also based around the [PSBT standard](https://github.com/bitcoin/bips/blob/master/bip-0174.mediawiki), but fully implements the signing model based on _accounts_, represented initially with [BIP-388 wallet policies](https://github.com/bitcoin/bips/blob/master/bip-0388.mediawiki) - more account types (like [silent payment addresses](https://github.com/bitcoin/bips/blob/master/bip-0352.mediawiki)) may be added in the future.
 
