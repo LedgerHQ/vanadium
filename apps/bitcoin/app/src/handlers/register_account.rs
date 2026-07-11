@@ -358,7 +358,6 @@ mod tests {
                 "tpubD6NzVbkrYhZ4YWFESthNwVXM9BnBbB81mYcR4Y2B1cn7H2877iHruRir4JtbC4h4gDueD7WcHayskdKpHowgWiQs8AQFWgas79gF5Nc2UG7",
                 "[f5acc2fd/48'/1'/0'/2']tpubDFAqEGNyad35aBCKUAXbQGDjdVhNueno5ZZVEn3sQbW5ci457gLR7HyTmHBg93oourBssgUxuWz1jX5uhc1qaqFo9VsybY1J5FuedLfm4dK",
                 "[7a88647b/48'/1'/0'/2']tpubDFfCoyA3T5WhDyLUwiyy1mHm1Kmm1DRTkW3iiGWu9q8Xi3rXNsQdDq6ujG1HzKu87HmS6dimVSAgWsnH2hdeAZ5WV99yg86BiU2RtJcPVHL",
-                "[deadbeef/44'/1'/0']tpubDDHMSwran1vbgn83DkbWX7hrGfzGLD5bd5Dspx7Ss2gZ9S8gT5FetN6TiKj6MvqQmBbnkaJG9zNW1roavxHa3EM3ikGs6BzARMqgRx457fT",
             ],
         );
         let expected_account_id = wallet_policy_of(&account).registration_id(account_name);
