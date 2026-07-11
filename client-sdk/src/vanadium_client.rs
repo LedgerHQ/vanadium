@@ -1746,7 +1746,15 @@ impl<E: std::fmt::Debug + Send + Sync + 'static> VanadiumAppClient<E> {
                 }
             }
 
-            // Step the engine if a V-App is running
+            // Step the engine if a V-App is running.
+            //
+            // We step continuously (even with no request in flight) so that the V-App's idle
+            // `xrecv` keeps returning and the app stays responsive. As a side effect, an `xrecv`
+            // that is waiting for real data mid-message (an ACK, or the next chunk) may also be
+            // answered here with a 0-length buffer; the app-SDK `comm` module tolerates such
+            // spurious 0-length reads while in the middle of a message exchange.
+            // TODO: a more careful implementation should be able to remove the spurious
+            // 0-length messages in receive_message/send_message in the app-sdk.
             if let Some(engine) = client.client.engine.as_mut() {
                 match engine.step().await {
                     Ok(Some(VAppResponse::Message(response))) => {
