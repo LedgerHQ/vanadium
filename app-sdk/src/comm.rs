@@ -109,9 +109,11 @@ pub fn receive_message() -> Result<Vec<u8>, MessageError> {
         xsend(&ACK);
 
         let chunk_len = loop {
-            // TODO: this is a workaround for a bug in VanadiumAsyncClient: while returning a 0-length message
-            // is expected when idle, this shouldn't happen when we are in the middle of receiving a message.
-            // This makes it tolerate the occasional 0-length chunk, but ideally this should be fixed in the client.
+            // While a 0-length message is the expected "no message" reply when the app is idle,
+            // it must not be interpreted as such in the middle of receiving a message: the async
+            // client keeps stepping the VM (to stay responsive) and may answer this `xrecv` with a
+            // 0-length buffer before the next chunk arrives. Tolerate it by retrying until we get
+            // the actual chunk.
             let len = xrecv_to(unsafe { &mut *chunk });
             if len != 0 {
                 break len;
@@ -162,7 +164,16 @@ pub fn send_message(msg: &[u8]) {
     // Send the remaining chunks.
     while total_bytes_sent < msg.len() {
         // Wait for ACK to maintain the alternating protocol.
-        let acc_len = xrecv_to(&mut acc_chunk);
+        //
+        // As in `receive_message`, tolerate spurious 0-length reads: the async client keeps
+        // stepping the VM to stay responsive and may answer this `xrecv` with a 0-length buffer
+        // before the ACK arrives. Retry until we get a real chunk, then validate it is an ACK.
+        let acc_len = loop {
+            let len = xrecv_to(&mut acc_chunk);
+            if len != 0 {
+                break len;
+            }
+        };
         if acc_len != 1 || acc_chunk != ACK {
             panic!("Unexpected byte received: {}", acc_chunk[0]);
         }
