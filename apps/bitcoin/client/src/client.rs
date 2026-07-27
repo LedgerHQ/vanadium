@@ -221,6 +221,7 @@ impl<'a> BitcoinClient {
         &mut self,
         name: &str,
         account: &message::Account,
+        signing_policies: Vec<common::psbt::signing_policy::SigningPolicy>,
         registered_identities: Option<Vec<message::RegisteredIdentityEntry>>,
         key_signatures: Option<Vec<Option<message::IdentitySignature>>>,
         show_cleartext: bool,
@@ -234,6 +235,7 @@ impl<'a> BitcoinClient {
         let msg = minicbor::to_vec(&Request::RegisterAccount {
             name: name.into(),
             account: account.clone(),
+            signing_policies,
             registered_identities,
             key_signatures,
             show_cleartext,

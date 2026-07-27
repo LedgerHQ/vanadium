@@ -10,16 +10,13 @@ use rustyline::hint::Hinter;
 use rustyline::validate::{ValidationContext, ValidationResult, Validator};
 use rustyline::{Context, Editor, Helper};
 
-use client::BitcoinClient;
-
-mod client;
+use vnd_bitcoin_client::{insert_signing_policies, BitcoinClient, BitcoinClientError};
 
 use sdk::linewriter::FileLineWriter;
 use sdk::vanadium_client::client_utils::{create_default_client, ClientType};
 
 use std::borrow::Cow;
-
-use crate::client::BitcoinClientError;
+use std::path::{Path, PathBuf};
 
 #[derive(Parser, Debug)]
 #[command(name = "vnd-bitcoin-cli")]
@@ -82,6 +79,8 @@ enum CliCommand {
         /// template on screen (when its confusion score is at most MAX_CONFUSION_SCORE).
         #[clap(long, default_missing_value = "true", num_args = 0..=1)]
         show_cleartext: bool,
+        #[clap(long = "signing-policy", value_name = "FILE.plc")]
+        signing_policies: Vec<PathBuf>,
     },
     RegisterIdentityKey {
         #[clap(long)]
@@ -113,6 +112,12 @@ enum CliCommand {
     SignPsbt {
         #[clap(long)]
         psbt: String,
+        #[clap(long = "signing-policy", value_name = "FILE.plc")]
+        signing_policies: Vec<PathBuf>,
+    },
+    SigningPolicyHash {
+        #[clap(long, value_name = "FILE.plc")]
+        policy: PathBuf,
     },
 }
 
@@ -282,13 +287,59 @@ fn parse_wallet_policy(
     common::bip388::WalletPolicy::new(descriptor_template, keys_info)
 }
 
+fn read_signing_policy(path: &Path) -> Result<common::psbt::SigningPolicy, BitcoinClientError> {
+    if path.extension().and_then(|extension| extension.to_str()) != Some("plc") {
+        return Err(BitcoinClientError::GenericError(format!(
+            "Signing policy file must have a case-sensitive .plc extension: {}",
+            path.display()
+        )));
+    }
+    let script = std::fs::read(path).map_err(|error| {
+        BitcoinClientError::GenericError(format!(
+            "Failed to read signing policy file {}: {}",
+            path.display(),
+            error
+        ))
+    })?;
+    Ok(common::psbt::SigningPolicy::new(
+        common::psbt::ENGINE_ID_PROGRAM,
+        0,
+        script,
+    ))
+}
+
+fn read_signing_policies(
+    paths: &[PathBuf],
+) -> Result<Vec<common::psbt::SigningPolicy>, BitcoinClientError> {
+    let mut signing_policies: Vec<common::psbt::SigningPolicy> = Vec::new();
+    for path in paths {
+        let signing_policy = read_signing_policy(path)?;
+        if let Some(existing) = signing_policies
+            .iter()
+            .find(|existing| existing.hash() == signing_policy.hash())
+        {
+            if existing != &signing_policy {
+                return Err(BitcoinClientError::GenericError(format!(
+                    "Signing policy file {} conflicts with another file having the same hash",
+                    path.display()
+                )));
+            }
+            continue;
+        }
+        signing_policies.push(signing_policy);
+    }
+    Ok(signing_policies)
+}
+
 async fn handle_cli_command(
     bitcoin_client: &mut BitcoinClient,
     cli: &Cli,
 ) -> Result<(), BitcoinClientError> {
     match &cli.command {
         CliCommand::GetFingerprint { tree } => {
-            let fpr = bitcoin_client.get_master_fingerprint((*tree).into()).await?;
+            let fpr = bitcoin_client
+                .get_master_fingerprint((*tree).into())
+                .await?;
             println!("{:08x}", fpr);
         }
         CliCommand::GetPubkey {
@@ -327,6 +378,7 @@ async fn handle_cli_command(
             descriptor_template,
             keys_info,
             show_cleartext,
+            signing_policies,
         } => {
             println!(
                 "Executing register_account for {:?} account: {:?} {:?}",
@@ -337,8 +389,16 @@ async fn handle_cli_command(
 
             let wallet_policy = parse_wallet_policy(descriptor_template, keys_info)?;
             let account = common::message::Account::WalletPolicy(wallet_policy);
+            let signing_policies = read_signing_policies(signing_policies)?;
             let (account_id, hmac) = bitcoin_client
-                .register_account(name, &account, None, None, *show_cleartext)
+                .register_account(
+                    name,
+                    &account,
+                    signing_policies,
+                    None,
+                    None,
+                    *show_cleartext,
+                )
                 .await?;
             println!(
                 "Account {} registered.\nAccount ID: {}\nHMAC: {}",
@@ -411,7 +471,10 @@ async fn handle_cli_command(
                 println!("Identity signature: {}", hex::encode(&sig.signature));
             }
         }
-        CliCommand::SignPsbt { psbt } => {
+        CliCommand::SignPsbt {
+            psbt,
+            signing_policies,
+        } => {
             let mut psbt = base64::engine::general_purpose::STANDARD
                 .decode(&psbt)
                 .map_err(|_| "Failed to decode PSBT")?;
@@ -425,6 +488,10 @@ async fn handle_cli_command(
                     .map_err(|_| "Failed to convert PSBTv0 to PSBTv2")?;
             }
 
+            let signing_policies = read_signing_policies(signing_policies)?;
+            psbt = insert_signing_policies(&psbt, &signing_policies).map_err(|error| {
+                format!("Failed to insert signing policies into PSBT: {}", error)
+            })?;
             let signed = bitcoin_client.sign_psbt(&psbt).await?;
 
             println!("{} partial signatures returned", signed.signatures.len());
@@ -468,6 +535,9 @@ async fn handle_cli_command(
                     }
                 }
             }
+        }
+        CliCommand::SigningPolicyHash { policy } => {
+            println!("{}", hex::encode(read_signing_policy(policy)?.hash()));
         }
     }
     Ok(())
@@ -571,4 +641,120 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use common::psbt::build_signing_policy_value;
+
+    use super::*;
+
+    static NEXT_FILE_ID: AtomicUsize = AtomicUsize::new(0);
+
+    struct TempPolicyFile(PathBuf);
+
+    impl TempPolicyFile {
+        fn new(extension: &str, contents: &[u8]) -> Self {
+            let id = NEXT_FILE_ID.fetch_add(1, Ordering::Relaxed);
+            let path = std::env::temp_dir().join(format!(
+                "vnd-bitcoin-policy-{}-{}.{}",
+                std::process::id(),
+                id,
+                extension
+            ));
+            std::fs::write(&path, contents).unwrap();
+            Self(path)
+        }
+    }
+
+    impl Drop for TempPolicyFile {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
+
+    #[test]
+    fn signing_policy_file_preserves_exact_bytes() {
+        let source = b"approve();\n";
+        let file = TempPolicyFile::new("plc", source);
+        let policy = read_signing_policy(&file.0).unwrap();
+        let (_, expected_hash) =
+            build_signing_policy_value(common::psbt::ENGINE_ID_PROGRAM, 0, source);
+
+        assert_eq!(policy.script, source);
+        assert_eq!(policy.hash(), expected_hash);
+    }
+
+    #[test]
+    fn signing_policy_file_extension_is_case_sensitive() {
+        let file = TempPolicyFile::new("PLC", b"approve();");
+        let error = read_signing_policy(&file.0).unwrap_err();
+        assert!(error.to_string().contains("case-sensitive .plc extension"));
+    }
+
+    #[test]
+    fn repeated_signing_policy_files_are_deduplicated() {
+        let first = TempPolicyFile::new("plc", b"approve();");
+        let second = TempPolicyFile::new("plc", b"approve();");
+        let policies = read_signing_policies(&[first.0.clone(), second.0.clone()]).unwrap();
+
+        assert_eq!(policies.len(), 1);
+        assert_eq!(policies[0].script, b"approve();");
+    }
+
+    #[test]
+    fn cli_accepts_repeatable_signing_policy_files() {
+        let register = Cli::try_parse_from([
+            "vnd-bitcoin-cli",
+            "register_account",
+            "--name",
+            "test",
+            "--descriptor_template",
+            "wpkh(@0/**)",
+            "--keys_info",
+            "xpub",
+            "--signing-policy",
+            "first.plc",
+            "--signing-policy",
+            "second.plc",
+        ])
+        .unwrap();
+        let CliCommand::RegisterAccount {
+            signing_policies, ..
+        } = register.command
+        else {
+            panic!("unexpected command");
+        };
+        assert_eq!(signing_policies.len(), 2);
+
+        let sign = Cli::try_parse_from([
+            "vnd-bitcoin-cli",
+            "sign_psbt",
+            "--psbt",
+            "cHNidP8=",
+            "--signing-policy",
+            "first.plc",
+            "--signing-policy",
+            "second.plc",
+        ])
+        .unwrap();
+        let CliCommand::SignPsbt {
+            signing_policies, ..
+        } = sign.command
+        else {
+            panic!("unexpected command");
+        };
+        assert_eq!(signing_policies.len(), 2);
+
+        let hash = Cli::try_parse_from([
+            "vnd-bitcoin-cli",
+            "signing_policy_hash",
+            "--policy",
+            "policy.plc",
+        ])
+        .unwrap();
+        assert!(matches!(hash.command, CliCommand::SigningPolicyHash { .. }));
+    }
 }
