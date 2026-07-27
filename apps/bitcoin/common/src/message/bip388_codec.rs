@@ -3,7 +3,7 @@
 //! ```text
 //! WalletPolicy    = { 0: tstr template, 1: [* KeyInformation] }
 //! KeyInformation  = { 0: bstr xpub_bytes, ? 1: KeyOrigin }   // origin omitted if None
-//! KeyOrigin       = { 0: uint fingerprint, 1: [* uint] path }
+//! KeyOrigin       = { 0: uint fingerprint, 1: [* uint] path, ? 2: bstr policy_hash }
 //! ```
 //!
 //! Used via `#[cbor(with = "bip388_codec")]` on the
@@ -110,13 +110,21 @@ fn encode_key_origin<W: Write>(
     origin: &KeyOrigin,
     e: &mut Encoder<W>,
 ) -> Result<(), encode::Error<W::Error>> {
-    e.map(2)?;
+    e.map(if origin.signing_policy_hash.is_some() {
+        3
+    } else {
+        2
+    })?;
     e.u8(0)?;
     e.u32(origin.fingerprint)?;
     e.u8(1)?;
     e.array(origin.derivation_path.len() as u64)?;
     for step in &origin.derivation_path {
         e.u32(u32::from(*step))?;
+    }
+    if let Some(hash) = origin.signing_policy_hash {
+        e.u8(2)?;
+        e.bytes(&hash)?;
     }
     Ok(())
 }
@@ -127,6 +135,7 @@ fn decode_key_origin<'b>(d: &mut Decoder<'b>) -> Result<KeyOrigin, cbor_decode::
         .ok_or_else(|| cbor_decode::Error::message("indefinite-length maps not supported"))?;
     let mut fingerprint: Option<u32> = None;
     let mut path: Option<Vec<ChildNumber>> = None;
+    let mut signing_policy_hash: Option<[u8; 32]> = None;
     for _ in 0..n {
         match d.u8()? {
             0 => fingerprint = Some(d.u32()?),
@@ -140,6 +149,13 @@ fn decode_key_origin<'b>(d: &mut Decoder<'b>) -> Result<KeyOrigin, cbor_decode::
                 }
                 path = Some(v);
             }
+            2 => {
+                signing_policy_hash = Some(
+                    d.bytes()?
+                        .try_into()
+                        .map_err(|_| cbor_decode::Error::message("invalid policy hash"))?,
+                );
+            }
             _ => d.skip()?,
         }
     }
@@ -149,5 +165,40 @@ fn decode_key_origin<'b>(d: &mut Decoder<'b>) -> Result<KeyOrigin, cbor_decode::
     Ok(KeyOrigin {
         fingerprint,
         derivation_path,
+        signing_policy_hash,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::message::Account;
+    use alloc::format;
+
+    const XPUB: &str = "tpubDCtKfsNyRhULjZ9XMS4VKKtVcPdVDi8MKUbcSD9MJDyjRu1A2ND5MiipozyyspBT9bg8upEp7a8EAgFxNxXn1d7QkdbL52Ty5jiSLcxPt1P";
+
+    #[test]
+    fn account_roundtrip_preserves_signing_policy_hash() {
+        let hash = [0x5a; 32];
+        let key = KeyInformation::try_from(
+            format!("[f5acc2fd/84'/1'/0'/{}]{}", hex::encode(hash), XPUB).as_str(),
+        )
+        .unwrap();
+        let account =
+            Account::WalletPolicy(bip388::WalletPolicy::new("wpkh(@0/**)", vec![key]).unwrap());
+
+        let encoded = minicbor::to_vec(&account).unwrap();
+        let decoded: Account = minicbor::decode(&encoded).unwrap();
+
+        assert_eq!(decoded, account);
+        let Account::WalletPolicy(policy) = decoded;
+        assert_eq!(
+            policy.key_information()[0]
+                .origin_info
+                .as_ref()
+                .unwrap()
+                .signing_policy_hash,
+            Some(hash)
+        );
+    }
 }

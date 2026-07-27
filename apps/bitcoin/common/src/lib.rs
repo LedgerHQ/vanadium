@@ -3,7 +3,7 @@
 extern crate alloc;
 
 pub mod account;
-pub use bip388;
+pub mod bip388;
 pub mod errors;
 pub mod fastpsbt;
 pub mod identity;
