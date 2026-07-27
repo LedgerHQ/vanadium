@@ -1,8 +1,10 @@
 pub mod account;
 pub mod id_auth;
+pub mod signing_policy;
 
 pub use account::*;
 pub use id_auth::*;
+pub use signing_policy::*;
 
 use bitcoin::psbt;
 

@@ -121,6 +121,20 @@ pub enum Error {
     MissingMusigSession,
     #[n(47)]
     MissingMusigPubnonce,
+
+    // Signing policies
+    #[n(48)]
+    InvalidSigningPolicy,
+    #[n(49)]
+    SigningPolicyMissing,
+    #[n(50)]
+    UnsupportedPolicyEngine,
+    #[n(51)]
+    PolicyExecutionFailed,
+    /// Deprecated: signing policies are now enforced for `musig()` keys too.
+    /// Kept as a reserved code so error numbering stays stable on the wire.
+    #[n(52)]
+    SigningPolicyUnsupportedForMusig,
 }
 
 impl fmt::Display for Error {
@@ -200,6 +214,17 @@ impl fmt::Display for Error {
                 f,
                 "MuSig2 round 2 requires this device's pubnonce in the PSBT but it is missing"
             ),
+
+            InvalidSigningPolicy => write!(f, "Invalid or malformed signing policy in the PSBT"),
+            SigningPolicyMissing => write!(
+                f,
+                "A key is bound to a signing policy that is not present in the PSBT"
+            ),
+            UnsupportedPolicyEngine => write!(f, "Unsupported signing-policy engine"),
+            PolicyExecutionFailed => write!(f, "Failed to compile or evaluate a signing policy"),
+            SigningPolicyUnsupportedForMusig => {
+                write!(f, "Signing policies are not supported for MuSig2 keys")
+            }
         }
     }
 }
