@@ -1,9 +1,10 @@
 This document details the specifications of extensions to the PSBT format used by the Vanadium Bitcoin app.
 
-Two extensions are currently defined:
+Three extensions are currently defined:
 
 - **Accounts**: The signing flow uses BIP-388 wallet policies (or other account abstractions) to identify inputs and outputs that belong to known accounts. The PSBT contains the necessary information to easily verify that UTXOs belong to the claimed accounts.
 - **Authenticated outputs**: Outputs that do not belong to known accounts can be *authenticated* by attaching a signature from a pubkey with an established Root of Trust.
+- **Signing policies**: Wallet-policy keys can commit to programs that inspect transaction aggregates and decide whether the key may sign.
 
 # Accounts and coordinates
 
@@ -33,9 +34,13 @@ The wallet policy is serialized as the concatenation of:
   - If there is no key origin information, a single byte 0, followed by a 78-byte serialized xpub
   - If there is key origin information, the concatenation of
     - a single byte 1
-    - 4 bytes: key fingerprint
-    - 1 byte: length _k_ of the key origin derivation
-    - 4 * _k_ bytes: the concatenation of each derivation step, each represented as a 4-byte little-endian number.
+    - 4 bytes: key fingerprint, big-endian
+    - compact-size length _k_ of the key origin derivation
+    - 4 * _k_ bytes: the concatenation of each derivation step, each represented as a 4-byte little-endian number
+    - a 78-byte serialized xpub
+
+A signing-policy-bound key (see [Signing policies](#signing-policies)) needs no special
+serialization: its binding lives entirely in an ordinary BIP-388 key origin path.
 
 The coordinates are serialized as:
 - a single byte 0 if not change, 1 if change
@@ -101,3 +106,159 @@ For each output, a signer should verify each provided proof against that output'
 
 - If a proof is well-formed and valid, it may be used for UX authentication if the pubkey is trusted.
 - If a proof is malformed or invalid, signing should be aborted.
+
+
+# Signing policies
+
+A key used in a wallet policy can carry an enforceable **signing program**: a tiny script the
+device evaluates against the transaction before signing with that key. The program can refuse to
+sign, or authorize signing without user confirmation.
+
+## Binding a program to a key
+
+A key is bound to a program through a **standard BIP-32 derivation path**. No non-standard xpub
+or key-origin extension is involved, so the binding is fully compatible with the rest of the
+stack and, in particular, composes with `musig(...)`.
+
+The program's 32-byte SHA-256 is truncated to `31 * 4 = 124` bits and split into four 31-bit
+chunks `p1, p2, p3, p4`: for `i in 0..4`, `pi = big_endian_u32(hash[4*i .. 4*i+4]) & 0x7FFFFFFF`
+(the top bit is cleared, so each chunk is a valid non-hardened child number). A policy-bound key is
+then derived along:
+
+```text
+m / 1347175257' / <coin_type>' / <account>' / p1 / p2 / p3 / p4
+```
+
+`1347175257 = 0x504C4359` is the ASCII string `"PLCY"` read as a big-endian `u32`; `<coin_type>'`
+and `<account>'` are hardened BIP-44-style coin-type and account indices chosen by the client
+(`1'` = testnet, account `0'` by default). The device does not constrain their values. The key
+origin therefore looks like an ordinary BIP-388 origin:
+
+```text
+[fingerprint/1347175257'/1'/0'/p1/p2/p3/p4]xpub
+```
+
+Because the binding lives in the derived **public key** (not in the chaincode), a policy-bound
+xpub used inside `musig(xpub1,xpub2,...)` still contributes its policy-bound key to the aggregate.
+Because the wallet policy (including its xpubs and origins) is committed by the registration proof,
+binding a program to a key changes the account ID and proof of registration.
+
+At signing time the device recognizes the `1347175257'` prefix on the origin path of a key it
+controls, recomputes `p1..p4` from the program supplied in the PSBT, and requires them to match the
+path. If no supplied program matches, signing fails closed. Because the key is derived by ordinary
+BIP-32, any produced signature is bound to the exact program via the derivation path. This applies
+uniformly to plain keys and to `musig(...)` participants.
+
+Account registration receives the full programs separately from the wallet policy. For each
+policy-bound key controlled by the device (recognized by the same path prefix), registration
+requires the matching full program and validates that the selected engine can compile it. One
+program may satisfy multiple keys that reference the same hash.
+
+The device does not display policy source or a policy summary during registration. Users should
+verify the exact policy bytes and hash independently on another trusted device before registering
+the account.
+
+## Global subkey type
+
+Programs are carried in proprietary PSBT global fields (`PSBT_GLOBAL_PROPRIETARY`), using
+proprietary identifier `SIGNING_POLICY` (all capital letters).
+
+| Name | `<subkeytype>` | `<subkeydata>` | `<subkeydata>` Description | `<valuedata>` | `<valuedata>` Description | Versions Allowing Inclusion | Parent BIP |
+|------|----------------|----------------|----------------------------|---------------|---------------------------|-----------------------------|------------|
+| Signing Policy Program | `PSBT_SIGNING_POLICY_GLOBAL_SCRIPT = 0x00` | `<32-byte hash>` | `SHA-256` of the value bytes; its first 124 bits (see [Binding a program to a key](#binding-a-program-to-a-key)) form the derivation-path chunks of any bound key | `<byte engine_id> <byte engine_version> <compact size len> <program bytes>` | The engine identifier and version, then the length-prefixed program source | 0, 2 | No BIP |
+
+`engine_id = 0x01` selects the built-in program language described below (`0x00` is reserved). The
+`engine_id` and `engine_version` are part of the hashed value, so bumping the version invalidates
+previously-registered programs by design.
+
+## The program language
+
+An infix, Rust-like language that runs for its side effects. It is deliberately minimal:
+non-Turing-complete (no loops or functions) and dynamically typed over `Int` (`i64`, satoshis)
+and `Bool`. It supports immutable, block-scoped `let` bindings for naming subexpressions.
+
+Statements run top to bottom. The first **action** reached is terminal:
+
+- `fail();` → refuse to sign with this key.
+- `approve();` → sign **without** user confirmation (honored only if every signing key approves
+  silently).
+- Falling off the end (no action) → sign with the **normal** user-confirmation flow.
+
+Any parse error, runtime type error, arithmetic overflow, divide-by-zero, or exceeded limit causes
+the device to **fail closed** (refuse to sign).
+
+```text
+program  := stmt*
+stmt     := let_stmt | if_stmt | action ";"
+let_stmt := "let" ident "=" expr ";"
+if_stmt  := "if" expr block ("else" (block | if_stmt))?
+block    := "{" stmt* "}"
+action   := ("fail" | "approve") "(" ")"
+expr     := or ; or := and ("||" and)* ; and := cmp ("&&" cmp)*
+cmp      := add (cmp_op add)?              ; comparisons are non-associative
+add      := mul (("+"|"-") mul)* ; mul := unary (("*"|"/") unary)*
+unary    := ("!"|"-") unary | primary
+primary  := int | "true" | "false" | "context" "." ident | ident | "(" expr ")"
+cmp_op   := "==" | "!=" | "<" | "<=" | ">" | ">="
+```
+
+`// line comments` are supported. Programs are capped at 2048 source bytes and 32 levels of
+nesting.
+
+A `let` binding is immutable and **block-scoped**: it is visible from its declaration to the end
+of the enclosing `{}` block. A `let` may not shadow a name already in scope, may not reference
+itself, and may not use a reserved name (`fail`, `approve`). A bare identifier in an expression
+(`primary := ident`) refers to an in-scope binding; an unknown name is a compile error
+(fail-closed).
+
+### The `context` object
+
+A program reads the transaction only through a fixed set of aggregate fields (there is no
+per-input / per-output access in this version). All amounts are in satoshis.
+
+| Field | Type | Meaning |
+|-------|------|---------|
+| `context.inputs_total` | Int | Sum of all input amounts |
+| `context.outputs_total` | Int | Sum of all output amounts |
+| `context.internal_in_total` | Int | Sum of inputs belonging to a recognized account (currently equals `inputs_total`) |
+| `context.external_out_total` | Int | Sum of outputs not belonging to a recognized account (external recipients) |
+| `context.change_total` | Int | Sum of change / internal outputs |
+| `context.fee` | Int | `inputs_total - outputs_total` |
+| `context.fee_percent` | Int | Fee as an integer percentage of `inputs_total`, floored |
+| `context.input_count` | Int | Number of inputs |
+| `context.output_count` | Int | Number of outputs |
+| `context.external_out_count` | Int | Number of external outputs |
+| `context.change_count` | Int | Number of change / internal outputs |
+| `context.tx_version` | Int | Transaction version |
+| `context.locktime` | Int | Transaction fallback locktime (0 if unset) |
+
+The `context` values are only trustworthy after the account-coordinate script checks are verified;
+the device gates silent signing on that verification succeeding.
+
+### Examples
+
+```rust
+// Spending cap: sign silently for small external spends, else ask the user.
+if context.external_out_total <= 100000 { approve(); }
+
+// Fee cap: refuse if the absolute fee or the fee percentage is too high.
+if context.fee > 50000 || context.fee_percent > 10 { fail(); }
+
+// Self-transfer only: silent if fully internal, else refuse.
+if context.external_out_total == 0 { approve(); } else { fail(); }
+
+// Refuse over a hard cap; silent when small; else normal user confirmation.
+if context.fee > 50000               { fail(); }
+if context.external_out_total > 5000000 { fail(); }
+if context.external_out_total <= 100000 { approve(); }
+
+// `let` names a value once and reuses it.
+let cap = 100000;
+if context.fee > cap / 10 { fail(); }
+if context.external_out_total <= cap { approve(); }
+```
+
+Signing policies are enforced for `musig(...)` participants as well as plain keys: when a
+device-controlled musig participant is policy-bound, the program is evaluated before the device
+contributes its nonce or partial signature, and a `fail()` makes the device abstain from the musig
+session entirely.

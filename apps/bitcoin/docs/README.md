@@ -25,13 +25,73 @@ They are documented in [PSBT.md](PSBT.md).
 - **Authenticated cosigner xpubs**: when registering a multi-key wallet policy, each cosigner xpub can be accompanied by a Schnorr signature from a registered identity key, so the device labels the key with the cosigner's name during the registration review.
 - **Multi-account spends**: a single PSBT can spend from multiple known wallet policies; the review shows the net amount spent or received for each affected account.
 - **Resident keys**: BIP-32 keys derived from a seed generated and stored inside the app and never exported. Resident keys can be used as keys in wallet policies, and the app supports PSBT signing with them.
+- **Signing policies**: wallet-policy keys can commit to programs that inspect transaction aggregates, refuse signing, or authorize signing without user confirmation. See [PSBT.md](PSBT.md#signing-policies).
 
 ## Planned features
 
 - [BIP-327](https://github.com/bitcoin/bips/blob/master/bip-0327.mediawiki) MuSig2 support
 - [BIP-352](https://github.com/bitcoin/bips/blob/master/bip-0352.mediawiki) Silent Payments support. Silent Payment addresses can be added as a new type of account - but they could also be used as *identity pubkeys*. This would allow a DNS-based Root of Trust that doesn't require an explicit registration step.
 - DNSSEC-based authentication for identity pubkeys. Similar to [BIP-353](https://github.com/bitcoin/bips/blob/master/bip-0353.mediawiki) but for identity pubkeys.
-- Signing policies: derive keys that will only sign transactions (and possibly auto-sign) if they satisfy certain spending policies.
+
+# Signing-policy CLI workflow
+
+Signing programs are raw `.plc` files. The CLI reads every byte exactly as stored; whitespace and
+trailing newlines affect the hash. File extensions are case-sensitive.
+
+Start the interactive client with the desired transport, for example:
+
+```shell
+cargo run --manifest-path apps/bitcoin/client/Cargo.toml --bin vnd_bitcoin_cli -- --sym
+```
+
+Enter the following commands at the client prompt.
+
+Compute a program's hash and the BIP-32 origin path a key must use to bind to it:
+
+```text
+signing_policy_hash --policy fee-cap.plc
+```
+
+This prints the canonical hash and the derivation path
+`1347175257'/<coin_type>'/<account>'/p1/p2/p3/p4` (the `p1..p4` chunks are derived from the hash;
+see [PSBT.md](PSBT.md#binding-a-program-to-a-key)). Use `--coin-type` (default 1 = testnet) and
+`--account` (default 0) to pick the BIP-44-style indices.
+
+Fetch the device's xpub at that path, and use it (with the same origin path) as the key that the
+policy binds:
+
+```text
+get_pubkey --tree standard --path "1347175257'/1'/0'/p1/p2/p3/p4"
+```
+
+```text
+[f5acc2fd/1347175257'/1'/0'/p1/p2/p3/p4]tpub...
+```
+
+Register the account while supplying the full program used by each local bound key:
+
+```text
+register_account \
+	--name "Policy account" \
+	--descriptor_template "wpkh(@0/**)" \
+	--keys_info "[f5acc2fd/1347175257'/1'/0'/p1/p2/p3/p4]tpub..." \
+	--signing-policy fee-cap.plc
+```
+
+Before signing, supply the same program so the CLI inserts its canonical entry into the PSBT global
+map. The input may be PSBTv0 or PSBTv2; PSBTv0 is converted to PSBTv2 before insertion.
+
+```text
+sign_psbt \
+	--psbt "$BASE64_PSBT" \
+	--signing-policy fee-cap.plc
+```
+
+`--signing-policy` may be repeated. Identical programs are deduplicated by hash. During
+registration the device shows the full canonical hash of the policy bound to each local key, but
+not the policy source or a summary of it; therefore, compute the canonical hash of the exact `.plc`
+bytes independently on another trusted device, and compare it with the hash shown on screen before
+registering the account.
 
 # Commands
 
@@ -66,10 +126,18 @@ Shows the identity key and its name to the user for confirmation. After approval
 
 ## `register_account`
 
-**Inputs:** The account name and description; an optional list of registered identity keys with their proofs of registration; an optional list of per-key identity signatures over the cosigner xpubs; a boolean `show_cleartext` flag.\
+**Inputs:** The account name and description; zero or more full signing programs; an optional list of registered identity keys with their proofs of registration; an optional list of per-key identity signatures over the cosigner xpubs; a boolean `show_cleartext` flag.\
 **Outputs:** The account id and the *Proof-of-Registration* of the account (HMAC).
 
 Shows an account for inspection to the user; after confirmation, returns the proof of registration. When `show_cleartext` is true (and the descriptor template is considered "safe enough" to be summarized), the device shows a human-readable description of each spending path instead of the raw descriptor template.
+
+A key is recognized as policy-bound when its origin path has the signing-policy shape
+`m/1347175257'/<coin_type>'/<account>'/p1/p2/p3/p4` (see
+[PSBT.md](PSBT.md#binding-a-program-to-a-key)). For
+each such internal key, the corresponding full program must be supplied and must compile; the
+device recomputes the path chunks from the program and requires them to match. The policy's full
+32-byte hash is then shown in lowercase hexadecimal next to the key it is bound to, tagged
+`Key @<i> signing policy`; the policy source itself is not shown on-device.
 
 For each cosigner key in the wallet policy, the device labels it on screen as:
 - the name of a registered identity key, if a valid signature over its xpub from that key is provided;
@@ -93,7 +161,7 @@ The provided proof of registration is validated against the (name, account) pair
 
 ## `sign_psbt`
 
-**Inputs:** A PSBTv2 filled with all the necessary information to sign the transaction, including account information for each affected input and output (see [PSBT.md](PSBT.md)).\
+**Inputs:** A PSBTv2 filled with all the necessary information to sign the transaction, including account information for each affected input and output and any signing programs required by policy-bound keys (see [PSBT.md](PSBT.md)).\
 **Outputs:** Partial signatures (or any other object the signer intends to add to the psbt).
 
 Processes (and, if appropriate, signs) a PSBT, after validating the action with the user.
@@ -107,5 +175,10 @@ The device also shows extra warnings before the transaction review when:
 - the transaction fee exceeds a configured fraction of the total input amount (high-fee warning).
 
 Both the standard tree or the resident tree are supported during signing.
+
+For each policy-bound signing attempt, the device verifies the program hash and evaluates the
+program against the transaction. `fail()` suppresses that key's signature, `approve()` permits
+signing without confirmation when every signing attempt approves silently, and a program that
+reaches no action uses the normal confirmation flow.
 
 *Remark*: The Ledger bitcoin app also takes the `wallet_policy` (and its *Proof-of-Registration* if needed) as a separate input. Here, the account information and the coordinates are included in the PSBT itself, for each affected input/output of the transaction.
