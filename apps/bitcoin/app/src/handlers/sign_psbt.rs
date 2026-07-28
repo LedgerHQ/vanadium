@@ -1194,9 +1194,13 @@ fn scan_signing_policies(
                     .expect("kp must be musig because is_musig() returned true");
                 for &participant_idx in indices {
                     let key_info = &wallet_policy.key_information()[participant_idx as usize];
-                    if let Some(local) =
-                        resolve_local_key(key_info, None, standard_fpr, resident_fpr, policy_bindings)?
-                    {
+                    if let Some(local) = resolve_local_key(
+                        key_info,
+                        None,
+                        standard_fpr,
+                        resident_fpr,
+                        policy_bindings,
+                    )? {
                         attempts.push(local.policy_hash);
                     }
                 }
@@ -1345,8 +1349,13 @@ pub async fn handle_sign_psbt(app: &mut sdk::App, psbt: &[u8]) -> Result<Respons
     let (policy_decisions, skip_confirmation) = if policies_present {
         let standard_fpr = sdk::curve::Secp256k1::get_master_fingerprint();
         let resident_fpr = get_resident_master_fingerprint()?;
-        let scan =
-            scan_signing_policies(&psbt, &summary, standard_fpr, resident_fpr, &policy_bindings)?;
+        let scan = scan_signing_policies(
+            &psbt,
+            &summary,
+            standard_fpr,
+            resident_fpr,
+            &policy_bindings,
+        )?;
         // The context aggregates (internal/external split, fee, …) are only
         // trustworthy once verification confirms the account-coordinate script
         // checks. Silent signing suppresses the prompt below, so it is gated on
@@ -1385,6 +1394,10 @@ pub async fn handle_sign_psbt(app: &mut sdk::App, psbt: &[u8]) -> Result<Respons
             app.show_info(Icon::Failure, "Transaction rejected");
 
             return Err(Error::UserRejected);
+        }
+    } else {
+        if summary.warn_unverified_inputs {
+            return Err(Error::CannotSignSilently);
         }
     }
 
@@ -2261,7 +2274,16 @@ mod tests {
 
     /// One-input/one-output PSBT spending from the policy account to an external
     /// P2WPKH output of `external_value` sat (fee is a fixed 10_000 sat).
-    fn build_policy_wpkh_psbt(wallet_policy: &WalletPolicy, external_value: u64) -> Psbt {
+    ///
+    /// When `with_non_witness_utxo` is true, the funding transaction is attached
+    /// as the input's `non_witness_utxo` (and the input is pointed at it), so the
+    /// SegWit v0 input's amount is verified; otherwise the input is unverified and
+    /// sets `warn_unverified_inputs`.
+    fn build_policy_wpkh_psbt(
+        wallet_policy: &WalletPolicy,
+        external_value: u64,
+        with_non_witness_utxo: bool,
+    ) -> Psbt {
         let secp = Secp256k1::new();
         let expected_script = wallet_policy.to_script(false, 0).unwrap();
 
@@ -2287,7 +2309,7 @@ mod tests {
         let mut psbt = Psbt::from_unsigned_tx(unsigned_tx).unwrap();
         psbt.inputs[0].witness_utxo = Some(TxOut {
             value: Amount::from_sat(external_value + 10_000),
-            script_pubkey: expected_script,
+            script_pubkey: expected_script.clone(),
         });
 
         // bip32_derivation so `prepare_psbt` can locate this input's coordinates.
@@ -2314,8 +2336,38 @@ mod tests {
             .collect();
         psbt.inputs[0].bip32_derivation.insert(
             child.public_key,
-            (Fingerprint::from(origin.fingerprint.to_be_bytes()), full_path),
+            (
+                Fingerprint::from(origin.fingerprint.to_be_bytes()),
+                full_path,
+            ),
         );
+
+        if with_non_witness_utxo {
+            // Attach the funding transaction and point the input at it, so the
+            // SegWit v0 input's amount is verified (no `warn_unverified_inputs`).
+            let prev_tx = Transaction {
+                version: transaction::Version::TWO,
+                lock_time: absolute::LockTime::ZERO,
+                input: vec![TxIn {
+                    previous_output: OutPoint {
+                        txid: Txid::from_byte_array([0x11; 32]),
+                        vout: 0,
+                    },
+                    script_sig: ScriptBuf::new(),
+                    sequence: Sequence::ENABLE_RBF_NO_LOCKTIME,
+                    witness: bitcoin::Witness::new(),
+                }],
+                output: vec![TxOut {
+                    value: Amount::from_sat(external_value + 10_000),
+                    script_pubkey: expected_script,
+                }],
+            };
+            psbt.unsigned_tx.input[0].previous_output = OutPoint {
+                txid: prev_tx.compute_txid(),
+                vout: 0,
+            };
+            psbt.inputs[0].non_witness_utxo = Some(prev_tx);
+        }
 
         psbt
     }
@@ -2331,7 +2383,7 @@ mod tests {
     fn test_signing_policy_evaluated_once_per_hash() {
         let program = b"approve();";
         let (wallet_policy, hash) = policy_bound_wpkh(program);
-        let mut psbt = build_policy_wpkh_psbt(&wallet_policy, 50_000);
+        let mut psbt = build_policy_wpkh_psbt(&wallet_policy, 50_000, true);
         set_signing_policy(&mut psbt, ENGINE_ID_PROGRAM, 0, program);
         let serialized = serialize_as_psbtv2(&psbt);
         let parsed = fastpsbt::Psbt::parse(&serialized).unwrap();
@@ -2366,10 +2418,11 @@ mod tests {
 
     #[test]
     fn test_handle_sign_psbt_policy_silent_approve() {
-        // external_out_total = 50_000 <= 100_000 → approve() → sign silently.
+        // external_out_total = 50_000 <= 100_000 → approve(). The input is
+        // verified (non-witness UTXO attached), so the device signs silently.
         let program = b"if context.external_out_total <= 100000 { approve(); }";
         let (wp, _hash) = policy_bound_wpkh(program);
-        let mut psbt = build_policy_wpkh_psbt(&wp, 50_000);
+        let mut psbt = build_policy_wpkh_psbt(&wp, 50_000, true);
         finalize_policy_psbt(&mut psbt, &wp);
         set_signing_policy(&mut psbt, ENGINE_ID_PROGRAM, 0, program);
 
@@ -2402,11 +2455,30 @@ mod tests {
     }
 
     #[test]
+    fn test_handle_sign_psbt_policy_silent_approve_fails_with_unverified_inputs() {
+        // The policy approves silently, but the SegWit v0 input carries no
+        // non-witness UTXO, so its amount is unverified. Silent signing must be
+        // refused (the aggregate context a silent decision relies on cannot be
+        // trusted), rather than signing without user confirmation.
+        let program = b"if context.external_out_total <= 100000 { approve(); }";
+        let (wp, _hash) = policy_bound_wpkh(program);
+        let mut psbt = build_policy_wpkh_psbt(&wp, 50_000, false);
+        finalize_policy_psbt(&mut psbt, &wp);
+        set_signing_policy(&mut psbt, ENGINE_ID_PROGRAM, 0, program);
+
+        let result = sdk::executor::block_on(handle_sign_psbt(
+            &mut sdk::App::singleton(),
+            &serialize_as_psbtv2(&psbt),
+        ));
+        assert_eq!(result, Err(Error::CannotSignSilently));
+    }
+
+    #[test]
     fn test_handle_sign_psbt_policy_deny() {
         // external_out_total = 50_000 > 40_000 → fail() → no signature produced.
         let program = b"if context.external_out_total > 40000 { fail(); }";
         let (wp, _hash) = policy_bound_wpkh(program);
-        let mut psbt = build_policy_wpkh_psbt(&wp, 50_000);
+        let mut psbt = build_policy_wpkh_psbt(&wp, 50_000, true);
         finalize_policy_psbt(&mut psbt, &wp);
         set_signing_policy(&mut psbt, ENGINE_ID_PROGRAM, 0, program);
 
@@ -2428,7 +2500,7 @@ mod tests {
         // approve silently. Context construction must reject it instead.
         let program = b"if context.external_out_total < 0 { approve(); }";
         let (wp, _hash) = policy_bound_wpkh(program);
-        let mut psbt = build_policy_wpkh_psbt(&wp, i64::MAX as u64 + 1);
+        let mut psbt = build_policy_wpkh_psbt(&wp, i64::MAX as u64 + 1, true);
         finalize_policy_psbt(&mut psbt, &wp);
         set_signing_policy(&mut psbt, ENGINE_ID_PROGRAM, 0, program);
 
@@ -2445,7 +2517,7 @@ mod tests {
         // program is attached to the PSBT → fail closed.
         let program = b"approve();";
         let (wp, _hash) = policy_bound_wpkh(program);
-        let mut psbt = build_policy_wpkh_psbt(&wp, 50_000);
+        let mut psbt = build_policy_wpkh_psbt(&wp, 50_000, true);
         finalize_policy_psbt(&mut psbt, &wp);
         // NOTE: deliberately not calling set_signing_policy.
 

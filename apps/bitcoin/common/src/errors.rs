@@ -131,10 +131,9 @@ pub enum Error {
     UnsupportedPolicyEngine,
     #[n(51)]
     PolicyExecutionFailed,
-    /// Deprecated: signing policies are now enforced for `musig()` keys too.
-    /// Kept as a reserved code so error numbering stays stable on the wire.
+
     #[n(52)]
-    SigningPolicyUnsupportedForMusig,
+    CannotSignSilently,
 }
 
 impl fmt::Display for Error {
@@ -222,8 +221,8 @@ impl fmt::Display for Error {
             ),
             UnsupportedPolicyEngine => write!(f, "Unsupported signing-policy engine"),
             PolicyExecutionFailed => write!(f, "Failed to compile or evaluate a signing policy"),
-            SigningPolicyUnsupportedForMusig => {
-                write!(f, "Signing policies are not supported for MuSig2 keys")
+            CannotSignSilently => {
+                write!(f, "Cannot sign silently due to policy restrictions")
             }
         }
     }

@@ -163,7 +163,7 @@ async fn test_e2e_policy_bound_account() {
         .unwrap();
 
     let key_info = format!("[{:08x}/{}]{}", fpr, path_str, account_xpub);
-    let wallet_policy = parse_wallet_policy("wpkh(@0/**)", &[key_info.as_str()]).unwrap();
+    let wallet_policy = parse_wallet_policy("tr(@0/**)", &[key_info.as_str()]).unwrap();
     let account_name = "Policy-bound account";
 
     let (_, por) = client
@@ -179,13 +179,17 @@ async fn test_e2e_policy_bound_account() {
         .unwrap();
     let por = por.dangerous_as_bytes();
 
-    // Receiving key at .../0/0 and the input's P2WPKH scriptPubKey.
+    // Receiving key at .../0/0 and the input's P2TR scriptPubKey.
     let secp = bitcoin::secp256k1::Secp256k1::new();
     let child = account_xpub
         .derive_pub(&secp, &DerivationPath::from_str("m/0/0").unwrap())
         .unwrap();
-    let expected_pubkey = child.public_key.serialize().to_vec();
+    let internal_key = child.public_key.x_only_public_key().0;
     let input_spk = wallet_policy.to_script(false, 0).unwrap();
+    // For a key-path spend the device signs with the tap-tweaked output key,
+    // which is exactly the 32-byte key pushed by the P2TR scriptPubKey
+    // (`OP_1 <32-byte output key>`).
+    let expected_pubkey = input_spk.as_bytes()[2..].to_vec();
     let full_path = DerivationPath::from_str(&format!("m/{}/0/0", path_str)).unwrap();
 
     // A 100_000-sat input; the fee is (100_000 - output_value). The policy caps
@@ -216,9 +220,12 @@ async fn test_e2e_policy_bound_account() {
             value: Amount::from_sat(100_000),
             script_pubkey: input_spk.clone(),
         });
-        psbt.inputs[0].bip32_derivation.insert(
-            child.public_key,
-            (Fingerprint::from(fpr.to_be_bytes()), full_path.clone()),
+        psbt.inputs[0].tap_key_origins.insert(
+            internal_key,
+            (
+                vec![],
+                (Fingerprint::from(fpr.to_be_bytes()), full_path.clone()),
+            ),
         );
         prepare_psbt(&mut psbt, &[(&wallet_policy, account_name, &por)]).unwrap();
         insert_signing_policies(
