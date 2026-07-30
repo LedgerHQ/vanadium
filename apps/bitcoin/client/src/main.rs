@@ -3,6 +3,7 @@ use bitcoin::psbt::Psbt;
 
 use clap::{CommandFactory, Parser, Subcommand};
 use common::por::ProofOfRegistration;
+use common::psbt::signing_policy::{signing_policy_key_path, SigningPolicy, ENGINE_ID_RISCV};
 use rustyline::completion::{Completer, Pair};
 use rustyline::error::ReadlineError;
 use rustyline::highlight::{CmdKind, Highlighter};
@@ -18,6 +19,7 @@ use sdk::linewriter::FileLineWriter;
 use sdk::vanadium_client::client_utils::{create_default_client, ClientType};
 
 use std::borrow::Cow;
+use std::path::{Path, PathBuf};
 
 use crate::client::BitcoinClientError;
 
@@ -82,6 +84,19 @@ enum CliCommand {
         /// template on screen (when its confusion score is at most MAX_CONFUSION_SCORE).
         #[clap(long, default_missing_value = "true", num_args = 0..=1)]
         show_cleartext: bool,
+        /// A signing-policy image bound to one of the account's keys. Repeatable.
+        #[clap(long = "signing-policy", value_name = "FILE.vpol")]
+        signing_policies: Vec<PathBuf>,
+    },
+    /// Print a signing policy's hash and the derivation path a key must use to
+    /// commit to it.
+    SigningPolicyHash {
+        #[clap(long = "signing-policy", value_name = "FILE.vpol")]
+        policy: PathBuf,
+        #[clap(long, default_value_t = 1)]
+        coin_type: u32,
+        #[clap(long, default_value_t = 0)]
+        account: u32,
     },
     RegisterIdentityKey {
         #[clap(long)]
@@ -111,6 +126,9 @@ enum CliCommand {
         identity_index: Option<u32>,
     },
     SignPsbt {
+        /// A signing-policy image required by a policy-bound key. Repeatable.
+        #[clap(long = "signing-policy", value_name = "FILE.vpol")]
+        signing_policies: Vec<PathBuf>,
         #[clap(long)]
         psbt: String,
     },
@@ -274,6 +292,61 @@ fn parse_keys_info(
     Ok(keys_info)
 }
 
+/// Read a `.vpol` image verbatim and wrap it in the transport envelope.
+///
+/// The extension check is case-sensitive on purpose: the file's exact bytes decide
+/// the policy hash, hence the key, so being sloppy about which file was read is not
+/// a small mistake.
+fn read_signing_policy(path: &Path) -> Result<SigningPolicy, String> {
+    if path.extension().and_then(|e| e.to_str()) != Some("vpol") {
+        return Err(format!(
+            "{}: a signing policy must be a .vpol file",
+            path.display()
+        ));
+    }
+    let image = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    Ok(SigningPolicy::new(ENGINE_ID_RISCV, 0, image))
+}
+
+/// Read every policy, deduplicating by hash.
+///
+/// Two files with the same hash are the same policy, so one is dropped. Two files
+/// that hash differently but were meant to be the same policy is a mistake this
+/// cannot detect — but a hash collision with different content is impossible, so
+/// same-hash-different-bytes is worth reporting.
+fn read_signing_policies(paths: &[PathBuf]) -> Result<Vec<SigningPolicy>, String> {
+    let mut out: Vec<SigningPolicy> = Vec::new();
+    for path in paths {
+        let policy = read_signing_policy(path)?;
+        let hash = policy.hash();
+        match out.iter().find(|p| p.hash() == hash) {
+            Some(existing) if existing.program != policy.program => {
+                return Err(format!(
+                    "{}: two different programs with the same hash",
+                    path.display()
+                ))
+            }
+            Some(_) => continue,
+            None => out.push(policy),
+        }
+    }
+    Ok(out)
+}
+
+/// Render a derivation path the way descriptors do.
+fn format_derivation_path(path: &[u32]) -> String {
+    let mut out = String::from("m");
+    for &step in path {
+        out.push('/');
+        if step & 0x8000_0000 != 0 {
+            out.push_str(&format!("{}'", step & 0x7FFF_FFFF));
+        } else {
+            out.push_str(&step.to_string());
+        }
+    }
+    out
+}
+
 fn parse_wallet_policy(
     descriptor_template: &str,
     keys_info: &str,
@@ -327,6 +400,7 @@ async fn handle_cli_command(
             descriptor_template,
             keys_info,
             show_cleartext,
+            signing_policies,
         } => {
             println!(
                 "Executing register_account for {:?} account: {:?} {:?}",
@@ -338,7 +412,14 @@ async fn handle_cli_command(
             let wallet_policy = parse_wallet_policy(descriptor_template, keys_info)?;
             let account = common::message::Account::WalletPolicy(wallet_policy);
             let (account_id, hmac) = bitcoin_client
-                .register_account(name, &account, None, None, *show_cleartext)
+                .register_account(
+                    name,
+                    &account,
+                    read_signing_policies(signing_policies)?,
+                    None,
+                    None,
+                    *show_cleartext,
+                )
                 .await?;
             println!(
                 "Account {} registered.\nAccount ID: {}\nHMAC: {}",
@@ -346,6 +427,17 @@ async fn handle_cli_command(
                 hex::encode(account_id.as_bytes()),
                 hex::encode(hmac.dangerous_as_bytes())
             );
+        }
+        CliCommand::SigningPolicyHash {
+            policy,
+            coin_type,
+            account,
+        } => {
+            let policy = read_signing_policy(policy)?;
+            let hash = policy.hash();
+            let path = signing_policy_key_path(*coin_type, *account, &hash);
+            println!("hash: {}", hex::encode(hash));
+            println!("path: {}", format_derivation_path(&path));
         }
         CliCommand::RegisterIdentityKey { name, pubkey } => {
             let pubkey_bytes = hex::decode(pubkey).map_err(|_| "Failed to decode pubkey hex")?;
@@ -411,7 +503,10 @@ async fn handle_cli_command(
                 println!("Identity signature: {}", hex::encode(&sig.signature));
             }
         }
-        CliCommand::SignPsbt { psbt } => {
+        CliCommand::SignPsbt {
+            psbt,
+            signing_policies,
+        } => {
             let mut psbt = base64::engine::general_purpose::STANDARD
                 .decode(&psbt)
                 .map_err(|_| "Failed to decode PSBT")?;
@@ -423,6 +518,13 @@ async fn handle_cli_command(
                 assert!(parsed_psbt.version == 0);
                 psbt = common::psbt::psbt_v0_to_v2(&psbt)
                     .map_err(|_| "Failed to convert PSBTv0 to PSBTv2")?;
+            }
+
+            // Programs travel inside the PSBT, spliced into the global map.
+            let policies = read_signing_policies(signing_policies)?;
+            if !policies.is_empty() {
+                psbt = vnd_bitcoin_client::insert_signing_policies(&psbt, &policies)
+                    .map_err(|e| format!("Failed to insert signing policies: {e:?}"))?;
             }
 
             let signed = bitcoin_client.sign_psbt(&psbt).await?;
@@ -571,4 +673,111 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod signing_policy_cli_tests {
+    use super::*;
+
+    fn write(dir: &Path, name: &str, bytes: &[u8]) -> PathBuf {
+        let path = dir.join(name);
+        std::fs::write(&path, bytes).unwrap();
+        path
+    }
+
+    fn tmpdir() -> PathBuf {
+        let base = std::env::temp_dir().join(format!("vpol-cli-{}", std::process::id()));
+        std::fs::create_dir_all(&base).unwrap();
+        base
+    }
+
+    #[test]
+    fn a_policy_file_is_read_verbatim() {
+        // Every byte decides the hash, so the reader must not normalize anything —
+        // not trailing whitespace, not a missing final newline.
+        let dir = tmpdir();
+        let image = b"VPOL\x00\x00\x00\x00 trailing spaces and no newline   ";
+        let path = write(&dir, "verbatim.vpol", image);
+
+        let policy = read_signing_policy(&path).unwrap();
+        assert_eq!(policy.program, image);
+        assert_eq!(policy.engine_id, ENGINE_ID_RISCV);
+        assert_eq!(policy.engine_version, 0);
+    }
+
+    #[test]
+    fn the_extension_is_checked_case_sensitively() {
+        let dir = tmpdir();
+        let ok = write(&dir, "good.vpol", b"image");
+        let bad = write(&dir, "bad.VPOL", b"image");
+        let worse = write(&dir, "worse.bin", b"image");
+
+        assert!(read_signing_policy(&ok).is_ok());
+        assert!(read_signing_policy(&bad).is_err());
+        assert!(read_signing_policy(&worse).is_err());
+    }
+
+    #[test]
+    fn repeated_files_are_deduplicated_by_hash() {
+        let dir = tmpdir();
+        let a = write(&dir, "dedup_a.vpol", b"same image");
+        let b = write(&dir, "dedup_b.vpol", b"same image");
+        let c = write(&dir, "dedup_c.vpol", b"different image");
+
+        let policies =
+            read_signing_policies(&[a.clone(), b, a, c]).unwrap();
+        assert_eq!(policies.len(), 2);
+    }
+
+    #[test]
+    fn a_missing_file_is_reported_with_its_path() {
+        let err = read_signing_policy(Path::new("/nonexistent/policy.vpol")).unwrap_err();
+        assert!(err.contains("policy.vpol"), "{err}");
+    }
+
+    #[test]
+    fn the_derivation_path_renders_hardened_steps() {
+        let path = [0x8000_0000 | 1347175257, 0x8000_0001, 0x8000_0000, 7, 8, 9, 10];
+        assert_eq!(
+            format_derivation_path(&path),
+            "m/1347175257'/1'/0'/7/8/9/10"
+        );
+    }
+
+    #[test]
+    fn the_hash_command_path_matches_the_transport_helper() {
+        let dir = tmpdir();
+        let path = write(&dir, "hashme.vpol", b"an image");
+        let policy = read_signing_policy(&path).unwrap();
+        let hash = policy.hash();
+
+        // The path the CLI prints must be the one the device recomputes.
+        let expected = signing_policy_key_path(1, 0, &hash);
+        assert_eq!(expected[0], 0x8000_0000 | 1347175257);
+        assert_eq!(
+            format_derivation_path(&expected),
+            format_derivation_path(&signing_policy_key_path(1, 0, &policy.hash()))
+        );
+    }
+
+    #[test]
+    fn the_cli_accepts_repeatable_policy_flags() {
+        let cli = Cli::try_parse_from([
+            "vnd_bitcoin_cli",
+            "sign_psbt",
+            "--psbt",
+            "cHNidP8=",
+            "--signing-policy",
+            "one.vpol",
+            "--signing-policy",
+            "two.vpol",
+        ]);
+        let cli = cli.expect("the flag must be repeatable");
+        match cli.command {
+            CliCommand::SignPsbt {
+                signing_policies, ..
+            } => assert_eq!(signing_policies.len(), 2),
+            _ => panic!("unexpected command"),
+        }
+    }
 }
