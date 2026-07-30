@@ -232,6 +232,28 @@ pub(crate) mod test_util {
         pub code_len_override: Option<u32>,
     }
 
+    /// A complete `.vpol` image whose program immediately exits with `decision`.
+    ///
+    /// Handler tests need a policy with a known verdict without caring how it is
+    /// expressed, so the three instructions are encoded here rather than going
+    /// through the engine tests' assembler.
+    pub fn exit_image(decision: u32) -> Vec<u8> {
+        exit_image_labeled(decision, b"")
+    }
+
+    pub fn exit_image_labeled(decision: u32, label: &[u8]) -> Vec<u8> {
+        // addi t0, zero, EXIT ; addi a0, zero, decision ; ecall
+        const EXIT: u32 = 0x0001;
+        let addi = |rd: u32, imm: u32| (imm & 0xFFF) << 20 | rd << 7 | 0x13;
+        let code: Vec<u8> = [addi(5, EXIT), addi(10, decision), 0x0000_0073]
+            .iter()
+            .flat_map(|w| w.to_le_bytes())
+            .collect();
+        let mut b = ImageBuilder::new(code);
+        b.label = label.to_vec();
+        b.build()
+    }
+
     impl ImageBuilder {
         pub fn new(code: Vec<u8>) -> Self {
             Self {
