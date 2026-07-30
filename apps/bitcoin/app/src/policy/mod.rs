@@ -17,6 +17,8 @@ use common::{
 
 pub mod context;
 pub mod engine;
+#[cfg(test)]
+pub mod test_assets;
 
 pub use context::PolicyContext;
 

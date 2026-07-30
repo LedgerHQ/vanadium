@@ -1,0 +1,8 @@
+// Refuse batched payments: at most one external recipient, at most one change
+// output.
+//
+// A host that tries to slip extra recipients into a transaction — the classic
+// way of hiding one output among many during a review — gets no signature from
+// this key. The payment itself is still reviewed on the device as usual.
+if context.external_out_count > 1 { fail(); }
+if context.change_count > 1 { fail(); }

@@ -1442,6 +1442,9 @@ mod tests {
     };
     use hex_literal::hex;
 
+    // Signing programs shipped in `apps/bitcoin/assets/signing_policies`.
+    use crate::policy::test_assets::{ALWAYS_APPROVE, FEE_CAP, SMALL_SPEND_AUTO_APPROVE};
+
     // rust-bitcoin doesn't support Psbtv2, so we use this helper for conversion
     fn serialize_as_psbtv2(psbt: &Psbt) -> Vec<u8> {
         common::psbt::psbt_v0_to_v2(&psbt.serialize()).expect("Failed to convert PSBTv0 to PSBTv2")
@@ -2381,7 +2384,7 @@ mod tests {
 
     #[test]
     fn test_signing_policy_evaluated_once_per_hash() {
-        let program = b"approve();";
+        let program = ALWAYS_APPROVE;
         let (wallet_policy, hash) = policy_bound_wpkh(program);
         let mut psbt = build_policy_wpkh_psbt(&wallet_policy, 50_000, true);
         set_signing_policy(&mut psbt, ENGINE_ID_PROGRAM, 0, program);
@@ -2420,7 +2423,7 @@ mod tests {
     fn test_handle_sign_psbt_policy_silent_approve() {
         // external_out_total = 50_000 <= 100_000 → approve(). The input is
         // verified (non-witness UTXO attached), so the device signs silently.
-        let program = b"if context.external_out_total <= 100000 { approve(); }";
+        let program = SMALL_SPEND_AUTO_APPROVE;
         let (wp, _hash) = policy_bound_wpkh(program);
         let mut psbt = build_policy_wpkh_psbt(&wp, 50_000, true);
         finalize_policy_psbt(&mut psbt, &wp);
@@ -2460,7 +2463,7 @@ mod tests {
         // non-witness UTXO, so its amount is unverified. Silent signing must be
         // refused (the aggregate context a silent decision relies on cannot be
         // trusted), rather than signing without user confirmation.
-        let program = b"if context.external_out_total <= 100000 { approve(); }";
+        let program = SMALL_SPEND_AUTO_APPROVE;
         let (wp, _hash) = policy_bound_wpkh(program);
         let mut psbt = build_policy_wpkh_psbt(&wp, 50_000, false);
         finalize_policy_psbt(&mut psbt, &wp);
@@ -2475,8 +2478,9 @@ mod tests {
 
     #[test]
     fn test_handle_sign_psbt_policy_deny() {
-        // external_out_total = 50_000 > 40_000 → fail() → no signature produced.
-        let program = b"if context.external_out_total > 40000 { fail(); }";
+        // The fee is 10_000 of 60_000 sat of inputs (16.7%), above the 10% cap
+        // of the fee-cap policy → fail() → no signature produced.
+        let program = FEE_CAP;
         let (wp, _hash) = policy_bound_wpkh(program);
         let mut psbt = build_policy_wpkh_psbt(&wp, 50_000, true);
         finalize_policy_psbt(&mut psbt, &wp);
@@ -2515,7 +2519,7 @@ mod tests {
     fn test_handle_sign_psbt_policy_missing_program_errors() {
         // Key is policy-bound (its origin path is a signing-policy path) but no
         // program is attached to the PSBT → fail closed.
-        let program = b"approve();";
+        let program = ALWAYS_APPROVE;
         let (wp, _hash) = policy_bound_wpkh(program);
         let mut psbt = build_policy_wpkh_psbt(&wp, 50_000, true);
         finalize_policy_psbt(&mut psbt, &wp);
@@ -2547,7 +2551,7 @@ mod tests {
     fn test_handle_sign_psbt_musig_policy_silent_approve_yields_nonce() {
         musig_signing::reset_storage_for_tests();
         // external_out_total = 50_000 <= 100_000 → approve() silently.
-        let program = b"if context.external_out_total <= 100000 { approve(); }";
+        let program = SMALL_SPEND_AUTO_APPROVE;
         let (_, hash) = build_signing_policy_value(ENGINE_ID_PROGRAM, 0, program);
         let wallet_policy = make_2of2_policy_keypath(&hash);
 
@@ -2578,8 +2582,9 @@ mod tests {
     #[test]
     fn test_handle_sign_psbt_musig_policy_deny_produces_no_nonce() {
         musig_signing::reset_storage_for_tests();
-        // external_out_total = 50_000 > 40_000 → fail() → no participation.
-        let program = b"if context.external_out_total > 40000 { fail(); }";
+        // The fee is 10_000 of 60_000 sat of inputs (16.7%), above the 10% cap
+        // of the fee-cap policy → fail() → no participation.
+        let program = FEE_CAP;
         let (_, hash) = build_signing_policy_value(ENGINE_ID_PROGRAM, 0, program);
         let wallet_policy = make_2of2_policy_keypath(&hash);
 
@@ -2611,7 +2616,7 @@ mod tests {
     #[test]
     fn test_handle_sign_psbt_musig_policy_missing_program_errors() {
         musig_signing::reset_storage_for_tests();
-        let program = b"approve();";
+        let program = ALWAYS_APPROVE;
         let (_, hash) = build_signing_policy_value(ENGINE_ID_PROGRAM, 0, program);
         let wallet_policy = make_2of2_policy_keypath(&hash);
 

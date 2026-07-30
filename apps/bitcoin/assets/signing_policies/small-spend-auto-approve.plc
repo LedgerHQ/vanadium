@@ -1,0 +1,13 @@
+// Sign small payments without asking; confirm anything bigger as usual.
+//
+// The threshold is measured on what actually leaves the wallet
+// (`external_out_total`), so change coming back to the account does not count
+// towards it. 100000 sat = 0.001 BTC.
+//
+// Silent approval is only honored when every key signing the transaction also
+// approves silently, and when all input amounts could be verified.
+//
+// Note that the fee is not looked at: a host could still turn a small payment
+// into an expensive transaction. See spending-limits.plc for a variant that
+// caps it too.
+if context.external_out_total <= 100000 { approve(); }

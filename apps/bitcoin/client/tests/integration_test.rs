@@ -137,8 +137,7 @@ async fn test_e2e_policy_bound_account() {
     use bitcoin::{Amount, OutPoint, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Txid, Witness};
     use std::str::FromStr;
 
-    const POLICY_SOURCE: &[u8] =
-        b"if context.fee * 10 > context.inputs_total { fail(); } approve();";
+    const POLICY_SOURCE: &[u8] = include_bytes!("../../assets/signing_policies/fee-cap.plc");
 
     let mut setup = setup().await;
     let client = &mut setup.client;

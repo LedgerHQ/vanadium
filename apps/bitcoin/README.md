@@ -83,3 +83,34 @@ If you want to run the V-app on a real device, execute instead:
 The executable client is a Command Line Interface to the features of the Bitcoin V-App, featuring autocomplete and command history.
 
 Once the CLI interface is running, press TAB to see the existing command and their arguments.
+
+### Signing policies (`.plc` files)
+
+Some commands take a *signing program*: a small script that a key of a wallet policy commits to,
+and that the device evaluates before signing with that key — it can refuse to sign, or authorize
+signing without confirmation. Programs are passed as files with the (case-sensitive) `.plc`
+extension; a set of ready-to-use ones lives in
+[assets/signing_policies](assets/signing_policies).
+
+Paths are resolved relative to the directory the client was started from, so from the `client`
+folder a policy is `../assets/signing_policies/<name>.plc`.
+
+A full round-trip, at the CLI prompt:
+
+```text
+signing_policy_hash --policy ../assets/signing_policies/fee-cap.plc
+get_pubkey --tree standard --path "1347175257'/1'/0'/p1/p2/p3/p4"
+register_account --name "Fee-capped account" --descriptor_template "wpkh(@0/**)" --keys_info "[f5acc2fd/1347175257'/1'/0'/p1/p2/p3/p4]tpub..." --signing-policy ../assets/signing_policies/fee-cap.plc
+sign_psbt --psbt "$BASE64_PSBT" --signing-policy ../assets/signing_policies/fee-cap.plc
+```
+
+`signing_policy_hash` prints the program's hash and the BIP-32 path that binds a key to it (the
+`p1..p4` chunks are derived from the hash); `get_pubkey` fetches the device's key at that path,
+which is then used — with the same origin — in the wallet policy. Both `register_account` and
+`sign_psbt` need the program itself, and accept `--signing-policy` more than once when the account
+uses several. A policy-bound key whose program is missing produces no signature.
+
+The device only displays the policy's *hash* when registering the account, so verify it against the
+hash of the exact file bytes computed elsewhere before approving. See
+[assets/signing_policies/README.md](assets/signing_policies/README.md) for what each shipped policy
+does, and [docs/PSBT.md](docs/PSBT.md#signing-policies) for the language and the PSBT encoding.

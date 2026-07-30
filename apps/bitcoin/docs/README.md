@@ -38,6 +38,12 @@ They are documented in [PSBT.md](PSBT.md).
 Signing programs are raw `.plc` files. The CLI reads every byte exactly as stored; whitespace and
 trailing newlines affect the hash. File extensions are case-sensitive.
 
+Ready-to-use programs — a fee cap, spending limits, consolidation-only, ... — are shipped in
+[assets/signing_policies](../assets/signing_policies), documented in
+[its README](../assets/signing_policies/README.md). The examples below use `fee-cap.plc` from that
+folder. Policy paths are resolved relative to the directory the client was started from, which the
+examples assume to be the repository root (see the launch command below).
+
 Start the interactive client with the desired transport, for example:
 
 ```shell
@@ -49,12 +55,12 @@ Enter the following commands at the client prompt.
 Compute a program's hash and the BIP-32 origin path a key must use to bind to it:
 
 ```text
-signing_policy_hash --policy fee-cap.plc
+signing_policy_hash --policy apps/bitcoin/assets/signing_policies/fee-cap.plc
 ```
 
 This prints the canonical hash and the derivation path
 `1347175257'/<coin_type>'/<account>'/p1/p2/p3/p4` (the `p1..p4` chunks are derived from the hash;
-see [PSBT.md](PSBT.md#binding-a-program-to-a-key)). Use `--coin-type` (default 1 = testnet) and
+see [PSBT.md](PSBT.md#binding-a-program-to-a-key)). Use `--coin_type` (default 1 = testnet) and
 `--account` (default 0) to pick the BIP-44-style indices.
 
 Fetch the device's xpub at that path, and use it (with the same origin path) as the key that the
@@ -75,7 +81,7 @@ register_account \
 	--name "Policy account" \
 	--descriptor_template "wpkh(@0/**)" \
 	--keys_info "[f5acc2fd/1347175257'/1'/0'/p1/p2/p3/p4]tpub..." \
-	--signing-policy fee-cap.plc
+	--signing-policy apps/bitcoin/assets/signing_policies/fee-cap.plc
 ```
 
 Before signing, supply the same program so the CLI inserts its canonical entry into the PSBT global
@@ -84,7 +90,7 @@ map. The input may be PSBTv0 or PSBTv2; PSBTv0 is converted to PSBTv2 before ins
 ```text
 sign_psbt \
 	--psbt "$BASE64_PSBT" \
-	--signing-policy fee-cap.plc
+	--signing-policy apps/bitcoin/assets/signing_policies/fee-cap.plc
 ```
 
 `--signing-policy` may be repeated. Identical programs are deduplicated by hash. During

@@ -313,6 +313,9 @@ mod tests {
         psbt::signing_policy::{signing_policy_key_path, SigningPolicy, ENGINE_ID_PROGRAM},
     };
 
+    // Signing programs shipped in `apps/bitcoin/assets/signing_policies`.
+    use crate::policy::test_assets::{ALWAYS_APPROVE, FEE_CAP};
+
     const INTERNAL_XPUB: &str = "tpubDCtKfsNyRhULjZ9XMS4VKKtVcPdVDi8MKUbcSD9MJDyjRu1A2ND5MiipozyyspBT9bg8upEp7a8EAgFxNxXn1d7QkdbL52Ty5jiSLcxPt1P";
     const EXTERNAL_XPUB: &str = "tpubDFWK5mCX28dt6hfy74Bc51jjbWrimXow1bTxCMpJrWqesK3AeZiYn8tcLFW3VoBiHhM9FjKdLWaC3GZVVX5PfGNG3zfbM14bMb1SLym36nN";
 
@@ -386,7 +389,7 @@ mod tests {
 
     #[test]
     fn test_review_pairs_show_full_policy_hash_in_lowercase_hex() {
-        let signing_policy = policy(ENGINE_ID_PROGRAM, 0, b"approve();");
+        let signing_policy = policy(ENGINE_ID_PROGRAM, 0, ALWAYS_APPROVE);
         let hash = signing_policy.hash();
         let key = device_policy_key_info(KeyTree::Standard, 0, &hash);
         let external_key = KeyInformation::try_from(EXTERNAL_XPUB).unwrap();
@@ -400,16 +403,20 @@ mod tests {
             false,
         );
 
-        // The policy hash is shown right after the key it is bound to.
+        // The policy hash is shown right after the key it is bound to, as all
+        // 32 bytes in lowercase hexadecimal.
+        let expected_hex: String = hash
+            .iter()
+            .flat_map(|byte| [byte >> 4, byte & 0x0f])
+            .map(|nibble| char::from(b"0123456789abcdef"[nibble as usize]))
+            .collect();
         let key_pos = pairs
             .iter()
             .position(|p| p.tag == "Key @0 (our key)")
             .expect("the policy-bound key should be shown");
         assert_eq!(pairs[key_pos + 1].tag, "Key @0 signing policy");
-        assert_eq!(
-            pairs[key_pos + 1].value,
-            "8c4fb8b0187df06442b70c7215e8f58ee595357a1e60cbb4916246c83ffd3216"
-        );
+        assert_eq!(expected_hex.len(), 64);
+        assert_eq!(pairs[key_pos + 1].value, expected_hex);
 
         // Keys without a policy get no such pair.
         let external_pos = pairs
@@ -421,7 +428,7 @@ mod tests {
 
     #[test]
     fn test_register_policy_bound_internal_key() {
-        let signing_policy = policy(ENGINE_ID_PROGRAM, 0, b"approve();");
+        let signing_policy = policy(ENGINE_ID_PROGRAM, 0, ALWAYS_APPROVE);
         let key = device_policy_key_info(KeyTree::Standard, 0, &signing_policy.hash());
         let account = account_from_keys("wpkh(@0/**)", vec![key]);
 
@@ -430,7 +437,7 @@ mod tests {
 
     #[test]
     fn test_register_policy_bound_resident_key() {
-        let signing_policy = policy(ENGINE_ID_PROGRAM, 0, b"approve();");
+        let signing_policy = policy(ENGINE_ID_PROGRAM, 0, ALWAYS_APPROVE);
         let key = device_policy_key_info(KeyTree::Resident, 0, &signing_policy.hash());
         let account = account_from_keys("wpkh(@0/**)", vec![key]);
 
@@ -439,7 +446,7 @@ mod tests {
 
     #[test]
     fn test_register_shared_and_repeated_signing_policy() {
-        let signing_policy = policy(ENGINE_ID_PROGRAM, 0, b"approve();");
+        let signing_policy = policy(ENGINE_ID_PROGRAM, 0, ALWAYS_APPROVE);
         let key0 = device_policy_key_info(KeyTree::Standard, 0, &signing_policy.hash());
         let key1 = device_policy_key_info(KeyTree::Standard, 1, &signing_policy.hash());
         let account = account_from_keys("wsh(multi(2,@0/**,@1/**))", vec![key0, key1]);
@@ -449,8 +456,8 @@ mod tests {
 
     #[test]
     fn test_register_multiple_signing_policies() {
-        let first_policy = policy(ENGINE_ID_PROGRAM, 0, b"approve();");
-        let second_policy = policy(ENGINE_ID_PROGRAM, 0, b"if true { approve(); }");
+        let first_policy = policy(ENGINE_ID_PROGRAM, 0, ALWAYS_APPROVE);
+        let second_policy = policy(ENGINE_ID_PROGRAM, 0, FEE_CAP);
         let first_key = device_policy_key_info(KeyTree::Standard, 0, &first_policy.hash());
         let second_key = device_policy_key_info(KeyTree::Standard, 0, &second_policy.hash());
         let account = account_from_keys("wsh(multi(2,@0/**,@1/**))", vec![first_key, second_key]);
@@ -460,7 +467,7 @@ mod tests {
 
     #[test]
     fn test_register_rejects_missing_or_mismatched_program() {
-        let signing_policy = policy(ENGINE_ID_PROGRAM, 0, b"approve();");
+        let signing_policy = policy(ENGINE_ID_PROGRAM, 0, ALWAYS_APPROVE);
         let key = device_policy_key_info(KeyTree::Standard, 0, &signing_policy.hash());
         let account = account_from_keys("wpkh(@0/**)", vec![key]);
 
@@ -468,10 +475,7 @@ mod tests {
         assert_eq!(register(&account, &[]), Err(Error::SigningPolicyMissing));
         // A different program has different path chunks, so it doesn't match.
         assert_eq!(
-            register(
-                &account,
-                &[policy(ENGINE_ID_PROGRAM, 0, b"if true { approve(); }")],
-            ),
+            register(&account, &[policy(ENGINE_ID_PROGRAM, 0, FEE_CAP)]),
             Err(Error::SigningPolicyMissing)
         );
     }
@@ -486,7 +490,7 @@ mod tests {
             Err(Error::PolicyExecutionFailed)
         );
 
-        let unsupported = policy(0xff, 0, b"approve();");
+        let unsupported = policy(0xff, 0, ALWAYS_APPROVE);
         let unsupported_key = device_policy_key_info(KeyTree::Standard, 0, &unsupported.hash());
         let unsupported_account = account_from_keys("wpkh(@0/**)", vec![unsupported_key]);
         assert_eq!(
@@ -494,7 +498,7 @@ mod tests {
             Err(Error::UnsupportedPolicyEngine)
         );
 
-        let unsupported_version = policy(ENGINE_ID_PROGRAM, 1, b"approve();");
+        let unsupported_version = policy(ENGINE_ID_PROGRAM, 1, ALWAYS_APPROVE);
         let unsupported_version_key =
             device_policy_key_info(KeyTree::Standard, 0, &unsupported_version.hash());
         let unsupported_version_account =
@@ -507,7 +511,7 @@ mod tests {
 
     #[test]
     fn test_register_allows_external_keys_and_extra_programs() {
-        let signing_policy = policy(ENGINE_ID_PROGRAM, 0, b"approve();");
+        let signing_policy = policy(ENGINE_ID_PROGRAM, 0, ALWAYS_APPROVE);
         // A purely external key ignores any supplied programs.
         let external_account = make_account(
             "wpkh(@0/**)",
@@ -537,7 +541,7 @@ mod tests {
 
     #[test]
     fn test_register_allows_policy_bound_musig_key() {
-        let signing_policy = policy(ENGINE_ID_PROGRAM, 0, b"approve();");
+        let signing_policy = policy(ENGINE_ID_PROGRAM, 0, ALWAYS_APPROVE);
         let internal_key = device_policy_key_info(KeyTree::Standard, 0, &signing_policy.hash());
         let external_key = KeyInformation::try_from(EXTERNAL_XPUB).unwrap();
         let account = account_from_keys("tr(musig(@0,@1)/**)", vec![internal_key, external_key]);
