@@ -507,6 +507,17 @@ fn main(attempt: Option<Attempt>, state: &mut State) -> Decision {
 `Option<Attempt>` reflects the two invocation kinds, so a program cannot forget to handle the final
 call. `Attempt` carries `input_index`, `attempt_index`, `attempt_count` and `is_musig`.
 
+The ecall table above is the raw ABI. The SDK wraps it idiomatically, by two conventions worth
+stating because the examples rely on them:
+
+- a **fixed-size** out-parameter becomes a return value, so `SELF_PUBKEY` is
+  `fn self_pubkey() -> Result<[u8; 33], Error>` and `TAPTWEAK_PUBKEY` returns the tweaked key and
+  its parity as a pair. Only variable-length results (`INPUT_SCRIPT_PUBKEY`, `PSBT_READ`, …) still
+  take a caller-provided slice, since only the caller knows its capacity;
+- `NOT_FOUND` becomes `Ok(None)`, so `INPUT_ACCOUNT` is
+  `fn input_account(i: u32) -> Result<Option<Coords>, Error>` and absence is distinguished from
+  failure by the type rather than by a sentinel.
+
 Calls that can fail — anything taking an index, anything writing into a buffer, anything that can
 report `NOT_FOUND` — return `Result<_, policy::Error>`. `INPUT_COUNT`, `OUTPUT_COUNT`, `TX_VERSION`,
 `LOCKTIME`, `FEE` and `TOTALS` cannot fail and return their value directly. Since every example
@@ -582,8 +593,8 @@ accelerated taproot tweak, and a deferred check in the final call.
 ```rust
 /// The vault's internal key and its next state's taptree, both committed by the
 /// policy hash. `VAULT_PK` plays the role of CCV's `pk` argument.
-const VAULT_PK: [u8; 32] = [/* x-only vault key */];
-const TAPTREE_NEXT: [u8; 32] = [/* taptree root of the next contract state */];
+const VAULT_PK: [u8; 32] = [0; 32]; // the x-only vault key
+const TAPTREE_NEXT: [u8; 32] = [0; 32]; // taptree root of the next contract state
 const MAX_FEE: u64 = 10_000;
 
 policy::state!(State);
@@ -596,10 +607,11 @@ struct State {
 
 /// The next contract state's scriptPubKey: OP_1 <32-byte tweaked output key>.
 fn next_state_spk() -> Result<[u8; 34], policy::Error> {
+    let (key, _parity) = policy::taptweak_pubkey(&VAULT_PK, Some(&TAPTREE_NEXT))?;
     let mut spk = [0u8; 34];
     spk[0] = 0x51; // OP_1
     spk[1] = 0x20; // push 32 bytes
-    policy::taptweak_pubkey(&VAULT_PK, Some(&TAPTREE_NEXT), &mut spk[2..34])?;
+    spk[2..34].copy_from_slice(&key);
     Ok(spk)
 }
 
@@ -611,11 +623,13 @@ fn next_state_spk() -> Result<[u8; 34], policy::Error> {
 /// what the device validates, by re-deriving each input's script from the
 /// descriptor at its claimed coordinates.
 fn scan(state: &mut State, my_input: u32) -> Result<bool, policy::Error> {
-    let mine = policy::input_account(my_input)?.account_index;
+    let mine = policy::input_account(my_input)?
+        .ok_or(policy::Error::NotFound)?
+        .account_index;
     for i in 0..policy::input_count() {
         // A policy is not invoked for another account's inputs, so a foreign
         // input would leave the total incomplete. Refuse instead of guessing.
-        if policy::input_account(i)?.account_index != mine {
+        if policy::input_account(i)?.map(|c| c.account_index) != Some(mine) {
             return Ok(false);
         }
         state.vault_in = state
