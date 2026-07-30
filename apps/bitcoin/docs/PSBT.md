@@ -1,9 +1,10 @@
 This document details the specifications of extensions to the PSBT format used by the Vanadium Bitcoin app.
 
-Two extensions are currently defined:
+Three extensions are currently defined:
 
 - **Accounts**: The signing flow uses BIP-388 wallet policies (or other account abstractions) to identify inputs and outputs that belong to known accounts. The PSBT contains the necessary information to easily verify that UTXOs belong to the claimed accounts.
 - **Authenticated outputs**: Outputs that do not belong to known accounts can be *authenticated* by attaching a signature from a pubkey with an established Root of Trust.
+- **Signing policies**: Wallet-policy keys can commit to programs that inspect the transaction and decide whether the key may sign.
 
 # Accounts and coordinates
 
@@ -33,9 +34,13 @@ The wallet policy is serialized as the concatenation of:
   - If there is no key origin information, a single byte 0, followed by a 78-byte serialized xpub
   - If there is key origin information, the concatenation of
     - a single byte 1
-    - 4 bytes: key fingerprint
-    - 1 byte: length _k_ of the key origin derivation
-    - 4 * _k_ bytes: the concatenation of each derivation step, each represented as a 4-byte little-endian number.
+    - 4 bytes: key fingerprint, big-endian
+    - compact-size length _k_ of the key origin derivation
+    - 4 * _k_ bytes: the concatenation of each derivation step, each represented as a 4-byte little-endian number
+    - a 78-byte serialized xpub
+
+A signing-policy-bound key (see [Signing policies](#signing-policies)) needs no special
+serialization: its binding lives entirely in an ordinary BIP-388 key origin path.
 
 The coordinates are serialized as:
 - a single byte 0 if not change, 1 if change
@@ -101,3 +106,87 @@ For each output, a signer should verify each provided proof against that output'
 
 - If a proof is well-formed and valid, it may be used for UX authentication if the pubkey is trusted.
 - If a proof is malformed or invalid, signing should be aborted.
+
+# Signing policies
+
+A key used in a wallet policy can carry an enforceable **signing program**: a program the device
+evaluates against the transaction before signing with that key. The program can refuse to sign, or
+authorize signing without user confirmation.
+
+This section specifies how a program is bound to a key and how it is carried in a PSBT. The program
+format, its execution environment and the interface through which it observes the transaction are
+specified in [SIGNING_POLICIES.md](SIGNING_POLICIES.md).
+
+## Binding a program to a key
+
+A key is bound to a program through a **standard BIP-32 derivation path**. No non-standard xpub
+or key-origin extension is involved, so the binding is fully compatible with the rest of the
+stack and, in particular, composes with `musig(...)`.
+
+The program's 32-byte SHA-256 is truncated to `31 * 4 = 124` bits and split into four 31-bit
+chunks `p1, p2, p3, p4`: for `i in 0..4`, `pi = big_endian_u32(hash[4*i .. 4*i+4]) & 0x7FFFFFFF`
+(the top bit is cleared, so each chunk is a valid non-hardened child number). A policy-bound key is
+then derived along:
+
+```text
+m / 1347175257' / <coin_type>' / <account>' / p1 / p2 / p3 / p4
+```
+
+`1347175257 = 0x504C4359` is the ASCII string `"PLCY"` read as a big-endian `u32`; `<coin_type>'`
+and `<account>'` are hardened BIP-44-style coin-type and account indices chosen by the client
+(`1'` = testnet, account `0'` by default). The device does not constrain their values. The key
+origin therefore looks like an ordinary BIP-388 origin:
+
+```text
+[fingerprint/1347175257'/1'/0'/p1/p2/p3/p4]xpub
+```
+
+Because the binding lives in the derived **public key** (not in the chaincode), a policy-bound
+xpub used inside `musig(xpub1,xpub2,...)` still contributes its policy-bound key to the aggregate.
+Because the wallet policy (including its xpubs and origins) is committed by the registration proof,
+binding a program to a key changes the account ID and proof of registration.
+
+At signing time the device recognizes the `1347175257'` prefix on the origin path of a key it
+controls, recomputes `p1..p4` from the program supplied in the PSBT, and requires them to match the
+path. If no supplied program matches, signing fails closed. Because the key is derived by ordinary
+BIP-32, any produced signature is bound to the exact program via the derivation path. This applies
+uniformly to plain keys and to `musig(...)` participants.
+
+Account registration receives the full programs separately from the wallet policy. For each
+policy-bound key controlled by the device (recognized by the same path prefix), registration
+requires the matching full program and validates it. One program may satisfy multiple keys that
+reference the same hash.
+
+The 124-bit truncation is a consequence of BIP-32 child numbers being 31 bits wide. It is a
+*binding*, not a commitment: registration and signing look up the full 32-byte hash from the
+supplied program and compare the derived chunks against the path.
+
+The device does not display program source or a summary of a program's behaviour during
+registration; it shows the program's full hash and its self-declared label. Users should verify the
+exact program bytes and hash independently on another trusted device before registering the account.
+See [Auditability](SIGNING_POLICIES.md#auditability).
+
+## Global subkey type
+
+Programs are carried in proprietary PSBT global fields (`PSBT_GLOBAL_PROPRIETARY`), using
+proprietary identifier `SIGNING_POLICY` (all capital letters).
+
+| Name | `<subkeytype>` | `<subkeydata>` | `<subkeydata>` Description | `<valuedata>` | `<valuedata>` Description | Versions Allowing Inclusion | Parent BIP |
+|------|----------------|----------------|----------------------------|---------------|---------------------------|-----------------------------|------------|
+| Signing Policy Program | `PSBT_SIGNING_POLICY_GLOBAL_SCRIPT = 0x00` | `<32-byte hash>` | `SHA-256` of the value bytes; its first 124 bits (see [Binding a program to a key](#binding-a-program-to-a-key)) form the derivation-path chunks of any bound key | `<byte engine_id> <byte engine_version> <compact size len> <program bytes>` | The engine identifier and version, then the length-prefixed program | 0, 2 | No BIP |
+
+Programs are content-addressed and global: a key references its program purely through its key
+origin path, and there are no per-input or per-output fields. Several distinct programs may coexist
+in one PSBT; two entries with the same hash, or an entry whose subkey data does not match the hash of
+its value, are errors.
+
+`engine_id = 0x02` selects the RISC-V engine specified in
+[SIGNING_POLICIES.md](SIGNING_POLICIES.md). `0x00` and `0x01` are reserved: they were used by
+earlier prototypes (a scripting-language embedding, and a bespoke expression language,
+respectively). The `engine_id` and `engine_version` are part of the hashed value, so bumping either
+invalidates previously-registered programs by design.
+
+Signing policies are enforced for `musig(...)` participants as well as plain keys: when a
+device-controlled musig participant is policy-bound, the program is evaluated before the device
+contributes its nonce or partial signature, and a refusal makes the device abstain from the musig
+session entirely.
