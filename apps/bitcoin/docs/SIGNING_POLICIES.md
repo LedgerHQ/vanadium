@@ -61,16 +61,32 @@ Each invocation yields one `Decision`:
 | `1` | `Confirm` | produce it, using the normal user-confirmation flow |
 | `2` | `ApproveSilently` | produce it without user confirmation |
 
-The three values form an ordered lattice `Deny < Confirm < ApproveSilently`. `ApproveSilently` is
-honored only when *every* signature the transaction produces is silently approved, and only when
-all input amounts could be verified; otherwise the normal confirmation flow applies. This rule is
-part of the signing flow, not of the engine, and is unchanged from the transport specification.
+The three values form an ordered lattice `Deny < Confirm < ApproveSilently`, and verdicts combine by
+`min` — twice:
 
-A decision of `Deny` is **not an error**: the device simply produces no signature for that attempt,
-and for a `musig(...)` participant contributes neither a nonce nor a partial signature. By
-contrast, any *engine* failure — a malformed image, an unsupported engine or version, a missing
-program, a trap, an exhausted budget — aborts the whole `sign_psbt` with an error. The device fails
-closed in both cases.
+```
+policy_verdict      = min over every invocation of that policy, the final call included
+transaction_verdict = min over every policy the transaction invokes
+```
+
+So **a single refusal anywhere suppresses every signature the transaction would produce**, not just
+the refusing key's, and `ApproveSilently` requires every invocation of every policy to have asked
+for it. Silent signing additionally requires that all input amounts could be verified; otherwise the
+normal confirmation flow applies.
+
+Signing policies therefore compose conjunctively: each one is a restriction, and restrictions add
+up. This is deliberate and stronger than suppressing one signature at a time. A policy-bound key is
+typically one of several keys in a descriptor, so a refusal that only removed *that* signature could
+be routed around through an alternative spending path — a key denied in a `2-of-3` changes nothing
+if the device still signs with the other two. Under `min`, refusing is enforcement rather than
+advice.
+
+A verdict of `Deny` is **not an error**: the device produces no signatures and reports success with
+an empty signature list, and contributes neither a nonce nor a partial signature to any
+`musig(...)` session. By contrast, any *engine* failure — a malformed image, an unsupported engine
+or version, a missing program, a trap, an exhausted budget — aborts `sign_psbt` with an error. The
+device fails closed in both cases; the distinction is only whether the client is told that something
+malfunctioned.
 
 # Program image format
 
@@ -208,21 +224,38 @@ Arguments are passed in registers:
 | `a2` | `attempt_count` | `attempt_count` |
 | `a3` | flags: bit 0 = musig participant | 0 |
 
-Each invocation must terminate by calling `EXIT(decision)`. The verdict of a per-attempt call
-applies to that attempt's signature. The verdict of the final call applies to all of them:
-
-```
-final_decision[k] = min(per_attempt_decision[k], final_call_verdict)
-```
-
-So the final call can veto, or downgrade a silent approval to a confirmation, but never upgrade.
-`ApproveSilently` is the no-veto value, and is what a program that has nothing to check in the final
-call should return.
+Each invocation must terminate by calling `EXIT(decision)`. Every verdict is folded into the
+policy's verdict with `min`, as described under [Decisions](#decisions), so no invocation can
+undo another's refusal and `ApproveSilently` is the value that expresses "no objection".
 
 The final call exists for **deferred checks** — conditions that can only be evaluated once every
-attempt has been seen. BIP-443's amount aggregation is the motivating case.
+attempt has been seen. BIP-443's amount aggregation is the motivating case. All invocations complete
+before any signature is produced, which is what makes a late refusal effective.
 
-All invocations complete before any signature is produced, which is what makes a veto meaningful.
+## Which inputs a policy sees invocations for
+
+This determines whether a policy can reason soundly about the transaction as a whole, so it is
+specified rather than left to follow from the implementation.
+
+A policy-bound key is a key expression in its account's BIP-388 descriptor template, and an account
+has exactly one template. Every input belonging to that account is spent under it, and the device
+attempts every placeholder of the template for every input of the account. Therefore:
+
+> A policy is invoked for **every input of its account**, whichever spending path each input uses.
+
+Two consequences worth relying on:
+
+- A policy's own invocations already cover every input of its account, so aggregating over them is
+  complete rather than a heuristic. If two different programs are bound to two different keys of the
+  same account, each is invoked for every input and each aggregates completely and independently.
+- The device rejects inputs that do not belong to a recognized account, so a transaction cannot
+  contain an input that no account claims.
+
+The one case a policy is *not* invoked for is an input belonging to a **different** account, in a
+PSBT that spends from several. Such an input is signed by that account's keys under that account's
+policies. A policy that aggregates amounts and wants certainty should require that every input
+belongs to its own account, which is one loop over `INPUT_ACCOUNT`; see
+[the vault example](#example-a-bip-443-vault-covenant).
 
 ## Failure
 
@@ -305,6 +338,7 @@ Only public data is exposed. There is no call that signs, derives a private key,
 | `0x001C` | `INPUT_FLAGS(i: u32) -> u32` | See below. |
 | `0x001D` | `INPUT_ACCOUNT(i: u32, out: *mut Coords) -> u32` | The account coordinates claimed for this input, or `NOT_FOUND`. |
 | `0x001E` | `INPUT_TAPTREE_HASH(i: u32, out: *mut [u8; 32]) -> u32` | The taproot merkle root of the account's descriptor for this input, or `NOT_FOUND` if the input is not taproot or the tree is empty. |
+| `0x001F` | `ATTEMPT_INPUT(k: u32) -> u32` | The input index of the `k`-th attempt, for `k < attempt_count`. Lets a policy materialize the whole set of inputs it will be asked to sign on its first invocation, rather than discovering it one call at a time. |
 
 `INPUT_FLAGS` bits:
 
@@ -317,8 +351,8 @@ Only public data is exposed. There is no call that signs, derives a private key,
 
 Bit 0 deserves attention when writing a policy that reasons about amounts. For legacy and
 segwit-v0 inputs the device verifies the amount against the full previous transaction; for taproot
-inputs it does not, because BIP-341 commits the amount in the sighash instead. A policy that
-enforces an amount bound on a segwit-v0 input should require bit 0.
+inputs it does not, because BIP-341 commits the amount in the sighash instead. See
+[Trusting data about other inputs](#trusting-data-about-other-inputs).
 
 `Coords` is a 12-byte little-endian structure describing wallet-policy coordinates:
 
@@ -534,115 +568,117 @@ fn check(attempt: Option<Attempt>, _state: &mut State) -> Result<Decision, polic
 
 ## Example: a BIP-443 vault covenant
 
-This is the example that justifies the design. The policy simulates
-`OP_CHECKCONTRACTVERIFY` in `CCV_MODE_CHECK_OUTPUT` (mode 0) with an empty `data` and a fixed
-`taptree`: every input of the vault must have its amount preserved into the vault output, and that
-output must itself be the same vault.
+This is the example that justifies the design. The policy enforces the amount-preserving half of
+`OP_CHECKCONTRACTVERIFY` in `CCV_MODE_CHECK_OUTPUT`: everything the vault contributes to the
+transaction must land in the vault's **next contract state**, up to a fee allowance.
+
+The next state is not a registered account — it is a script the wallet has never seen, derived from
+the vault key and the next state's taptree — so the device cannot recognize it and the policy
+computes the expected `scriptPubKey` itself. That is what the accelerated taproot tweak is for.
 
 It needs everything the previous examples did not: per-input invocation, the shared state, an
-accelerated taproot tweak, script comparison, and a deferred check in the final call.
+accelerated taproot tweak, and a deferred check in the final call.
 
 ```rust
-const TAPTREE: [u8; 32] = [/* the vault's taptree root, committed by the policy hash */];
-const TARGET_OUTPUT: u32 = 0;
-const MAX_OUTPUTS: usize = 8;
+/// The vault's internal key and its next state's taptree, both committed by the
+/// policy hash. `VAULT_PK` plays the role of CCV's `pk` argument.
+const VAULT_PK: [u8; 32] = [/* x-only vault key */];
+const TAPTREE_NEXT: [u8; 32] = [/* taptree root of the next contract state */];
+const MAX_FEE: u64 = 10_000;
 
 policy::state!(State);
 
 #[derive(Default)]
 struct State {
     scanned: bool,
-    min_amount: [u64; MAX_OUTPUTS],
-    checked: [bool; MAX_OUTPUTS],
+    vault_in: u64,
 }
 
-/// The vault's scriptPubKey: OP_1 <32-byte tweaked output key>.
-fn vault_spk() -> Result<[u8; 34], policy::Error> {
-    let mut self_key = [0u8; 33];
-    policy::self_pubkey(&mut self_key)?;
+/// The next contract state's scriptPubKey: OP_1 <32-byte tweaked output key>.
+fn next_state_spk() -> Result<[u8; 34], policy::Error> {
     let mut spk = [0u8; 34];
     spk[0] = 0x51; // OP_1
     spk[1] = 0x20; // push 32 bytes
-    policy::taptweak_pubkey(&self_key[1..33], Some(&TAPTREE), &mut spk[2..34])?;
+    policy::taptweak_pubkey(&VAULT_PK, Some(&TAPTREE_NEXT), &mut spk[2..34])?;
     Ok(spk)
 }
 
-/// Aggregate every vault input in the transaction into the target output's
-/// minimum amount. Run once, then cached in the shared state.
+/// Total what the vault contributes. Run once, then cached in the shared state.
 ///
-/// This must scan *all* inputs, not just the ones this policy is invoked for.
-/// BIP-443 aggregates across every input naming the output, and sibling vault
-/// inputs may be signed by a different key, whose policy this is not.
-fn scan(state: &mut State) -> Result<(), policy::Error> {
-    let expected = vault_spk()?;
-    let mut spk = [0u8; 34];
+/// Siblings are recognized by **account membership**, not by script equality: a
+/// BIP-388 key expression derives a different key per address index, so the
+/// account's inputs have different scriptPubKeys. Account membership is also
+/// what the device validates, by re-deriving each input's script from the
+/// descriptor at its claimed coordinates.
+fn scan(state: &mut State, my_input: u32) -> Result<bool, policy::Error> {
+    let mine = policy::input_account(my_input)?.account_index;
     for i in 0..policy::input_count() {
-        if policy::input_script_pubkey(i, &mut spk) != Ok(34) || spk != expected {
-            continue;
+        // A policy is not invoked for another account's inputs, so a foreign
+        // input would leave the total incomplete. Refuse instead of guessing.
+        if policy::input_account(i)?.account_index != mine {
+            return Ok(false);
         }
-        let slot = &mut state.min_amount[TARGET_OUTPUT as usize];
-        *slot = slot
+        state.vault_in = state
+            .vault_in
             .checked_add(policy::input_amount(i)?)
             .ok_or(policy::Error::Overflow)?;
-        state.checked[TARGET_OUTPUT as usize] = true;
     }
     state.scanned = true;
-    Ok(())
+    Ok(true)
 }
 
 fn check(attempt: Option<Attempt>, state: &mut State) -> Result<Decision, policy::Error> {
-    if policy::output_count() as usize > MAX_OUTPUTS {
-        return Ok(Decision::Deny);
-    }
-    if !state.scanned {
-        scan(state)?;
+    if let Some(a) = attempt {
+        if !state.scanned && !scan(state, a.input_index)? {
+            return Ok(Decision::Deny);
+        }
+        // Nothing about this input on its own is objectionable. Returning
+        // `ApproveSilently` is what lets the transaction be signed silently at
+        // all: verdicts combine with `min`, so one `Confirm` here would force
+        // the confirmation flow for the whole transaction.
+        return Ok(Decision::ApproveSilently);
     }
 
-    match attempt {
-        // Per input: the CCV script check. The target output must be the vault.
-        Some(_) => {
-            let mut spk = [0u8; 34];
-            if policy::output_script_pubkey(TARGET_OUTPUT, &mut spk) != Ok(34)
-                || spk != vault_spk()?
-            {
-                return Ok(Decision::Deny);
-            }
-            Ok(Decision::ApproveSilently)
-        }
-        // The deferred amount check, once every input has been accounted for.
-        None => {
-            for j in 0..MAX_OUTPUTS {
-                if state.checked[j] && policy::output_amount(j as u32)? < state.min_amount[j] {
-                    return Ok(Decision::Deny);
-                }
-            }
-            Ok(Decision::ApproveSilently)
+    // Deferred: everything the vault contributed must land in its next state.
+    let expected = next_state_spk()?;
+    let mut preserved = 0u64;
+    let mut spk = [0u8; 34];
+    for j in 0..policy::output_count() {
+        if policy::output_script_pubkey(j, &mut spk) == Ok(34) && spk == expected {
+            preserved = preserved
+                .checked_add(policy::output_amount(j)?)
+                .ok_or(policy::Error::Overflow)?;
         }
     }
+    if preserved.saturating_add(MAX_FEE) < state.vault_in {
+        return Ok(Decision::Deny);
+    }
+    Ok(Decision::ApproveSilently)
 }
 ```
 
-Two things about this example are worth stating as general rules.
+Three things about this example generalize.
 
-**A policy is invoked only for the inputs its own key signs.** BIP-443's aggregation is over every
-input that names an output, which in a covenant is enforced because consensus evaluates every
-input's script. Here, an input belonging to the same vault but signed by another key produces no
-invocation of this policy. A policy that accumulated only over its own invocations would
-under-count: two inputs each requiring 100 satoshis preserved into a 150-satoshi output would each
-independently pass. Iterating all `INPUT_COUNT()` inputs and recognizing siblings by their
-scriptPubKey is what makes the simulation faithful. Full transaction visibility on every invocation
-is why this is possible at all.
+**Aggregate as a conservation law, not as per-input residuals.** BIP-443 threads
+`output_min_amount[]` through the transaction because a script has no view beyond its own input, and
+defers the comparison to the validator. A policy *has* the whole transaction, so the same intent is
+one equation over what the account contributes and what comes back. It is less code, and it cannot
+exhibit the under-counting that per-input residual bookkeeping invites.
 
-**The shared state is a cache as much as a channel.** `scan` costs one tweak and one script
-comparison per input; doing it once and reusing the result is the difference between `O(n)` and
-`O(n²)` tweaks over a transaction with `n` vault inputs, against a budget shared by all
-invocations.
+**Recognize siblings by what the device validates.** Account membership is checked by re-deriving
+the script from the descriptor; script equality is a guess that happens to be wrong here, because
+each address index yields a different key. Preferring the validated predicate is the general rule.
+
+**The shared state is a cache as much as a channel.** `scan` is `O(n_inputs)`; doing it once instead
+of once per invocation is the difference between `O(n)` and `O(n²)` against a budget that all
+invocations share.
 
 Full BIP-443 support would add the other three modes, a non-empty `data` tweak
 (`data_tweak = SHA256(pk ‖ data)`), `CCV_MODE_CHECK_INPUT`, the residual-amount bookkeeping of
 `CCV_MODE_CHECK_OUTPUT_DEDUCT_AMOUNT`, and the rule that an output may not be checked with both the
 default and the deduct logic, or twice with the deduct logic. None of that needs anything beyond the
-interface above.
+interface above — but a policy author should first ask whether the conservation form expresses the
+same intent, since it usually does and is harder to get wrong.
 
 # Security considerations
 
@@ -693,6 +729,30 @@ already has: **evaluate the policies, then wait for verification to succeed, and
 any signature**. Without it, a client could get a silent approval out of a policy by lying about
 which outputs are change. This is a requirement on the flow, not an incidental property of it.
 
+## Trusting data about other inputs
+
+A policy that aggregates over inputs it does not itself sign is trusting the client's claims about
+them. Whether that is safe depends on what the signature it is authorizing commits to.
+
+With BIP-341 and `SIGHASH_DEFAULT`, the sighash covers `sha_amounts` and `sha_scriptpubkeys` over
+**all** of the transaction's inputs, plus all of its outputs. A client that misreports another
+input's amount or script therefore obtains a signature that is invalid on the real transaction:
+lying is self-defeating, and a policy on a taproot key may rely on `INPUT_AMOUNT` and
+`INPUT_SCRIPT_PUBKEY` for every input.
+
+That reasoning does not extend to the other input types. A segwit-v0 sighash commits to
+`hashPrevouts` — the set of outpoints, so the *set* of inputs is fixed — and to the signing input's
+own amount, but not to any other input's amount or script. A legacy sighash commits to less again. A
+policy on such a key that aggregates amounts must require `INPUT_FLAGS` bit 0 on every input it
+counts, which is the device's own verification against the previous transaction.
+
+**This depends on the app signing only with `SIGHASH_ALL` / `SIGHASH_DEFAULT`**, which is currently
+the case (both sighash types are hardcoded, and the code paths that would derive them from the PSBT
+are marked as unimplemented). Two future changes would invalidate it: `SIGHASH_ANYONECANPAY` drops
+the commitment to other inputs, and `SIGHASH_NONE` / `SIGHASH_SINGLE` drop the commitment to the
+outputs a policy checks. If support for either is added, this interface must expose the input's
+sighash type and policies that reason about other inputs must check it.
+
 ## Memory access patterns
 
 Vanadium does not hide where an app reads and writes; see
@@ -738,6 +798,14 @@ registering the account — and nothing else.
 - **Shared state across keys.** Two keys of one account bound to the same policy currently share a
   sandbox and its state. This is the more expressive choice and lets a policy reason about the
   account as a whole, but a policy author who does not expect it could be surprised.
+- **Aggregation across accounts is the policy author's responsibility.** A policy is invoked for
+  every input of its own account, so aggregating over its own invocations is complete for that
+  account — but a PSBT may spend from several accounts, and a policy is not invoked for another
+  account's inputs. The guard is one loop over `INPUT_ACCOUNT`, and the vault example shows it, but
+  the engine does not enforce it. The alternative would be an engine-maintained accumulator that
+  every policy reserves against, checked once for the whole transaction; that would make the
+  guarantee structural, at the cost of state shared between policies. Worth revisiting if
+  multi-account covenants turn out to matter.
 - **PSBT key types.** `PSBT_FIELD` specifies `keytype` as a compact-size value, which is what
   BIP-174 defines. The app's current PSBT parser treats a key type as a single byte; that must be
   widened before this interface is honest about arbitrary field access.

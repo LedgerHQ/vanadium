@@ -190,3 +190,7 @@ Signing policies are enforced for `musig(...)` participants as well as plain key
 device-controlled musig participant is policy-bound, the program is evaluated before the device
 contributes its nonce or partial signature, and a refusal makes the device abstain from the musig
 session entirely.
+
+Policies compose conjunctively across the transaction: the device returns no signature at all unless
+every policy it invokes approves. A key that a policy refuses cannot therefore be worked around
+through an alternative spending path of the same descriptor.
