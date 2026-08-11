@@ -24,14 +24,14 @@ They are documented in [PSBT.md](PSBT.md).
 
 - **Cleartext registration of wallet policies**: when registering a wallet policy, show a cleartext, human-readable description of the spending paths to the user, instead of (or in addition to) the raw BIP-388 descriptor template. Falls back to the raw template when the descriptor template's confusion score exceeds the safe threshold.
 - **Identity-based authentication** ([identity.md](identity.md)): identity keys are derived from the device, can be registered with a user-chosen name, and used to sign for xpubs and for output `scriptPubkey`s. During PSBT signing, external outputs carrying a valid signature from a registered identity key are displayed alongside the corresponding name, enabling clear signing of known counterparts.
+- **DNS-anchored identity keys** ([dns-identity.md](dns-identity.md)): an identity key can also be trusted because a human-readable name publishes it in the DNS, proven to the device by an RFC 9102 DNSSEC chain carried in the PSBT. This is a variant of [BIP-353](https://github.com/bitcoin/bips/blob/master/bip-0353.mediawiki) in which the record encodes a public key rather than an address, so it never needs rotating; the address arrives out of band with a signature from that key. Removes the need for an explicit registration step, at the cost of trusting the DNS hierarchy, so the device distinguishes the two sources on screen.
 - **Authenticated cosigner xpubs**: when registering a multi-key wallet policy, each cosigner xpub can be accompanied by a Schnorr signature from a registered identity key, so the device labels the key with the cosigner's name during the registration review.
 - **Multi-account spends**: a single PSBT can spend from multiple known wallet policies; the review shows the net amount spent or received for each affected account.
 - **Resident keys**: BIP-32 keys derived from a seed generated and stored inside the app and never exported. Resident keys can be used as keys in wallet policies, and the app supports PSBT signing with them.
 
 ## Planned features
 
-- [BIP-352](https://github.com/bitcoin/bips/blob/master/bip-0352.mediawiki) Silent Payments support. Silent Payment addresses can be added as a new type of account - but they could also be used as *identity pubkeys*. This would allow a DNS-based Root of Trust that doesn't require an explicit registration step.
-- DNSSEC-based authentication for identity pubkeys. Similar to [BIP-353](https://github.com/bitcoin/bips/blob/master/bip-0353.mediawiki) but for identity pubkeys.
+- [BIP-352](https://github.com/bitcoin/bips/blob/master/bip-0352.mediawiki) Silent Payments support. Silent Payment addresses can be added as a new type of account - but they could also be used as *identity pubkeys*.
 - Signing policies: derive keys that will only sign transactions (and possibly auto-sign) if they satisfy certain spending policies.
 
 # Commands

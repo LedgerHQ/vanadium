@@ -23,13 +23,19 @@ use common::{errors::Error, fastpsbt, message::Response};
 
 use crate::handlers::musig_signing::{self, MusigSigningState};
 
-pub async fn handle_sign_psbt(app: &mut sdk::App, psbt: &[u8]) -> Result<Response, Error> {
+pub async fn handle_sign_psbt(
+    app: &mut sdk::App,
+    psbt: &[u8],
+    current_time: Option<u64>,
+) -> Result<Response, Error> {
     app.show_spinner("Processing...");
 
     let psbt = fastpsbt::Psbt::parse(psbt).map_err(|_| Error::FailedToDeserializePsbt)?;
 
-    // Lightweight analysis: structural validation + extract data for display and verification
-    let (summary, deferred_checks) = analyze::analyze_transaction(&psbt)?;
+    // Lightweight analysis: structural validation + extract data for display and verification.
+    // Validating any DNSSEC proofs happens here too, and is the one expensive part: the names it
+    // yields are needed before the review screens can be built.
+    let (summary, deferred_checks) = analyze::analyze_transaction(&psbt, current_time)?;
 
     // Spawn expensive verification (proof-of-registration + script derivation) as a background
     // task so it runs concurrently with the UX flows below.

@@ -70,11 +70,9 @@ async fn handle_request(
             )
             .await
         }
-        Request::SignPsbt {
-            psbt,
-            // Wired up together with DNSSEC proof validation.
-            current_time: _,
-        } => handle_sign_psbt(app, psbt).await,
+        Request::SignPsbt { psbt, current_time } => {
+            handle_sign_psbt(app, psbt, *current_time).await
+        }
     }
 }
 

@@ -5,5 +5,6 @@
 //! [`super::test_utils`].
 
 mod basic;
+mod dnssec_identity;
 mod identity;
 mod musig;

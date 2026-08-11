@@ -106,6 +106,7 @@ fn test_handle_sign_psbt_musig_no_local_participant() {
     let response = sdk::executor::block_on(handle_sign_psbt(
         &mut sdk::App::singleton(),
         &serialize_as_psbtv2(&psbt),
+        None,
     ))
     .unwrap();
 
@@ -284,6 +285,7 @@ fn test_handle_sign_psbt_musig_2of2_keypath_round_trip() {
     let r1 = sdk::executor::block_on(handle_sign_psbt(
         &mut sdk::App::singleton(),
         &serialize_as_psbtv2(&psbt),
+        None,
     ))
     .unwrap();
     let device_pubnonce = match r1 {
@@ -319,6 +321,7 @@ fn test_handle_sign_psbt_musig_2of2_keypath_round_trip() {
     let r2 = sdk::executor::block_on(handle_sign_psbt(
         &mut sdk::App::singleton(),
         &serialize_as_psbtv2(&psbt),
+        None,
     ))
     .unwrap();
     let device_psig = match r2 {
@@ -450,6 +453,7 @@ fn test_handle_sign_psbt_musig_round2_without_round1_errors() {
     let result = sdk::executor::block_on(handle_sign_psbt(
         &mut sdk::App::singleton(),
         &serialize_as_psbtv2(&psbt),
+        None,
     ));
     assert_eq!(result, Err(Error::MissingMusigSession));
 }
@@ -473,6 +477,7 @@ fn test_handle_sign_psbt_musig_round2_missing_cosigner_pubnonce_errors() {
     let r1 = sdk::executor::block_on(handle_sign_psbt(
         &mut sdk::App::singleton(),
         &serialize_as_psbtv2(&psbt),
+        None,
     ))
     .unwrap();
     let device_pubnonce = match r1 {
@@ -495,6 +500,7 @@ fn test_handle_sign_psbt_musig_round2_missing_cosigner_pubnonce_errors() {
     let result = sdk::executor::block_on(handle_sign_psbt(
         &mut sdk::App::singleton(),
         &serialize_as_psbtv2(&psbt),
+        None,
     ));
     assert_eq!(result, Err(Error::MissingMusigPubnonce));
 }
