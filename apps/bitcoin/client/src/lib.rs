@@ -1,6 +1,7 @@
 extern crate bitcoin;
 
 mod client;
+pub mod dns_identity;
 
 pub use client::BitcoinClient;
 

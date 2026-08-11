@@ -13,6 +13,7 @@ use rustyline::{Context, Editor, Helper};
 use client::BitcoinClient;
 
 mod client;
+mod dns_identity;
 
 use sdk::linewriter::FileLineWriter;
 use sdk::vanadium_client::client_utils::{create_default_client, ClientType};
@@ -113,6 +114,37 @@ enum CliCommand {
     SignPsbt {
         #[clap(long)]
         psbt: String,
+        /// Human-readable names (`alice@example.com`) whose identity keys should be proven to the
+        /// device from the DNS. For each one, a DNSSEC proof is fetched and attached to the PSBT, so
+        /// that outputs carrying a signature from that key are labelled with the name.
+        ///
+        /// The per-output signatures themselves come from the payee, not from here.
+        #[clap(long = "dns-identity")]
+        dns_identities: Vec<String>,
+        /// Recursive resolver to build DNSSEC proofs with. It is not trusted: proofs are
+        /// self-contained and validated locally and again on the device.
+        #[clap(long, default_value = "1.1.1.1:53")]
+        resolver: String,
+    },
+    /// Fetches and validates a DNSSEC proof that a name publishes an identity key, and prints it.
+    ///
+    /// Useful to inspect a published record, and to capture proofs as test fixtures.
+    FetchDnsIdentity {
+        /// The human-readable name, e.g. `alice@example.com`.
+        name: String,
+        #[clap(long, default_value = "1.1.1.1:53")]
+        resolver: String,
+        /// Write the raw authentication chain to this file instead of printing it as hex.
+        #[clap(long)]
+        out: Option<String>,
+    },
+    /// Prints the DNS record to publish for a given identity public key.
+    MakeDnsIdentityRecord {
+        /// The human-readable name, e.g. `alice@example.com`.
+        name: String,
+        /// The 33-byte compressed identity public key, in hex.
+        #[clap(long)]
+        pubkey: String,
     },
 }
 
@@ -411,10 +443,36 @@ async fn handle_cli_command(
                 println!("Identity signature: {}", hex::encode(&sig.signature));
             }
         }
-        CliCommand::SignPsbt { psbt } => {
+        CliCommand::SignPsbt {
+            psbt,
+            dns_identities,
+            resolver,
+        } => {
             let mut psbt = base64::engine::general_purpose::STANDARD
                 .decode(&psbt)
                 .map_err(|_| "Failed to decode PSBT")?;
+
+            // Attach DNSSEC proofs before the v0 -> v2 conversion, since the conversion copies
+            // proprietary fields through verbatim.
+            if !dns_identities.is_empty() {
+                let resolver: std::net::SocketAddr =
+                    resolver.parse().map_err(|_| "Invalid resolver address")?;
+                let mut parsed = Psbt::deserialize(&psbt).map_err(|_| "Failed to parse PSBT")?;
+                for name in dns_identities {
+                    let proof = dns_identity::fetch_identity_proof(resolver, name)
+                        .map_err(|e| format!("{}: {}", name, e))?;
+                    println!(
+                        "₿{}: proved key {} ({} byte chain, ttl {}s)",
+                        proof.hrn,
+                        hex::encode(proof.pubkey),
+                        proof.chain.len(),
+                        proof.ttl
+                    );
+                    dns_identity::add_identity_proof_to_psbt(&mut parsed, &proof)
+                        .map_err(|e| format!("{}: {}", name, e))?;
+                }
+                psbt = parsed.serialize();
+            }
 
             // At this time, rust-bitcoin only supports PSBT version 0. Therefore, if parsing
             // succeeds, we assume it's a valid PSBTv0, and we convert it to version 2.
@@ -472,6 +530,48 @@ async fn handle_cli_command(
                     }
                 }
             }
+        }
+        CliCommand::FetchDnsIdentity {
+            name,
+            resolver,
+            out,
+        } => {
+            let resolver: std::net::SocketAddr =
+                resolver.parse().map_err(|_| "Invalid resolver address")?;
+            let proof = dns_identity::fetch_identity_proof(resolver, &name)
+                .map_err(|e| format!("{}: {}", name, e))?;
+
+            println!("Name:      ₿{}", proof.hrn);
+            println!("DNS name:  {}", common::dns_identity::hrn_to_dns_name(&proof.hrn)
+                .map_err(|_| "Invalid name")?
+                .as_str());
+            println!("Pubkey:    {}", hex::encode(proof.pubkey));
+            println!("idkey:     {}", common::dns_identity::encode_idkey(&proof.pubkey));
+            println!("Chain:     {} bytes, ttl {}s", proof.chain.len(), proof.ttl);
+            match out {
+                Some(path) => {
+                    std::fs::write(path, &proof.chain)
+                        .map_err(|e| format!("failed to write {}: {}", path, e))?;
+                    println!("Chain written to {}", path);
+                }
+                None => println!("{}", hex::encode(&proof.chain)),
+            }
+        }
+        CliCommand::MakeDnsIdentityRecord { name, pubkey } => {
+            let pubkey: [u8; 33] = hex::decode(&pubkey)
+                .map_err(|_| "Invalid pubkey hex")?
+                .try_into()
+                .map_err(|_| "Identity pubkey must be 33 bytes")?;
+            if pubkey[0] != 0x02 && pubkey[0] != 0x03 {
+                return Err("Identity pubkey must be a compressed point".into());
+            }
+            let dns_name = common::dns_identity::hrn_to_dns_name(&name)
+                .map_err(|_| "Name must be a valid ASCII user@domain")?;
+            println!(
+                "{} 3600 IN TXT \"bitcoin:?idkey={}\"",
+                dns_name.as_str(),
+                common::dns_identity::encode_idkey(&pubkey)
+            );
         }
     }
     Ok(())
