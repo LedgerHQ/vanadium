@@ -26,12 +26,18 @@ If a hardware signing device is used to manage the HD seed, then:
 Signing devices might chose to adapt or simplify the UX when asking the user to inspect elements (addresses, xpubs, etc.) that are signed with an identity key, but they should clearly identify the reason that key is trusted.
 
 There are many possible ways of establishing that a key is trusted:
-- Direct key exchange and registration on the device (only approach currently implemented in this app)
-- DNSSEC-based proof, similar to [BIP-353](https://github.com/bitcoin/bips/blob/master/bip-0353.mediawiki)
+- Direct key exchange and registration on the device
+- DNSSEC-based proof, similar to [BIP-353](https://github.com/bitcoin/bips/blob/master/bip-0353.mediawiki); specified in [dns-identity.md](dns-identity.md)
 - Public Key Infrastructure
 - Web of trust
 
-The device should make it clear what is the source of trust for this key, or lack thereof.
+The first two are implemented in this app.
+
+The device should make it clear what is the source of trust for this key, or lack thereof. Different
+sources of trust do not warrant the same confidence, and the difference is not a detail the user can
+be expected to infer: a name that was typed by the user during a registration means something quite
+different from a name asserted by whoever controls a DNS zone. Therefore, when a name is shown, the
+device must also make its provenance visible.
 
 ## Signing for objects
 
