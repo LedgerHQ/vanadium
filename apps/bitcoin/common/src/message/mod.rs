@@ -182,6 +182,13 @@ pub enum Request {
     SignPsbt {
         #[cbor(n(0), with = "minicbor::bytes")]
         psbt: Vec<u8>,
+        /// The current time, as a UNIX timestamp in seconds.
+        ///
+        /// Required only to validate the DNSSEC proofs of DNS-anchored identity keys, whose
+        /// signatures have a validity period. The device has no trusted clock, so this comes from
+        /// the client and is therefore untrusted; the app displays the date it used.
+        #[n(1)]
+        current_time: Option<u64>,
     },
 
     #[n(7)]

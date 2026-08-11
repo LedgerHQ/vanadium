@@ -337,12 +337,18 @@ impl<'a> BitcoinClient {
     ///   - otherwise → a round-1 pubnonce lands in `musig_pubnonces`, and the
     ///     host is expected to merge it with cosigners' nonces into the PSBT
     ///     and re-send for round 2.
+    ///
+    /// `current_time` is a UNIX timestamp in seconds. It is only needed if the PSBT carries a
+    /// DNSSEC-authenticated identity key, whose proof has a validity period the device must check
+    /// but cannot obtain on its own.
     pub async fn sign_psbt(
         &mut self,
         psbt: &[u8],
+        current_time: Option<u64>,
     ) -> Result<SignedPsbtResponse, BitcoinClientError> {
         let msg = minicbor::to_vec(&Request::SignPsbt {
             psbt: psbt.to_vec(),
+            current_time,
         })
         .map_err(|_| {
             BitcoinClientError::GenericError("Failed to serialize SignPsbt request".to_string())

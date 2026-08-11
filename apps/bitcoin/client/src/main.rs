@@ -425,7 +425,11 @@ async fn handle_cli_command(
                     .map_err(|_| "Failed to convert PSBTv0 to PSBTv2")?;
             }
 
-            let signed = bitcoin_client.sign_psbt(&psbt).await?;
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .ok();
+            let signed = bitcoin_client.sign_psbt(&psbt, now).await?;
 
             println!("{} partial signatures returned", signed.signatures.len());
             for part_sig in &signed.signatures {
