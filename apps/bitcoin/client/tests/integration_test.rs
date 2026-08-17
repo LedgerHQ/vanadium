@@ -104,7 +104,11 @@ async fn test_e2e_sign_transaction() {
     )
     .unwrap();
 
-    let result = client.sign_psbt(&serialize_as_psbtv2(&psbt)).await.unwrap();
+    // No DNSSEC-authenticated identity keys in this PSBT, so no current time is needed.
+    let result = client
+        .sign_psbt(&serialize_as_psbtv2(&psbt), None)
+        .await
+        .unwrap();
 
     // we don't check the actual signatures here, just that we got something back
     // more detailed tests are in the unit tests of the handlers
