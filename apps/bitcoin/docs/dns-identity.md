@@ -227,6 +227,62 @@ Verification of the binding does not, by itself, justify skipping user confirmat
   Verifiers reject non-ASCII names, and a device with a small screen should take care that a long
   name cannot push the address out of view.
 
+# Appendix: trying this against a real record
+
+This section is not normative. It is the procedure for exercising the success path end to end, which
+requires a DNSSEC-signed zone you control, because a chain that validates cannot be synthesised: a
+verifier chains to the real IANA root anchors.
+
+A single device suffices. Publish that device's own identity key, and let it attest to one of its own
+addresses: `get_address` returns an address together with a signature over its `scriptPubKey`, and an
+output carrying no account coordinates is external as far as the signer is concerned, so the device
+ends up verifying an attestation from a key the DNS says belongs to a name.
+
+Build the V-App and start the CLI against a device (`--hid`) or Speculos (`--sym`). Build *without*
+the `autoapprove` feature if you want to see the review screens, which is the point of doing this on
+real hardware.
+
+**1. Read the device's identity key and publish it.**
+
+```text
+₿ get-identity-key --index 0
+Identity key: 02...                      # 33-byte compressed key
+
+₿ make-dns-identity-record you@example.com --pubkey 02...
+you.user._bitcoin-payment.example.com. 3600 IN TXT "bitcoin:?idkey=idkey1..."
+```
+
+Publish that record in your zone and wait for it to be signed and served. The record itself never
+expires; only the signatures over it are refreshed, automatically.
+
+**2. Capture the proof.**
+
+```text
+₿ fetch-dns-identity you@example.com --out /tmp/you.chain
+```
+
+This validates the chain locally before writing it, so a failure here means the record or the zone is
+wrong, not the device.
+
+**3. Run the end-to-end test.**
+
+```sh
+export VND_DNS_IDENTITY_NAME=you@example.com
+export VND_DNS_IDENTITY_CHAIN=/tmp/you.chain
+cargo test --features speculos-tests --test dns_identity_e2e -- --nocapture
+```
+
+It covers the success path plus two rejections — a tampered chain and a proof presented a day past
+its expiry. Watch the screen: the output should read `₿you@example.com`, with the tag `Output N (DNS)`
+and a row giving the date the proof was checked against.
+
+**On staleness.** The captured chain does not go stale *for the test*, which pins the device's notion
+of "now" to the middle of the captured validity window; the device has no clock and checks the window
+against whatever time it is given. A capture is only needed afresh for a run against the true current
+time — and not because of your zone's signing policy. The chain also carries the root's and the TLD's
+signatures, and `verify_rr_stream` reports the earliest expiry across all of them, so the window is
+typically a few days wide whatever validity you configure locally.
+
 # Limitations of this profile
 
 - Ed25519-signed zones (DNSSEC algorithm 15) cannot be verified.

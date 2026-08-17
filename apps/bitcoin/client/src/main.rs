@@ -548,6 +548,15 @@ async fn handle_cli_command(
             println!("Pubkey:    {}", hex::encode(proof.pubkey));
             println!("idkey:     {}", common::dns_identity::encode_idkey(&proof.pubkey));
             println!("Chain:     {} bytes, ttl {}s", proof.chain.len(), proof.ttl);
+            // The window is usually set by the root and the TLD, not by the zone publishing the
+            // record, so it is typically only days wide. It bounds a run against the real clock; a
+            // test that pins the device's time inside it can reuse this capture indefinitely.
+            println!(
+                "Valid:     {}..{} ({} hours wide)",
+                proof.valid_from,
+                proof.expires,
+                proof.expires.saturating_sub(proof.valid_from) / 3600
+            );
             match out {
                 Some(path) => {
                     std::fs::write(path, &proof.chain)

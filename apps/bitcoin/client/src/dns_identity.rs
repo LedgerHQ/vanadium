@@ -60,6 +60,14 @@ pub struct DnsIdentityProof {
     pub chain: Vec<u8>,
     /// The lowest TTL in the chain: the proof should not be cached for longer than this.
     pub ttl: u32,
+    /// The latest inception across the chain's signatures.
+    pub valid_from: u64,
+    /// The earliest expiration across the chain's signatures.
+    ///
+    /// This is usually not set by the zone publishing the record: the chain also carries the root's
+    /// and the TLD's signatures, which are re-issued on their own schedule, so the window is
+    /// typically only days wide however the leaf zone is configured.
+    pub expires: u64,
 }
 
 /// Builds an RFC 9102 proof for the TXT records at `name`.
@@ -118,8 +126,29 @@ pub fn fetch_identity_proof(
     hrn: &str,
 ) -> Result<DnsIdentityProof, DnsIdentityError> {
     let dns_name = hrn_to_dns_name(hrn).map_err(|_| DnsIdentityError::InvalidName)?;
-
     let (chain, ttl) = build_txt_proof_sequentially(resolver, &dns_name)?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    validate_identity_proof(hrn, chain, ttl, Some(now))
+}
+
+/// Validates a chain already in hand, without touching the network.
+///
+/// `now` is the time to enforce the chain's validity window against. Pass `None` to skip that check
+/// and accept a chain outside its window: the client is not a trust boundary, and the device
+/// enforces the window itself against whatever time it is given. This is what makes a captured chain
+/// usable indefinitely as a test fixture — pin the device's time inside [`DnsIdentityProof::valid_from`]
+/// and [`DnsIdentityProof::expires`] and the proof stays good forever, even though a run against the
+/// real clock would need a fresh capture within days.
+pub fn validate_identity_proof(
+    hrn: &str,
+    chain: Vec<u8>,
+    ttl: u32,
+    now: Option<u64>,
+) -> Result<DnsIdentityProof, DnsIdentityError> {
+    let dns_name = hrn_to_dns_name(hrn).map_err(|_| DnsIdentityError::InvalidName)?;
 
     if chain.len() > MAX_DNSSEC_CHAIN_LEN {
         return Err(DnsIdentityError::ProofTooLarge(chain.len()));
@@ -140,18 +169,20 @@ pub fn fetch_identity_proof(
     .map_err(|_| DnsIdentityError::ProofInvalid)?;
     let pubkey = parse_idkey_param(&uri).map_err(|_| DnsIdentityError::ProofInvalid)?;
 
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    verify_dnssec_identity_key(hrn, &chain, &pubkey, now)
-        .map_err(|_| DnsIdentityError::ProofInvalid)?;
+    if let Some(now) = now {
+        // Re-run the device's own entry point rather than reimplementing its rules, so that a chain
+        // this tool accepts is exactly one the device would accept.
+        verify_dnssec_identity_key(hrn, &chain, &pubkey, now)
+            .map_err(|_| DnsIdentityError::ProofInvalid)?;
+    }
 
     Ok(DnsIdentityProof {
         hrn: hrn.to_string(),
         pubkey,
         chain,
         ttl,
+        valid_from: verified.valid_from,
+        expires: verified.expires,
     })
 }
 
