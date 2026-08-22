@@ -221,6 +221,7 @@ impl<'a> BitcoinClient {
         &mut self,
         name: &str,
         account: &message::Account,
+        signing_policies: Vec<common::psbt::signing_policy::SigningPolicy>,
         registered_identities: Option<Vec<message::RegisteredIdentityEntry>>,
         key_signatures: Option<Vec<Option<message::IdentitySignature>>>,
         show_cleartext: bool,
@@ -237,6 +238,7 @@ impl<'a> BitcoinClient {
             registered_identities,
             key_signatures,
             show_cleartext,
+            signing_policies: Some(signing_policies),
         })
         .map_err(|_| {
             BitcoinClientError::GenericError(

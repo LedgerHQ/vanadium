@@ -26,6 +26,8 @@
 use alloc::{string::String, vec::Vec};
 use minicbor::{Decode, Encode};
 
+use crate::psbt::signing_policy::SigningPolicy;
+
 mod bip388_codec;
 
 /// BIP32 derivation path. Encoded transparently as a CBOR array of `u32`s.
@@ -156,6 +158,13 @@ pub enum Request {
         /// of the descriptor template on screen.
         #[n(4)]
         show_cleartext: bool,
+        /// Full signing policies, used to validate policy-bound internal keys.
+        ///
+        /// Every internal key whose origin path has the signing-policy shape must
+        /// have its policy supplied here, or registration fails closed. `None` is
+        /// equivalent to an empty list.
+        #[n(5)]
+        signing_policies: Option<Vec<SigningPolicy>>,
     },
 
     #[n(5)]

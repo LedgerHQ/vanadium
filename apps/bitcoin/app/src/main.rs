@@ -6,6 +6,7 @@ mod bip32;
 mod constants;
 mod handlers;
 mod identity;
+mod policy;
 mod resident_key;
 
 use handlers::*;
@@ -37,11 +38,13 @@ async fn handle_request(
             registered_identities,
             key_signatures,
             show_cleartext,
+            signing_policies,
         } => {
             handle_register_account(
                 app,
                 name,
                 account,
+                signing_policies.as_deref().unwrap_or(&[]),
                 registered_identities.as_deref(),
                 key_signatures.as_deref(),
                 *show_cleartext,
