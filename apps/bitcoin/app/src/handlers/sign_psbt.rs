@@ -7,18 +7,21 @@ use alloc::{
 
 use common::{
     account::Account,
-    bip388::{DescriptorTemplate, KeyExpression, SegwitVersion},
+    bip388::{DescriptorTemplate, KeyExpression, KeyInformation, SegwitVersion},
     errors::Error,
     identity::{build_identity_message, IdentityKey, MSG_TYPE_OUTPUT},
     message::{MuSig2PartialSignature, MuSig2Pubnonce, PartialSignature, Response},
     por::{ProofOfRegistration, Registerable},
     psbt::{
+        signing_policy::{parse_signing_policy_path, PsbtSigningPolicyGlobalRead},
         PsbtAccount, PsbtAccountCoordinates, PsbtAccountGlobalRead, PsbtAccountInputRead,
         PsbtAccountOutputRead, PsbtIdAuthGlobalRead, PsbtOutputAuthRead,
     },
     script::ToScript,
     taproot::{GetTapLeafHash, GetTapTreeHash},
 };
+
+use crate::policy::{self, PolicyContext, SigningDecision};
 
 use bitcoin::{
     bip32::ChildNumber,
@@ -113,85 +116,130 @@ fn format_amount(value: u64, ticker: &str) -> String {
     format!("{}.{:08} {}", whole_part, fractional_part, ticker)
 }
 
-/// Identifies how the signing private key should be obtained: a key tree and a
-/// full BIP-32 derivation path relative to that tree's master.
+/// Identifies how the signing private key should be obtained.
+///
+/// The parent HD node is derived in `tree` at `parent_path` (an ordinary BIP-32
+/// derivation), and `child_steps` (if any) are derived from it.
+///
+/// `child_steps` is `Some((change_step, address_index))` for the plain-key
+/// signing path, and `None` for the BIP-388 musig path (where the master
+/// participant key signs and BIP-32 derivation is folded into the session
+/// tweaks).
 struct KeySource {
     tree: KeyTree,
-    path: Vec<ChildNumber>,
+    parent_path: Vec<ChildNumber>,
+    child_steps: Option<(ChildNumber, ChildNumber)>,
+}
+
+/// A locally-controlled key resolved from a wallet-policy key, together with the
+/// signing policy (if any) that binds it.
+struct LocalKey {
+    key_source: KeySource,
+    /// `Some(hash)` when the key's origin path is a signing-policy path (see
+    /// [`parse_signing_policy_path`]) that matches a program present in the PSBT,
+    /// where `hash` is that program's full SHA-256; `None` for ordinary keys.
+    policy_hash: Option<[u8; 32]>,
 }
 
 /// Resolves a `KeySource` into an `HDPrivNode` containing the final private key.
 fn resolve_private_key(
     key_source: &KeySource,
 ) -> Result<HDPrivNode<sdk::curve::Secp256k1, 32>, Error> {
-    let path: Vec<u32> = key_source.path.iter().map(|&x| x.into()).collect();
-    match key_source.tree {
-        KeyTree::Standard => {
-            sdk::curve::Secp256k1::derive_hd_node(&path).map_err(|_| Error::KeyDerivationFailed)
-        }
-        KeyTree::Resident => derive_resident_hd_node(&path),
+    let parent_path: Vec<u32> = key_source.parent_path.iter().map(|&x| x.into()).collect();
+    let parent = match key_source.tree {
+        KeyTree::Standard => sdk::curve::Secp256k1::derive_hd_node(&parent_path)
+            .map_err(|_| Error::KeyDerivationFailed)?,
+        KeyTree::Resident => derive_resident_hd_node(&parent_path)?,
+    };
+    match key_source.child_steps {
+        None => Ok(parent),
+        Some((change_step, address_index)) => parent
+            .ckd_priv(u32::from(change_step))
+            .map_err(|_| Error::KeyDerivationFailed)?
+            .ckd_priv(u32::from(address_index))
+            .map_err(|_| Error::KeyDerivationFailed),
     }
 }
 
 /// Identifies whether `key_info` refers to a locally-controlled key (Standard
-/// or Resident tree) and, if so, returns the [`KeySource`] for signing.
+/// or Resident tree) and, if so, returns the [`LocalKey`] for signing.
 ///
-/// If `child_steps` is `Some((change_step, address_index))`, the returned
-/// `KeySource` includes those as the final two BIP-32 steps — this is the
-/// plain-key signing path. If `child_steps` is `None`, the `KeySource` stops
-/// at the master xpub (no extra derivation) — this is the BIP-388 musig
-/// signing path, where the master key signs and BIP-32 derivation is folded
-/// into [`SessionContext`] tweaks.
+/// The master derivation at the key's origin path is recomputed locally: the
+/// derived pubkey and chaincode must match `key_info.pubkey` (defeating
+/// fingerprint collisions and tampered xpubs). A key is policy-bound iff its
+/// origin path has the signing-policy shape (see [`parse_signing_policy_path`]);
+/// in that case a program matching the path chunks must be present in
+/// `policy_bindings`, otherwise this fails closed with
+/// [`Error::SigningPolicyMissing`].
 ///
-/// In both cases, the master derivation is recomputed locally and compared
-/// against `key_info.pubkey` to defeat fingerprint collisions.
-///
-/// Returns `None` if:
-/// - the key has no origin info (bare xpub, can't be derived locally), or
-/// - the fingerprint matches neither local tree, or
-/// - the local derivation doesn't yield the claimed pubkey/chaincode.
-fn resolve_local_key_source(
-    key_info: &common::bip388::KeyInformation,
+/// Returns `None` if the key has no origin info, its fingerprint matches neither
+/// local tree, or the local derivation doesn't yield the claimed pubkey.
+fn resolve_local_key(
+    key_info: &KeyInformation,
     child_steps: Option<(ChildNumber, ChildNumber)>,
     standard_fpr: u32,
     resident_fpr: u32,
-) -> Option<KeySource> {
-    let key_origin = key_info.origin_info.as_ref()?;
+    policy_bindings: &[([u32; 4], [u8; 32])],
+) -> Result<Option<LocalKey>, Error> {
+    let Some(key_origin) = key_info.origin_info.as_ref() else {
+        return Ok(None);
+    };
 
     let tree = if key_origin.fingerprint == standard_fpr {
         KeyTree::Standard
     } else if key_origin.fingerprint == resident_fpr {
         KeyTree::Resident
     } else {
-        return None;
+        return Ok(None);
     };
 
-    // Derive the master xpub locally and check it matches what the wallet
-    // policy claims; defeats fingerprint collisions.
     let master_path_u32: Vec<u32> = key_origin
         .derivation_path
         .iter()
         .map(|&s| u32::from(s))
         .collect();
     let claim_node = match tree {
-        KeyTree::Standard => sdk::curve::Secp256k1::derive_hd_node(&master_path_u32).ok()?,
-        KeyTree::Resident => derive_resident_hd_node(&master_path_u32).ok()?,
+        KeyTree::Standard => sdk::curve::Secp256k1::derive_hd_node(&master_path_u32).ok(),
+        KeyTree::Resident => derive_resident_hd_node(&master_path_u32).ok(),
+    };
+    let Some(claim_node) = claim_node else {
+        return Ok(None);
     };
     let derived_pubkey = EcfpPrivateKey::<sdk::curve::Secp256k1, 32>::new(*claim_node.privkey)
         .to_public_key()
         .to_compressed();
-    let expected_pubkey = key_info.pubkey.public_key.serialize();
-    let expected_chaincode: &[u8; 32] = key_info.pubkey.chain_code.as_ref();
-    if derived_pubkey != expected_pubkey || claim_node.chaincode != *expected_chaincode {
-        return None;
+    if derived_pubkey != key_info.pubkey.public_key.serialize() {
+        return Ok(None);
     }
 
-    let mut path: Vec<ChildNumber> = key_origin.derivation_path.iter().copied().collect();
-    if let Some((change_step, address_index)) = child_steps {
-        path.push(change_step);
-        path.push(address_index);
+    // The declared xpub must be the genuine derived node. The pubkey is checked
+    // above; the chaincode governs the change/address child derivation.
+    let xpub_chaincode: [u8; 32] = *key_info.pubkey.chain_code.as_ref();
+    if xpub_chaincode != claim_node.chaincode {
+        return Err(Error::InvalidSigningPolicy);
     }
-    Some(KeySource { tree, path })
+
+    // A signing-policy-bound key is recognized purely by the shape of its origin
+    // path; its program must be present in the PSBT (fail closed otherwise).
+    let policy_hash = match parse_signing_policy_path(&master_path_u32) {
+        None => None,
+        Some((_coin_type, _account, chunks)) => Some(
+            policy_bindings
+                .iter()
+                .find(|(binding_chunks, _)| *binding_chunks == chunks)
+                .map(|(_, hash)| *hash)
+                .ok_or(Error::SigningPolicyMissing)?,
+        ),
+    };
+
+    Ok(Some(LocalKey {
+        key_source: KeySource {
+            tree,
+            parent_path: key_origin.derivation_path.iter().copied().collect(),
+            child_steps,
+        },
+        policy_hash,
+    }))
 }
 
 /// Computes a 32-byte BIP-341 sighash for the given input. The output goes to
@@ -321,6 +369,10 @@ struct TransactionSummary {
     external_output_auth_names: Vec<Option<String>>,
     inputs_total_amount: u64,
     outputs_total_amount: u64,
+    /// Sum of amounts of external (non-change) outputs.
+    external_out_total: u64,
+    /// Sum of amounts of change / internal outputs.
+    change_out_total: u64,
     warn_unverified_inputs: bool,
 }
 
@@ -394,6 +446,8 @@ fn analyze_transaction(
     let mut external_output_auth_names: Vec<Option<String>> = Vec::new();
     let mut inputs_total_amount: u64 = 0;
     let mut outputs_total_amount: u64 = 0;
+    let mut external_out_total: u64 = 0;
+    let mut change_out_total: u64 = 0;
     let mut warn_unverified_inputs = false;
     let mut script_checks = Vec::new();
 
@@ -545,6 +599,7 @@ fn analyze_transaction(
             });
 
             account_spent_amounts[account_id as usize] -= amount as i64;
+            change_out_total += amount;
         } else {
             // Verify any id_auth proofs on external outputs immediately.
             let proofs = output
@@ -576,6 +631,7 @@ fn analyze_transaction(
             }
             external_outputs_indexes.push(output_index);
             external_output_auth_names.push(first_auth_name);
+            external_out_total += amount;
         };
 
         outputs_total_amount += amount;
@@ -594,6 +650,8 @@ fn analyze_transaction(
         external_output_auth_names,
         inputs_total_amount,
         outputs_total_amount,
+        external_out_total,
+        change_out_total,
         warn_unverified_inputs,
     };
 
@@ -830,6 +888,8 @@ fn leaf_hash_for(
 fn sign_all_inputs(
     psbt: &fastpsbt::Psbt,
     summary: &TransactionSummary,
+    decisions: &PolicyDecisions,
+    policy_bindings: &[([u32; 4], [u8; 32])],
     musig_state: &mut MusigSigningState,
 ) -> Result<SignedInputs, Error> {
     let unsigned_tx = psbt
@@ -888,6 +948,8 @@ fn sign_all_inputs(
                     &mut prevouts,
                     standard_fpr,
                     resident_fpr,
+                    decisions,
+                    policy_bindings,
                     &mut out,
                 )?;
                 continue;
@@ -898,14 +960,26 @@ fn sign_all_inputs(
                 .plain_key_index()
                 .expect("kp must be plain because not musig");
             let key_info = &wallet_policy.key_information()[key_index as usize];
-            let Some(key_source) = resolve_local_key_source(
+            let Some(local) = resolve_local_key(
                 key_info,
                 Some((change_step, address_index)),
                 standard_fpr,
                 resident_fpr,
-            ) else {
+                policy_bindings,
+            )?
+            else {
                 continue;
             };
+
+            // Enforce the signing policy bound to this key, if any.
+            if let Some(hash) = local.policy_hash {
+                match decision_for(decisions, &hash) {
+                    Some(SigningDecision::Deny) => continue, // policy refused: skip this key
+                    Some(_) => {} // approved (silently or with confirmation)
+                    None => return Err(Error::SigningPolicyMissing),
+                }
+            }
+            let key_source = local.key_source;
 
             if input.witness_utxo.is_some() {
                 match wallet_policy.get_segwit_version() {
@@ -964,6 +1038,8 @@ fn handle_musig_placeholder(
     prevouts: &mut Option<Vec<TxOut>>,
     standard_fpr: u32,
     resident_fpr: u32,
+    decisions: &PolicyDecisions,
+    policy_bindings: &[([u32; 4], [u8; 32])],
     out: &mut SignedInputs,
 ) -> Result<(), Error> {
     // musig() can only appear inside tr() per BIP-388.
@@ -985,11 +1061,13 @@ fn handle_musig_placeholder(
     let indices = kp
         .musig_key_indices()
         .expect("kp must be musig because is_musig() returned true");
-    let mut ours: Vec<KeySource> = Vec::new();
+    let mut ours: Vec<(KeySource, Option<[u8; 32]>)> = Vec::new();
     for &participant_idx in indices {
         let key_info = &wallet_policy.key_information()[participant_idx as usize];
-        if let Some(ks) = resolve_local_key_source(key_info, None, standard_fpr, resident_fpr) {
-            ours.push(ks);
+        if let Some(local) =
+            resolve_local_key(key_info, None, standard_fpr, resident_fpr, policy_bindings)?
+        {
+            ours.push((local.key_source, local.policy_hash));
         }
     }
     if ours.is_empty() {
@@ -1005,7 +1083,18 @@ fn handle_musig_placeholder(
         spend,
     )?;
 
-    for ks in &ours {
+    for (ks, policy_hash) in &ours {
+        // Enforce the signing policy bound to this participant, if any. A denied
+        // policy yields neither a round-1 pubnonce nor a round-2 partial
+        // signature, so the musig session simply never completes for this key.
+        if let Some(hash) = policy_hash {
+            match decision_for(decisions, hash) {
+                Some(SigningDecision::Deny) => continue,
+                Some(_) => {} // approved (silently or with confirmation)
+                None => return Err(Error::SigningPolicyMissing),
+            }
+        }
+
         // This participant's own derived child pubkey (= one entry in
         // `info.keys`).
         let hd = resolve_private_key(ks)?;
@@ -1058,6 +1147,175 @@ fn handle_musig_placeholder(
     Ok(())
 }
 
+/// The decision produced for one signing policy, keyed by the policy's hash.
+///
+/// The [`PolicyContext`] is transaction-global, so a policy's decision depends
+/// only on `(context, hash)` — the same for every input, placeholder and musig
+/// participant that references the policy. Each distinct policy is therefore
+/// evaluated once and looked up by hash.
+struct PolicyDecision {
+    hash: [u8; 32],
+    decision: SigningDecision,
+}
+
+type PolicyDecisions = Vec<PolicyDecision>;
+
+/// Aggregated result of scanning which local keys will sign.
+struct SigningScan {
+    /// One entry per local signing attempt (plain key or musig participant), in
+    /// signing order: `Some(hash)` when the key is policy-bound, `None` otherwise.
+    attempts: Vec<Option<[u8; 32]>>,
+}
+
+/// Walk every (input, placeholder) pair, classify the local signing keys and
+/// record the signing policy (if any) that binds each one. Policy-bound musig
+/// participants are recorded like plain signers (they are enforced too).
+fn scan_signing_policies(
+    psbt: &fastpsbt::Psbt,
+    summary: &TransactionSummary,
+    standard_fpr: u32,
+    resident_fpr: u32,
+    policy_bindings: &[([u32; 4], [u8; 32])],
+) -> Result<SigningScan, Error> {
+    let mut attempts: Vec<Option<[u8; 32]>> = Vec::new();
+
+    for input_index in 0..psbt.inputs.len() {
+        let (account_id, _) = summary.input_coordinates[input_index];
+        let PsbtAccount::WalletPolicy(wallet_policy) = &summary.accounts[account_id as usize];
+
+        for (_placeholder_index, (kp, _tapleaf_desc)) in wallet_policy
+            .descriptor_template()
+            .placeholders()
+            .enumerate()
+        {
+            if kp.is_musig() {
+                let indices = kp
+                    .musig_key_indices()
+                    .expect("kp must be musig because is_musig() returned true");
+                for &participant_idx in indices {
+                    let key_info = &wallet_policy.key_information()[participant_idx as usize];
+                    if let Some(local) = resolve_local_key(
+                        key_info,
+                        None,
+                        standard_fpr,
+                        resident_fpr,
+                        policy_bindings,
+                    )? {
+                        attempts.push(local.policy_hash);
+                    }
+                }
+            } else {
+                let key_index = kp
+                    .plain_key_index()
+                    .expect("kp must be plain because not musig");
+                let key_info = &wallet_policy.key_information()[key_index as usize];
+                if let Some(local) =
+                    resolve_local_key(key_info, None, standard_fpr, resident_fpr, policy_bindings)?
+                {
+                    attempts.push(local.policy_hash);
+                }
+            }
+        }
+    }
+
+    Ok(SigningScan { attempts })
+}
+
+fn evaluate_signing_policies(
+    psbt: &fastpsbt::Psbt,
+    ctx: &PolicyContext,
+    scan: &SigningScan,
+) -> Result<PolicyDecisions, Error> {
+    let mut decisions: PolicyDecisions = Vec::new();
+    for hash in scan.attempts.iter().flatten() {
+        if decisions.iter().any(|d| d.hash == *hash) {
+            continue; // evaluate each distinct policy once
+        }
+        decisions.push(PolicyDecision {
+            hash: *hash,
+            decision: policy::evaluate_policy(psbt, ctx, hash)?,
+        });
+    }
+    Ok(decisions)
+}
+
+/// Decide whether user confirmation can be skipped, given the policy decisions.
+///
+/// Confirmation is skipped only if at least one signature will be produced and
+/// *every* signature that will be produced comes from a policy-bound key that
+/// authorized silent signing. Keys whose policy denied signing are ignored (they
+/// produce no signature); any non-policy signer (plain key or musig participant)
+/// or key requiring confirmation forces the normal confirmation flow.
+///
+/// Silent signing (including for musig participants) is only acted upon after the
+/// background verification task succeeds — see [`handle_sign_psbt`] — so the
+/// context aggregates the policy relied on are trustworthy before any nonce or
+/// signature is emitted.
+fn can_skip_confirmation(scan: &SigningScan, decisions: &PolicyDecisions) -> bool {
+    let mut any_silent = false;
+    for attempt in &scan.attempts {
+        match attempt {
+            None => return false,
+            Some(hash) => match decision_for(decisions, hash) {
+                Some(SigningDecision::ApproveSilently) => any_silent = true,
+                Some(SigningDecision::Deny) => {} // will not sign
+                _ => return false,                // ApproveWithUserConfirmation (or missing)
+            },
+        }
+    }
+    any_silent
+}
+
+fn decision_for(decisions: &PolicyDecisions, hash: &[u8; 32]) -> Option<SigningDecision> {
+    decisions
+        .iter()
+        .find(|decision| decision.hash == *hash)
+        .map(|decision| decision.decision)
+}
+
+/// Build the read-only aggregate [`PolicyContext`] exposed to signing programs
+/// from the analyzed transaction.
+fn build_policy_context(
+    psbt: &fastpsbt::Psbt,
+    summary: &TransactionSummary,
+) -> Result<PolicyContext, Error> {
+    fn to_policy_int<T>(value: T) -> Result<i64, Error>
+    where
+        i64: TryFrom<T>,
+    {
+        i64::try_from(value).map_err(|_| Error::PolicyExecutionFailed)
+    }
+
+    let inputs_total = summary.inputs_total_amount;
+    let fee = summary.fee();
+    let fee_percent = if inputs_total > 0 {
+        fee.saturating_mul(100) / inputs_total
+    } else {
+        0
+    };
+    let external_out_count = summary.external_outputs_indexes.len();
+    let output_count = psbt.outputs.len();
+    let change_count = output_count
+        .checked_sub(external_out_count)
+        .ok_or(Error::PolicyExecutionFailed)?;
+    Ok(PolicyContext {
+        inputs_total: to_policy_int(inputs_total)?,
+        outputs_total: to_policy_int(summary.outputs_total_amount)?,
+        // Every input must belong to an account, so internal == total for now.
+        internal_in_total: to_policy_int(inputs_total)?,
+        external_out_total: to_policy_int(summary.external_out_total)?,
+        change_total: to_policy_int(summary.change_out_total)?,
+        fee: to_policy_int(fee)?,
+        fee_percent: to_policy_int(fee_percent)?,
+        input_count: to_policy_int(psbt.inputs.len())?,
+        output_count: to_policy_int(output_count)?,
+        external_out_count: to_policy_int(external_out_count)?,
+        change_count: to_policy_int(change_count)?,
+        tx_version: i64::from(psbt.tx_version),
+        locktime: i64::from(psbt.fallback_locktime.unwrap_or(0)),
+    })
+}
+
 pub async fn handle_sign_psbt(app: &mut sdk::App, psbt: &[u8]) -> Result<Response, Error> {
     app.show_spinner("Processing...");
 
@@ -1078,40 +1336,86 @@ pub async fn handle_sign_psbt(app: &mut sdk::App, psbt: &[u8]) -> Result<Respons
         .await
     });
 
-    // Show warnings (runs while verification task progresses in the background)
-    if summary.warn_unverified_inputs {
-        if !display_warning_unverified_inputs(app).await {
-            return Err(Error::UserRejected);
-            // verification_handle is dropped here → task is cancelled
-        }
-    }
+    // Signing-policy handling. Each policy present in the PSBT maps to the four
+    // 31-bit path chunks that a bound key's origin path must carry. Fast path:
+    // if the PSBT carries no signing programs, behave as if the feature were
+    // absent — a device key that nonetheless has a signing-policy origin path
+    // then fails closed in `sign_all_inputs` (no matching program).
+    let policy_bindings = psbt
+        .signing_policy_chunk_bindings()
+        .map_err(|_| Error::InvalidSigningPolicy)?;
+    let policies_present = !policy_bindings.is_empty();
 
-    let fee = summary.fee();
-    if summary.inputs_total_amount >= crate::constants::THRESHOLD_WARN_HIGH_FEES_AMOUNT {
-        let fee_percent = fee.saturating_mul(100) / summary.inputs_total_amount;
-        if fee_percent >= crate::constants::THRESHOLD_WARN_HIGH_FEES_PERCENT {
-            if !display_warning_high_fee(app, fee_percent).await {
+    let (policy_decisions, skip_confirmation) = if policies_present {
+        let standard_fpr = sdk::curve::Secp256k1::get_master_fingerprint();
+        let resident_fpr = get_resident_master_fingerprint()?;
+        let scan = scan_signing_policies(
+            &psbt,
+            &summary,
+            standard_fpr,
+            resident_fpr,
+            &policy_bindings,
+        )?;
+        // The context aggregates (internal/external split, fee, …) are only
+        // trustworthy once verification confirms the account-coordinate script
+        // checks. Silent signing suppresses the prompt below, so it is gated on
+        // `await_task` succeeding before any signature is produced.
+        let ctx = build_policy_context(&psbt, &summary)?;
+        let decisions = evaluate_signing_policies(&psbt, &ctx, &scan)?;
+        let skip = can_skip_confirmation(&scan, &decisions);
+        (decisions, skip)
+    } else {
+        (Vec::new(), false)
+    };
+
+    if !skip_confirmation {
+        // Show warnings (runs while verification task progresses in the background)
+        if summary.warn_unverified_inputs {
+            if !display_warning_unverified_inputs(app).await {
                 return Err(Error::UserRejected);
+                // verification_handle is dropped here → task is cancelled
             }
         }
+
+        let fee = summary.fee();
+        if summary.inputs_total_amount >= crate::constants::THRESHOLD_WARN_HIGH_FEES_AMOUNT {
+            let fee_percent = fee.saturating_mul(100) / summary.inputs_total_amount;
+            if fee_percent >= crate::constants::THRESHOLD_WARN_HIGH_FEES_PERCENT {
+                if !display_warning_high_fee(app, fee_percent).await {
+                    return Err(Error::UserRejected);
+                }
+            }
+        }
+
+        // Display transaction for user approval
+        let pairs = build_display_pairs(&psbt, &summary)?;
+        if !display_transaction(app, &pairs).await {
+            #[cfg(not(any(test, feature = "autoapprove")))]
+            app.show_info(Icon::Failure, "Transaction rejected");
+
+            return Err(Error::UserRejected);
+        }
+    } else {
+        if summary.warn_unverified_inputs {
+            return Err(Error::CannotSignSilently);
+        }
     }
 
-    // Display transaction for user approval
-    let pairs = build_display_pairs(&psbt, &summary)?;
-    if !display_transaction(app, &pairs).await {
-        #[cfg(not(any(test, feature = "autoapprove")))]
-        app.show_info(Icon::Failure, "Transaction rejected");
-
-        return Err(Error::UserRejected);
-    }
-
-    // Wait for verification to complete (likely already done by now)
+    // Wait for verification to complete (likely already done by now). This must
+    // succeed before any signature is produced — and, for silently-approved
+    // transactions, before we act on having skipped the confirmation prompt.
     app.await_task("Verifying...", verification_handle)?;
 
     // All checks passed — sign
     app.show_spinner("Signing transaction...");
     let mut musig_state = MusigSigningState::default();
-    let signed = sign_all_inputs(&psbt, &summary, &mut musig_state)?;
+    let signed = sign_all_inputs(
+        &psbt,
+        &summary,
+        &policy_decisions,
+        &policy_bindings,
+        &mut musig_state,
+    )?;
 
     // Persist the round-1 session, if any, only after the signing pass has
     // completed successfully — partial failures must leave no stale session.
@@ -1132,12 +1436,29 @@ mod tests {
     use super::*;
     use base64::{engine::general_purpose::STANDARD, Engine as _};
     use bitcoin::{psbt::Psbt, secp256k1::schnorr::Signature, XOnlyPublicKey};
-    use common::{bip388::WalletPolicy, psbt::prepare_psbt};
+    use common::{
+        bip388::WalletPolicy,
+        psbt::{prepare_psbt, PsbtAccountGlobalWrite},
+    };
     use hex_literal::hex;
+
+    // Signing programs shipped in `apps/bitcoin/assets/signing_policies`.
+    use crate::policy::test_assets::{ALWAYS_APPROVE, FEE_CAP, SMALL_SPEND_AUTO_APPROVE};
 
     // rust-bitcoin doesn't support Psbtv2, so we use this helper for conversion
     fn serialize_as_psbtv2(psbt: &Psbt) -> Vec<u8> {
         common::psbt::psbt_v0_to_v2(&psbt.serialize()).expect("Failed to convert PSBTv0 to PSBTv2")
+    }
+
+    fn refresh_account_pors(psbt: &mut Psbt) {
+        let accounts = psbt.get_accounts().unwrap();
+        for (account_id, account) in accounts.iter().enumerate() {
+            let PsbtAccount::WalletPolicy(wallet_policy) = account;
+            let name = psbt.get_account_name(account_id as u32).unwrap().unwrap();
+            let por = ProofOfRegistration::new(&wallet_policy.registration_id(&name));
+            psbt.set_account_proof_of_registration(account_id as u32, &por.dangerous_as_bytes())
+                .unwrap();
+        }
     }
 
     #[test]
@@ -1375,7 +1696,8 @@ mod tests {
 
         // Case 2: valid PoR, but the Schnorr signature over the output script is invalid ==> rejected with InvalidIdentitySignature.
         let psbt_b64 = "cHNidP8BALICAAAAApcjbJiptnVfVZ8u5lEDOmwWO4ApbFXQk50KhPXeVqToAAAAAAAAAAAAEJQv9ZdQMi/KhGbkBskfsaZyegiwfV/RH6oVl8cepNsAAAAAAAAAAAACmDoAAAAAAAAiUSDcH+P34kHoc+fctxVKmO/RlrwtgevDkXfwxtAqCZC8tZc6AAAAAAAAIlEggbusbuk6g0dnZIj5nEgvlGnGQVr4D4co77xvtNkr8LsAAAAATwEENYfPBKvvuwaAAAACOY8+nsIJJTr+nBUK0w+kGCzGKmiDRLGAxsafRuEXptYDZ6wvQTRA5DwRKy2x9lLQtiisFFZKuk1+qQFl+B1SdgoU9azC/TAAAIABAACAAAAAgAIAAIAO/AdBQ0NPVU5UAAAAAABwAAl0cihAMC8qKikBAfWswv0EMAAAgAEAAIAAAACAAgAAgAQ1h88Eq++7BoAAAAI5jz6ewgklOv6cFQrTD6QYLMYqaINEsYDGxp9G4Rem1gNnrC9BNEDkPBErLbH2UtC2KKwUVkq6TX6pAWX4HVJ2Cg78B0FDQ09VTlQBAAAAAAxUZXN0IGFjY291bnQO/AdBQ0NPVU5UAgAAAAAgTWldX2utrybjCRhpakIzoHUrVchEgs+aWCRAhe2qRVsq/AZJREFVVEgAAtCUts85qNnC53vT1fTs3ax/bTfvwlYvRYIqTtecWjV0MRBTYXRvc2hpIE5ha2Ftb3RvuFIxVHknuLpQ/zP3rTZie8gIyZjCHfUXcOEGSDcFFboAAQErECcAAAAAAAAiUSA1AkRxB/U8hQVW+E3Rw5yQDdY00QZ3TGdCwzwyEpy1RCEWCFne76qAVgdNCn1scuOxZQlP4K4FV9Zy4yrf+wkueaYdAPWswv0wAACAAQAAgAAAAIACAACAAAAAAAESAAABFyAIWd7vqoBWB00KfWxy47FlCU/grgVX1nLjKt/7CS55pgr8B0FDQ09VTlQABwAAAAESAAAAAQErIE4AAAAAAAAiUSA5DqSH1RNHbf/kpCTKALEGzw4iUkyo7SIz62lJA2gY5yEWUD3ScUW1Ylc9FIKs8E46QWstkJTux5wf4mQ1eb7Y3v8dAPWswv0wAACAAQAAgAAAAIACAACAAQAAAGMMAAABFyBQPdJxRbViVz0UgqzwTjpBay2QlO7HnB/iZDV5vtje/wr8B0FDQ09VTlQABwAAAWMMAAAAK/wGSURBVVRIAAAC0JS2zzmo2cLne9PV9OzdrH9tN+/CVi9FgipO15xaNXRAEREREREREREREREREREREREREREREREREREREREREREREREREREREREREREREREREREREREREREREREREREREQABBSADwo/+2nrTysZIeuSJ6nFcsooKPHueSPFCWAvjS977NSEHA8KP/tp608rGSHrkiepxXLKKCjx7nkjxQlgL40ve+zUdAPWswv0wAACAAQAAgAAAAIACAACAAQAAADIgAAAK/AdBQ0NPVU5UAAcAAAEyIAAAAA==";
-        let psbt = Psbt::deserialize(&STANDARD.decode(psbt_b64).unwrap()).unwrap();
+        let mut psbt = Psbt::deserialize(&STANDARD.decode(psbt_b64).unwrap()).unwrap();
+        refresh_account_pors(&mut psbt);
         let result = sdk::executor::block_on(handle_sign_psbt(
             &mut sdk::App::singleton(),
             &serialize_as_psbtv2(&psbt),
@@ -1386,7 +1708,8 @@ mod tests {
     #[test]
     fn test_handle_sign_psbt_identity_key_success() {
         let psbt_b64 = "cHNidP8BALICAAAAApcjbJiptnVfVZ8u5lEDOmwWO4ApbFXQk50KhPXeVqToAAAAAAAAAAAAEJQv9ZdQMi/KhGbkBskfsaZyegiwfV/RH6oVl8cepNsAAAAAAAAAAAACmDoAAAAAAAAiUSDcH+P34kHoc+fctxVKmO/RlrwtgevDkXfwxtAqCZC8tZc6AAAAAAAAIlEggbusbuk6g0dnZIj5nEgvlGnGQVr4D4co77xvtNkr8LsAAAAATwEENYfPBKvvuwaAAAACOY8+nsIJJTr+nBUK0w+kGCzGKmiDRLGAxsafRuEXptYDZ6wvQTRA5DwRKy2x9lLQtiisFFZKuk1+qQFl+B1SdgoU9azC/TAAAIABAACAAAAAgAIAAIAO/AdBQ0NPVU5UAAAAAABwAAl0cihAMC8qKikBAfWswv0EMAAAgAEAAIAAAACAAgAAgAQ1h88Eq++7BoAAAAI5jz6ewgklOv6cFQrTD6QYLMYqaINEsYDGxp9G4Rem1gNnrC9BNEDkPBErLbH2UtC2KKwUVkq6TX6pAWX4HVJ2Cg78B0FDQ09VTlQBAAAAAAxUZXN0IGFjY291bnQO/AdBQ0NPVU5UAgAAAAAgTWldX2utrybjCRhpakIzoHUrVchEgs+aWCRAhe2qRVsq/AZJREFVVEgAAtCUts85qNnC53vT1fTs3ax/bTfvwlYvRYIqTtecWjV0MRBTYXRvc2hpIE5ha2Ftb3RvuFIxVHknuLpQ/zP3rTZie8gIyZjCHfUXcOEGSDcFFboAAQErECcAAAAAAAAiUSA1AkRxB/U8hQVW+E3Rw5yQDdY00QZ3TGdCwzwyEpy1RCEWCFne76qAVgdNCn1scuOxZQlP4K4FV9Zy4yrf+wkueaYdAPWswv0wAACAAQAAgAAAAIACAACAAAAAAAESAAABFyAIWd7vqoBWB00KfWxy47FlCU/grgVX1nLjKt/7CS55pgr8B0FDQ09VTlQABwAAAAESAAAAAQErIE4AAAAAAAAiUSA5DqSH1RNHbf/kpCTKALEGzw4iUkyo7SIz62lJA2gY5yEWUD3ScUW1Ylc9FIKs8E46QWstkJTux5wf4mQ1eb7Y3v8dAPWswv0wAACAAQAAgAAAAIACAACAAQAAAGMMAAABFyBQPdJxRbViVz0UgqzwTjpBay2QlO7HnB/iZDV5vtje/wr8B0FDQ09VTlQABwAAAWMMAAAAK/wGSURBVVRIAAAC0JS2zzmo2cLne9PV9OzdrH9tN+/CVi9FgipO15xaNXRAR5l6X7yUsuUpkyekIKx81HNmEE3mnqVB7/5A1UpjtZuvx0c2N93OOf6HvpNKpvounBUpNoOYTRJvVhKqqrl/KgABBSADwo/+2nrTysZIeuSJ6nFcsooKPHueSPFCWAvjS977NSEHA8KP/tp608rGSHrkiepxXLKKCjx7nkjxQlgL40ve+zUdAPWswv0wAACAAQAAgAAAAIACAACAAQAAADIgAAAK/AdBQ0NPVU5UAAcAAAEyIAAAAA==";
-        let psbt = Psbt::deserialize(&STANDARD.decode(psbt_b64).unwrap()).unwrap();
+        let mut psbt = Psbt::deserialize(&STANDARD.decode(psbt_b64).unwrap()).unwrap();
+        refresh_account_pors(&mut psbt);
         let result = sdk::executor::block_on(handle_sign_psbt(
             &mut sdk::App::singleton(),
             &serialize_as_psbtv2(&psbt),
@@ -1904,5 +2227,409 @@ mod tests {
             &serialize_as_psbtv2(&psbt),
         ));
         assert_eq!(result, Err(Error::MissingMusigPubnonce));
+    }
+
+    // ===================== signing-policy integration tests =====================
+
+    use common::psbt::signing_policy::{
+        build_signing_policy_value, set_signing_policy, signing_policy_key_path, ENGINE_ID_PROGRAM,
+    };
+
+    /// Builds a device-controlled [`KeyInformation`] whose origin path is the
+    /// signing-policy path for `program_hash` at `account`. It is an ordinary
+    /// BIP-32 xpub (real chaincode); the *path* is what binds it to the policy.
+    fn policy_bound_key_info(account: u32, program_hash: &[u8; 32]) -> KeyInformation {
+        // Coin-type is not semantically constrained by the device; use testnet.
+        let path = signing_policy_key_path(1, account, program_hash);
+        let node = sdk::curve::Secp256k1::derive_hd_node(&path).unwrap();
+        let compressed = EcfpPrivateKey::<sdk::curve::Secp256k1, 32>::new(*node.privkey)
+            .to_public_key()
+            .to_compressed();
+        let standard_fpr = sdk::curve::Secp256k1::get_master_fingerprint();
+        let pubkey = Xpub {
+            network: bitcoin::NetworkKind::Test,
+            depth: path.len() as u8,
+            parent_fingerprint: Fingerprint::default(),
+            child_number: ChildNumber::from(*path.last().unwrap()),
+            public_key: bitcoin::secp256k1::PublicKey::from_slice(&compressed).unwrap(),
+            chain_code: ChainCode::from(node.chaincode),
+        };
+        KeyInformation {
+            pubkey,
+            origin_info: Some(KeyOrigin {
+                fingerprint: standard_fpr,
+                derivation_path: path.iter().map(|&n| ChildNumber::from(n)).collect(),
+            }),
+        }
+    }
+
+    /// A `wpkh(@0/**)` wallet policy whose single (device-controlled) key is
+    /// bound to `program` via its derivation path. Returns the policy and the
+    /// program hash.
+    fn policy_bound_wpkh(program: &[u8]) -> (WalletPolicy, [u8; 32]) {
+        let (_, hash) = build_signing_policy_value(ENGINE_ID_PROGRAM, 0, program);
+        let key_info = policy_bound_key_info(0, &hash);
+        (
+            WalletPolicy::new("wpkh(@0/**)", vec![key_info]).unwrap(),
+            hash,
+        )
+    }
+
+    /// One-input/one-output PSBT spending from the policy account to an external
+    /// P2WPKH output of `external_value` sat (fee is a fixed 10_000 sat).
+    ///
+    /// When `with_non_witness_utxo` is true, the funding transaction is attached
+    /// as the input's `non_witness_utxo` (and the input is pointed at it), so the
+    /// SegWit v0 input's amount is verified; otherwise the input is unverified and
+    /// sets `warn_unverified_inputs`.
+    fn build_policy_wpkh_psbt(
+        wallet_policy: &WalletPolicy,
+        external_value: u64,
+        with_non_witness_utxo: bool,
+    ) -> Psbt {
+        let secp = Secp256k1::new();
+        let expected_script = wallet_policy.to_script(false, 0).unwrap();
+
+        let unsigned_tx = Transaction {
+            version: transaction::Version::TWO,
+            lock_time: absolute::LockTime::ZERO,
+            input: vec![TxIn {
+                previous_output: OutPoint {
+                    txid: Txid::from_byte_array([0x42; 32]),
+                    vout: 0,
+                },
+                script_sig: ScriptBuf::new(),
+                sequence: Sequence::ENABLE_RBF_NO_LOCKTIME,
+                witness: bitcoin::Witness::new(),
+            }],
+            output: vec![TxOut {
+                value: Amount::from_sat(external_value),
+                script_pubkey: ScriptBuf::from_bytes(
+                    hex!("0014" "00112233445566778899aabbccddeeff00112233").to_vec(),
+                ),
+            }],
+        };
+        let mut psbt = Psbt::from_unsigned_tx(unsigned_tx).unwrap();
+        psbt.inputs[0].witness_utxo = Some(TxOut {
+            value: Amount::from_sat(external_value + 10_000),
+            script_pubkey: expected_script.clone(),
+        });
+
+        // bip32_derivation so `prepare_psbt` can locate this input's coordinates.
+        let child_path = vec![
+            ChildNumber::Normal { index: 0 },
+            ChildNumber::Normal { index: 0 },
+        ];
+        let child = wallet_policy.key_information()[0]
+            .pubkey
+            .derive_pub(
+                &secp,
+                &child_path.iter().copied().collect::<DerivationPath>(),
+            )
+            .unwrap();
+        let origin = wallet_policy.key_information()[0]
+            .origin_info
+            .as_ref()
+            .unwrap();
+        let full_path: DerivationPath = origin
+            .derivation_path
+            .iter()
+            .copied()
+            .chain(child_path.iter().copied())
+            .collect();
+        psbt.inputs[0].bip32_derivation.insert(
+            child.public_key,
+            (
+                Fingerprint::from(origin.fingerprint.to_be_bytes()),
+                full_path,
+            ),
+        );
+
+        if with_non_witness_utxo {
+            // Attach the funding transaction and point the input at it, so the
+            // SegWit v0 input's amount is verified (no `warn_unverified_inputs`).
+            let prev_tx = Transaction {
+                version: transaction::Version::TWO,
+                lock_time: absolute::LockTime::ZERO,
+                input: vec![TxIn {
+                    previous_output: OutPoint {
+                        txid: Txid::from_byte_array([0x11; 32]),
+                        vout: 0,
+                    },
+                    script_sig: ScriptBuf::new(),
+                    sequence: Sequence::ENABLE_RBF_NO_LOCKTIME,
+                    witness: bitcoin::Witness::new(),
+                }],
+                output: vec![TxOut {
+                    value: Amount::from_sat(external_value + 10_000),
+                    script_pubkey: expected_script,
+                }],
+            };
+            psbt.unsigned_tx.input[0].previous_output = OutPoint {
+                txid: prev_tx.compute_txid(),
+                vout: 0,
+            };
+            psbt.inputs[0].non_witness_utxo = Some(prev_tx);
+        }
+
+        psbt
+    }
+
+    fn finalize_policy_psbt(psbt: &mut Psbt, wallet_policy: &WalletPolicy) {
+        let name = "policy account";
+        let por =
+            ProofOfRegistration::new(&wallet_policy.registration_id(name)).dangerous_as_bytes();
+        prepare_psbt(psbt, &[(wallet_policy, name, &por)]).unwrap();
+    }
+
+    #[test]
+    fn test_signing_policy_evaluated_once_per_hash() {
+        let program = ALWAYS_APPROVE;
+        let (wallet_policy, hash) = policy_bound_wpkh(program);
+        let mut psbt = build_policy_wpkh_psbt(&wallet_policy, 50_000, true);
+        set_signing_policy(&mut psbt, ENGINE_ID_PROGRAM, 0, program);
+        let serialized = serialize_as_psbtv2(&psbt);
+        let parsed = fastpsbt::Psbt::parse(&serialized).unwrap();
+        // Two signing attempts referencing the same policy dedup to one decision.
+        let scan = SigningScan {
+            attempts: vec![Some(hash), Some(hash)],
+        };
+        let context = PolicyContext {
+            inputs_total: 60_000,
+            outputs_total: 50_000,
+            internal_in_total: 60_000,
+            external_out_total: 50_000,
+            change_total: 0,
+            fee: 10_000,
+            fee_percent: 16,
+            input_count: 1,
+            output_count: 1,
+            external_out_count: 1,
+            change_count: 0,
+            tx_version: 2,
+            locktime: 0,
+        };
+
+        let decisions = evaluate_signing_policies(&parsed, &context, &scan).unwrap();
+
+        assert_eq!(decisions.len(), 1);
+        assert_eq!(
+            decision_for(&decisions, &hash),
+            Some(SigningDecision::ApproveSilently)
+        );
+    }
+
+    #[test]
+    fn test_handle_sign_psbt_policy_silent_approve() {
+        // external_out_total = 50_000 <= 100_000 → approve(). The input is
+        // verified (non-witness UTXO attached), so the device signs silently.
+        let program = SMALL_SPEND_AUTO_APPROVE;
+        let (wp, _hash) = policy_bound_wpkh(program);
+        let mut psbt = build_policy_wpkh_psbt(&wp, 50_000, true);
+        finalize_policy_psbt(&mut psbt, &wp);
+        set_signing_policy(&mut psbt, ENGINE_ID_PROGRAM, 0, program);
+
+        let resp = sdk::executor::block_on(handle_sign_psbt(
+            &mut sdk::App::singleton(),
+            &serialize_as_psbtv2(&psbt),
+        ))
+        .unwrap();
+
+        let Response::PsbtSigned { signatures, .. } = resp else {
+            panic!("expected PsbtSigned");
+        };
+        assert_eq!(signatures.len(), 1);
+        // The signature must be under the child key derived along the
+        // signing-policy path — the standard BIP-32 derivation of the bound key.
+        let secp = Secp256k1::new();
+        let child = wp.key_information()[0]
+            .pubkey
+            .derive_pub(
+                &secp,
+                &vec![
+                    ChildNumber::Normal { index: 0 },
+                    ChildNumber::Normal { index: 0 },
+                ]
+                .into_iter()
+                .collect::<DerivationPath>(),
+            )
+            .unwrap();
+        assert_eq!(signatures[0].pubkey, child.public_key.serialize().to_vec());
+    }
+
+    #[test]
+    fn test_handle_sign_psbt_policy_silent_approve_fails_with_unverified_inputs() {
+        // The policy approves silently, but the SegWit v0 input carries no
+        // non-witness UTXO, so its amount is unverified. Silent signing must be
+        // refused (the aggregate context a silent decision relies on cannot be
+        // trusted), rather than signing without user confirmation.
+        let program = SMALL_SPEND_AUTO_APPROVE;
+        let (wp, _hash) = policy_bound_wpkh(program);
+        let mut psbt = build_policy_wpkh_psbt(&wp, 50_000, false);
+        finalize_policy_psbt(&mut psbt, &wp);
+        set_signing_policy(&mut psbt, ENGINE_ID_PROGRAM, 0, program);
+
+        let result = sdk::executor::block_on(handle_sign_psbt(
+            &mut sdk::App::singleton(),
+            &serialize_as_psbtv2(&psbt),
+        ));
+        assert_eq!(result, Err(Error::CannotSignSilently));
+    }
+
+    #[test]
+    fn test_handle_sign_psbt_policy_deny() {
+        // The fee is 10_000 of 60_000 sat of inputs (16.7%), above the 10% cap
+        // of the fee-cap policy → fail() → no signature produced.
+        let program = FEE_CAP;
+        let (wp, _hash) = policy_bound_wpkh(program);
+        let mut psbt = build_policy_wpkh_psbt(&wp, 50_000, true);
+        finalize_policy_psbt(&mut psbt, &wp);
+        set_signing_policy(&mut psbt, ENGINE_ID_PROGRAM, 0, program);
+
+        let resp = sdk::executor::block_on(handle_sign_psbt(
+            &mut sdk::App::singleton(),
+            &serialize_as_psbtv2(&psbt),
+        ))
+        .unwrap();
+
+        let Response::PsbtSigned { signatures, .. } = resp else {
+            panic!("expected PsbtSigned");
+        };
+        assert!(signatures.is_empty(), "policy should have denied signing");
+    }
+
+    #[test]
+    fn test_handle_sign_psbt_policy_rejects_out_of_range_context() {
+        // A narrowing cast would turn this amount negative and let the policy
+        // approve silently. Context construction must reject it instead.
+        let program = b"if context.external_out_total < 0 { approve(); }";
+        let (wp, _hash) = policy_bound_wpkh(program);
+        let mut psbt = build_policy_wpkh_psbt(&wp, i64::MAX as u64 + 1, true);
+        finalize_policy_psbt(&mut psbt, &wp);
+        set_signing_policy(&mut psbt, ENGINE_ID_PROGRAM, 0, program);
+
+        let result = sdk::executor::block_on(handle_sign_psbt(
+            &mut sdk::App::singleton(),
+            &serialize_as_psbtv2(&psbt),
+        ));
+        assert_eq!(result, Err(Error::PolicyExecutionFailed));
+    }
+
+    #[test]
+    fn test_handle_sign_psbt_policy_missing_program_errors() {
+        // Key is policy-bound (its origin path is a signing-policy path) but no
+        // program is attached to the PSBT → fail closed.
+        let program = ALWAYS_APPROVE;
+        let (wp, _hash) = policy_bound_wpkh(program);
+        let mut psbt = build_policy_wpkh_psbt(&wp, 50_000, true);
+        finalize_policy_psbt(&mut psbt, &wp);
+        // NOTE: deliberately not calling set_signing_policy.
+
+        let result = sdk::executor::block_on(handle_sign_psbt(
+            &mut sdk::App::singleton(),
+            &serialize_as_psbtv2(&psbt),
+        ));
+        assert_eq!(result, Err(Error::SigningPolicyMissing));
+    }
+
+    // ---- musig() policy enforcement ----
+
+    /// A `tr(musig(@0,@1)/**)` policy where `@0` is device-controlled and bound
+    /// to `program_hash` via its signing-policy origin path, and `@1` is the bare
+    /// hot cosigner xpub.
+    fn make_2of2_policy_keypath(program_hash: &[u8; 32]) -> WalletPolicy {
+        let secp = Secp256k1::new();
+        let key_info_0 = policy_bound_key_info(0, program_hash);
+        let key_info_1 = KeyInformation {
+            pubkey: cosigner_xpub(&secp),
+            origin_info: None,
+        };
+        WalletPolicy::new("tr(musig(@0,@1)/**)", vec![key_info_0, key_info_1]).unwrap()
+    }
+
+    #[test]
+    fn test_handle_sign_psbt_musig_policy_silent_approve_yields_nonce() {
+        musig_signing::reset_storage_for_tests();
+        // external_out_total = 50_000 <= 100_000 → approve() silently.
+        let program = SMALL_SPEND_AUTO_APPROVE;
+        let (_, hash) = build_signing_policy_value(ENGINE_ID_PROGRAM, 0, program);
+        let wallet_policy = make_2of2_policy_keypath(&hash);
+
+        let mut psbt = build_musig_keypath_psbt(&wallet_policy, 0);
+        let por = ProofOfRegistration::new(&wallet_policy.registration_id("musig policy"))
+            .dangerous_as_bytes();
+        prepare_psbt(&mut psbt, &[(&wallet_policy, &"musig policy", &por)]).unwrap();
+        set_signing_policy(&mut psbt, ENGINE_ID_PROGRAM, 0, program);
+
+        let resp = sdk::executor::block_on(handle_sign_psbt(
+            &mut sdk::App::singleton(),
+            &serialize_as_psbtv2(&psbt),
+        ))
+        .unwrap();
+        let Response::PsbtSigned {
+            musig_pubnonces, ..
+        } = resp
+        else {
+            panic!("expected PsbtSigned");
+        };
+        assert_eq!(
+            musig_pubnonces.len(),
+            1,
+            "an approved musig participant must emit a round-1 pubnonce"
+        );
+    }
+
+    #[test]
+    fn test_handle_sign_psbt_musig_policy_deny_produces_no_nonce() {
+        musig_signing::reset_storage_for_tests();
+        // The fee is 10_000 of 60_000 sat of inputs (16.7%), above the 10% cap
+        // of the fee-cap policy → fail() → no participation.
+        let program = FEE_CAP;
+        let (_, hash) = build_signing_policy_value(ENGINE_ID_PROGRAM, 0, program);
+        let wallet_policy = make_2of2_policy_keypath(&hash);
+
+        let mut psbt = build_musig_keypath_psbt(&wallet_policy, 0);
+        let por = ProofOfRegistration::new(&wallet_policy.registration_id("musig policy"))
+            .dangerous_as_bytes();
+        prepare_psbt(&mut psbt, &[(&wallet_policy, &"musig policy", &por)]).unwrap();
+        set_signing_policy(&mut psbt, ENGINE_ID_PROGRAM, 0, program);
+
+        let resp = sdk::executor::block_on(handle_sign_psbt(
+            &mut sdk::App::singleton(),
+            &serialize_as_psbtv2(&psbt),
+        ))
+        .unwrap();
+        let Response::PsbtSigned {
+            musig_pubnonces,
+            musig_partial_sigs,
+            ..
+        } = resp
+        else {
+            panic!("expected PsbtSigned");
+        };
+        assert!(
+            musig_pubnonces.is_empty() && musig_partial_sigs.is_empty(),
+            "a denied musig participant must not emit a nonce or partial signature"
+        );
+    }
+
+    #[test]
+    fn test_handle_sign_psbt_musig_policy_missing_program_errors() {
+        musig_signing::reset_storage_for_tests();
+        let program = ALWAYS_APPROVE;
+        let (_, hash) = build_signing_policy_value(ENGINE_ID_PROGRAM, 0, program);
+        let wallet_policy = make_2of2_policy_keypath(&hash);
+
+        let mut psbt = build_musig_keypath_psbt(&wallet_policy, 0);
+        let por = ProofOfRegistration::new(&wallet_policy.registration_id("musig policy"))
+            .dangerous_as_bytes();
+        prepare_psbt(&mut psbt, &[(&wallet_policy, &"musig policy", &por)]).unwrap();
+        // NOTE: deliberately not attaching the program → fail closed.
+
+        let result = sdk::executor::block_on(handle_sign_psbt(
+            &mut sdk::App::singleton(),
+            &serialize_as_psbtv2(&psbt),
+        ));
+        assert_eq!(result, Err(Error::SigningPolicyMissing));
     }
 }

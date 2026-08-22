@@ -1,0 +1,8 @@
+// Never sign with this key.
+//
+// The device still derives the account's addresses and can receive on them, but
+// this key can never contribute a signature: the coins are only spendable
+// through the other paths of the wallet policy (a recovery branch, the other
+// cosigners, ...). A convenient way to retire one signer of an account without
+// losing the ability to watch it.
+fail();

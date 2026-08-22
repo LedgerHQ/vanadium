@@ -1,0 +1,9 @@
+// Refuse to sign when the fee is more than 10% of the total input amount.
+//
+// `context.fee_percent` is floored to an integer percentage, which is too coarse
+// for a sharp threshold; comparing `fee * 10` against `inputs_total` keeps the
+// check exact (amounts are in satoshis, so the product cannot overflow i64).
+//
+// Transactions under the cap are not approved silently: they still go through
+// the normal on-device confirmation flow.
+if context.fee * 10 > context.inputs_total { fail(); }

@@ -1,0 +1,12 @@
+// Layered limits for a hot key: a hard cap, a fee sanity check, and a silent
+// approval threshold for everyday amounts.
+//
+// The first action reached is terminal, so the refusals must come before the
+// approval. Amounts in between the two thresholds fall off the end of the
+// program and use the normal on-device confirmation flow.
+let max_spend = 5000000; // 0.05 BTC: never signed by this key
+let no_confirm = 100000; // 0.001 BTC: signed without confirmation
+
+if context.external_out_total > max_spend { fail(); }
+if context.fee * 20 > context.inputs_total { fail(); } // fee above 5% of inputs
+if context.external_out_total <= no_confirm { approve(); }

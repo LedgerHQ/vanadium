@@ -19,12 +19,14 @@
 //! 1. Never reuse a field or variant index.
 //! 2. Never change the *type* of an existing field; introduce a new
 //!    field at a fresh index instead.
-//! 3. New fields added to existing variants must be `Option<_>` (or
-//!    otherwise carry a sensible default) so that older encoders can
-//!    omit them.
+//! 3. New fields added to existing variants must normally be `Option<_>` (or
+//!    otherwise carry a sensible default). Required fields are reserved for
+//!    coordinated breaking changes to the unreleased protocol.
 
 use alloc::{string::String, vec::Vec};
 use minicbor::{Decode, Encode};
+
+use crate::psbt::signing_policy::SigningPolicy;
 
 mod bip388_codec;
 
@@ -156,6 +158,9 @@ pub enum Request {
         /// of the descriptor template on screen.
         #[n(4)]
         show_cleartext: bool,
+        /// Full signing programs used to validate policy-bound internal keys.
+        #[n(5)]
+        signing_policies: Vec<SigningPolicy>,
     },
 
     #[n(5)]
@@ -333,6 +338,33 @@ pub enum Response {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::psbt::signing_policy::ENGINE_ID_PROGRAM;
+
+    const XPUB: &str = "tpubDCtKfsNyRhULjZ9XMS4VKKtVcPdVDi8MKUbcSD9MJDyjRu1A2ND5MiipozyyspBT9bg8upEp7a8EAgFxNxXn1d7QkdbL52Ty5jiSLcxPt1P";
+
+    #[test]
+    fn register_account_roundtrip_with_signing_policies() {
+        let key = crate::bip388::KeyInformation::try_from(XPUB).unwrap();
+        let request = Request::RegisterAccount {
+            name: "Policy account".into(),
+            account: Account::WalletPolicy(
+                crate::bip388::WalletPolicy::new("wpkh(@0/**)", vec![key]).unwrap(),
+            ),
+            registered_identities: None,
+            key_signatures: None,
+            show_cleartext: false,
+            signing_policies: vec![SigningPolicy::new(
+                ENGINE_ID_PROGRAM,
+                0,
+                b"approve();".to_vec(),
+            )],
+        };
+
+        let encoded = minicbor::to_vec(&request).unwrap();
+        let decoded: Request = minicbor::decode(&encoded).unwrap();
+
+        assert_eq!(decoded, request);
+    }
 
     /// CBOR round-trip for `MuSig2Pubnonce`.
     #[test]

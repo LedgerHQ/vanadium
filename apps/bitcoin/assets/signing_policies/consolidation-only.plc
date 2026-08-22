@@ -1,0 +1,12 @@
+// Automated UTXO consolidation: fold several of the account's coins into fewer,
+// without bothering the user.
+//
+// Every output must come back to the account, the transaction must actually
+// reduce the number of UTXOs, and the fee must stay below 1% of the inputs.
+// A wallet service can hold this key and tidy up the account on its own, with
+// no way to move a single satoshi out of it.
+if context.external_out_count != 0 { fail(); }
+if context.external_out_total != 0 { fail(); }
+if context.input_count <= context.output_count { fail(); }
+if context.fee * 100 > context.inputs_total { fail(); }
+approve();

@@ -1,0 +1,9 @@
+// A key that can only move funds within the wallet.
+//
+// Nothing may go to an external recipient, so the fee is the only value the
+// transaction can lose — cap it at 1% of the inputs, otherwise a host could
+// still drain the account by burning everything as fee. What is left is
+// harmless enough to be signed without confirmation.
+if context.external_out_total > 0 { fail(); }
+if context.fee * 100 > context.inputs_total { fail(); }
+approve();

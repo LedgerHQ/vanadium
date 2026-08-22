@@ -1,0 +1,7 @@
+// Sign anything this account allows, without confirmation on the device.
+//
+// DEMO ONLY. A key bound to this program never asks and never refuses: the only
+// remaining protection is the wallet policy itself. It is meaningful only for a
+// key that is already constrained by something else — one participant of a
+// multisig whose cosigners do the checking, or a test setup.
+approve();

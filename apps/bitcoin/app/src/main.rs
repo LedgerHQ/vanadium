@@ -6,6 +6,7 @@ mod bip32;
 mod constants;
 mod handlers;
 mod identity;
+mod policy;
 mod resident_key;
 
 use handlers::*;
@@ -34,6 +35,7 @@ async fn handle_request(
         Request::RegisterAccount {
             name,
             account,
+            signing_policies,
             registered_identities,
             key_signatures,
             show_cleartext,
@@ -42,6 +44,7 @@ async fn handle_request(
                 app,
                 name,
                 account,
+                signing_policies,
                 registered_identities.as_deref(),
                 key_signatures.as_deref(),
                 *show_cleartext,
