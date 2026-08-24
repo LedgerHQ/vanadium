@@ -14,6 +14,8 @@ mod sighash;
 mod signing;
 
 #[cfg(test)]
+mod test_utils;
+#[cfg(test)]
 mod tests;
 
 use common::{errors::Error, fastpsbt, message::Response};
