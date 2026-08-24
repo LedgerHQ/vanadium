@@ -16,7 +16,7 @@ use common::{
     bip388::{DescriptorTemplate, SegwitVersion},
     errors::Error,
     fastpsbt,
-    message::{MuSig2PartialSignature, MuSig2Pubnonce, PartialSignature},
+    message::PartialSignature,
     psbt::{PsbtAccount, PsbtAccountCoordinates},
 };
 use sdk::curve::{Curve, EcfpPrivateKey, ToPublicKey};
@@ -28,6 +28,7 @@ use super::analyze::{ensure_prevouts, TransactionSummary};
 use super::key_resolution::{resolve_local_key_source, resolve_private_key, KeySource};
 use super::musig;
 use super::sighash::{compute_taproot_sighash, leaf_hash_for, taptree_hash_for};
+use super::SignedInputs;
 
 fn sign_input_ecdsa(
     psbt: &fastpsbt::Psbt,
@@ -101,13 +102,6 @@ fn sign_input_schnorr(
         pubkey: signing_privkey.to_public_key().as_ref().to_bytes()[1..33].to_vec(),
         leaf_hash: leaf_hash.map(|x| x.to_byte_array().to_vec()),
     })
-}
-
-/// All signing outputs produced by a single `SignPsbt` call.
-pub(super) struct SignedInputs {
-    pub(super) signatures: Vec<PartialSignature>,
-    pub(super) musig_pubnonces: Vec<MuSig2Pubnonce>,
-    pub(super) musig_partial_sigs: Vec<MuSig2PartialSignature>,
 }
 
 /// Signs a single plain-key placeholder for one input: dispatches on the input's
