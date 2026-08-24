@@ -67,12 +67,18 @@ impl TransactionSummary {
 
 /// Resolves an input's prevout: its witness UTXO if it has one, otherwise the output
 /// that `output_index` selects in its non-witness UTXO.
-fn input_prevout(input: &fastpsbt::Input<'_>) -> Result<TxOut, Error> {
+///
+/// This is the single definition of "the prevout of input *i*", shared by
+/// [`analyze_transaction`] and the taproot sighash paths via [`ensure_prevouts`].
+///
+/// `output_index` comes straight from the PSBT and is attacker-controlled, so it is
+/// bounds-checked against the referenced transaction rather than used to index.
+fn input_prevout<'i>(input: &'i fastpsbt::Input<'_>) -> Result<&'i TxOut, Error> {
     if let Some(witness_utxo) = input
         .get_witness_utxo()
         .map_err(|_| Error::InvalidWitnessUtxo)?
     {
-        return Ok(witness_utxo.clone());
+        return Ok(witness_utxo);
     }
 
     let non_witness_utxo = input
@@ -85,7 +91,6 @@ fn input_prevout(input: &fastpsbt::Input<'_>) -> Result<TxOut, Error> {
     non_witness_utxo
         .output
         .get(output_index)
-        .cloned()
         .ok_or(Error::InvalidNonWitnessUtxo)
 }
 
@@ -100,7 +105,7 @@ pub(super) fn ensure_prevouts<'a>(
         *cache = Some(
             psbt.inputs
                 .iter()
-                .map(input_prevout)
+                .map(|input| input_prevout(input).cloned())
                 .collect::<Result<Vec<_>, _>>()?,
         );
     }
@@ -232,18 +237,23 @@ pub(super) fn analyze_transaction(
             return Err(Error::WitnessUtxoRequiredForSegwit);
         }
 
-        let tx_out: &TxOut = if let Some(witness_utxo) = input
-            .get_witness_utxo()
-            .map_err(|_| Error::InvalidWitnessUtxo)?
-        {
+        // Resolving the prevout first bounds-checks the attacker-controlled
+        // `output_index` before the redeem-script checks below read the referenced
+        // output. The two checks above pin down which UTXO it came from: a segwit input
+        // has a witness UTXO and a legacy one is forbidden from carrying one, so
+        // `tx_out` is the witness UTXO in the first branch and the non-witness one in
+        // the second.
+        let tx_out: &TxOut = input_prevout(input)?;
+
+        if segwit_version.is_segwit() {
             let script = if let Some(redeem_script) = input.redeem_script {
                 let redeem_script = ScriptBuf::from_bytes(redeem_script.to_vec());
-                if witness_utxo.script_pubkey != redeem_script.to_p2sh() {
+                if tx_out.script_pubkey != redeem_script.to_p2sh() {
                     return Err(Error::RedeemScriptMismatchWitness);
                 }
                 redeem_script
             } else {
-                witness_utxo.script_pubkey.clone()
+                tx_out.script_pubkey.clone()
             };
 
             if script.is_p2wsh() {
@@ -256,24 +266,12 @@ pub(super) fn analyze_transaction(
                     return Err(Error::WitnessScriptRequiredForP2WSH);
                 }
             }
-            &witness_utxo
-        } else if let Some(non_witness_utxo) = input
-            .get_non_witness_utxo()
-            .map_err(|_| Error::InvalidNonWitnessUtxo)?
-        {
-            let prevout_index = input
-                .output_index
-                .ok_or(Error::MissingPreviousOutputIndex)? as usize;
-            if let Some(redeem_script) = input.redeem_script {
-                let redeem_script = ScriptBuf::from_bytes(redeem_script.to_vec());
-                if non_witness_utxo.output[prevout_index].script_pubkey != redeem_script.to_p2sh() {
-                    return Err(Error::RedeemScriptMismatch);
-                }
+        } else if let Some(redeem_script) = input.redeem_script {
+            let redeem_script = ScriptBuf::from_bytes(redeem_script.to_vec());
+            if tx_out.script_pubkey != redeem_script.to_p2sh() {
+                return Err(Error::RedeemScriptMismatch);
             }
-            &non_witness_utxo.output[prevout_index]
-        } else {
-            return Err(Error::MissingInputUtxo);
-        };
+        }
 
         // Record for deferred script derivation check
         script_checks.push(ScriptCheck {
@@ -415,15 +413,71 @@ pub(super) async fn verify_transaction(
     Ok(())
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bitcoin::{ScriptBuf, Transaction};
+
+    use base64::{engine::general_purpose::STANDARD, Engine as _};
+    use bitcoin::{psbt::Psbt, ScriptBuf, Transaction};
+    use common::{bip388::WalletPolicy, psbt::prepare_psbt};
 
     // rust-bitcoin doesn't support Psbtv2, so we use this helper for conversion
-    fn serialize_as_psbtv2(psbt: &bitcoin::psbt::Psbt) -> Vec<u8> {
+    fn serialize_as_psbtv2(psbt: &Psbt) -> Vec<u8> {
         common::psbt::psbt_v0_to_v2(&psbt.serialize()).expect("Failed to convert PSBTv0 to PSBTv2")
+    }
+
+    /// The legacy `pkh(@0/**)` fixture also used by the end-to-end handler tests: a
+    /// single input whose non-witness UTXO has 2 outputs, spending vout 1.
+    fn legacy_pkh_psbt() -> Psbt {
+        let psbt_b64 = "cHNidP8BAFUCAAAAAVEiws3mgj5VdUF1uSycV6Co4ayDw44Xh/06H/M0jpUTAQAAAAD9////AXhBDwAAAAAAGXapFBPX1YFmlGw+wCKTQGbYwNER0btBiKwaBB0AAAEA+QIAAAAAAQHsIw5TCVJWBSokKCcO7ASYlEsQ9vHFePQxwj0AmLSuWgEAAAAXFgAUKBU5gg4t6XOuQbpgBLQxySHE2G3+////AnJydQAAAAAAF6kUyLkGrymMcOYDoow+/C+uGearKA+HQEIPAAAAAAAZdqkUy65bUM+Tnm9TG4prer14j+FLApeIrAJHMEQCIDfstCSDYar9T4wR5wXw+npfvc1ZUXL81WQ/OxG+/11AAiACDG0yb2w31jzsra9OszX67ffETgX17x0raBQLAjvRPQEhA9rIL8Cs/Pw2NI1KSKRvAc6nfyuezj+MO0yZ0LCy+ZXShPIcACIGAu6GCCB+IQKEJvaedkR9fj1eB3BJ9eaDwxNsIxR2KkcYGPWswv0sAACAAQAAgAAAAIAAAAAAAAAAAAAA";
+        let mut psbt = Psbt::deserialize(&STANDARD.decode(psbt_b64).unwrap()).unwrap();
+
+        let wallet_policy = WalletPolicy::new(
+            "pkh(@0/**)",
+            vec![
+                "[f5acc2fd/44'/1'/0']tpubDCwYjpDhUdPGP5rS3wgNg13mTrrjBuG8V9VpWbyptX6TRPbNoZVXsoVUSkCjmQ8jJycjuDKBb9eataSymXakTTaGifxR6kmVsfFehH1ZgJT".try_into().unwrap()
+            ]
+        ).unwrap();
+
+        let account_name = "My legacy account #0";
+        let por = ProofOfRegistration::new(&wallet_policy.registration_id(account_name))
+            .dangerous_as_bytes();
+        prepare_psbt(&mut psbt, &[(&wallet_policy, account_name, &por)]).unwrap();
+
+        psbt
+    }
+
+    /// `PSBT_IN_OUTPUT_INDEX` is attacker-controlled and must be bounds-checked against
+    /// the non-witness UTXO it selects into: pointing it past the end used to panic.
+    #[test]
+    fn out_of_range_output_index_is_rejected() {
+        let mut psbt = legacy_pkh_psbt();
+        // The referenced transaction has 2 outputs; select a nonexistent one. The txid
+        // still matches, so the non-witness-UTXO check ahead of this one passes.
+        psbt.unsigned_tx.input[0].previous_output.vout = 5;
+
+        let serialized = serialize_as_psbtv2(&psbt);
+        let parsed = fastpsbt::Psbt::parse(&serialized).unwrap();
+
+        assert_eq!(
+            analyze_transaction(&parsed).err(),
+            Some(Error::InvalidNonWitnessUtxo)
+        );
+    }
+
+    /// The unmodified fixture must still analyze cleanly, so the test above is failing
+    /// for the reason it claims.
+    #[test]
+    fn in_range_output_index_is_accepted() {
+        let psbt = legacy_pkh_psbt();
+        let serialized = serialize_as_psbtv2(&psbt);
+        let parsed = fastpsbt::Psbt::parse(&serialized).unwrap();
+
+        let (summary, _, script_checks) = analyze_transaction(&parsed).unwrap();
+        assert_eq!(summary.inputs_total_amount, 1_000_000);
+        // One input belonging to the account; the single output is external.
+        assert_eq!(script_checks.len(), 1);
+        assert_eq!(summary.external_outputs_indexes, vec![0]);
     }
 
     #[test]
