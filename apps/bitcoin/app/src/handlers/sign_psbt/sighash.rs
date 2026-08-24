@@ -42,8 +42,22 @@ pub(super) fn compute_taproot_sighash(
     Ok(sighash.to_byte_array())
 }
 
+/// Whether the policy is `tr(...)` at all. Only looks at the descriptor's kind, so
+/// unlike [`taptree_hash_for`] it costs nothing.
+pub(super) fn is_taproot_policy(wallet_policy: &common::bip388::WalletPolicy) -> bool {
+    matches!(
+        wallet_policy.descriptor_template(),
+        DescriptorTemplate::Tr(..)
+    )
+}
+
 /// Computes the merkle root of a `tr(...)` wallet policy's script tree at the
 /// given coordinates, or `None` for BIP-86 / BIP-386 style policies (no tree).
+///
+/// This walks the entire tree, deriving every leaf's keys — measured at ~18s on a
+/// Ledger Flex for a three-leaf tree. Reach it through
+/// [`super::context::PlaceholderCtx::taptree_hash`], which computes it at most once per
+/// input and only when something actually reads the result.
 pub(super) fn taptree_hash_for(
     wallet_policy: &common::bip388::WalletPolicy,
     coords: &common::message::WalletPolicyCoordinates,
