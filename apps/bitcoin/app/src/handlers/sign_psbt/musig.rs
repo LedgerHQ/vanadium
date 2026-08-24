@@ -1,6 +1,9 @@
 //! MuSig2 placeholder dispatch: the glue between [`super::signing`]'s per-input loop
 //! and the PSBT-structure-agnostic MuSig2 session/crypto engine in
 //! `crate::handlers::musig_signing`.
+//!
+//! Depends on [`super::sighash`] and [`super::key_resolution`] but deliberately not on
+//! [`super::signing`], which dispatches to this module.
 
 use alloc::vec::Vec;
 
@@ -17,7 +20,7 @@ use crate::handlers::musig_signing::{self, MusigSigningState, SpendPath};
 use super::analyze::ensure_prevouts;
 use super::key_resolution::{resolve_local_key_source, resolve_private_key, KeySource};
 use super::sighash::{compute_taproot_sighash, leaf_hash_for, taptree_hash_for};
-use super::signing::SignedInputs;
+use super::SignedInputs;
 
 /// Handles a single `musig(...)` placeholder for one PSBT input. Pushes either
 /// a round-1 pubnonce or a round-2 partial signature into `out`, *for each*
