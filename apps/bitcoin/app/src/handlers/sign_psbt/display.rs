@@ -204,7 +204,7 @@ mod tests {
         let psbt = legacy_pkh_psbt();
         let serialized = serialize_as_psbtv2(&psbt);
         let parsed = fastpsbt::Psbt::parse(&serialized).unwrap();
-        let (summary, _, _) = analyze_transaction(&parsed).unwrap();
+        let (summary, _) = analyze_transaction(&parsed).unwrap();
 
         assert_eq!(summary.fee(), 200);
 
@@ -220,7 +220,7 @@ mod tests {
         let psbt = legacy_pkh_psbt();
         let serialized = serialize_as_psbtv2(&psbt);
         let parsed = fastpsbt::Psbt::parse(&serialized).unwrap();
-        let (summary, _, _) = analyze_transaction(&parsed).unwrap();
+        let (summary, _) = analyze_transaction(&parsed).unwrap();
 
         let pairs = build_display_pairs(&parsed, &summary).unwrap();
         let tags: Vec<&str> = pairs.iter().map(|p| p.tag.as_str()).collect();
