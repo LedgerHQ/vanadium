@@ -3,6 +3,7 @@
 //! [`super::musig`].
 
 use alloc::vec::Vec;
+use core::cell::OnceCell;
 
 use bitcoin::{
     bip32::ChildNumber,
@@ -27,7 +28,7 @@ use super::analyze::{ensure_prevouts, TransactionSummary};
 use super::context::{PlaceholderCtx, SignedInputs, SigningCtx};
 use super::key_resolution::{resolve_private_key, KeySource, LocalKeys};
 use super::musig;
-use super::sighash::{compute_taproot_sighash, leaf_hash_for, taptree_hash_for};
+use super::sighash::{compute_taproot_sighash, leaf_hash_for};
 
 fn sign_input_ecdsa(
     psbt: &fastpsbt::Psbt,
@@ -119,8 +120,13 @@ fn sign_plain_key_placeholder(
                 ctx.out.signatures.push(sig);
             }
             Ok(SegwitVersion::Taproot) => {
-                let taptree_hash = taptree_hash_for(ph.wallet_policy, ph.coords)?;
                 let leaf_hash = leaf_hash_for(ph.tapleaf_desc, ph.wallet_policy, ph.coords)?;
+                // A script-path spend signs with the untweaked leaf key, so it never
+                // looks at the tree root — don't make it pay for the walk.
+                let taptree_hash = match leaf_hash {
+                    Some(_) => None,
+                    None => ph.taptree_hash()?,
+                };
                 let prev = ensure_prevouts(&mut ctx.prevouts, ctx.psbt)?;
                 let sig = sign_input_schnorr(
                     ph.input_index,
@@ -184,6 +190,10 @@ pub(super) fn sign_all_inputs(
         let wallet_id = wallet_policy.get_id(account_name);
         let session_id = musig_signing::compute_psbt_session_id(&wallet_id, &unsigned_tx_id);
 
+        // Filled in by the first placeholder of this input that needs the tap tree
+        // root, if any, and reused by the rest — see `PlaceholderCtx::taptree_hash`.
+        let taptree_hash_memo = OnceCell::new();
+
         for (placeholder_index, (kp, tapleaf_desc)) in wallet_policy
             .descriptor_template()
             .placeholders()
@@ -199,6 +209,7 @@ pub(super) fn sign_all_inputs(
                 kp,
                 tapleaf_desc,
                 session_id,
+                taptree_hash_memo: &taptree_hash_memo,
             };
 
             if kp.is_musig() {

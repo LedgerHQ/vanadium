@@ -16,7 +16,7 @@ use crate::handlers::musig_signing::{self, MusigSigningState, SpendPath};
 use super::analyze::ensure_prevouts;
 use super::context::{PlaceholderCtx, SigningCtx};
 use super::key_resolution::{resolve_private_key, KeySource};
-use super::sighash::{compute_taproot_sighash, leaf_hash_for, taptree_hash_for};
+use super::sighash::{compute_taproot_sighash, is_taproot_policy, leaf_hash_for};
 
 /// Handles a single `musig(...)` placeholder for one PSBT input. Pushes either
 /// a round-1 pubnonce or a round-2 partial signature into `out`, *for each*
@@ -26,22 +26,20 @@ pub(super) fn handle_musig_placeholder(
     ph: &PlaceholderCtx<'_>,
     musig_state: &mut MusigSigningState,
 ) -> Result<(), Error> {
-    // musig() can only appear inside tr() per BIP-388.
-    let taptree_hash = taptree_hash_for(ph.wallet_policy, ph.coords)?;
-    let leaf_hash = leaf_hash_for(ph.tapleaf_desc, ph.wallet_policy, ph.coords)?;
-    let leaf_hash_bytes: Option<[u8; 32]> = leaf_hash.map(|l| l.to_byte_array());
-
-    let spend = match leaf_hash_bytes.as_ref() {
-        Some(lh) => SpendPath::Tapscript { leaf_hash: lh },
-        None => SpendPath::Keypath {
-            taptree_hash: taptree_hash.as_ref(),
-        },
-    };
+    // musig() can only appear inside tr() per BIP-388; this rejects anything else. It
+    // only inspects the descriptor's kind, so it is free — the tree root itself is
+    // fetched below, and only if this turns out to be a key-path spend.
+    if !is_taproot_policy(ph.wallet_policy) {
+        return Err(Error::UnexpectedTaprootPolicy);
+    }
 
     // Identify which participants this device controls. For BIP-388 musig,
     // signing uses the *master* participant key (no `(change, address_index)`
     // suffix in the path) — that derivation is folded into the SessionContext
     // tweaks below.
+    //
+    // Done before any of the tapleaf work, so a placeholder we hold no key for costs
+    // nothing beyond this scan.
     let indices = ph
         .kp
         .musig_key_indices()
@@ -59,6 +57,23 @@ pub(super) fn handle_musig_placeholder(
     if ours.is_empty() {
         return Ok(());
     }
+
+    let leaf_hash = leaf_hash_for(ph.tapleaf_desc, ph.wallet_policy, ph.coords)?;
+    let leaf_hash_bytes: Option<[u8; 32]> = leaf_hash.map(|l| l.to_byte_array());
+
+    // Only the key-path spend is tweaked by the tree root; a tapscript spend never
+    // reads it, so it doesn't pay for the walk.
+    let taptree_hash = match leaf_hash_bytes {
+        Some(_) => None,
+        None => ph.taptree_hash()?,
+    };
+
+    let spend = match leaf_hash_bytes.as_ref() {
+        Some(lh) => SpendPath::Tapscript { leaf_hash: lh },
+        None => SpendPath::Keypath {
+            taptree_hash: taptree_hash.as_ref(),
+        },
+    };
 
     // Per-input info is the same for every "ours" participant; compute once.
     let info = musig_signing::compute_per_input_info(
