@@ -24,10 +24,10 @@ use sdk::curve::{Curve, EcfpPrivateKey, ToPublicKey};
 use crate::handlers::musig_signing::{self, MusigSigningState};
 use crate::resident_key::get_resident_master_fingerprint;
 
-use super::analyze::TransactionSummary;
+use super::analyze::{ensure_prevouts, TransactionSummary};
 use super::key_resolution::{resolve_local_key_source, resolve_private_key, KeySource};
 use super::musig;
-use super::sighash::{compute_taproot_sighash, ensure_prevouts, leaf_hash_for, taptree_hash_for};
+use super::sighash::{compute_taproot_sighash, leaf_hash_for, taptree_hash_for};
 
 fn sign_input_ecdsa(
     psbt: &fastpsbt::Psbt,

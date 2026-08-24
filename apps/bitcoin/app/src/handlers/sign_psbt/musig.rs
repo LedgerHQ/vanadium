@@ -14,8 +14,9 @@ use sdk::curve::{EcfpPrivateKey, ToPublicKey};
 
 use crate::handlers::musig_signing::{self, MusigSigningState, SpendPath};
 
+use super::analyze::ensure_prevouts;
 use super::key_resolution::{resolve_local_key_source, resolve_private_key, KeySource};
-use super::sighash::{compute_taproot_sighash, ensure_prevouts, leaf_hash_for, taptree_hash_for};
+use super::sighash::{compute_taproot_sighash, leaf_hash_for, taptree_hash_for};
 use super::signing::SignedInputs;
 
 /// Handles a single `musig(...)` placeholder for one PSBT input. Pushes either
