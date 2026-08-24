@@ -7,6 +7,7 @@
 //! and respond.
 
 mod analyze;
+mod context;
 mod display;
 mod key_resolution;
 mod musig;
@@ -18,28 +19,12 @@ mod test_utils;
 #[cfg(test)]
 mod tests;
 
-use alloc::vec::Vec;
-
-use common::{
-    errors::Error,
-    fastpsbt,
-    message::{MuSig2PartialSignature, MuSig2Pubnonce, PartialSignature, Response},
-};
+use common::{errors::Error, fastpsbt, message::Response};
 
 use crate::handlers::musig_signing::{self, MusigSigningState};
 
 #[cfg(not(any(test, feature = "autoapprove")))]
 use sdk::ux::Icon;
-
-/// All signing outputs produced by a single `SignPsbt` call.
-///
-/// Lives here rather than in [`signing`] so that [`musig`] can fill one in without
-/// depending on [`signing`], which dispatches to it.
-pub(super) struct SignedInputs {
-    pub(super) signatures: Vec<PartialSignature>,
-    pub(super) musig_pubnonces: Vec<MuSig2Pubnonce>,
-    pub(super) musig_partial_sigs: Vec<MuSig2PartialSignature>,
-}
 
 pub async fn handle_sign_psbt(app: &mut sdk::App, psbt: &[u8]) -> Result<Response, Error> {
     app.show_spinner("Processing...");
