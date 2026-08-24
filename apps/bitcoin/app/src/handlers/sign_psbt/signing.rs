@@ -13,7 +13,7 @@ use bitcoin::{
 };
 use common::{
     account::Account,
-    bip388::{DescriptorTemplate, SegwitVersion},
+    bip388::SegwitVersion,
     errors::Error,
     fastpsbt,
     message::PartialSignature,
@@ -25,10 +25,10 @@ use crate::handlers::musig_signing::{self, MusigSigningState};
 use crate::resident_key::get_resident_master_fingerprint;
 
 use super::analyze::{ensure_prevouts, TransactionSummary};
+use super::context::{PlaceholderCtx, SignedInputs, SigningCtx};
 use super::key_resolution::{resolve_local_key_source, resolve_private_key, KeySource};
 use super::musig;
 use super::sighash::{compute_taproot_sighash, leaf_hash_for, taptree_hash_for};
-use super::SignedInputs;
 
 fn sign_input_ecdsa(
     psbt: &fastpsbt::Psbt,
@@ -106,51 +106,38 @@ fn sign_input_schnorr(
 
 /// Signs a single plain-key placeholder for one input: dispatches on the input's
 /// segwit version to produce either an ECDSA or a Schnorr partial signature, and
-/// pushes it into `out`. Mirrors the shape of [`musig::handle_musig_placeholder`].
+/// pushes it into `ctx.out`. Mirrors the shape of [`musig::handle_musig_placeholder`].
 fn sign_plain_key_placeholder(
-    psbt: &fastpsbt::Psbt,
-    input: &fastpsbt::Input<'_>,
-    input_index: usize,
-    wallet_policy: &common::bip388::WalletPolicy,
-    coords: &common::message::WalletPolicyCoordinates,
-    tapleaf_desc: Option<&DescriptorTemplate>,
+    ctx: &mut SigningCtx<'_>,
+    ph: &PlaceholderCtx<'_>,
     key_source: &KeySource,
-    sighash_cache: &mut SighashCache<&Transaction>,
-    prevouts: &mut Option<Vec<TxOut>>,
-    out: &mut SignedInputs,
 ) -> Result<(), Error> {
-    if input.witness_utxo.is_some() {
-        match wallet_policy.get_segwit_version() {
+    if ph.input.witness_utxo.is_some() {
+        match ph.wallet_policy.get_segwit_version() {
             Ok(SegwitVersion::SegwitV0) => {
-                out.signatures.push(sign_input_ecdsa(
-                    psbt,
-                    input_index,
-                    sighash_cache,
-                    key_source,
-                )?);
+                let sig =
+                    sign_input_ecdsa(ctx.psbt, ph.input_index, &mut ctx.sighash_cache, key_source)?;
+                ctx.out.signatures.push(sig);
             }
             Ok(SegwitVersion::Taproot) => {
-                let taptree_hash = taptree_hash_for(wallet_policy, coords)?;
-                let leaf_hash = leaf_hash_for(tapleaf_desc, wallet_policy, coords)?;
-                let prev = ensure_prevouts(prevouts, psbt)?;
-                out.signatures.push(sign_input_schnorr(
-                    input_index,
-                    sighash_cache,
+                let taptree_hash = taptree_hash_for(ph.wallet_policy, ph.coords)?;
+                let leaf_hash = leaf_hash_for(ph.tapleaf_desc, ph.wallet_policy, ph.coords)?;
+                let prev = ensure_prevouts(&mut ctx.prevouts, ctx.psbt)?;
+                let sig = sign_input_schnorr(
+                    ph.input_index,
+                    &mut ctx.sighash_cache,
                     prev,
                     key_source,
                     taptree_hash,
                     leaf_hash,
-                )?);
+                )?;
+                ctx.out.signatures.push(sig);
             }
             _ => return Err(Error::UnexpectedSegwitVersion),
         }
     } else {
-        out.signatures.push(sign_input_ecdsa(
-            psbt,
-            input_index,
-            sighash_cache,
-            key_source,
-        )?);
+        let sig = sign_input_ecdsa(ctx.psbt, ph.input_index, &mut ctx.sighash_cache, key_source)?;
+        ctx.out.signatures.push(sig);
     }
     Ok(())
 }
@@ -172,15 +159,18 @@ pub(super) fn sign_all_inputs(
         .unsigned_tx()
         .map_err(|_| Error::FailedUnsignedTransaction)?;
     let unsigned_tx_id: [u8; 32] = unsigned_tx.compute_txid().to_byte_array();
-    let mut sighash_cache = SighashCache::new(unsigned_tx);
 
-    let mut prevouts: Option<Vec<TxOut>> = None;
-    let standard_fpr = sdk::curve::Secp256k1::get_master_fingerprint();
-    let resident_fpr = get_resident_master_fingerprint()?;
-    let mut out = SignedInputs {
-        signatures: Vec::with_capacity(psbt.inputs.len()),
-        musig_pubnonces: Vec::new(),
-        musig_partial_sigs: Vec::new(),
+    let mut ctx = SigningCtx {
+        psbt,
+        sighash_cache: SighashCache::new(unsigned_tx),
+        prevouts: None,
+        standard_fpr: sdk::curve::Secp256k1::get_master_fingerprint(),
+        resident_fpr: get_resident_master_fingerprint()?,
+        out: SignedInputs {
+            signatures: Vec::with_capacity(psbt.inputs.len()),
+            musig_pubnonces: Vec::new(),
+            musig_partial_sigs: Vec::new(),
+        },
     };
 
     for (input_index, input) in psbt.inputs.iter().enumerate() {
@@ -201,31 +191,19 @@ pub(super) fn sign_all_inputs(
             .placeholders()
             .enumerate()
         {
-            let change_step: ChildNumber = if !coords.is_change {
-                kp.num1.into()
-            } else {
-                kp.num2.into()
+            let ph = PlaceholderCtx {
+                input,
+                input_index,
+                placeholder_index,
+                wallet_policy,
+                coords,
+                kp,
+                tapleaf_desc,
+                session_id,
             };
-            let address_index: ChildNumber = coords.address_index.into();
 
             if kp.is_musig() {
-                musig::handle_musig_placeholder(
-                    input,
-                    input_index,
-                    placeholder_index,
-                    kp,
-                    tapleaf_desc,
-                    wallet_policy,
-                    coords,
-                    session_id,
-                    musig_state,
-                    psbt,
-                    &mut sighash_cache,
-                    &mut prevouts,
-                    standard_fpr,
-                    resident_fpr,
-                    &mut out,
-                )?;
+                musig::handle_musig_placeholder(&mut ctx, &ph, musig_state)?;
                 continue;
             }
 
@@ -234,29 +212,24 @@ pub(super) fn sign_all_inputs(
                 .plain_key_index()
                 .expect("kp must be plain because not musig");
             let key_info = &wallet_policy.key_information()[key_index as usize];
+            let change_step: ChildNumber = if !coords.is_change {
+                kp.num1.into()
+            } else {
+                kp.num2.into()
+            };
+            let address_index: ChildNumber = coords.address_index.into();
             let Some(key_source) = resolve_local_key_source(
                 key_info,
                 Some((change_step, address_index)),
-                standard_fpr,
-                resident_fpr,
+                ctx.standard_fpr,
+                ctx.resident_fpr,
             ) else {
                 continue;
             };
 
-            sign_plain_key_placeholder(
-                psbt,
-                input,
-                input_index,
-                wallet_policy,
-                coords,
-                tapleaf_desc,
-                &key_source,
-                &mut sighash_cache,
-                &mut prevouts,
-                &mut out,
-            )?;
+            sign_plain_key_placeholder(&mut ctx, &ph, &key_source)?;
         }
     }
 
-    Ok(out)
+    Ok(ctx.out)
 }
