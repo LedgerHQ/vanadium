@@ -12,6 +12,8 @@ use common::{
     message::{MuSig2PartialSignature, MuSig2Pubnonce, PartialSignature, WalletPolicyCoordinates},
 };
 
+use super::key_resolution::LocalKeys;
+
 /// All signing outputs produced by a single `SignPsbt` call.
 pub(super) struct SignedInputs {
     pub(super) signatures: Vec<PartialSignature>,
@@ -30,8 +32,7 @@ pub(super) struct SigningCtx<'a> {
     /// Materialized on first use by [`super::analyze::ensure_prevouts`]; taproot inputs
     /// all share it.
     pub(super) prevouts: Option<Vec<TxOut>>,
-    pub(super) standard_fpr: u32,
-    pub(super) resident_fpr: u32,
+    pub(super) local_keys: LocalKeys,
     pub(super) out: SignedInputs,
 }
 
@@ -41,6 +42,7 @@ pub(super) struct PlaceholderCtx<'a> {
     pub(super) input: &'a fastpsbt::Input<'a>,
     pub(super) input_index: usize,
     pub(super) placeholder_index: usize,
+    pub(super) account_id: u32,
     pub(super) wallet_policy: &'a WalletPolicy,
     pub(super) coords: &'a WalletPolicyCoordinates,
     pub(super) kp: &'a KeyExpression,

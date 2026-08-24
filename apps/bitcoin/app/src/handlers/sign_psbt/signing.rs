@@ -19,14 +19,13 @@ use common::{
     message::PartialSignature,
     psbt::{PsbtAccount, PsbtAccountCoordinates},
 };
-use sdk::curve::{Curve, EcfpPrivateKey, ToPublicKey};
+use sdk::curve::{EcfpPrivateKey, ToPublicKey};
 
 use crate::handlers::musig_signing::{self, MusigSigningState};
-use crate::resident_key::get_resident_master_fingerprint;
 
 use super::analyze::{ensure_prevouts, TransactionSummary};
 use super::context::{PlaceholderCtx, SignedInputs, SigningCtx};
-use super::key_resolution::{resolve_local_key_source, resolve_private_key, KeySource};
+use super::key_resolution::{resolve_private_key, KeySource, LocalKeys};
 use super::musig;
 use super::sighash::{compute_taproot_sighash, leaf_hash_for, taptree_hash_for};
 
@@ -164,8 +163,7 @@ pub(super) fn sign_all_inputs(
         psbt,
         sighash_cache: SighashCache::new(unsigned_tx),
         prevouts: None,
-        standard_fpr: sdk::curve::Secp256k1::get_master_fingerprint(),
-        resident_fpr: get_resident_master_fingerprint()?,
+        local_keys: LocalKeys::new()?,
         out: SignedInputs {
             signatures: Vec::with_capacity(psbt.inputs.len()),
             musig_pubnonces: Vec::new(),
@@ -195,6 +193,7 @@ pub(super) fn sign_all_inputs(
                 input,
                 input_index,
                 placeholder_index,
+                account_id,
                 wallet_policy,
                 coords,
                 kp,
@@ -218,11 +217,10 @@ pub(super) fn sign_all_inputs(
                 kp.num2.into()
             };
             let address_index: ChildNumber = coords.address_index.into();
-            let Some(key_source) = resolve_local_key_source(
+            let Some(key_source) = ctx.local_keys.resolve(
                 key_info,
+                (account_id, key_index),
                 Some((change_step, address_index)),
-                ctx.standard_fpr,
-                ctx.resident_fpr,
             ) else {
                 continue;
             };
