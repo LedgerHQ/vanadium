@@ -14,10 +14,7 @@ use bitcoin::{psbt::Psbt, secp256k1::schnorr::Signature, XOnlyPublicKey};
 use common::{bip388::WalletPolicy, psbt::prepare_psbt};
 use hex_literal::hex;
 
-// rust-bitcoin doesn't support Psbtv2, so we use this helper for conversion
-fn serialize_as_psbtv2(psbt: &Psbt) -> Vec<u8> {
-    common::psbt::psbt_v0_to_v2(&psbt.serialize()).expect("Failed to convert PSBTv0 to PSBTv2")
-}
+use super::test_utils::serialize_as_psbtv2;
 
 #[test]
 fn test_handle_sign_psbt_pkh() {
