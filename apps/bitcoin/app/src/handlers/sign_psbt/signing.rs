@@ -77,7 +77,7 @@ fn sign_input_schnorr(
     let keypair: Keypair = Keypair::from_seckey_slice(&secp, hd_node.privkey.as_ref())
         .map_err(|_| Error::InvalidKey)?;
 
-    let signing_privkey = if !leaf_hash.is_none() {
+    let signing_privkey = if leaf_hash.is_some() {
         // script path signing, no further tweak
         EcfpPrivateKey::new(keypair.secret_bytes())
     } else {

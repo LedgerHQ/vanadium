@@ -124,7 +124,7 @@ pub(super) fn handle_musig_placeholder(
             let data = musig_signing::sign_sighash_musig(
                 &info,
                 &internal_pk,
-                &*hd.privkey,
+                &hd.privkey,
                 &sighash,
                 session,
                 ph.input_index as u32,

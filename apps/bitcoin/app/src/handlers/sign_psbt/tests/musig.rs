@@ -101,7 +101,7 @@ fn test_handle_sign_psbt_musig_no_local_participant() {
     let account_name = "Musig for my ears";
     let por =
         ProofOfRegistration::new(&wallet_policy.registration_id(account_name)).dangerous_as_bytes();
-    prepare_psbt(&mut psbt, &[(&wallet_policy, &account_name, &por)]).unwrap();
+    prepare_psbt(&mut psbt, &[(&wallet_policy, account_name, &por)]).unwrap();
 
     let response = sdk::executor::block_on(handle_sign_psbt(
         &mut sdk::App::singleton(),
@@ -278,7 +278,7 @@ fn test_handle_sign_psbt_musig_2of2_keypath_round_trip() {
     let mut psbt = build_musig_keypath_psbt(&wallet_policy, address_index);
     let por =
         ProofOfRegistration::new(&wallet_policy.registration_id(account_name)).dangerous_as_bytes();
-    prepare_psbt(&mut psbt, &[(&wallet_policy, &account_name, &por)]).unwrap();
+    prepare_psbt(&mut psbt, &[(&wallet_policy, account_name, &por)]).unwrap();
 
     // ---- Round 1 ----
     let r1 = sdk::executor::block_on(handle_sign_psbt(
@@ -409,7 +409,7 @@ fn test_handle_sign_psbt_musig_round2_without_round1_errors() {
     let mut psbt = build_musig_keypath_psbt(&wallet_policy, address_index);
     let por =
         ProofOfRegistration::new(&wallet_policy.registration_id(account_name)).dangerous_as_bytes();
-    prepare_psbt(&mut psbt, &[(&wallet_policy, &account_name, &por)]).unwrap();
+    prepare_psbt(&mut psbt, &[(&wallet_policy, account_name, &por)]).unwrap();
 
     // Compute what the agg_pk would be so we can inject pubnonces under
     // the right BIP-373 key — the device will *try* to enter round 2.
@@ -467,7 +467,7 @@ fn test_handle_sign_psbt_musig_round2_missing_cosigner_pubnonce_errors() {
     let mut psbt = build_musig_keypath_psbt(&wallet_policy, address_index);
     let por =
         ProofOfRegistration::new(&wallet_policy.registration_id(account_name)).dangerous_as_bytes();
-    prepare_psbt(&mut psbt, &[(&wallet_policy, &account_name, &por)]).unwrap();
+    prepare_psbt(&mut psbt, &[(&wallet_policy, account_name, &por)]).unwrap();
 
     // ---- Round 1 (real) ----
     let r1 = sdk::executor::block_on(handle_sign_psbt(
