@@ -175,8 +175,59 @@ pub(super) fn build_display_pairs(
     // Fee
     pairs.push(TagValue {
         tag: "Fee".to_string(),
-        value: format!("{} {}", fee, COIN_TICKER),
+        value: format_amount(fee, COIN_TICKER),
     });
 
     Ok(pairs)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use super::super::analyze::analyze_transaction;
+    use super::super::test_utils::{legacy_pkh_psbt, serialize_as_psbtv2};
+
+    #[test]
+    fn format_amount_pads_the_fractional_part() {
+        assert_eq!(format_amount(0, "TEST"), "0.00000000 TEST");
+        assert_eq!(format_amount(1, "TEST"), "0.00000001 TEST");
+        assert_eq!(format_amount(200, "TEST"), "0.00000200 TEST");
+        assert_eq!(format_amount(SATS_PER_BTC, "TEST"), "1.00000000 TEST");
+        assert_eq!(format_amount(123_456_789, "TEST"), "1.23456789 TEST");
+    }
+
+    /// Every amount on the review screen must be denominated in whole coins — the fee
+    /// included. It used to be rendered as a raw satoshi count under the same ticker.
+    #[test]
+    fn fee_is_shown_in_whole_coins() {
+        let psbt = legacy_pkh_psbt();
+        let serialized = serialize_as_psbtv2(&psbt);
+        let parsed = fastpsbt::Psbt::parse(&serialized).unwrap();
+        let (summary, _, _) = analyze_transaction(&parsed).unwrap();
+
+        assert_eq!(summary.fee(), 200);
+
+        let pairs = build_display_pairs(&parsed, &summary).unwrap();
+        let fee = pairs.iter().find(|p| p.tag == "Fee").expect("no Fee pair");
+        assert_eq!(fee.value, "0.00000200 TEST");
+    }
+
+    /// The spent amount and the external output are formatted the same way, so the
+    /// screen reads consistently top to bottom.
+    #[test]
+    fn spend_and_output_amounts_are_shown_in_whole_coins() {
+        let psbt = legacy_pkh_psbt();
+        let serialized = serialize_as_psbtv2(&psbt);
+        let parsed = fastpsbt::Psbt::parse(&serialized).unwrap();
+        let (summary, _, _) = analyze_transaction(&parsed).unwrap();
+
+        let pairs = build_display_pairs(&parsed, &summary).unwrap();
+        let tags: Vec<&str> = pairs.iter().map(|p| p.tag.as_str()).collect();
+        assert_eq!(tags, ["Spend from", "Amount", "Output 0", "Amount", "Fee"]);
+
+        assert_eq!(pairs[0].value, "account: My legacy account #0");
+        assert_eq!(pairs[1].value, "0.01000000 TEST"); // 1_000_000 sat in
+        assert_eq!(pairs[3].value, "0.00999800 TEST"); // 999_800 sat out
+    }
 }
