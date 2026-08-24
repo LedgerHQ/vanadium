@@ -81,10 +81,8 @@ fn sign_input_schnorr(
         EcfpPrivateKey::new(keypair.secret_bytes())
     } else {
         // key path signing, apply tap_tweak
-        let tweaked_keypair = keypair.tap_tweak(
-            &secp,
-            taptree_hash.map(|t| TapNodeHash::from_slice(&t).unwrap()),
-        );
+        let tweaked_keypair =
+            keypair.tap_tweak(&secp, taptree_hash.map(TapNodeHash::from_byte_array));
 
         EcfpPrivateKey::new(tweaked_keypair.to_keypair().secret_bytes())
     };
