@@ -39,20 +39,18 @@ pub async fn handle_sign_psbt(app: &mut sdk::App, psbt: &[u8]) -> Result<Respons
     let verification_handle = app.spawn_task(async { deferred_checks.verify(&summary).await });
 
     // Show warnings (runs while verification task progresses in the background)
-    if summary.warn_unverified_inputs {
-        if !display::display_warning_unverified_inputs(app).await {
-            return Err(Error::UserRejected);
-            // verification_handle is dropped here → task is cancelled
-        }
+    if summary.warn_unverified_inputs && !display::display_warning_unverified_inputs(app).await {
+        return Err(Error::UserRejected);
+        // verification_handle is dropped here → task is cancelled
     }
 
     let fee = summary.fee();
     if summary.inputs_total_amount >= crate::constants::THRESHOLD_WARN_HIGH_FEES_AMOUNT {
         let fee_percent = fee.saturating_mul(100) / summary.inputs_total_amount;
-        if fee_percent >= crate::constants::THRESHOLD_WARN_HIGH_FEES_PERCENT {
-            if !display::display_warning_high_fee(app, fee_percent).await {
-                return Err(Error::UserRejected);
-            }
+        if fee_percent >= crate::constants::THRESHOLD_WARN_HIGH_FEES_PERCENT
+            && !display::display_warning_high_fee(app, fee_percent).await
+        {
+            return Err(Error::UserRejected);
         }
     }
 
