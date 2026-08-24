@@ -16,8 +16,14 @@ use crate::constants::COIN_TICKER;
 
 use super::analyze::TransactionSummary;
 
-#[cfg(not(any(test, feature = "autoapprove")))]
+/// The `autoapprove` feature makes all the UX functionalities approve automatically
+/// instead of asking the user; useful for tests.
+const AUTO_APPROVE: bool = cfg!(any(test, feature = "autoapprove"));
+
 pub(super) async fn display_warning_high_fee(app: &mut sdk::App, fee_percent: u64) -> bool {
+    if AUTO_APPROVE {
+        return true;
+    }
     app.show_confirm_reject(
         "High fees",
         &format!("Transaction fee fraction is higher than {}%", fee_percent),
@@ -27,13 +33,10 @@ pub(super) async fn display_warning_high_fee(app: &mut sdk::App, fee_percent: u6
     .await
 }
 
-#[cfg(any(test, feature = "autoapprove"))]
-pub(super) async fn display_warning_high_fee(_app: &mut sdk::App, _fee_percent: u64) -> bool {
-    true
-}
-
-#[cfg(not(any(test, feature = "autoapprove")))]
 pub(super) async fn display_warning_unverified_inputs(app: &mut sdk::App) -> bool {
+    if AUTO_APPROVE {
+        return true;
+    }
     app.show_confirm_reject(
         "Unverified inputs",
         "Some inputs could not be verified.\nReject if you're not sure.",
@@ -43,13 +46,11 @@ pub(super) async fn display_warning_unverified_inputs(app: &mut sdk::App) -> boo
     .await
 }
 
-#[cfg(any(test, feature = "autoapprove"))]
-pub(super) async fn display_warning_unverified_inputs(_app: &mut sdk::App) -> bool {
-    true
-}
-
-#[cfg(not(any(test, feature = "autoapprove")))]
 pub(super) async fn display_transaction(app: &mut sdk::App, pairs: &[TagValue]) -> bool {
+    if AUTO_APPROVE {
+        return true;
+    }
+
     // message on speculos or real device
 
     let button_text = if sdk::ux::has_page_api() {
@@ -72,11 +73,6 @@ pub(super) async fn display_transaction(app: &mut sdk::App, pairs: &[TagValue]) 
         true,
     )
     .await
-}
-
-#[cfg(any(test, feature = "autoapprove"))]
-pub(super) async fn display_transaction(_app: &mut sdk::App, _pairs: &[TagValue]) -> bool {
-    true
 }
 
 const SATS_PER_BTC: u64 = 100_000_000;
