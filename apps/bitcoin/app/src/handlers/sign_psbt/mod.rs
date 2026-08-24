@@ -32,19 +32,11 @@ pub async fn handle_sign_psbt(app: &mut sdk::App, psbt: &[u8]) -> Result<Respons
     let psbt = fastpsbt::Psbt::parse(psbt).map_err(|_| Error::FailedToDeserializePsbt)?;
 
     // Lightweight analysis: structural validation + extract data for display and verification
-    let (summary, account_proofs, script_checks) = analyze::analyze_transaction(&psbt)?;
+    let (summary, deferred_checks) = analyze::analyze_transaction(&psbt)?;
 
     // Spawn expensive verification (proof-of-registration + script derivation) as a background
     // task so it runs concurrently with the UX flows below.
-    let verification_handle = app.spawn_task(async {
-        analyze::verify_transaction(
-            &summary.accounts,
-            &summary.account_names,
-            &account_proofs,
-            &script_checks,
-        )
-        .await
-    });
+    let verification_handle = app.spawn_task(async { deferred_checks.verify(&summary).await });
 
     // Show warnings (runs while verification task progresses in the background)
     if summary.warn_unverified_inputs {
