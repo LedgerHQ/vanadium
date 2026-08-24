@@ -501,9 +501,39 @@ impl DeferredChecks {
 mod tests {
     use super::*;
 
-    use bitcoin::{ScriptBuf, Transaction};
+    use bitcoin::{hashes::Hash, Amount, ScriptBuf, Transaction, TxOut, Txid};
 
-    use super::super::test_utils::{legacy_pkh_psbt, serialize_as_psbtv2};
+    use super::super::test_utils::{legacy_pkh_psbt, segwit_wpkh_psbt, serialize_as_psbtv2};
+
+    /// Runs the analysis over a `bitcoin::psbt::Psbt` fixture, re-encoding it as PSBTv2
+    /// the way the handler receives it.
+    fn analyze(psbt: &bitcoin::psbt::Psbt) -> Result<(TransactionSummary, DeferredChecks), Error> {
+        let serialized = serialize_as_psbtv2(psbt);
+        let parsed = fastpsbt::Psbt::parse(&serialized).unwrap();
+        analyze_transaction(&parsed)
+    }
+
+    /// A scriptPubKey that is not the P2SH of anything the fixtures carry.
+    fn bogus_redeem_script() -> ScriptBuf {
+        ScriptBuf::from_bytes(
+            hex_literal::hex!("0014 00112233445566778899aabbccddeeff00112233").to_vec(),
+        )
+    }
+
+    /// Both fixtures must analyze cleanly, so every rejection below can be attributed
+    /// to the one thing that test changes.
+    #[test]
+    fn unmodified_fixtures_are_accepted() {
+        let (summary, checks) = analyze(&legacy_pkh_psbt()).unwrap();
+        assert_eq!(summary.inputs_total_amount, 1_000_000);
+        // One input belonging to the account; the single output is external.
+        assert_eq!(checks.script_checks.len(), 1);
+        assert!(checks.script_checks[0].is_input);
+        assert_eq!(summary.external_outputs_indexes, vec![0]);
+        assert!(!summary.warn_unverified_inputs);
+
+        assert!(analyze(&segwit_wpkh_psbt()).is_ok());
+    }
 
     /// `PSBT_IN_OUTPUT_INDEX` is attacker-controlled and must be bounds-checked against
     /// the non-witness UTXO it selects into: pointing it past the end used to panic.
@@ -514,39 +544,98 @@ mod tests {
         // still matches, so the non-witness-UTXO check ahead of this one passes.
         psbt.unsigned_tx.input[0].previous_output.vout = 5;
 
-        let serialized = serialize_as_psbtv2(&psbt);
-        let parsed = fastpsbt::Psbt::parse(&serialized).unwrap();
+        assert_eq!(analyze(&psbt).err(), Some(Error::InvalidNonWitnessUtxo));
+    }
+
+    #[test]
+    fn legacy_input_may_not_carry_a_witness_utxo() {
+        let mut psbt = legacy_pkh_psbt();
+        psbt.inputs[0].witness_utxo = Some(TxOut {
+            value: Amount::from_sat(1_000_000),
+            script_pubkey: ScriptBuf::new(),
+        });
 
         assert_eq!(
-            analyze_transaction(&parsed).err(),
-            Some(Error::InvalidNonWitnessUtxo)
+            analyze(&psbt).err(),
+            Some(Error::WitnessUtxoNotAllowedForLegacy)
         );
     }
 
-    /// The unmodified fixture must still analyze cleanly, so the test above is failing
-    /// for the reason it claims.
     #[test]
-    fn in_range_output_index_is_accepted() {
-        let psbt = legacy_pkh_psbt();
-        let serialized = serialize_as_psbtv2(&psbt);
-        let parsed = fastpsbt::Psbt::parse(&serialized).unwrap();
+    fn legacy_input_requires_a_non_witness_utxo() {
+        let mut psbt = legacy_pkh_psbt();
+        psbt.inputs[0].non_witness_utxo = None;
 
-        let (summary, checks) = analyze_transaction(&parsed).unwrap();
-        assert_eq!(summary.inputs_total_amount, 1_000_000);
-        // One input belonging to the account; the single output is external.
-        assert_eq!(checks.script_checks.len(), 1);
-        assert!(checks.script_checks[0].is_input);
-        assert_eq!(summary.external_outputs_indexes, vec![0]);
+        assert_eq!(analyze(&psbt).err(), Some(Error::NonWitnessUtxoRequired));
+    }
+
+    #[test]
+    fn non_witness_utxo_must_hash_to_the_spent_txid() {
+        let mut psbt = legacy_pkh_psbt();
+        // Keep the UTXO, point the input somewhere else.
+        psbt.unsigned_tx.input[0].previous_output.txid = Txid::from_byte_array([0x42; 32]);
+
+        assert_eq!(analyze(&psbt).err(), Some(Error::NonWitnessUtxoMismatch));
+    }
+
+    #[test]
+    fn legacy_redeem_script_must_hash_to_the_prevout_script() {
+        let mut psbt = legacy_pkh_psbt();
+        psbt.inputs[0].redeem_script = Some(bogus_redeem_script());
+
+        assert_eq!(analyze(&psbt).err(), Some(Error::RedeemScriptMismatch));
+    }
+
+    #[test]
+    fn segwit_input_requires_a_witness_utxo() {
+        let mut psbt = segwit_wpkh_psbt();
+        psbt.inputs[0].witness_utxo = None;
+
+        assert_eq!(
+            analyze(&psbt).err(),
+            Some(Error::WitnessUtxoRequiredForSegwit)
+        );
+    }
+
+    #[test]
+    fn segwit_redeem_script_must_hash_to_the_witness_utxo_script() {
+        let mut psbt = segwit_wpkh_psbt();
+        psbt.inputs[0].redeem_script = Some(bogus_redeem_script());
+
+        assert_eq!(
+            analyze(&psbt).err(),
+            Some(Error::RedeemScriptMismatchWitness)
+        );
+    }
+
+    #[test]
+    fn outputs_may_not_exceed_inputs() {
+        let mut psbt = legacy_pkh_psbt();
+        // The single input is worth 1_000_000 sat.
+        psbt.unsigned_tx.output[0].value = Amount::from_sat(1_000_001);
+
+        assert_eq!(analyze(&psbt).err(), Some(Error::InputsLessThanOutputs));
+    }
+
+    /// A SegWit v0 input with no non-witness UTXO is accepted, but its amount can't be
+    /// checked against the funding transaction, so the user must be warned.
+    #[test]
+    fn segwit_input_without_non_witness_utxo_warns() {
+        let mut psbt = segwit_wpkh_psbt();
+        psbt.inputs[0].non_witness_utxo = None;
+
+        let (summary, _) = analyze(&psbt).unwrap();
+        assert!(summary.warn_unverified_inputs);
     }
 
     #[test]
     fn ensure_prevouts_supports_mixed_utxo_types() {
         let witness_prevout = TxOut {
-            value: bitcoin::Amount::from_sat(60_000),
+            value: Amount::from_sat(60_000),
             script_pubkey: ScriptBuf::new(),
         };
         let legacy_prevout = TxOut {
-            value: bitcoin::Amount::from_sat(70_000),
+            value: Amount::from_sat(70_000),
             script_pubkey: ScriptBuf::new(),
         };
         let legacy_tx = Transaction {
@@ -566,7 +655,7 @@ mod tests {
             input: vec![
                 bitcoin::TxIn {
                     previous_output: bitcoin::OutPoint {
-                        txid: bitcoin::Txid::from_byte_array([0x42; 32]),
+                        txid: Txid::from_byte_array([0x42; 32]),
                         vout: 0,
                     },
                     script_sig: ScriptBuf::new(),

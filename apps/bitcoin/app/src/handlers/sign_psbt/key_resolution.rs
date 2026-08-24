@@ -133,3 +133,133 @@ impl LocalKeys {
         Some(tree)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use bitcoin::bip32::ChainCode;
+    use common::bip388::KeyOrigin;
+
+    use super::super::test_utils::{device_xpub, DEVICE_PATH};
+
+    fn device_origin() -> KeyOrigin {
+        KeyOrigin {
+            fingerprint: sdk::curve::Secp256k1::get_master_fingerprint(),
+            derivation_path: DEVICE_PATH.iter().map(|&n| ChildNumber::from(n)).collect(),
+        }
+    }
+
+    #[test]
+    fn resolves_a_key_the_device_actually_controls() {
+        let key_info = KeyInformation {
+            pubkey: device_xpub(),
+            origin_info: Some(device_origin()),
+        };
+
+        let mut local_keys = LocalKeys::new().unwrap();
+        let source = local_keys
+            .resolve(&key_info, (0, 0), None)
+            .expect("device-derived key must resolve");
+
+        assert!(matches!(source.tree, KeyTree::Standard));
+        let path: Vec<u32> = source.path.iter().map(|&s| u32::from(s)).collect();
+        assert_eq!(path, DEVICE_PATH);
+    }
+
+    #[test]
+    fn appends_the_child_steps_when_asked() {
+        let key_info = KeyInformation {
+            pubkey: device_xpub(),
+            origin_info: Some(device_origin()),
+        };
+
+        let mut local_keys = LocalKeys::new().unwrap();
+        let source = local_keys
+            .resolve(
+                &key_info,
+                (0, 0),
+                Some((ChildNumber::from(1), ChildNumber::from(7))),
+            )
+            .unwrap();
+
+        let path: Vec<u32> = source.path.iter().map(|&s| u32::from(s)).collect();
+        assert_eq!(path, [DEVICE_PATH.as_slice(), &[1, 7]].concat());
+    }
+
+    /// A fingerprint is only 4 bytes, so a hostile PSBT can name one the device really
+    /// does own while supplying a foreign xpub. Re-deriving the claimed node is what
+    /// catches that, and it must reject the key rather than sign under it.
+    #[test]
+    fn rejects_a_colliding_fingerprint_with_a_foreign_pubkey() {
+        let mut pubkey = device_xpub();
+        // Same origin the device would accept, but a different key at the end of it.
+        pubkey.public_key = bitcoin::secp256k1::PublicKey::from_slice(&hex_literal::hex!(
+            "02ee8608207e21028426f69e76447d7e3d5e077049f5e683c3136c2314762a4718"
+        ))
+        .unwrap();
+        let key_info = KeyInformation {
+            pubkey,
+            origin_info: Some(device_origin()),
+        };
+
+        let mut local_keys = LocalKeys::new().unwrap();
+        assert!(local_keys.resolve(&key_info, (0, 0), None).is_none());
+    }
+
+    /// Same, but the pubkey is genuine and the chaincode is not: the derived children
+    /// would differ, so the key must be rejected too.
+    #[test]
+    fn rejects_a_colliding_fingerprint_with_a_foreign_chaincode() {
+        let mut pubkey = device_xpub();
+        pubkey.chain_code = ChainCode::from([0xAB; 32]);
+        let key_info = KeyInformation {
+            pubkey,
+            origin_info: Some(device_origin()),
+        };
+
+        let mut local_keys = LocalKeys::new().unwrap();
+        assert!(local_keys.resolve(&key_info, (0, 0), None).is_none());
+    }
+
+    #[test]
+    fn rejects_a_foreign_fingerprint_and_a_bare_xpub() {
+        let mut local_keys = LocalKeys::new().unwrap();
+
+        let foreign = KeyInformation {
+            pubkey: device_xpub(),
+            origin_info: Some(KeyOrigin {
+                fingerprint: 0xDEAD_BEEF,
+                derivation_path: DEVICE_PATH.iter().map(|&n| ChildNumber::from(n)).collect(),
+            }),
+        };
+        assert!(local_keys.resolve(&foreign, (0, 0), None).is_none());
+
+        let bare = KeyInformation {
+            pubkey: device_xpub(),
+            origin_info: None,
+        };
+        assert!(local_keys.resolve(&bare, (0, 1), None).is_none());
+    }
+
+    /// The memo must be keyed tightly enough that two accounts' key #0 don't collide.
+    #[test]
+    fn memoizes_per_account_and_key_index() {
+        let ours = KeyInformation {
+            pubkey: device_xpub(),
+            origin_info: Some(device_origin()),
+        };
+        let theirs = KeyInformation {
+            pubkey: device_xpub(),
+            origin_info: None,
+        };
+
+        let mut local_keys = LocalKeys::new().unwrap();
+        // Account 0's key #0 is ours; account 1's key #0 is not.
+        assert!(local_keys.resolve(&ours, (0, 0), None).is_some());
+        assert!(local_keys.resolve(&theirs, (1, 0), None).is_none());
+        // Cached answers, which must not have been swapped for each other.
+        assert!(local_keys.resolve(&ours, (0, 0), None).is_some());
+        assert!(local_keys.resolve(&theirs, (1, 0), None).is_none());
+    }
+}
