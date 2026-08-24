@@ -15,7 +15,7 @@ use crate::handlers::musig_signing::{self, MusigSigningState, SpendPath};
 
 use super::analyze::ensure_prevouts;
 use super::context::{PlaceholderCtx, SigningCtx};
-use super::key_resolution::{resolve_local_key_source, resolve_private_key, KeySource};
+use super::key_resolution::{resolve_private_key, KeySource};
 use super::sighash::{compute_taproot_sighash, leaf_hash_for, taptree_hash_for};
 
 /// Handles a single `musig(...)` placeholder for one PSBT input. Pushes either
@@ -49,8 +49,9 @@ pub(super) fn handle_musig_placeholder(
     let mut ours: Vec<KeySource> = Vec::new();
     for &participant_idx in indices {
         let key_info = &ph.wallet_policy.key_information()[participant_idx as usize];
-        if let Some(ks) =
-            resolve_local_key_source(key_info, None, ctx.standard_fpr, ctx.resident_fpr)
+        if let Some(ks) = ctx
+            .local_keys
+            .resolve(key_info, (ph.account_id, participant_idx), None)
         {
             ours.push(ks);
         }
