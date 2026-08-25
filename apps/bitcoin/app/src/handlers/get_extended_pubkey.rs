@@ -7,8 +7,13 @@ use crate::{
     bip32::KeyTree, constants::BIP32_TESTNET_PUBKEY_VERSION, identity::compute_identity_signature,
 };
 
-#[cfg(not(any(test, feature = "autoapprove")))]
+const AUTO_APPROVE: bool = cfg!(any(test, feature = "autoapprove"));
+
 async fn display_identity_key(app: &mut sdk::App, value: &str, index: Option<u32>) -> bool {
+    if AUTO_APPROVE {
+        return true;
+    }
+
     use alloc::vec;
     use sdk::ux::{Icon, TagValue};
 
@@ -64,8 +69,11 @@ async fn display_identity_key(app: &mut sdk::App, value: &str, index: Option<u32
     approved
 }
 
-#[cfg(not(any(test, feature = "autoapprove")))]
 async fn display_xpub(app: &mut sdk::App, tree: KeyTree, xpub: &str, path: &[u32]) -> bool {
+    if AUTO_APPROVE {
+        return true;
+    }
+
     use alloc::{string::ToString, vec};
     use sdk::ux::{Icon, TagValue};
 
@@ -118,16 +126,6 @@ async fn display_xpub(app: &mut sdk::App, tree: KeyTree, xpub: &str, path: &[u32
         },
     );
     approved
-}
-
-#[cfg(any(test, feature = "autoapprove"))]
-async fn display_identity_key(_app: &mut sdk::App, _value: &str, _index: Option<u32>) -> bool {
-    true
-}
-
-#[cfg(any(test, feature = "autoapprove"))]
-async fn display_xpub(_app: &mut sdk::App, _tree: KeyTree, _xpub: &str, _path: &[u32]) -> bool {
-    true
 }
 
 pub async fn handle_get_extended_pubkey(

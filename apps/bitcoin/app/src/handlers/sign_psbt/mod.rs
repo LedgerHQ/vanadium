@@ -23,9 +23,6 @@ use common::{errors::Error, fastpsbt, message::Response};
 
 use crate::handlers::musig_signing::{self, MusigSigningState};
 
-#[cfg(not(any(test, feature = "autoapprove")))]
-use sdk::ux::Icon;
-
 pub async fn handle_sign_psbt(app: &mut sdk::App, psbt: &[u8]) -> Result<Response, Error> {
     app.show_spinner("Processing...");
 
@@ -57,9 +54,7 @@ pub async fn handle_sign_psbt(app: &mut sdk::App, psbt: &[u8]) -> Result<Respons
     // Display transaction for user approval
     let pairs = display::build_display_pairs(&psbt, &summary)?;
     if !display::display_transaction(app, &pairs).await {
-        #[cfg(not(any(test, feature = "autoapprove")))]
-        app.show_info(Icon::Failure, "Transaction rejected");
-
+        display::show_transaction_rejected(app);
         return Err(Error::UserRejected);
     }
 
@@ -75,8 +70,7 @@ pub async fn handle_sign_psbt(app: &mut sdk::App, psbt: &[u8]) -> Result<Respons
     // completed successfully — partial failures must leave no stale session.
     musig_signing::commit(&musig_state)?;
 
-    #[cfg(not(any(test, feature = "autoapprove")))]
-    app.show_info(Icon::Success, "Transaction signed");
+    display::show_transaction_signed(app);
 
     Ok(Response::PsbtSigned {
         signatures: signed.signatures,

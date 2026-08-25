@@ -2,9 +2,7 @@
 
 extern crate alloc;
 
-#[cfg(not(test))]
 use alloc::format;
-#[cfg(not(test))]
 use sdk::ux::Icon;
 
 use alloc::{vec, vec::Vec};
@@ -20,7 +18,10 @@ struct RPSGame {
     m_b: u8,       // our move
 }
 
-#[cfg(not(test))]
+/// The `test` cfg makes all the UX functionalities approve automatically instead of
+/// asking the user; useful for tests.
+const AUTO_APPROVE: bool = cfg!(test);
+
 fn display_move(move_num: u8) -> &'static str {
     match move_num {
         0 => "Rock",
@@ -32,8 +33,11 @@ fn display_move(move_num: u8) -> &'static str {
 
 // Shows the game summary and the app's chosen move
 // Returns true if the user accepts
-#[cfg(not(test))]
 async fn show_game_ui(app: &mut App<RPSGame>, c_a: &[u8; 32], m_b: u8) -> bool {
+    if AUTO_APPROVE {
+        return true;
+    }
+
     app.show_confirm_reject(
         "Game started",
         &format!(
@@ -46,14 +50,12 @@ async fn show_game_ui(app: &mut App<RPSGame>, c_a: &[u8; 32], m_b: u8) -> bool {
     ).await
 }
 
-#[cfg(test)]
-async fn show_game_ui(_app: &mut App<RPSGame>, _c_a: &[u8; 32], _m_b: u8) -> bool {
-    true
-}
-
 // Shows the game's outcome
-#[cfg(not(test))]
 fn show_game_result(app: &mut App<RPSGame>, m_a: u8, result: u8) {
+    if AUTO_APPROVE {
+        return;
+    }
+
     let alice_move = display_move(m_a);
     match result {
         0 => app.show_info(
@@ -71,9 +73,6 @@ fn show_game_result(app: &mut App<RPSGame>, m_a: u8, result: u8) {
         _ => panic!("Invalid game result"),
     }
 }
-
-#[cfg(test)]
-fn show_game_result(_app: &mut App<RPSGame>, _m_a: u8, _result: u8) {}
 
 // generate a uniform random number in [0, 2]
 fn random_move() -> u8 {

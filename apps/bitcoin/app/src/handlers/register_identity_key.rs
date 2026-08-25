@@ -5,8 +5,13 @@ use common::{
     por::{ProofOfRegistration, Registerable},
 };
 
-#[cfg(not(any(test, feature = "autoapprove")))]
+const AUTO_APPROVE: bool = cfg!(any(test, feature = "autoapprove"));
+
 async fn display_register_identity_key(app: &mut sdk::App, name: &str, pubkey_hex: &str) -> bool {
+    if AUTO_APPROVE {
+        return true;
+    }
+
     use alloc::vec::Vec;
     use sdk::ux::{Icon, TagValue};
 
@@ -44,15 +49,6 @@ async fn display_register_identity_key(app: &mut sdk::App, name: &str, pubkey_he
     }
 
     approved
-}
-
-#[cfg(any(test, feature = "autoapprove"))]
-async fn display_register_identity_key(
-    _app: &mut sdk::App,
-    _name: &str,
-    _pubkey_hex: &str,
-) -> bool {
-    true
 }
 
 pub async fn handle_register_identity_key(

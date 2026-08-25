@@ -10,8 +10,13 @@ use common::{
 
 use crate::identity::compute_identity_signature;
 
-#[cfg(not(any(test, feature = "autoapprove")))]
+const AUTO_APPROVE: bool = cfg!(any(test, feature = "autoapprove"));
+
 async fn display_address(app: &mut sdk::App, account_name: Option<&str>, addr: &str) -> bool {
+    if AUTO_APPROVE {
+        return true;
+    }
+
     use alloc::vec;
     use sdk::ux::{Icon, TagValue};
 
@@ -53,11 +58,6 @@ async fn display_address(app: &mut sdk::App, account_name: Option<&str>, addr: &
     }
 
     approved
-}
-
-#[cfg(any(test, feature = "autoapprove"))]
-async fn display_address(_app: &mut sdk::App, _account_name: Option<&str>, _addr: &str) -> bool {
-    true
 }
 
 pub async fn handle_get_address(
