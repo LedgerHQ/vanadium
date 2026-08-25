@@ -3,6 +3,13 @@
 debug/
 target/
 
+# Symlink farm created by the build-cases justfile recipes: the benchmark
+# cases are members of a workspace, so cargo writes binaries to the shared
+# target/ dir; the recipes link them back into each case directory so that
+# tools can locate the ELF next to the crate's Cargo.toml
+/bench/cases/*/target/
+/apps/bitcoin/benchmarks/cases/*/target/
+
 # Cargo.lock is tracked for every workspace that produces final artifacts:
 # the root workspace (cargo-vnd and the SDKs), the Vanadium VM app, the V-App
 # workspaces (apps/*), and the benchmark suites. The vendored libraries in

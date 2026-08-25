@@ -2,7 +2,16 @@ run:
   vnd-bench
 
 # build all the testcases for riscv target (Ledger Vanadium)
+# The cases are members of the workspace rooted here, so the binaries land in
+# the shared ./target directory; we symlink each binary back into the case
+# directory so tools can find the ELF next to the case's Cargo.toml
 build-cases:
-  for case_dir in ./cases/*; do\
-    (cd "$case_dir" && cargo build --release --target=riscv32imac-unknown-none-elf --no-default-features --features target_vanadium_ledger)\
+  #!/usr/bin/env bash
+  set -e
+  for case_dir in ./cases/*; do
+    (cd "$case_dir" && cargo build --release --target=riscv32imac-unknown-none-elf --no-default-features --features target_vanadium_ledger)
+    crate_name=$(grep -m1 '^name' "$case_dir/Cargo.toml" | cut -d'"' -f2)
+    mkdir -p "$case_dir/target/riscv32imac-unknown-none-elf/release"
+    ln -sf "../../../../../target/riscv32imac-unknown-none-elf/release/$crate_name" \
+      "$case_dir/target/riscv32imac-unknown-none-elf/release/$crate_name"
   done

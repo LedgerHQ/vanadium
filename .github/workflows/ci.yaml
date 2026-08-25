@@ -134,8 +134,16 @@ jobs:
       - name: Build app
         working-directory: bench
         run: |
+          # The cases are members of the workspace rooted in bench/, so the
+          # binaries land in the shared ./target directory; symlink each binary
+          # back into the case directory so vnd-bench finds the ELF next to the
+          # case's Cargo.toml
           for case_dir in ./cases/*; do
             (cd "$case_dir" && cargo +stable build --release --target=riscv32imac-unknown-none-elf --no-default-features --features target_vanadium_ledger) || exit 1
+            crate_name=$(grep -m1 '^name' "$case_dir/Cargo.toml" | cut -d'"' -f2)
+            mkdir -p "$case_dir/target/riscv32imac-unknown-none-elf/release"
+            ln -sf "../../../../../target/riscv32imac-unknown-none-elf/release/$crate_name" \
+              "$case_dir/target/riscv32imac-unknown-none-elf/release/$crate_name"
           done
       - name: Run Speculos with Vanadium binary
         run: |

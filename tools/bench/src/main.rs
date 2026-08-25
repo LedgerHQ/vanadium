@@ -48,14 +48,14 @@ struct BenchCase {
     case_name: String,
     crate_name: String,
     repetitions: u64,
-    // Target directory of the workspace containing the benchmark cases
-    target_dir: PathBuf,
+    // Directory of the case crate (contains its Cargo.toml)
+    case_dir: PathBuf,
 }
 
 impl BenchCase {
     fn app_path(&self) -> PathBuf {
-        self.target_dir
-            .join("riscv32imac-unknown-none-elf/release")
+        self.case_dir
+            .join("target/riscv32imac-unknown-none-elf/release")
             .join(&self.crate_name)
     }
 }
@@ -122,18 +122,11 @@ fn discover_bench_cases(
             .into());
         }
 
-        // The cases are members of the workspace rooted at the parent of the
-        // cases directory, so their binaries land in the shared target dir.
-        let target_dir = cases_dir
-            .parent()
-            .unwrap_or_else(|| Path::new(""))
-            .join("target");
-
         let case = BenchCase {
             case_name,
             crate_name,
             repetitions,
-            target_dir,
+            case_dir: entry.path(),
         };
 
         cases.push(case);
