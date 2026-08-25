@@ -18,9 +18,16 @@ sdk::bootstrap!();
 
 const H: u32 = 0x80000000u32;
 
+/// The `test` cfg makes all the UX functionalities approve automatically instead of
+/// asking the user; useful for tests.
+const AUTO_APPROVE: bool = cfg!(test);
+
 // Shows the message to the user and asks for confirmation to sign
-#[cfg(not(test))]
 async fn show_message_ui(app: &mut App, msg: &str) -> bool {
+    if AUTO_APPROVE {
+        return true;
+    }
+
     use alloc::format;
 
     let approved = app.show_confirm_reject(
@@ -31,11 +38,6 @@ async fn show_message_ui(app: &mut App, msg: &str) -> bool {
     ).await;
 
     approved
-}
-
-#[cfg(test)]
-async fn show_message_ui(_app: &mut App, _msg: &str) -> bool {
-    true
 }
 
 async fn process_sign_message(app: &mut App, msg: &[u8]) -> Vec<u8> {

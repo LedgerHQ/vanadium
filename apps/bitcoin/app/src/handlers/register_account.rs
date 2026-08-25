@@ -10,6 +10,8 @@ use sdk::curve::{EcfpPrivateKey, EcfpPublicKey, Secp256k1, ToPublicKey};
 
 use crate::{bip32::KeyTree, constants::NUMS_COMPRESSED_PUBKEY};
 
+const AUTO_APPROVE: bool = cfg!(any(test, feature = "autoapprove"));
+
 async fn display_wallet_policy(
     app: &mut sdk::App,
     name: &str,
@@ -17,6 +19,10 @@ async fn display_wallet_policy(
     key_auth_names: &[Option<String>],
     show_cleartext: bool,
 ) -> bool {
+    if AUTO_APPROVE {
+        return true;
+    }
+
     use alloc::{format, string::ToString, vec::Vec};
     use common::bip388::{ClearText, MAX_CONFUSION_SCORE};
     use sdk::ux::TagValue;
@@ -59,38 +65,27 @@ async fn display_wallet_policy(
         });
     }
 
-    let approved: bool;
+    let (intro_text, intro_subtext) = if sdk::ux::has_page_api() {
+        ("Register Bitcoin\naccount", "")
+    } else {
+        ("Register Bitcoin", "account")
+    };
 
-    #[cfg(not(any(test, feature = "autoapprove")))]
-    {
-        let (intro_text, intro_subtext) = if sdk::ux::has_page_api() {
-            ("Register Bitcoin\naccount", "")
-        } else {
-            ("Register Bitcoin", "account")
-        };
+    let approved = app
+        .review_pairs(
+            intro_text,
+            intro_subtext,
+            &pairs,
+            "Confirm registration",
+            "Register",
+            false,
+        )
+        .await;
 
-        approved = app
-            .review_pairs(
-                intro_text,
-                intro_subtext,
-                &pairs,
-                "Confirm registration",
-                "Register",
-                false,
-            )
-            .await;
-
-        if approved {
-            app.show_info(sdk::ux::Icon::Success, "Account registered");
-        } else {
-            app.show_info(sdk::ux::Icon::Failure, "Registration cancelled");
-        }
-    }
-
-    #[cfg(any(test, feature = "autoapprove"))]
-    {
-        let _ = app;
-        approved = true;
+    if approved {
+        app.show_info(sdk::ux::Icon::Success, "Account registered");
+    } else {
+        app.show_info(sdk::ux::Icon::Failure, "Registration cancelled");
     }
 
     approved

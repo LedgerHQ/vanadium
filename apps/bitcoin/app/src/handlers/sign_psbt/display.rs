@@ -10,14 +10,12 @@ use alloc::{
 use common::{errors::Error, fastpsbt};
 
 use bitcoin::{Address, ScriptBuf};
-use sdk::ux::TagValue;
+use sdk::ux::{Icon, TagValue};
 
 use crate::constants::COIN_TICKER;
 
 use super::analyze::TransactionSummary;
 
-/// The `autoapprove` feature makes all the UX functionalities approve automatically
-/// instead of asking the user; useful for tests.
 const AUTO_APPROVE: bool = cfg!(any(test, feature = "autoapprove"));
 
 pub(super) async fn display_warning_high_fee(app: &mut sdk::App, fee_percent: u64) -> bool {
@@ -73,6 +71,20 @@ pub(super) async fn display_transaction(app: &mut sdk::App, pairs: &[TagValue]) 
         true,
     )
     .await
+}
+
+pub(super) fn show_transaction_rejected(app: &mut sdk::App) {
+    if AUTO_APPROVE {
+        return;
+    }
+    app.show_info(Icon::Failure, "Transaction rejected");
+}
+
+pub(super) fn show_transaction_signed(app: &mut sdk::App) {
+    if AUTO_APPROVE {
+        return;
+    }
+    app.show_info(Icon::Success, "Transaction signed");
 }
 
 const SATS_PER_BTC: u64 = 100_000_000;
