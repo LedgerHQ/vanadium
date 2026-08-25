@@ -21,4 +21,3 @@ serde = { version = "1.0.215", default-features = false, features = ["alloc", "d
 [dev-dependencies]
 sdk = { package = "vanadium-app-sdk", path = "../../../app-sdk", default-features = false, features = ["test-mode", "target_native"] }
 
-[workspace]

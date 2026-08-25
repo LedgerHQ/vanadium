@@ -19,14 +19,3 @@ target_vanadium_ledger = ["sdk/target_vanadium_ledger"]
 common = { package = "vnd-bitcoin-common", path = "../../../common", default-features = false }
 hex-literal = "0.4.1"
 sdk = { package = "vanadium-app-sdk", path = "../../../../../app-sdk", default-features = false }
-
-[workspace]
-
-[patch.crates-io.bitcoin_hashes]
-path = "../../../../../libs/bitcoin_hashes"
-[patch.crates-io.secp256k1]
-path = "../../../../../libs/secp256k1"
-[patch.crates-io.base58ck]
-path = "../../../../../libs/base58"
-[patch.crates-io.getrandom]
-path = "../../../../../libs/getrandom"

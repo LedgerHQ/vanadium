@@ -71,7 +71,7 @@ jobs:
       - name: Run native integration tests
         working-directory: ${{ inputs.client_dir }}
         env:
-          VAPP_BINARY: ../app/target/debug/${{ inputs.vapp_binary_name }}
+          VAPP_BINARY: ../target/debug/${{ inputs.vapp_binary_name }}
         run: |
           cargo test --features ${{ inputs.cargo_test_features }}
 

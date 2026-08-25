@@ -232,7 +232,7 @@ where
 /// # Example
 ///
 /// ```rust,ignore
-/// let setup = setup_native_test("../app/target/debug/vnd-sadik", |transport| {
+/// let setup = setup_native_test("../target/debug/vnd-sadik", |transport| {
 ///     SadikClient::new(transport)
 /// })
 /// .await;

@@ -1,0 +1,12 @@
+[workspace]
+resolver = "2"
+members = ["cases/*"]
+
+[patch.crates-io.bitcoin_hashes]
+path = "../../../libs/bitcoin_hashes"
+[patch.crates-io.secp256k1]
+path = "../../../libs/secp256k1"
+[patch.crates-io.base58ck]
+path = "../../../libs/base58"
+[patch.crates-io.getrandom]
+path = "../../../libs/getrandom"

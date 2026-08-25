@@ -31,5 +31,3 @@ path = "src/lib.rs"
 name = "vnd_test_cli"
 path = "src/main.rs"
 
-
-[workspace]

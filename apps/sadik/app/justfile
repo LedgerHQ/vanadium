@@ -16,8 +16,8 @@ build-riscv:
 
 # disassembles the riscv binary
 disassemble:
-  riscv64-linux-gnu-objdump -d target/riscv32imac-unknown-none-elf/release/vnd-sadik
+  riscv64-linux-gnu-objdump -d ../target/riscv32imac-unknown-none-elf/release/vnd-sadik
 
 # show the sections of the riscv binary
 show-sections:
-  readelf -S target/riscv32imac-unknown-none-elf/release/vnd-sadik
+  readelf -S ../target/riscv32imac-unknown-none-elf/release/vnd-sadik

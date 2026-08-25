@@ -1,6 +1,16 @@
 [workspace]
 resolver = "2"
-members = ["app-sdk", "client-sdk", "ecalls", "macros", "common", "cargo-vnd", "riscv-arch-tests"]
+members = [
+    "app-sdk",
+    "client-sdk",
+    "ecalls",
+    "macros",
+    "common",
+    "cargo-vnd",
+    "riscv-arch-tests",
+    "tools/bench",
+    "tools/vanalyze",
+]
 
 [workspace.package]
 edition = "2024"

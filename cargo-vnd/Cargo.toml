@@ -25,3 +25,4 @@ rhai_codegen = "=3.1.0"
 git2 = { version = "0.20", default-features = false }
 tokio = { version = "1.38.1", features = ["io-util", "macros", "net", "rt", "rt-multi-thread", "sync"] }
 env_logger = "0.11"
+serde_json = "1"

@@ -80,4 +80,6 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: ${{ inputs.artifact_name }}
-          path: ${{ inputs.vapp_dir }}/target/${{ inputs.riscv_target }}/release/${{ inputs.binary_name }}*
+          # vapp_dir is the app crate directory (e.g. apps/test/app); the crate is a
+          # member of the workspace rooted one level up, so the target dir is there
+          path: ${{ inputs.vapp_dir }}/../target/${{ inputs.riscv_target }}/release/${{ inputs.binary_name }}*

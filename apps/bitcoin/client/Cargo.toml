@@ -36,7 +36,6 @@ env_logger = { version = "0.11.8", optional = true }
 [dev-dependencies]
 sdk = { package = "vanadium-client-sdk", path = "../../../client-sdk", features = ["test-utils"] }
 
-
 [lib]
 name = "vnd_bitcoin_client"
 path = "src/lib.rs"
@@ -45,5 +44,3 @@ path = "src/lib.rs"
 name = "vnd_bitcoin_cli"
 path = "src/main.rs"
 
-
-[workspace]

@@ -1,0 +1,19 @@
+[workspace]
+resolver = "2"
+members = ["app", "client", "common"]
+exclude = ["benchmarks"]
+
+[profile.release]
+opt-level = "s"
+lto = true
+# improves LTO performance and code size (but it slows down compilation a bit)
+codegen-units = 1
+
+[patch.crates-io.bitcoin_hashes]
+path = "../../libs/bitcoin_hashes"
+[patch.crates-io.secp256k1]
+path = "../../libs/secp256k1"
+[patch.crates-io.base58ck]
+path = "../../libs/base58"
+[patch.crates-io.getrandom]
+path = "../../libs/getrandom"

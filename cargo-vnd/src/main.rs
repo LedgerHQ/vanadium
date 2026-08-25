@@ -109,10 +109,9 @@ fn main() -> Result<()> {
             let elf_path = match app {
                 Some(path) => path,
                 // if the app path is not provided, default to release binary for the riscv32imac target
-                None => cargo_toml_path
-                    .parent()
-                    .unwrap()
-                    .join("target/riscv32imac-unknown-none-elf/release")
+                // the crate may be a workspace member, so resolve the actual target directory
+                None => workspace_target_dir(&cargo_toml_path)?
+                    .join("riscv32imac-unknown-none-elf/release")
                     .join(vapp_crate_name),
             };
             // if the output path is not provided, default to adding the .vapp extension to the elf
@@ -203,6 +202,29 @@ fn main() -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Resolves the cargo target directory for the crate at the given manifest path,
+/// which is the workspace root's target dir if the crate is a workspace member.
+fn workspace_target_dir(cargo_toml_path: &std::path::Path) -> Result<PathBuf> {
+    let output = Command::new("cargo")
+        .args(["metadata", "--no-deps", "--format-version", "1"])
+        .arg("--manifest-path")
+        .arg(cargo_toml_path)
+        .output()
+        .context("Failed to run `cargo metadata`")?;
+    if !output.status.success() {
+        return Err(anyhow::anyhow!(
+            "cargo metadata failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+    let metadata: serde_json::Value =
+        serde_json::from_slice(&output.stdout).context("Failed to parse `cargo metadata` output")?;
+    let target_directory = metadata["target_directory"]
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("`cargo metadata` output has no target_directory"))?;
+    Ok(PathBuf::from(target_directory))
 }
 
 fn compute_merkle_roots(

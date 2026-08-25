@@ -48,14 +48,15 @@ struct BenchCase {
     case_name: String,
     crate_name: String,
     repetitions: u64,
+    // Target directory of the workspace containing the benchmark cases
+    target_dir: PathBuf,
 }
 
 impl BenchCase {
-    fn app_path(&self) -> String {
-        format!(
-            "cases/{}/target/riscv32imac-unknown-none-elf/release/{}",
-            self.case_name, self.crate_name
-        )
+    fn app_path(&self) -> PathBuf {
+        self.target_dir
+            .join("riscv32imac-unknown-none-elf/release")
+            .join(&self.crate_name)
     }
 }
 
@@ -121,10 +122,18 @@ fn discover_bench_cases(
             .into());
         }
 
+        // The cases are members of the workspace rooted at the parent of the
+        // cases directory, so their binaries land in the shared target dir.
+        let target_dir = cases_dir
+            .parent()
+            .unwrap_or_else(|| Path::new(""))
+            .join("target");
+
         let case = BenchCase {
             case_name,
             crate_name,
             repetitions,
+            target_dir,
         };
 
         cases.push(case);
@@ -170,7 +179,11 @@ async fn run_bench_case(
     let print_writer = Box::new(std::io::sink());
 
     vanadium_client
-        .start_vapp(&case.app_path(), Box::new(print_writer), false)
+        .start_vapp(
+            &case.app_path().to_string_lossy(),
+            Box::new(print_writer),
+            false,
+        )
         .await?;
 
     let mut client = BenchClient::new(vanadium_client);

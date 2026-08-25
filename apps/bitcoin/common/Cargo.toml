@@ -30,8 +30,3 @@ bip388 = { version = "0.1.0", default-features = false }
 hex-literal = "0.4.1"
 sdk = { package = "vanadium-app-sdk", path = "../../../app-sdk", default-features = false, features = ["target_native"] }
 
-[profile.release]
-opt-level = 3
-lto = true
-
-[workspace]

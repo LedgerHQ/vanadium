@@ -53,6 +53,10 @@ rustc-dep-of-std = [
 # Unstable/test-only feature to run wasm-bindgen tests in a browser
 test-in-browser = []
 
+# This is a vendored fork used via [patch.crates-io]; keep it out of the
+# root workspace like the other crates in libs/
+[workspace]
+
 [lints.rust]
 warnings = "allow"
 

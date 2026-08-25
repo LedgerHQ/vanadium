@@ -22,4 +22,3 @@ client = { package = "vnd-async-client", path = "../client", default-features = 
 [dev-dependencies]
 sdk = { package = "vanadium-app-sdk", path = "../../../app-sdk", default-features = false, features = ["test-mode", "target_native"] }
 
-[workspace]

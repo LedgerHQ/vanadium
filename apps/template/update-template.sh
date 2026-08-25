@@ -19,14 +19,16 @@ fi
 
 cp -r app client README.md vapp.code-workspace "$TARGET_DIR"
 
-# Rename Cargo.toml to Cargo.toml.liquid in `app` and `client` folders
+# Copy the workspace root manifest (app and client are workspace members)
+cp Cargo.toml "$TARGET_DIR/Cargo.toml"
+# The `generate` folder only exists in this repo, not in generated projects
+sed -i '/^exclude = \["generate"\]$/d' "$TARGET_DIR/Cargo.toml"
+
+# Rename Cargo.toml to Cargo.toml.liquid in the root, `app` and `client` folders
 # cargo-generate automatically removes this extension when generating a new project
+mv "$TARGET_DIR/Cargo.toml" "$TARGET_DIR/Cargo.toml.liquid"
 mv "$TARGET_DIR/app/Cargo.toml" "$TARGET_DIR/app/Cargo.toml.liquid"
 mv "$TARGET_DIR/client/Cargo.toml" "$TARGET_DIR/client/Cargo.toml.liquid"
-
-# Remove Cargo.lock files to avoid committing them in the template
-rm -f "$TARGET_DIR/app/Cargo.lock"
-rm -f "$TARGET_DIR/client/Cargo.lock"
 
 # Replace fixed values with templating placeholders
 sed -i 's/name = "vnd-template"/name = "{{project-app-crate}}"/g' "$TARGET_DIR/app/Cargo.toml.liquid"

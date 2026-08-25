@@ -33,4 +33,3 @@ sha2 = "0.10.8"
 name = "vnd_sadik_client"
 path = "src/lib.rs"
 
-[workspace]

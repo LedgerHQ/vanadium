@@ -19,4 +19,3 @@ target_vanadium_ledger = ["sdk/target_vanadium_ledger"]
 bs58 = { version = "0.5.1", default-features = false, features = ["alloc"] }
 sdk = { package = "vanadium-app-sdk", path = "../../../app-sdk", default-features = false }
 
-[workspace]

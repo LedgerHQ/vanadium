@@ -18,4 +18,3 @@ target_vanadium_ledger = ["sdk/target_vanadium_ledger"]
 [dependencies]
 sdk = { package = "vanadium-app-sdk", path = "../../../app-sdk", default-features = false }
 
-[workspace]
