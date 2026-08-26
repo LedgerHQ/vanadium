@@ -11,6 +11,8 @@ In the future, experimenting with features like _signed addresses_, _known conta
 The bitcoin app implements standards to guarantee interoperability, security and clear signing for bitcoin transactions, from the simpler to the more advanced use cases:
 - [BIP-370](https://github.com/bitcoin/bips/blob/master/bip-0370.mediawiki) PSBTs Version 2 are used to describe transactions to the application.
 - [BIP-388](https://github.com/bitcoin/bips/blob/master/bip-0388.mediawiki) wallet policies build on top of descriptors ([BIP-380](https://github.com/bitcoin/bips/blob/master/bip-0380.mediawiki) and related BIPs) to describe standardized *wallet accounts* that work for any kind of spending conditions, including using [miniscript](https://github.com/bitcoin/bips/blob/master/bip-0379.md).
+- [BIP-327](https://github.com/bitcoin/bips/blob/master/bip-0327.mediawiki) MuSig2 support for compatible BIP-388 wallet policies.
+
 
 ## PSBT-level extensions
 PSBT-level extensions via *Proprietary Use Types* are used to carry account information, proofs of registration and identity-based output authentication.
@@ -28,7 +30,6 @@ They are documented in [PSBT.md](PSBT.md).
 
 ## Planned features
 
-- [BIP-327](https://github.com/bitcoin/bips/blob/master/bip-0327.mediawiki) MuSig2 support
 - [BIP-352](https://github.com/bitcoin/bips/blob/master/bip-0352.mediawiki) Silent Payments support. Silent Payment addresses can be added as a new type of account - but they could also be used as *identity pubkeys*. This would allow a DNS-based Root of Trust that doesn't require an explicit registration step.
 - DNSSEC-based authentication for identity pubkeys. Similar to [BIP-353](https://github.com/bitcoin/bips/blob/master/bip-0353.mediawiki) but for identity pubkeys.
 - Signing policies: derive keys that will only sign transactions (and possibly auto-sign) if they satisfy certain spending policies.
