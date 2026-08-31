@@ -22,7 +22,10 @@ base64 = { version = "0.22.1", default-features = false, features = ["alloc"] }
 bech32 = { version = "0.11", default-features = false, features = ["alloc"] }
 # `validation` is the no_std proof-verification half of the crate; its only dependency is
 # bitcoin_hashes. Do not enable `std` here: it would pull the DNS query code into the device build.
-dnssec-prover = { version = "0.6", default-features = false, features = ["validation"] }
+# >= 0.6.10 for the fix to the NSEC/NSEC3 type bitmap, which used to be inline as [u8; 8192] and
+# blew up the RR enum to 8232 bytes per record, overflowing the 64 KiB V-App heap while parsing
+# any chain at all.
+dnssec-prover = { version = "0.6.10", default-features = false, features = ["validation"] }
 hex = { version = "0.4.3", default-features = false, features = ["alloc"] }
 minicbor = { version = "2.2", default-features = false, features = ["alloc", "derive"] }
 sdk = { package = "vanadium-app-sdk", path = "../../../app-sdk", default-features = false }

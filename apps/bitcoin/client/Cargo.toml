@@ -20,7 +20,8 @@ base58   = { package = "base58ck", version = "0.1", default-features = false }
 common = { package = "vnd-bitcoin-common", path = "../common", default-features = false, features = ["target_native"]}
 # `std` adds the query module, used to build proofs by asking a recursive resolver. The device only
 # ever needs `validation`, which comes in through `common`.
-dnssec-prover = { version = "0.6", default-features = false, features = ["validation", "std"] }
+# >= 0.6.10 for the fix to the NSEC/NSEC3 type bitmap; see the comment on the `common` dependency.
+dnssec-prover = { version = "0.6.10", default-features = false, features = ["validation", "std"] }
 hex = "0.4.3"
 hidapi = "2.6.3"
 minicbor = { version = "2.2", features = ["alloc", "derive", "std"] }
