@@ -30,7 +30,11 @@ pub const ECALL_MULTM: u32 = 113;
 pub const ECALL_POWM: u32 = 114;
 pub const ECALL_MODINV_PRIME: u32 = 115;
 
-pub const MAX_BIGNUMBER_SIZE: usize = 64;
+/// Maximum size, in bytes, of a big number operand accepted by the modular arithmetic ECALLs
+/// (`bn_modm`, `bn_addm`, `bn_subm`, `bn_multm`, `bn_powm`, `bn_modinv_prime`).
+///
+/// 512 bytes = 4096 bits, which is enough to support RSA operations up to a 4096-bit modulus.
+pub const MAX_BIGNUMBER_SIZE: usize = 512;
 
 // HD derivations
 pub enum CurveKind {
