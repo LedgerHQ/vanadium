@@ -642,14 +642,14 @@ impl<'a, const N: usize> CommEcallHandler<'a, N> {
             ));
         }
 
-        // copy inputs to local memory
+        // copy inputs to local memory (heap-allocated to keep large operands off the stack)
         // we use r_local both for the input and for the result
-        let mut r_local: [u8; MAX_BIGNUMBER_SIZE] = [0; MAX_BIGNUMBER_SIZE];
+        let mut r_local = vec![0u8; len];
         cpu.get_segment::<E>(n.0)?
-            .read_buffer(n.0, &mut r_local[0..len])?;
-        let mut m_local: [u8; MAX_BIGNUMBER_SIZE] = [0; MAX_BIGNUMBER_SIZE];
+            .read_buffer(n.0, &mut r_local)?;
+        let mut m_local = vec![0u8; m_len];
         cpu.get_segment::<E>(m.0)?
-            .read_buffer(m.0, &mut m_local[0..m_len])?;
+            .read_buffer(m.0, &mut m_local)?;
 
         unsafe {
             let res =
@@ -661,7 +661,7 @@ impl<'a, const N: usize> CommEcallHandler<'a, N> {
 
         // copy r_local to r
         let segment = cpu.get_segment::<E>(r.0)?;
-        segment.write_buffer(r.0, &r_local[0..len])?;
+        segment.write_buffer(r.0, &r_local)?;
         Ok(())
     }
 
@@ -678,18 +678,18 @@ impl<'a, const N: usize> CommEcallHandler<'a, N> {
             return Err(CommEcallError::InvalidParameters("len is too large"));
         }
 
-        // copy inputs to local memory
-        let mut a_local: [u8; MAX_BIGNUMBER_SIZE] = [0; MAX_BIGNUMBER_SIZE];
+        // copy inputs to local memory (heap-allocated to keep large operands off the stack)
+        let mut a_local = vec![0u8; len];
         cpu.get_segment::<E>(a.0)?
-            .read_buffer(a.0, &mut a_local[0..len])?;
-        let mut b_local: [u8; MAX_BIGNUMBER_SIZE] = [0; MAX_BIGNUMBER_SIZE];
+            .read_buffer(a.0, &mut a_local)?;
+        let mut b_local = vec![0u8; len];
         cpu.get_segment::<E>(b.0)?
-            .read_buffer(b.0, &mut b_local[0..len])?;
-        let mut m_local: [u8; MAX_BIGNUMBER_SIZE] = [0; MAX_BIGNUMBER_SIZE];
+            .read_buffer(b.0, &mut b_local)?;
+        let mut m_local = vec![0u8; len];
         cpu.get_segment::<E>(m.0)?
-            .read_buffer(m.0, &mut m_local[0..len])?;
+            .read_buffer(m.0, &mut m_local)?;
 
-        let mut r_local: [u8; MAX_BIGNUMBER_SIZE] = [0; MAX_BIGNUMBER_SIZE];
+        let mut r_local = vec![0u8; len];
         unsafe {
             let res = sys::cx_math_addm_no_throw(
                 r_local.as_mut_ptr(),
@@ -705,7 +705,7 @@ impl<'a, const N: usize> CommEcallHandler<'a, N> {
 
         // copy r_local to r
         let segment = cpu.get_segment::<E>(r.0)?;
-        segment.write_buffer(r.0, &r_local[0..len])?;
+        segment.write_buffer(r.0, &r_local)?;
         Ok(())
     }
 
@@ -722,18 +722,18 @@ impl<'a, const N: usize> CommEcallHandler<'a, N> {
             return Err(CommEcallError::InvalidParameters("len is too large"));
         }
 
-        // copy inputs to local memory
-        let mut a_local: [u8; MAX_BIGNUMBER_SIZE] = [0; MAX_BIGNUMBER_SIZE];
+        // copy inputs to local memory (heap-allocated to keep large operands off the stack)
+        let mut a_local = vec![0u8; len];
         cpu.get_segment::<E>(a.0)?
-            .read_buffer(a.0, &mut a_local[0..len])?;
-        let mut b_local: [u8; MAX_BIGNUMBER_SIZE] = [0; MAX_BIGNUMBER_SIZE];
+            .read_buffer(a.0, &mut a_local)?;
+        let mut b_local = vec![0u8; len];
         cpu.get_segment::<E>(b.0)?
-            .read_buffer(b.0, &mut b_local[0..len])?;
-        let mut m_local: [u8; MAX_BIGNUMBER_SIZE] = [0; MAX_BIGNUMBER_SIZE];
+            .read_buffer(b.0, &mut b_local)?;
+        let mut m_local = vec![0u8; len];
         cpu.get_segment::<E>(m.0)?
-            .read_buffer(m.0, &mut m_local[0..len])?;
+            .read_buffer(m.0, &mut m_local)?;
 
-        let mut r_local: [u8; MAX_BIGNUMBER_SIZE] = [0; MAX_BIGNUMBER_SIZE];
+        let mut r_local = vec![0u8; len];
         unsafe {
             let res = sys::cx_math_subm_no_throw(
                 r_local.as_mut_ptr(),
@@ -749,7 +749,7 @@ impl<'a, const N: usize> CommEcallHandler<'a, N> {
 
         // copy r_local to r
         let segment = cpu.get_segment::<E>(r.0)?;
-        segment.write_buffer(r.0, &r_local[0..len])?;
+        segment.write_buffer(r.0, &r_local)?;
         Ok(())
     }
 
@@ -766,18 +766,18 @@ impl<'a, const N: usize> CommEcallHandler<'a, N> {
             return Err(CommEcallError::InvalidParameters("len is too large"));
         }
 
-        // copy inputs to local memory
-        let mut a_local: [u8; MAX_BIGNUMBER_SIZE] = [0; MAX_BIGNUMBER_SIZE];
+        // copy inputs to local memory (heap-allocated to keep large operands off the stack)
+        let mut a_local = vec![0u8; len];
         cpu.get_segment::<E>(a.0)?
-            .read_buffer(a.0, &mut a_local[0..len])?;
-        let mut b_local: [u8; MAX_BIGNUMBER_SIZE] = [0; MAX_BIGNUMBER_SIZE];
+            .read_buffer(a.0, &mut a_local)?;
+        let mut b_local = vec![0u8; len];
         cpu.get_segment::<E>(b.0)?
-            .read_buffer(b.0, &mut b_local[0..len])?;
-        let mut m_local: [u8; MAX_BIGNUMBER_SIZE] = [0; MAX_BIGNUMBER_SIZE];
+            .read_buffer(b.0, &mut b_local)?;
+        let mut m_local = vec![0u8; len];
         cpu.get_segment::<E>(m.0)?
-            .read_buffer(m.0, &mut m_local[0..len])?;
+            .read_buffer(m.0, &mut m_local)?;
 
-        let mut r_local: [u8; MAX_BIGNUMBER_SIZE] = [0; MAX_BIGNUMBER_SIZE];
+        let mut r_local = vec![0u8; len];
         unsafe {
             let res = sys::cx_math_multm_no_throw(
                 r_local.as_mut_ptr(),
@@ -793,7 +793,7 @@ impl<'a, const N: usize> CommEcallHandler<'a, N> {
 
         // copy r_local to r
         let segment = cpu.get_segment::<E>(r.0)?;
-        segment.write_buffer(r.0, &r_local[0..len])?;
+        segment.write_buffer(r.0, &r_local)?;
         Ok(())
     }
 
@@ -810,15 +810,15 @@ impl<'a, const N: usize> CommEcallHandler<'a, N> {
             return Err(CommEcallError::InvalidParameters("len is too large"));
         }
 
-        // copy inputs to local memory
-        let mut a_local: [u8; MAX_BIGNUMBER_SIZE] = [0; MAX_BIGNUMBER_SIZE];
+        // copy inputs to local memory (heap-allocated to keep large operands off the stack)
+        let mut a_local = vec![0u8; len];
         cpu.get_segment::<E>(a.0)?
-            .read_buffer(a.0, &mut a_local[0..len])?;
-        let mut p_local: [u8; MAX_BIGNUMBER_SIZE] = [0; MAX_BIGNUMBER_SIZE];
+            .read_buffer(a.0, &mut a_local)?;
+        let mut p_local = vec![0u8; len];
         cpu.get_segment::<E>(p.0)?
-            .read_buffer(p.0, &mut p_local[0..len])?;
+            .read_buffer(p.0, &mut p_local)?;
 
-        let mut r_local: [u8; MAX_BIGNUMBER_SIZE] = [0; MAX_BIGNUMBER_SIZE];
+        let mut r_local = vec![0u8; len];
         unsafe {
             let res = sys::cx_math_invprimem_no_throw(
                 r_local.as_mut_ptr(),
@@ -833,7 +833,7 @@ impl<'a, const N: usize> CommEcallHandler<'a, N> {
 
         // copy r_local to r
         let segment = cpu.get_segment::<E>(r.0)?;
-        segment.write_buffer(r.0, &r_local[0..len])?;
+        segment.write_buffer(r.0, &r_local)?;
         Ok(())
     }
 
@@ -854,18 +854,18 @@ impl<'a, const N: usize> CommEcallHandler<'a, N> {
             return Err(CommEcallError::InvalidParameters("len is too large"));
         }
 
-        // copy inputs to local memory
-        let mut a_local: [u8; MAX_BIGNUMBER_SIZE] = [0; MAX_BIGNUMBER_SIZE];
+        // copy inputs to local memory (heap-allocated to keep large operands off the stack)
+        let mut a_local = vec![0u8; len];
         cpu.get_segment::<E>(a.0)?
-            .read_buffer(a.0, &mut a_local[0..len])?;
-        let mut e_local: [u8; MAX_BIGNUMBER_SIZE] = [0; MAX_BIGNUMBER_SIZE];
+            .read_buffer(a.0, &mut a_local)?;
+        let mut e_local = vec![0u8; len_e];
         cpu.get_segment::<E>(e.0)?
-            .read_buffer(e.0, &mut e_local[0..len_e])?;
-        let mut m_local: [u8; MAX_BIGNUMBER_SIZE] = [0; MAX_BIGNUMBER_SIZE];
+            .read_buffer(e.0, &mut e_local)?;
+        let mut m_local = vec![0u8; len];
         cpu.get_segment::<E>(m.0)?
-            .read_buffer(m.0, &mut m_local[0..len])?;
+            .read_buffer(m.0, &mut m_local)?;
 
-        let mut r_local: [u8; MAX_BIGNUMBER_SIZE] = [0; MAX_BIGNUMBER_SIZE];
+        let mut r_local = vec![0u8; len];
         unsafe {
             let res = sys::cx_math_powm_no_throw(
                 r_local.as_mut_ptr(),
@@ -882,7 +882,7 @@ impl<'a, const N: usize> CommEcallHandler<'a, N> {
 
         // copy r_local to r
         let segment = cpu.get_segment::<E>(r.0)?;
-        segment.write_buffer(r.0, &r_local[0..len])?;
+        segment.write_buffer(r.0, &r_local)?;
         Ok(())
     }
 
