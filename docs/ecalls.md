@@ -28,3 +28,7 @@ Each new ECALL requires:
 ECALLs are not exported directly in the `vanadium-app-sdk`. Rather, clean Rust abstractions are implemented. Apart from providing a cleaner interface, the goal of the abstraction is to avoid that the application code depends on the low-level details of ECALLs. This allows breaking changes in the ECALLs, or even target-specific ECALLs, without impacting the users of the crate.
 
 Eventually, the goal is to stabilize a set of ECALLs that constitutes the core of Vanadium, in order to simplify adding new targets.
+
+# Big-number arithmetic and RSA
+
+The big-number ECALLs (`bn_modm`, `bn_addm`, `bn_subm`, `bn_multm`, `bn_powm`, `bn_modinv_prime`) provide modular arithmetic on operands up to `MAX_BIGNUMBER_SIZE` (512 bytes, i.e. 4096 bits). They are exposed to V-Apps through the [`bignum`](../app-sdk/src/bignum.rs) module of the app SDK.
