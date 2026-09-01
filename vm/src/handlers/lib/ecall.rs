@@ -18,7 +18,7 @@ use common::{
 };
 use ledger_device_sdk::sys::{
     self, cx_ripemd160_t, cx_sha256_t, cx_sha3_t, cx_sha512_t, CX_KECCAK, CX_OK, CX_RIPEMD160,
-    CX_SHA256, CX_SHA3, CX_SHA512,
+    CX_SHA256, CX_SHA3, CX_SHA384, CX_SHA512,
 };
 use ledger_device_sdk::{hash::HashInit, io::DecodedEventType};
 
@@ -226,7 +226,7 @@ impl LedgerHashContext {
         let res = match (hash_identifier >> 16) as u8 {
             CX_RIPEMD160 => core::mem::size_of::<cx_ripemd160_t>(),
             CX_SHA256 => core::mem::size_of::<cx_sha256_t>(),
-            CX_SHA512 => core::mem::size_of::<cx_sha512_t>(),
+            CX_SHA384 | CX_SHA512 => core::mem::size_of::<cx_sha512_t>(),
             CX_KECCAK | CX_SHA3 => core::mem::size_of::<cx_sha3_t>(),
             _ => return Err(LedgerHashContextError::UnsupportedHashId),
         };
@@ -240,7 +240,7 @@ impl LedgerHashContext {
         }
         // validate that the algorithm in the high 16 bits is supported
         match (hash_identifier >> 16) as u8 {
-            CX_RIPEMD160 | CX_SHA256 | CX_SHA512 => {}
+            CX_RIPEMD160 | CX_SHA256 | CX_SHA384 | CX_SHA512 => {}
             CX_KECCAK | CX_SHA3 => {
                 // only the following output lengths are supported
                 let output_size = (hash_identifier & 0xFFFF) as usize;
