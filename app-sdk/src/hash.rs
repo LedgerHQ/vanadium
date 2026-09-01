@@ -4,7 +4,8 @@ mod hashers {
     use super::*;
     use crate::ecalls;
     use common::ecall_constants::{
-        HashId, CTX_RIPEMD160_SIZE, CTX_SHA256_SIZE, CTX_SHA3_SIZE, CTX_SHA512_SIZE,
+        HashId, CTX_RIPEMD160_SIZE, CTX_SHA256_SIZE, CTX_SHA384_SIZE, CTX_SHA3_SIZE,
+        CTX_SHA512_SIZE,
     };
 
     /// Generates a hash wrapper backed by an opaque byte buffer of `$ctx_size`
@@ -70,6 +71,7 @@ mod hashers {
     }
 
     impl_hash!(Sha256, Sha256, CTX_SHA256_SIZE, 32);
+    impl_hash!(Sha384, Sha384, CTX_SHA384_SIZE, 48);
     impl_hash!(Sha512, Sha512, CTX_SHA512_SIZE, 64);
     impl_hash!(Ripemd160, Ripemd160, CTX_RIPEMD160_SIZE, 20);
 
@@ -87,6 +89,6 @@ mod hashers {
 }
 
 pub use hashers::{
-    Keccak224, Keccak256, Keccak384, Keccak512, Ripemd160, Sha256, Sha3_224, Sha3_256, Sha3_384,
-    Sha3_512, Sha512,
+    Keccak224, Keccak256, Keccak384, Keccak512, Ripemd160, Sha256, Sha384, Sha3_224, Sha3_256,
+    Sha3_384, Sha3_512, Sha512,
 };

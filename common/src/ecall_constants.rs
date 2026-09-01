@@ -43,6 +43,7 @@ pub enum CurveKind {
 pub enum HashId {
     Ripemd160 = 1,
     Sha256 = 3,
+    Sha384 = 4,
     Sha512 = 5,
     Keccak = 6,
     Sha3 = 7,
@@ -98,6 +99,8 @@ pub const ECALL_HASH_DIGEST: u32 = 152;
 /// be larger.
 pub const CTX_SHA256_SIZE: usize = 128;
 pub const CTX_SHA512_SIZE: usize = 224;
+// SHA-384 shares the same context structure as SHA-512 in the Ledger C SDK.
+pub const CTX_SHA384_SIZE: usize = CTX_SHA512_SIZE;
 pub const CTX_RIPEMD160_SIZE: usize = 120;
 // Keccak and SHA-3 share the same internal Keccak-f[1600] state (cx_sha3_t on Ledger, ~200 bytes
 // of rate buffer + 25×u64 state). 448 bytes gives comfortable headroom above the 424-byte

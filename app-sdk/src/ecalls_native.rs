@@ -19,8 +19,8 @@ use sha2::Digest as _;
 use common::{
     constants::STORAGE_SLOT_SIZE,
     ecall_constants::{
-        CurveKind, HashId, CTX_RIPEMD160_SIZE, CTX_SHA256_SIZE, CTX_SHA3_SIZE, CTX_SHA512_SIZE,
-        MAX_BIGNUMBER_SIZE,
+        CurveKind, HashId, CTX_RIPEMD160_SIZE, CTX_SHA256_SIZE, CTX_SHA384_SIZE, CTX_SHA3_SIZE,
+        CTX_SHA512_SIZE, MAX_BIGNUMBER_SIZE,
     },
     ux::{Deserializable, EventCode, EventData},
     BufferType,
@@ -1256,6 +1256,10 @@ const _: () = assert!(
     "sha2::Sha256 does not fit in CtxSha256",
 );
 const _: () = assert!(
+    std::mem::size_of::<sha2::Sha384>() <= CTX_SHA384_SIZE,
+    "sha2::Sha384 does not fit in CtxSha384",
+);
+const _: () = assert!(
     std::mem::size_of::<sha2::Sha512>() <= CTX_SHA512_SIZE,
     "sha2::Sha512 does not fit in CtxSha512",
 );
@@ -1284,6 +1288,13 @@ pub fn hash_init(hash_identifier: u32, ctx: *mut u8) {
             }
             let hasher = sha2::Sha256::new();
             unsafe { std::ptr::write_unaligned(ctx as *mut sha2::Sha256, hasher) };
+        }
+        id if id == HashId::Sha384 as u32 => {
+            if output_size != 48 {
+                panic!("hash_init: invalid output size {} for SHA-384", output_size);
+            }
+            let hasher = sha2::Sha384::new();
+            unsafe { std::ptr::write_unaligned(ctx as *mut sha2::Sha384, hasher) };
         }
         id if id == HashId::Sha512 as u32 => {
             if output_size != 64 {
@@ -1354,6 +1365,14 @@ pub fn hash_update(hash_identifier: u32, ctx: *mut u8, data: *const u8, len: usi
             let mut hasher = unsafe { std::ptr::read_unaligned(ctx as *const sha2::Sha256) };
             hasher.update(data_slice);
             unsafe { std::ptr::write_unaligned(ctx as *mut sha2::Sha256, hasher) };
+        }
+        id if id == HashId::Sha384 as u32 => {
+            if output_size != 48 {
+                return 0;
+            }
+            let mut hasher = unsafe { std::ptr::read_unaligned(ctx as *const sha2::Sha384) };
+            hasher.update(data_slice);
+            unsafe { std::ptr::write_unaligned(ctx as *mut sha2::Sha384, hasher) };
         }
         id if id == HashId::Sha512 as u32 => {
             if output_size != 64 {
@@ -1434,6 +1453,16 @@ pub fn hash_final(hash_identifier: u32, ctx: *mut u8, digest: *mut u8) -> u32 {
             let result = hasher.finalize();
             unsafe {
                 std::ptr::copy_nonoverlapping(result.as_ptr(), digest as *mut u8, 32);
+            }
+        }
+        id if id == HashId::Sha384 as u32 => {
+            if output_size != 48 {
+                return 0;
+            }
+            let hasher = unsafe { std::ptr::read_unaligned(ctx as *const sha2::Sha384) };
+            let result = hasher.finalize();
+            unsafe {
+                std::ptr::copy_nonoverlapping(result.as_ptr(), digest, 48);
             }
         }
         id if id == HashId::Sha512 as u32 => {
@@ -1590,6 +1619,11 @@ mod tests {
         test_hash_sha256,
         crate::hash::Sha256,
         "../test-vectors/hashes/sha256.json"
+    );
+    test_hash!(
+        test_hash_sha384,
+        crate::hash::Sha384,
+        "../test-vectors/hashes/sha384.json"
     );
     test_hash!(
         test_hash_sha512,
