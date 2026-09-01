@@ -440,7 +440,7 @@ pub fn bn_modm(r: *mut u8, n: *const u8, len: usize, m: *const u8, len_m: usize)
         return 0;
     }
 
-    if len_m > len_m {
+    if len_m > len {
         return 0;
     }
 
