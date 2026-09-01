@@ -23,6 +23,7 @@ pub mod curve;
 pub mod executor;
 pub mod hash;
 pub mod rand;
+pub mod rsa;
 pub mod slip21;
 pub mod storage;
 pub mod ux;
