@@ -641,6 +641,13 @@ impl<'a, const N: usize> CommEcallHandler<'a, N> {
                 "len or m_len is too large",
             ));
         }
+        // The modulus may not be longer than the operand being reduced; this mirrors the
+        // contract enforced by the native implementation of the ECALL.
+        if m_len > len {
+            return Err(CommEcallError::InvalidParameters(
+                "m_len is larger than len",
+            ));
+        }
 
         // copy inputs to local memory (heap-allocated to keep large operands off the stack)
         // we use r_local both for the input and for the result
@@ -876,7 +883,7 @@ impl<'a, const N: usize> CommEcallHandler<'a, N> {
                 len,
             );
             if res != CX_OK {
-                return Err(CommEcallError::GenericError("addm failed"));
+                return Err(CommEcallError::GenericError("powm failed"));
             }
         }
 

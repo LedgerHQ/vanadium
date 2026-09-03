@@ -102,8 +102,9 @@ impl RsaHash {
 /// Computes `base^exponent mod modulus`, returning the result as a big-endian byte vector of
 /// the same length as `modulus`, or `None` if the inputs are out of range or the ECALL fails.
 ///
-/// `base` must be strictly smaller than `modulus` (which always holds for the RSA
-/// operations in this module) and no longer than `modulus`.
+/// `base` must be no longer than `modulus`, and strictly smaller than it: `bn_powm` requires
+/// a reduced base, and an out-of-range one is rejected.
+/// Note that a signature received for verification is untrusted and may well be `>= modulus`.
 fn mod_exp(base: &[u8], exponent: &[u8], modulus: &[u8]) -> Option<Vec<u8>> {
     let k = modulus.len();
     if k == 0 || k > MAX_BIGNUMBER_SIZE {
@@ -119,6 +120,12 @@ fn mod_exp(base: &[u8], exponent: &[u8], modulus: &[u8]) -> Option<Vec<u8>> {
     // Left-pad the base to the modulus length, as required by bn_powm.
     let mut a = vec![0u8; k];
     a[k - base.len()..].copy_from_slice(base);
+
+    // Both operands are now `k` bytes long and big-endian, so the lexicographic comparison of
+    // the byte strings is the numeric comparison.
+    if a[..] >= modulus[..] {
+        return None;
+    }
 
     let mut r = vec![0u8; k];
     // SAFETY: `r` and `a` are writable/readable for `k` bytes, `exponent` for `exponent.len()`
@@ -141,8 +148,12 @@ fn mod_exp(base: &[u8], exponent: &[u8], modulus: &[u8]) -> Option<Vec<u8>> {
 
 /// Builds the `EMSA-PKCS1-v1_5` encoded message of length `em_len` for the given digest:
 /// `0x00 || 0x01 || PS || 0x00 || DigestInfo || digest`, where `PS` is at least eight `0xff`
-/// bytes. Returns `None` if `digest` has the wrong length or the modulus is too small.
+/// bytes. Returns `None` if `digest` has the wrong length, or if the modulus is too small to
+/// hold the padding or larger than `MAX_BIGNUMBER_SIZE`.
 fn emsa_pkcs1_v15_encode(hash: RsaHash, digest: &[u8], em_len: usize) -> Option<Vec<u8>> {
+    if em_len > MAX_BIGNUMBER_SIZE {
+        return None;
+    }
     if digest.len() != hash.digest_len() {
         return None;
     }
@@ -272,7 +283,8 @@ impl RsaPrivateKey {
     ///
     /// `digest` must be the output of `hash` applied to the message to sign. On success the
     /// signature is exactly [`RsaPrivateKey::size`] bytes long. Returns `None` if the digest
-    /// length is wrong, the modulus is too small for the padding, or the ECALL fails.
+    /// length is wrong, the modulus is too small for the padding or larger than
+    /// [`MAX_BIGNUMBER_SIZE`], or the ECALL fails.
     pub fn sign_pkcs1_v1_5(&self, hash: RsaHash, digest: &[u8]) -> Option<Vec<u8>> {
         let k = self.n.len();
         let em = emsa_pkcs1_v15_encode(hash, digest, k)?;
@@ -492,6 +504,22 @@ mod tests {
     }
 
     #[test]
+    fn test_verify_rejects_signature_out_of_range() {
+        // A signature is untrusted input and may be >= n even when it has the right length;
+        // such a value must be rejected cleanly rather than reaching `bn_powm`, which
+        // requires a reduced base.
+        let pk = RsaPublicKey::new(RSA2048_N, RSA2048_E);
+        assert!(!pk.verify_pkcs1_v1_5(RsaHash::Sha256, RSA2048_DIGEST_SHA256, RSA2048_N));
+        assert!(!pk.verify_pkcs1_v1_5(RsaHash::Sha256, RSA2048_DIGEST_SHA256, &[0xffu8; 256]));
+
+        // The largest in-range value is still accepted as a (wrong) signature, i.e. the check
+        // is `>= n`, not `>= n - 1`.
+        let mut n_minus_1 = RSA2048_N.to_vec();
+        n_minus_1[255] -= 1;
+        assert!(mod_exp(&n_minus_1, RSA2048_E, RSA2048_N).is_some());
+    }
+
+    #[test]
     fn test_sign_matches_known_vectors() {
         // RSASSA-PKCS1-v1_5 is deterministic, so signing must reproduce the reference
         // signatures produced independently by OpenSSL.
@@ -553,5 +581,21 @@ mod tests {
         assert!(emsa_pkcs1_v15_encode(RsaHash::Sha256, &digest, 40).is_none());
         // A digest of the wrong length for the algorithm is rejected.
         assert!(emsa_pkcs1_v15_encode(RsaHash::Sha256, &[0u8; 20], 256).is_none());
+        // The largest supported modulus is fine, one byte more is not: the buffer is
+        // allocated from `em_len`, so the bound must be checked before allocating.
+        assert!(emsa_pkcs1_v15_encode(RsaHash::Sha256, &digest, MAX_BIGNUMBER_SIZE).is_some());
+        assert!(emsa_pkcs1_v15_encode(RsaHash::Sha256, &digest, MAX_BIGNUMBER_SIZE + 1).is_none());
+    }
+
+    #[test]
+    fn test_oversized_modulus_rejected() {
+        let n = [0xffu8; MAX_BIGNUMBER_SIZE + 1];
+        let digest = [0xabu8; 32];
+
+        let pk = RsaPublicKey::new(&n, RSA2048_E);
+        assert!(!pk.verify_pkcs1_v1_5(RsaHash::Sha256, &digest, &[0x01u8; MAX_BIGNUMBER_SIZE + 1]));
+
+        let sk = RsaPrivateKey::new(&n, RSA2048_D);
+        assert!(sk.sign_pkcs1_v1_5(RsaHash::Sha256, &digest).is_none());
     }
 }
