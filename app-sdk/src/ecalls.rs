@@ -191,7 +191,7 @@ forward_to_ecall! {
     /// - `n`: Pointer to the dividend buffer.
     /// - `len`: Length of `r` and `n`.
     /// - `m`: Pointer to the divisor buffer.
-    /// - `len_m`: Length of `m`.
+    /// - `len_m`: Length of `m`; it must not exceed `len`.
     ///
     /// # Returns
     /// 1 on success, 0 on error.
