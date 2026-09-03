@@ -32,6 +32,18 @@ jobs:
       vapp_name: "common"
       test_dirs_json: '["common"]'
 
+  # The dnssec-prover fork replaces the crate's RSA and P-256/P-384 arithmetic with the
+  # modular-arithmetic ECALLs; the Wycheproof suites it vendors are what hold that honest, so
+  # they run here rather than only being available to run.
+  test_dnssec_prover:
+    uses: ./.github/workflows/reusable_native_tests.yaml
+    with:
+      vapp_name: "dnssec-prover"
+      test_dirs_json: '["libs/dnssec-prover"]'
+      # `std` is what gates the crate's test module in at all. The `query::` tests need a live
+      # recursive resolver, so they are skipped.
+      cargo_test_args: '--release --features std -- --skip query::'
+
   test_riscv_arch:
     name: RISC-V architecture tests
     runs-on: ubuntu-latest
