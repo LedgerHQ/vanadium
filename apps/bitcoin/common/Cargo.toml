@@ -42,3 +42,10 @@ opt-level = 3
 lto = true
 
 [workspace]
+
+# Only takes effect when this crate is tested on its own; when it is built as a dependency the
+# patch comes from the enclosing workspace, which is why the client (whose own root does not patch
+# it) still gets the upstream crate. Pointing the tests at the fork means the fixture chain in
+# `tests/dns_identity_fixture.rs` is verified with the ECALL-backed crypto the device runs.
+[patch.crates-io.dnssec-prover]
+path = "../../../libs/dnssec-prover"

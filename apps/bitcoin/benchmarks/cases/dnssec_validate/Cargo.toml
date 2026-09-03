@@ -30,3 +30,6 @@ path = "../../../../../libs/secp256k1"
 path = "../../../../../libs/base58"
 [patch.crates-io.getrandom]
 path = "../../../../../libs/getrandom"
+# The ECALL-backed crypto fork; the app patches it in the same way.
+[patch.crates-io.dnssec-prover]
+path = "../../../../../libs/dnssec-prover"

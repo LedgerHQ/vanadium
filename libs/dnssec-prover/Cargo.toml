@@ -14,19 +14,22 @@ rust-version = "1.61.0"
 features = ["std", "validation", "tokio"]
 
 [features]
-default = ["validation"]
+default = ["validation", "target_native"]
 std = []
 validation = ["bitcoin_hashes"]
 tokio = ["tokio_crate/net", "tokio_crate/io-util", "std"]
 build_server = ["tokio", "tokio_crate/rt-multi-thread", "tokio_crate/macros"]
 slower_smaller_binary = []
+target_native = ["sdk/target_native"]
+target_vanadium_ledger = ["sdk/target_vanadium_ledger"]
 
 [dependencies]
+# The RSA and P-256/P-384 arithmetic upstream implements in `crypto/bigint.rs` is delegated to the
+# modular-arithmetic ECALLs instead; see `src/crypto/mod.rs`.
+sdk = { package = "vanadium-app-sdk", path = "../../app-sdk", default-features = false }
+
 bitcoin_hashes = { version = "0.14", default-features = false, optional = true }
 tokio_crate = { package = "tokio", version = "1.0", default-features = false, optional = true }
-
-[target.'cfg(fuzzing)'.dependencies]
-ibig = { version = "0.3", optional = true }
 
 [dev-dependencies]
 hex-conservative = { version = "0.1", default-features = false, features = ["alloc"] }
@@ -39,6 +42,10 @@ serde_json = { version = "1.0", default-features = false, features = ["std"] }
 [profile.dev]
 opt-level = 1
 
+[profile.release]
+opt-level = 3
+lto = true
+
 [lib]
 name = "dnssec_prover"
 path = "src/lib.rs"
@@ -46,6 +53,9 @@ path = "src/lib.rs"
 [[bin]]
 name = "http_proof_gen"
 path = "src/http.rs"
+required-features = ["build_server"]
+
+[workspace]
 
 [lints.rust.unexpected_cfgs]
 level = "forbid"
@@ -60,3 +70,8 @@ check-cfg = [
 	"cfg(dnssec_prover_c_hashers)",
 	"cfg(dnssec_prover_c_hashers_test)"
 ]
+
+[patch.crates-io.bitcoin_hashes]
+path = "../bitcoin_hashes"
+[patch.crates-io.getrandom]
+path = "../getrandom"

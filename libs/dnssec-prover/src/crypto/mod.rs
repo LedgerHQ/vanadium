@@ -1,27 +1,30 @@
 //! Implementations of cryptographic verification
 //!
-//! Sadly, the choices for cryptographic verification in Rust are somewhat limited. For us (RSA and
-//! secp256r1/secp384r1) there's really only `ring` and `RustCrypto`.
+//! This is the Vanadium fork of `dnssec-prover`. Upstream implements RSA and the secp256r1 /
+//! secp384r1 group law over its own pure-Rust bignum backend (`crypto/bigint.rs`), because there
+//! is no Rust crypto library it is willing to depend on. On a Vanadium V-App there is a better
+//! option: the modular-arithmetic ECALLs run natively on the secure element while the V-App code
+//! is interpreted, so every multiplication moved behind an ECALL is both far faster and absent
+//! from the app binary.
 //!
-//! While `ring` is great, it struggles with platform support and has a fairly involved dependency
-//! tree due to its reliance on C backends.
+//! So this fork drops `bigint.rs` entirely and rebuilds the three verification entry points
+//! `validation.rs` needs on top of the app SDK:
 //!
-//! `RustCrypto`, on the other hand, tries to stick to Rust, which is great, but in doing so takes
-//! on more (unnecessary) dependencies and has a particularly unusable MSRV policy. Thus, its
-//! somewhat difficult to take on as a dependency.
+//!  * [`rsa::validate_rsa`] is a thin DNSKEY-decoding wrapper over `sdk::rsa`, which performs the
+//!    whole `s^e mod n` in one `bn_powm` ECALL.
+//!  * [`secp256r1::validate_ecdsa`] and [`secp384r1::validate_ecdsa`] keep upstream's Jacobian
+//!    formulas and double-and-add ladder in [`ec`], but every field operation is a `bn_*` ECALL
+//!    via `sdk::bignum::BigNumMod`.
 //!
-//! Instead, we go our own way here, and luckily actually implementing the required algorithms
-//! isn't all that difficult, at least if we're okay with performance being marginally sub-par.
-//! Because we don't ever do any signing, we don't need to worry about constant-time-ness, further
-//! reducing complexity.
+//! The ECALL ABI has no P-256/P-384 curve, only `CurveKind::Secp256k1`, so the ladder itself
+//! cannot (yet) be delegated. Adding those curves would collapse each ECDSA verification to a
+//! single ECALL; the field-level acceleration here needs no ABI change.
 //!
-//! While we could similarly go our own way on hashing, too, rust-bitcoin's `bitcoin_hashes` crate
-//! does what we need without any unnecessary dependencies and with a very conservative MSRV
-//! policy. Thus we go ahead and use that for our hashing needs.
+//! Hashing already went through `bitcoin_hashes`, which this repo patches to its own ECALL-backed
+//! fork, so [`hash`] is untouched from upstream.
 
-pub mod bigint;
-mod ec;
 pub mod hash;
+mod ec;
 pub mod rsa;
 pub mod secp256r1;
 pub mod secp384r1;
