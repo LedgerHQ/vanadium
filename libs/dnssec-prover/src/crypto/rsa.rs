@@ -42,6 +42,21 @@ fn split_dnskey_rsa(pubkey: &[u8]) -> Result<(&[u8], &[u8]), ()> {
     if exponent.is_empty() || modulus.is_empty() {
         return Err(());
     }
+    // An even modulus must be turned away here rather than left to fail later, and the reason is
+    // not that it is a nonsense key -- though it is, since one of its factors would be two.
+    //
+    // `bn_powm` is `cx_math_powm` on the device, which requires an odd modulus and returns an
+    // error otherwise; the VM turns that error into a fatal `CommEcallError`, killing the V-App
+    // instead of returning failure to it. A DNSKEY comes out of an attacker-supplied PSBT, so
+    // letting one reach the ECALL would hand the host a way to abort signing at will.
+    //
+    // Note that no test of `validate_rsa` can catch the loss of this check: `bn_powm` on native
+    // is `num-bigint::modpow`, which handles an even modulus perfectly well and just produces a
+    // digest that does not match, so the outcome is `Err` either way. That is why the test for it
+    // below calls `split_dnskey_rsa` directly.
+    if modulus[modulus.len() - 1] % 2 == 0 {
+        return Err(());
+    }
     Ok((exponent, modulus))
 }
 
@@ -83,5 +98,71 @@ pub fn validate_rsa(pk: &[u8], sig_bytes: &[u8], hash_input: &[u8]) -> Result<()
         Ok(())
     } else {
         Err(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Builds an RFC 3110 DNSKEY body with a one-byte exponent length.
+    fn dnskey(exponent: &[u8], modulus: &[u8]) -> alloc::vec::Vec<u8> {
+        let mut v = alloc::vec![exponent.len() as u8];
+        v.extend_from_slice(exponent);
+        v.extend_from_slice(modulus);
+        v
+    }
+
+    const E: &[u8] = &[0x01, 0x00, 0x01];
+
+    #[test]
+    fn accepts_a_well_formed_key() {
+        let modulus = [0xc5u8; 128];
+        assert_eq!(
+            split_dnskey_rsa(&dnskey(E, &modulus)),
+            Ok((E, &modulus[..]))
+        );
+    }
+
+    #[test]
+    fn rejects_an_even_modulus() {
+        // The check this pins keeps an even modulus away from `bn_powm`, which is fatal to the
+        // V-App on the device; see the comment on it. Testing `validate_rsa` instead would prove
+        // nothing, since native `bn_powm` accepts an even modulus and merely fails the digest.
+        let mut modulus = [0xc5u8; 128];
+        modulus[127] = 0xc4;
+        assert_eq!(split_dnskey_rsa(&dnskey(E, &modulus)), Err(()));
+    }
+
+    #[test]
+    fn rejects_an_even_modulus_hidden_behind_leading_zeros() {
+        // Parity has to be read after the leading zeros come off, not from the wire bytes.
+        let mut modulus = [0u8; 130];
+        modulus[2..].copy_from_slice(&[0xc5u8; 128]);
+        modulus[129] = 0xc4;
+        assert_eq!(split_dnskey_rsa(&dnskey(E, &modulus)), Err(()));
+    }
+
+    #[test]
+    fn strips_leading_zeros_so_the_modulus_length_is_the_signature_length() {
+        let mut wire = [0u8; 130];
+        wire[2..].copy_from_slice(&[0xc5u8; 128]);
+        let key = dnskey(E, &wire);
+        let (e, m) = split_dnskey_rsa(&key).unwrap();
+        assert_eq!(e, E);
+        assert_eq!(m.len(), 128);
+    }
+
+    #[test]
+    fn rejects_a_zero_or_absent_modulus() {
+        assert_eq!(split_dnskey_rsa(&dnskey(E, &[0u8; 64])), Err(()));
+        assert_eq!(split_dnskey_rsa(&dnskey(E, &[])), Err(()));
+    }
+
+    #[test]
+    fn rejects_an_oversized_exponent() {
+        // Verification time is linear in the exponent's bit length, so the bound is a DoS bound.
+        let big_e = [0xffu8; 5];
+        assert_eq!(split_dnskey_rsa(&dnskey(&big_e, &[0xc5u8; 128])), Err(()));
     }
 }
