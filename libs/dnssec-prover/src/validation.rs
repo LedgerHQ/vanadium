@@ -9,6 +9,7 @@ use crate::base32;
 use crate::crypto;
 use crate::rr::*;
 use crate::ser::write_name;
+use crate::sort::{insertion_sort, insertion_sort_by};
 use crate::unhex::unhex;
 use crate::MAX_PROOF_STEPS;
 
@@ -90,7 +91,7 @@ where Keys: IntoIterator<Item = &'a DnsKey> {
 			hash_ctx.update(&sig.key_tag.to_be_bytes());
 			write_name(&mut hash_ctx, &sig.key_name);
 
-			records.sort_unstable();
+			insertion_sort(&mut records);
 
 			// Some recursive resolvers (at least 9.9.9.9) give us a few too many records, and the
 			// proof builder is too naive to filter them out. Instead, we filter them out here, as
@@ -458,7 +459,7 @@ pub fn verify_rr_stream<'a>(inp: &'a [RR]) -> Result<VerifiedRRStream<'a>, Valid
 	if latest_inception >= earliest_expiry { return Err(ValidationError::Invalid) }
 
 	// First sort the proofs we're looking for so that the retains below avoid shifting.
-	rrs_needing_non_existence_proofs.sort_unstable_by(nsec_ord_extra);
+	insertion_sort_by(&mut rrs_needing_non_existence_proofs, nsec_ord_extra);
 	'proof_search_loop: while let Some((name, zone)) = rrs_needing_non_existence_proofs.pop() {
 		let local_zone_nsecs =
 			nsec_records.iter().filter(|(_, nsec_zone)| *nsec_zone == zone).map(|(rr, _)| rr);

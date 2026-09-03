@@ -17,6 +17,7 @@ use tokio_crate::io::{AsyncReadExt, AsyncWriteExt};
 
 use crate::rr::*;
 use crate::ser::*;
+use crate::sort::insertion_sort;
 use crate::MAX_PROOF_STEPS;
 
 // In testing use a rather small buffer to ensure we hit the allocation paths sometimes. In
@@ -347,7 +348,7 @@ impl ProofBuilder {
 		self.min_ttl = cmp::min(self.min_ttl, min_ttl);
 		self.pending_queries -= 1;
 
-		rrsig_key_names.sort_unstable();
+		insertion_sort(&mut rrsig_key_names);
 		rrsig_key_names.dedup();
 
 		let mut new_queries = Vec::with_capacity(2);

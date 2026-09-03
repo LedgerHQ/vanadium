@@ -56,6 +56,8 @@ mod base32;
 #[cfg(feature = "validation")]
 pub(crate) mod unhex;
 
+mod sort;
+
 #[cfg(all(feature = "validation", any(dnssec_prover_fuzzing, dnssec_validate_bench)))]
 pub mod crypto;
 #[cfg(all(feature = "validation", not(any(dnssec_prover_fuzzing, dnssec_validate_bench))))]
