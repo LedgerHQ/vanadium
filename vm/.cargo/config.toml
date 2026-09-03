@@ -8,7 +8,14 @@ target = "nanosplus"
 # The value of CUSTOM_IO_APDU_BUFFER_SIZE needs to be compatible with the MAX_APDU_DATA_SIZE
 # constant, taking into account the overhead for APDU headers
 LEDGER_SDK_EXTRA_DEFINES="CUSTOM_IO_APDU_BUFFER_SIZE=600"
-HEAP_SIZE = "nanox: 13824, nanosplus: 31232, flex: 24576, stax: 24576, apex_p: 24576"
+# The heap is a static array in .bss, and the stack is whatever is left in SRAM after it;
+# therefore, every byte given to the heap (that is, to the page caches, see `start_vapp`) is
+# a byte taken away from the stack. nanosplus, flex and stax give up 3 KiB of heap (about 10
+# cached pages) to keep the stack out of trouble: the worst-case call chain is an ecall
+# handler (the bignum ones keep up to 4 operands of MAX_BIGNUMBER_SIZE bytes on the stack)
+# taking a page fault, which loads and authenticates a page. nanox and apex_p have more SRAM
+# left over and need no adjustment.
+HEAP_SIZE = "nanox: 13824, nanosplus: 28160, flex: 21504, stax: 21504, apex_p: 24576"
 
 [unstable]
 build-std = ["core", "alloc"]
