@@ -1,0 +1,30 @@
+This repo has a handful of APIs to create and verify RFC 9102 proofs.
+
+It has minimal dependencies (bitcoin_hashes for hashing operations, hex_lit for
+some hex constants, and optionally tokio for networking in some APIs).
+
+There are numerous APIs present:
+ * Building the crate as a library provides a handful of DNS types, including
+   (de)serialization for them.
+ * Building the crate as a library with the `validation` feature also enables
+   the `validation` module, which allows for verification of an RFC 9102 proof.
+ * Building the crate as a library with the `std` feature enables the `query`
+   module which can build an RFC 9102 proof using repeated queries to any
+   standard DNS server (including over DoH).
+ * The `wasmpack` directory and `uniffi` directory expose very simplified APIs
+   to build and verify RFC 9102 proofs either in WASM (via wasm-pack, see-also
+   the `wasmpack/doh_lookup.js` file which can build RFC 9102 proofs using
+   repeated queries to a DoH server directly from JavaScript) or any language
+   supported by `uniffi`.
+ * Building the the `http_proof_gen` binary in the crate builds an HTTP server
+   which responds to requests for RFC 9102 proofs in the form
+   `/dnssecproof?d=domain&t=rr_type`, returning the binary proof containing and
+   proving the Resource Record of type `rr_type` at `domain`.
+
+The `slower_smaller_binary` feature slows proof validation down by 50%+ for a
+very marginal reduction in binary size, but those who are extremely binary size
+constrained may still find it useful.
+
+See https://docs.rs/dnssec-prover for full API details on the Rust API.
+There's also a website which demonstrates the WASM build of this crate at
+https://http-dns-prover.as397444.net/ which allows for making validated queries.
