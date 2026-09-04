@@ -2,7 +2,7 @@
 
 use sdk::{
     bignum::{BigNum, BigNumMod, ModulusProvider, PrimeModulusProvider},
-    curve::{Curve as _, EcfpPrivateKey, EcfpPublicKey, HdCurve as _, Secp256k1Point},
+    curve::{Curve, EcfpPrivateKey, EcfpPublicKey, HdCurve as _, Point},
     hash::Hasher,
     App, AppBuilder,
 };
@@ -10,7 +10,7 @@ use sdk::{
 extern crate alloc;
 
 use alloc::{vec, vec::Vec};
-use common::{Command, Curve, ECPointOperation, HashId};
+use common::{Command, Curve as WireCurve, ECPointOperation, HashId};
 
 sdk::bootstrap!();
 
@@ -26,18 +26,64 @@ impl ModulusProvider<32> for N {
 }
 impl PrimeModulusProvider<32> for N {}
 
-// parses a 65-byte uncompressed pubkey into an EcfpPublicKey
-fn parse_pubkey(pubkey: &[u8]) -> EcfpPublicKey<sdk::curve::Secp256k1, 32> {
-    let pubkey_raw: [u8; 65] = pubkey
-        .try_into()
-        .expect("invalid pubkey: it must be 65 bytes in uncompressed form");
-    if pubkey_raw[0] != 0x04 {
+/// Parses an uncompressed SEC1 pubkey (`0x04 || X || Y`) into an `EcfpPublicKey`.
+///
+/// Generic over the scalar length so the same code serves all three curves; the encoded length
+/// is checked against `1 + 2 * SCALAR_LENGTH` rather than a literal.
+fn parse_pubkey<C: Curve<SCALAR_LENGTH>, const SCALAR_LENGTH: usize>(
+    pubkey: &[u8],
+) -> EcfpPublicKey<C, SCALAR_LENGTH> {
+    assert_eq!(
+        pubkey.len(),
+        1 + 2 * SCALAR_LENGTH,
+        "invalid pubkey: wrong length for this curve"
+    );
+    if pubkey[0] != 0x04 {
         panic!("invalid pubkey: it must start with 0x04");
     }
     EcfpPublicKey::new(
-        pubkey_raw[1..33].try_into().unwrap(),
-        pubkey_raw[33..65].try_into().unwrap(),
+        pubkey[1..1 + SCALAR_LENGTH].try_into().unwrap(),
+        pubkey[1 + SCALAR_LENGTH..].try_into().unwrap(),
     )
+}
+
+/// Verifies a DER-encoded ECDSA signature, returning sadik's boolean encoding.
+fn ecdsa_verify<C: Curve<SCALAR_LENGTH>, const SCALAR_LENGTH: usize>(
+    pubkey: &[u8],
+    msg_hash: &[u8],
+    signature: &[u8],
+) -> Vec<u8> {
+    let pubkey = parse_pubkey::<C, SCALAR_LENGTH>(pubkey);
+    if pubkey.ecdsa_verify_hash(msg_hash, signature).is_ok() {
+        vec![1]
+    } else {
+        vec![0]
+    }
+}
+
+/// Point addition and scalar multiplication for one curve width.
+///
+/// A macro rather than a generic function because `Point::from_bytes` takes
+/// `&[u8; 1 + 2 * SCALAR_LENGTH]`, which cannot be named generically without
+/// `generic_const_exprs`.
+macro_rules! point_operation {
+    ($curve:ty, $scalar_len:expr, $point_len:expr, $operation:expr) => {
+        match $operation {
+            ECPointOperation::Add(p, q) => {
+                let p_bytes: [u8; $point_len] = p.as_slice().try_into().unwrap();
+                let p = Point::<$curve, $scalar_len>::from_bytes(&p_bytes).unwrap();
+                let q_bytes: [u8; $point_len] = q.as_slice().try_into().unwrap();
+                let q = Point::<$curve, $scalar_len>::from_bytes(&q_bytes).unwrap();
+                (&p + &q).to_bytes().to_vec()
+            }
+            ECPointOperation::ScalarMult(p, k) => {
+                let p_bytes: [u8; $point_len] = p.as_slice().try_into().unwrap();
+                let p = Point::<$curve, $scalar_len>::from_bytes(&p_bytes).unwrap();
+                let k: [u8; $scalar_len] = k.as_slice().try_into().unwrap();
+                (&p * &k).to_bytes().to_vec()
+            }
+        }
+    };
 }
 
 #[sdk::handler]
@@ -167,17 +213,25 @@ async fn process_message(_app: &mut App, msg: &[u8]) -> Vec<u8> {
             }
         }
         Command::GetMasterFingerprint { curve } => match curve {
-            Curve::Secp256k1 => sdk::curve::Secp256k1::get_master_fingerprint()
+            WireCurve::Secp256k1 => sdk::curve::Secp256k1::get_master_fingerprint()
                 .to_be_bytes()
                 .to_vec(),
+            // The other curves are verification-only: the device derives no keys on them.
+            WireCurve::Secp256r1 | WireCurve::Secp384r1 => {
+                panic!("the master fingerprint is only supported on secp256k1")
+            }
         },
         Command::DeriveHdNode { curve, path } => match curve {
             // returns the concatenation of the chaincode and private key
-            Curve::Secp256k1 => {
+            WireCurve::Secp256k1 => {
                 let node = sdk::curve::Secp256k1::derive_hd_node(&path).unwrap();
                 let mut result = node.chaincode.to_vec();
                 result.extend_from_slice(&node.privkey[..]);
                 result
+            }
+            // The other curves are verification-only: the device derives no keys on them.
+            WireCurve::Secp256r1 | WireCurve::Secp384r1 => {
+                panic!("HD derivation is only supported on secp256k1")
             }
         },
         Command::DeriveSlip21Key { labels } => {
@@ -187,28 +241,22 @@ async fn process_message(_app: &mut App, msg: &[u8]) -> Vec<u8> {
                 .to_vec()
         }
         Command::ECPointOperation { curve, operation } => match curve {
-            Curve::Secp256k1 => match operation {
-                ECPointOperation::Add(p, q) => {
-                    let p_bytes: [u8; 65] = p.as_slice().try_into().unwrap();
-                    let p = Secp256k1Point::from_bytes(&p_bytes).unwrap();
-                    let q_bytes: [u8; 65] = q.as_slice().try_into().unwrap();
-                    let q = Secp256k1Point::from_bytes(&q_bytes).unwrap();
-                    (&p + &q).to_bytes().to_vec()
-                }
-                ECPointOperation::ScalarMult(p, k) => {
-                    let p_bytes: [u8; 65] = p.as_slice().try_into().unwrap();
-                    let p = Secp256k1Point::from_bytes(&p_bytes).unwrap();
-                    let k: [u8; 32] = k.as_slice().try_into().unwrap();
-                    (&p * &k).to_bytes().to_vec()
-                }
-            },
+            WireCurve::Secp256k1 => {
+                point_operation!(sdk::curve::Secp256k1, 32, 65, operation)
+            }
+            WireCurve::Secp256r1 => {
+                point_operation!(sdk::curve::Secp256r1, 32, 65, operation)
+            }
+            WireCurve::Secp384r1 => {
+                point_operation!(sdk::curve::Secp384r1, 48, 97, operation)
+            }
         },
         Command::EcdsaSign {
             curve,
             privkey,
             msg_hash,
         } => match curve {
-            Curve::Secp256k1 => {
+            WireCurve::Secp256k1 => {
                 let msg_hash: [u8; 32] = msg_hash
                     .as_slice()
                     .try_into()
@@ -218,6 +266,10 @@ async fn process_message(_app: &mut App, msg: &[u8]) -> Vec<u8> {
 
                 privkey.ecdsa_sign_hash(&msg_hash).unwrap()
             }
+            // The other curves are verification-only: the device derives no keys on them.
+            WireCurve::Secp256r1 | WireCurve::Secp384r1 => {
+                panic!("ECDSA signing is only supported on secp256k1")
+            }
         },
         Command::EcdsaVerify {
             curve,
@@ -225,18 +277,14 @@ async fn process_message(_app: &mut App, msg: &[u8]) -> Vec<u8> {
             pubkey,
             signature,
         } => match curve {
-            Curve::Secp256k1 => {
-                let pubkey = parse_pubkey(&pubkey);
-                let msg_hash: [u8; 32] = msg_hash
-                    .as_slice()
-                    .try_into()
-                    .expect("hash must be 32 bytes");
-
-                if pubkey.ecdsa_verify_hash(&msg_hash, &signature).is_ok() {
-                    vec![1]
-                } else {
-                    vec![0]
-                }
+            WireCurve::Secp256k1 => {
+                ecdsa_verify::<sdk::curve::Secp256k1, 32>(&pubkey, &msg_hash, &signature)
+            }
+            WireCurve::Secp256r1 => {
+                ecdsa_verify::<sdk::curve::Secp256r1, 32>(&pubkey, &msg_hash, &signature)
+            }
+            WireCurve::Secp384r1 => {
+                ecdsa_verify::<sdk::curve::Secp384r1, 48>(&pubkey, &msg_hash, &signature)
             }
         },
         Command::SchnorrSign {
@@ -244,10 +292,14 @@ async fn process_message(_app: &mut App, msg: &[u8]) -> Vec<u8> {
             privkey,
             msg,
         } => match curve {
-            Curve::Secp256k1 => {
+            WireCurve::Secp256k1 => {
                 let privkey: EcfpPrivateKey<sdk::curve::Secp256k1, 32> =
                     EcfpPrivateKey::new(privkey.as_slice().try_into().expect("invalid privkey"));
                 privkey.schnorr_sign(&msg, None).unwrap()
+            }
+            // BIP-340 is defined for secp256k1 alone.
+            WireCurve::Secp256r1 | WireCurve::Secp384r1 => {
+                panic!("Schnorr signing is only supported on secp256k1")
             }
         },
         Command::SchnorrVerify {
@@ -256,13 +308,18 @@ async fn process_message(_app: &mut App, msg: &[u8]) -> Vec<u8> {
             msg,
             signature,
         } => match curve {
-            Curve::Secp256k1 => {
-                let pubkey: EcfpPublicKey<sdk::curve::Secp256k1, 32> = parse_pubkey(&pubkey);
+            WireCurve::Secp256k1 => {
+                let pubkey: EcfpPublicKey<sdk::curve::Secp256k1, 32> =
+                    parse_pubkey::<sdk::curve::Secp256k1, 32>(&pubkey);
                 if pubkey.schnorr_verify(&msg, &signature).is_ok() {
                     vec![1]
                 } else {
                     vec![0]
                 }
+            }
+            // BIP-340 is defined for secp256k1 alone.
+            WireCurve::Secp256r1 | WireCurve::Secp384r1 => {
+                panic!("Schnorr verification is only supported on secp256k1")
             }
         },
         Command::Sleep { n_ticks } => {

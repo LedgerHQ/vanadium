@@ -24,6 +24,10 @@ pub enum ECPointOperation {
 #[derive(Serialize, Deserialize, Debug, PartialEq)]
 pub enum Curve {
     Secp256k1,
+    /// NIST P-256. Verification and point arithmetic only; the device holds no P-256 keys.
+    Secp256r1,
+    /// NIST P-384. Verification and point arithmetic only.
+    Secp384r1,
 }
 
 #[derive(Serialize, Deserialize, Debug, PartialEq)]

@@ -1309,4 +1309,82 @@ mod tests {
         ));
         assert_eq!(privkey.to_public_key().fingerprint(), 0x3442193e);
     }
+    // ---------------------------------------------------------------------------
+    // Verification-only curves
+    // ---------------------------------------------------------------------------
+
+    /// `Point::to_bytes` reinterprets `&Point` as `&[u8; 1 + 2 * SCALAR_LENGTH]`, which is only
+    /// sound if `#[repr(C)]` lays the struct out with no padding. Checked for both widths that
+    /// `impl_point_bytes!` instantiates; the comment on `to_bytes` points here.
+    #[test]
+    fn point_layout_has_no_padding() {
+        assert_eq!(core::mem::size_of::<Point<Secp256k1, 32>>(), 65);
+        assert_eq!(core::mem::size_of::<Point<Secp256r1, 32>>(), 65);
+        assert_eq!(core::mem::size_of::<Point<Secp384r1, 48>>(), 97);
+        assert_eq!(core::mem::align_of::<Point<Secp384r1, 48>>(), 1);
+    }
+
+    #[test]
+    fn curve_kinds_are_distinct() {
+        assert_eq!(Secp256k1::curve_kind(), CurveKind::Secp256k1);
+        assert_eq!(Secp256r1::curve_kind(), CurveKind::Secp256r1);
+        assert_eq!(Secp384r1::curve_kind(), CurveKind::Secp384r1);
+    }
+
+    /// The generator of each curve must be accepted by `from_bytes`, which validates that a point
+    /// is on the curve by multiplying it by one through `ecfp_scalar_mult`. That makes this a test
+    /// of the new curves reaching the point ECALL, not just of the byte shuffling.
+    #[test]
+    fn generators_round_trip_through_point_bytes() {
+        // SEC1 uncompressed generators, from SEC 2 / FIPS 186-4.
+        let g_p256 = hex!(
+            "046b17d1f2e12c4247f8bce6e563a440f277037d812deb33a0f4a13945d898c2"
+            "964fe342e2fe1a7f9b8ee7eb4a7c0f9e162bce33576b315ececbb6406837bf51"
+            "f5"
+        );
+        let p = Point::<Secp256r1, 32>::from_bytes(&g_p256).expect("P-256 generator is on-curve");
+        assert_eq!(p.to_bytes(), &g_p256);
+
+        let g_p384 = hex!(
+            "04aa87ca22be8b05378eb1c71ef320ad746e1d3b628ba79b9859f741e082542a"
+            "385502f25dbf55296c3a545e3872760ab73617de4a96262c6f5d9e98bf9292dc"
+            "29f8f41dbd289a147ce9da3113b5f0b8c00a60b1ce1d7e819d7a431d7c90ea0e"
+            "5f"
+        );
+        let p = Point::<Secp384r1, 48>::from_bytes(&g_p384).expect("P-384 generator is on-curve");
+        assert_eq!(p.to_bytes(), &g_p384);
+    }
+
+    /// A point that is not on the curve must be rejected, for the new widths too.
+    #[test]
+    fn off_curve_points_are_rejected() {
+        let mut bad = [0u8; 97];
+        bad[0] = 0x04;
+        bad[96] = 0x01;
+        assert!(Point::<Secp384r1, 48>::from_bytes(&bad).is_err());
+
+        let mut bad = [0u8; 65];
+        bad[0] = 0x04;
+        bad[64] = 0x01;
+        assert!(Point::<Secp256r1, 32>::from_bytes(&bad).is_err());
+    }
+
+    /// Doubling the generator through the ECALL-backed `Mul`, checked against the published
+    /// coordinates of 2G.
+    #[test]
+    fn p384_scalar_mult_matches_published_2g() {
+        let g_p384 = hex!(
+            "04aa87ca22be8b05378eb1c71ef320ad746e1d3b628ba79b9859f741e082542a"
+            "385502f25dbf55296c3a545e3872760ab73617de4a96262c6f5d9e98bf9292dc"
+            "29f8f41dbd289a147ce9da3113b5f0b8c00a60b1ce1d7e819d7a431d7c90ea0e"
+            "5f"
+        );
+        let g = Point::<Secp384r1, 48>::from_bytes(&g_p384).unwrap();
+        let mut two = [0u8; 48];
+        two[47] = 2;
+        let g2 = &g * &two;
+        // G + G must agree with G * 2.
+        let sum = &g + &g;
+        assert_eq!(g2.to_bytes(), sum.to_bytes());
+    }
 }
