@@ -1,5 +1,8 @@
 use common::errors::Error;
-use sdk::curve::{Curve, EcfpPrivateKey, HDPrivNode, Secp256k1, ToPublicKey};
+use sdk::curve::{EcfpPrivateKey, HDPrivNode, Secp256k1, ToPublicKey};
+// Only the real seed derivation needs the HD trait; the test/fixed-seed path does not.
+#[cfg(not(any(test, feature = "fixed_resident_seed")))]
+use sdk::curve::HdCurve;
 use sdk::hash::{Hasher, Sha512};
 
 #[cfg(not(any(test, feature = "fixed_resident_seed")))]

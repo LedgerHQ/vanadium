@@ -21,7 +21,7 @@ use common::{
     script::ToScript,
 };
 use hex_literal::hex;
-use sdk::curve::{Curve, EcfpPrivateKey, EcfpPublicKey, ToPublicKey};
+use sdk::curve::{EcfpPrivateKey, EcfpPublicKey, HdCurve, ToPublicKey};
 
 use crate::handlers::musig_signing;
 

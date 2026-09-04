@@ -41,7 +41,18 @@ trace_colors = []       # if tracing features are enabled, prints them with colo
 run_tests = []  # Run the test suite instead of the app
 
 [package.metadata.ledger]
-curve = ["secp256k1", "slip21"]
+# "secp256r1" is the name the build accepts. This list reaches the C SDK's install_params.py via
+# the Rust SDK's build.rs, and that script maps "secp256r1" to CURVE_PRIME256R1 and raises on
+# anything it does not know -- "prime256r1" included, which fails the build for every device.
+#
+# Be aware that ledgerwallet's manifest.py, used by `ledgerctl install` with a manifest rather
+# than at build time, spells the same curve "prime256r1" and silently ignores names it does not
+# recognise. The two disagree upstream; the build-time spelling is the one that decides the
+# permission bitmask compiled into the app, so it is the one used here.
+#
+# There is no P-384 entry to add: the bitmask has no bit for it. P-384 verification does not need
+# one, since the permission gates seed derivation and cx_ecdsa_verify never touches the seed.
+curve = ["secp256k1", "secp256r1", "slip21"]
 flags = "0x10"  # DERIVE_MASTER
 path = [""]
 path_slip21 = ["VANADIUM"]

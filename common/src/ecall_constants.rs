@@ -34,10 +34,79 @@ pub const ECALL_MODINV_PRIME: u32 = 115;
 /// (`bn_modm`, `bn_addm`, `bn_subm`, `bn_multm`, `bn_powm`, `bn_modinv_prime`).
 pub const MAX_BIGNUMBER_SIZE: usize = 512;
 
-// HD derivations
+/// The elliptic curves the ECALL interface knows about.
+///
+/// The discriminants match the Ledger SDK's `cx_curve_e` constants, so that a `curve` ECALL
+/// argument can be passed straight through as the `curve` field of a `cx_ecfp_*_key_t`.
+///
+/// Not every curve is accepted by every curve ECALL: secp256k1 is the only one with private-key
+/// operations (see [`CurveKind::supports_private_key_ops`]), since it is the only one the VM
+/// derives from the seed. The others are verification-only.
+// TODO: IDs for now are matching the ones in the ledger SDK
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[repr(u32)]
 pub enum CurveKind {
     Secp256k1 = 0x21,
+    Secp256r1 = 0x22,
+    Secp384r1 = 0x23,
 }
+
+impl CurveKind {
+    /// Parses the `curve` argument of an ECALL, returning `None` if it names no known curve.
+    pub const fn from_u32(value: u32) -> Option<Self> {
+        match value {
+            0x21 => Some(CurveKind::Secp256k1),
+            0x22 => Some(CurveKind::Secp256r1),
+            0x23 => Some(CurveKind::Secp384r1),
+            _ => None,
+        }
+    }
+
+    /// Length in bytes of a scalar (a private key, or one point coordinate) on this curve.
+    pub const fn scalar_len(self) -> usize {
+        match self {
+            CurveKind::Secp256k1 | CurveKind::Secp256r1 => 32,
+            CurveKind::Secp384r1 => 48,
+        }
+    }
+
+    /// Length in bytes of a point in uncompressed SEC1 form (`0x04 || X || Y`), which is how
+    /// points are passed to and from the curve ECALLs.
+    pub const fn point_len(self) -> usize {
+        1 + 2 * self.scalar_len()
+    }
+
+    /// Maximum length in bytes of a DER-encoded ECDSA signature on this curve.
+    ///
+    /// A `SEQUENCE` of two `INTEGER`s, each at worst `scalar_len + 1` bytes of content (a leading
+    /// zero byte when the high bit is set) plus a 2-byte tag-and-length, inside a 2-byte
+    /// tag-and-length: `2 + 2 * (2 + scalar_len + 1)`.
+    pub const fn max_der_signature_len(self) -> usize {
+        2 + 2 * (3 + self.scalar_len())
+    }
+
+    /// Whether the VM will perform private-key operations on this curve: signing, HD derivation
+    /// from the seed, and the master key fingerprint.
+    ///
+    /// Only secp256k1 qualifies. The other curves exist so that a V-App can *verify* signatures
+    /// made elsewhere, which needs no access to the device's seed.
+    pub const fn supports_private_key_ops(self) -> bool {
+        matches!(self, CurveKind::Secp256k1)
+    }
+}
+
+/// Largest [`CurveKind::point_len`] over all supported curves, for sizing buffers that must hold
+/// a point on any of them.
+pub const MAX_CURVE_POINT_SIZE: usize = CurveKind::Secp384r1.point_len();
+
+/// Largest [`CurveKind::max_der_signature_len`] over all supported curves.
+pub const MAX_DER_SIGNATURE_SIZE: usize = CurveKind::Secp384r1.max_der_signature_len();
+
+/// Largest message digest `ecdsa_verify` will accept, in bytes.
+///
+/// ECDSA does not constrain the digest length, so the bound is a buffer bound rather than a
+/// cryptographic one: 64 bytes covers every hash the SDK offers, SHA-512 included.
+pub const MAX_ECDSA_HASH_SIZE: usize = 64;
 
 // TODO: IDs for now are matching the ones in the ledger SDK
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -131,3 +200,69 @@ pub const ECALL_SCHNORR_VERIFY: u32 = 183;
 
 pub const ECALL_SHOW_PAGE: u32 = 192; // Flex / Stax / Apex_P
 pub const ECALL_SHOW_STEP: u32 = 193; // Nano X / Nano S+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The buffer sizes these helpers compute used to be hardcoded in the ECALL handlers, so
+    /// secp256k1 must keep producing exactly the values that were written there by hand.
+    #[test]
+    fn secp256k1_sizes_match_the_previously_hardcoded_ones() {
+        assert_eq!(CurveKind::Secp256k1.scalar_len(), 32);
+        assert_eq!(CurveKind::Secp256k1.point_len(), 65);
+        assert_eq!(CurveKind::Secp256k1.max_der_signature_len(), 72);
+    }
+
+    #[test]
+    fn secp384r1_sizes() {
+        assert_eq!(CurveKind::Secp384r1.scalar_len(), 48);
+        assert_eq!(CurveKind::Secp384r1.point_len(), 97);
+        assert_eq!(CurveKind::Secp384r1.max_der_signature_len(), 104);
+    }
+
+    #[test]
+    fn maxima_cover_every_curve() {
+        for curve in [
+            CurveKind::Secp256k1,
+            CurveKind::Secp256r1,
+            CurveKind::Secp384r1,
+        ] {
+            assert!(curve.point_len() <= MAX_CURVE_POINT_SIZE);
+            assert!(curve.max_der_signature_len() <= MAX_DER_SIGNATURE_SIZE);
+        }
+        assert_eq!(MAX_CURVE_POINT_SIZE, 97);
+        assert_eq!(MAX_DER_SIGNATURE_SIZE, 104);
+    }
+
+    /// The discriminants are the Ledger SDK's `CX_CURVE_*` values; the VM relies on that by
+    /// passing the ECALL argument through as `curve as u8`.
+    #[test]
+    fn discriminants_match_the_ledger_sdk() {
+        assert_eq!(CurveKind::Secp256k1 as u32, 0x21);
+        assert_eq!(CurveKind::Secp256r1 as u32, 0x22);
+        assert_eq!(CurveKind::Secp384r1 as u32, 0x23);
+    }
+
+    #[test]
+    fn from_u32_round_trips_and_rejects_unknown_curves() {
+        for curve in [
+            CurveKind::Secp256k1,
+            CurveKind::Secp256r1,
+            CurveKind::Secp384r1,
+        ] {
+            assert_eq!(CurveKind::from_u32(curve as u32), Some(curve));
+        }
+        // 0x24 is CX_CURVE_BLS12_381_G1 in the SDK, which the VM does not implement.
+        for unknown in [0u32, 0x20, 0x24, 0x30, u32::MAX] {
+            assert_eq!(CurveKind::from_u32(unknown), None);
+        }
+    }
+
+    #[test]
+    fn only_secp256k1_has_private_key_ops() {
+        assert!(CurveKind::Secp256k1.supports_private_key_ops());
+        assert!(!CurveKind::Secp256r1.supports_private_key_ops());
+        assert!(!CurveKind::Secp384r1.supports_private_key_ops());
+    }
+}

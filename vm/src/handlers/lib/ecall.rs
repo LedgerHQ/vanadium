@@ -384,6 +384,191 @@ pub struct CommEcallHandler<'a, const N: usize> {
     n_storage_slots: u32,
 }
 
+/// Generates the point-arithmetic handlers for one curve width.
+///
+/// The generated methods are `#[inline(never)]` on purpose. Every handler in this impl is
+/// inlined into `handle_ecall`, so a handler's locals are charged to the frame of *every*
+/// ECALL; the P-384 buffers are half again as large as the 256-bit ones, and the native stack
+/// on nanosplus/flex is already tight enough that `vm/.cargo/config.toml` trades heap away to
+/// buy headroom. Keeping these out of line confines each width's cost to calls that use it.
+macro_rules! impl_point_handlers_for_width {
+    ($add_name:ident, $mult_name:ident, $point_len:expr) => {
+        #[inline(never)]
+        fn $add_name<E: fmt::Debug>(
+            &self,
+            cpu: &mut Cpu<OutsourcedMemory<'_, N>>,
+            curve: u8,
+            r: GuestPointer,
+            p: GuestPointer,
+            q: GuestPointer,
+        ) -> Result<u32, CommEcallError> {
+            let mut p_local = [0u8; $point_len];
+            cpu.get_segment::<E>(p.0)?.read_buffer(p.0, &mut p_local)?;
+
+            let mut q_local = [0u8; $point_len];
+            cpu.get_segment::<E>(q.0)?.read_buffer(q.0, &mut q_local)?;
+
+            let mut r_local = [0u8; $point_len];
+
+            // The point at infinity is encoded as an all-zero point, identified by its first
+            // byte (a finite point always has the 0x04 uncompressed-SEC1 prefix).
+            let p_is_infinity = p_local[0] == 0;
+            let q_is_infinity = q_local[0] == 0;
+
+            if p_is_infinity && q_is_infinity {
+                // already all zeroes
+            } else if p_is_infinity {
+                r_local = q_local;
+            } else if q_is_infinity {
+                r_local = p_local;
+            } else {
+                // SAFETY: all three buffers are $point_len bytes, the length this curve's
+                // points occupy, and `curve` is one of the curves checked by the caller.
+                unsafe {
+                    let res = sys::cx_ecfp_add_point_no_throw(
+                        curve,
+                        r_local.as_mut_ptr(),
+                        p_local.as_ptr(),
+                        q_local.as_ptr(),
+                    );
+                    if res == sys::CX_EC_INFINITE_POINT {
+                        r_local = [0u8; $point_len];
+                    } else if res != CX_OK {
+                        return Err(CommEcallError::GenericError("add_point failed"));
+                    }
+                }
+            }
+
+            let segment = cpu.get_segment::<E>(r.0)?;
+            segment.write_buffer(r.0, &r_local)?;
+
+            Ok(1)
+        }
+
+        #[inline(never)]
+        fn $mult_name<E: fmt::Debug>(
+            &self,
+            cpu: &mut Cpu<OutsourcedMemory<'_, N>>,
+            curve: u8,
+            r: GuestPointer,
+            p: GuestPointer,
+            k: GuestPointer,
+            k_len: usize,
+        ) -> Result<u32, CommEcallError> {
+            // `r_local` doubles as the input point and the result, as cx_ecfp_scalar_mult
+            // works in place.
+            let mut r_local = [0u8; $point_len];
+            cpu.get_segment::<E>(p.0)?.read_buffer(p.0, &mut r_local)?;
+
+            // O * k = O
+            if r_local[0] == 0 {
+                let segment = cpu.get_segment::<E>(r.0)?;
+                segment.write_buffer(r.0, &r_local)?;
+                return Ok(1);
+            }
+
+            let mut k_local = [0u8; ($point_len - 1) / 2];
+            cpu.get_segment::<E>(k.0)?
+                .read_buffer(k.0, &mut k_local[0..k_len])?;
+
+            // Check if the scalar is identically 0
+            let mut any_nonzero = 0u8;
+            for &b in &k_local[0..k_len] {
+                any_nonzero |= b;
+            }
+            if any_nonzero == 0 {
+                r_local = [0u8; $point_len];
+            } else {
+                // SAFETY: `r_local` holds a $point_len-byte point of this curve and `k_local`
+                // is readable for `k_len` bytes, which the caller bounded by the scalar length.
+                unsafe {
+                    let res = sys::cx_ecfp_scalar_mult_no_throw(
+                        curve,
+                        r_local.as_mut_ptr(),
+                        k_local.as_ptr(),
+                        k_len,
+                    );
+                    if res == sys::CX_EC_INFINITE_POINT {
+                        r_local = [0u8; $point_len];
+                    } else if res != CX_OK {
+                        return Err(CommEcallError::GenericError("scalar_mult failed"));
+                    }
+                }
+            }
+
+            let segment = cpu.get_segment::<E>(r.0)?;
+            segment.write_buffer(r.0, &r_local)?;
+
+            Ok(1)
+        }
+    };
+}
+
+
+/// Generates an `ecdsa_verify` handler for one public-key struct width.
+///
+/// `cx_ecdsa_verify_no_throw` takes a `*const cx_ecfp_public_key_t`, which is the 256-bit key
+/// struct; a P-384 key needs `cx_ecfp_384_public_key_s`, so it is passed by casting the pointer.
+/// That is the Ledger C SDK's own convention, and it is sound because the two structs share a
+/// prefix -- `curve` at offset 0, `W_len` at 4, `W` at 8, both aligned to 4 -- and BOLOS reads no
+/// more than `W_len` bytes of `W`. The `const` assertions below pin those offsets, so a change to
+/// the bindings breaks the build rather than the device.
+///
+/// `#[inline(never)]` for the same reason as the point handlers: every handler is inlined into
+/// `handle_ecall`, so out-of-line keeps the wider buffers off the frame that every ECALL pays.
+macro_rules! impl_ecdsa_verify_for_width {
+    ($name:ident, $key_ty:ty, $point_len:expr, $max_sig_len:expr) => {
+        #[inline(never)]
+        fn $name<E: fmt::Debug>(
+            &self,
+            cpu: &mut Cpu<OutsourcedMemory<'_, N>>,
+            curve: u8,
+            pubkey: GuestPointer,
+            msg_hash: GuestPointer,
+            msg_hash_len: usize,
+            signature: GuestPointer,
+            signature_len: usize,
+        ) -> Result<u32, CommEcallError> {
+            const _: () = {
+                assert!(core::mem::offset_of!($key_ty, curve) == 0);
+                assert!(core::mem::offset_of!($key_ty, W_len) == 4);
+                assert!(core::mem::offset_of!($key_ty, W) == 8);
+                assert!(core::mem::align_of::<$key_ty>() == core::mem::align_of::<sys::cx_ecfp_public_key_t>());
+            };
+
+            let mut pubkey_local: $key_ty = Default::default();
+            pubkey_local.curve = curve;
+            pubkey_local.W_len = $point_len;
+            debug_assert_eq!(pubkey_local.W.len(), $point_len);
+            cpu.get_segment::<E>(pubkey.0)?
+                .read_buffer(pubkey.0, &mut pubkey_local.W)?;
+
+            let mut msg_hash_local = [0u8; MAX_ECDSA_HASH_SIZE];
+            cpu.get_segment::<E>(msg_hash.0)?
+                .read_buffer(msg_hash.0, &mut msg_hash_local[..msg_hash_len])?;
+
+            let mut signature_local = [0u8; $max_sig_len];
+            cpu.get_segment::<E>(signature.0)?
+                .read_buffer(signature.0, &mut signature_local[..signature_len])?;
+
+            // SAFETY: `pubkey_local` is a fully initialized key struct whose layout is
+            // prefix-compatible with `cx_ecfp_public_key_t` (asserted above), and the hash and
+            // signature buffers are readable for the lengths passed alongside them.
+            let res = unsafe {
+                sys::cx_ecdsa_verify_no_throw(
+                    &pubkey_local as *const $key_ty as *const sys::cx_ecfp_public_key_t,
+                    msg_hash_local.as_ptr(),
+                    msg_hash_len,
+                    signature_local.as_ptr(),
+                    signature_len,
+                )
+            };
+
+            Ok(res as u32)
+        }
+    };
+}
+
 impl<'a, const N: usize> CommEcallHandler<'a, N> {
     pub fn new(
         comm: Rc<RefCell<&'a mut ledger_device_sdk::io::Comm<N>>>,
@@ -1179,6 +1364,9 @@ impl<'a, const N: usize> CommEcallHandler<'a, N> {
         Ok(1)
     }
 
+    impl_point_handlers_for_width!(handle_ecfp_add_point_256, handle_ecfp_scalar_mult_256, 65);
+    impl_point_handlers_for_width!(handle_ecfp_add_point_384, handle_ecfp_scalar_mult_384, 97);
+
     fn handle_ecfp_add_point<E: fmt::Debug>(
         &self,
         cpu: &mut Cpu<OutsourcedMemory<'_, N>>,
@@ -1187,61 +1375,14 @@ impl<'a, const N: usize> CommEcallHandler<'a, N> {
         p: GuestPointer,
         q: GuestPointer,
     ) -> Result<u32, CommEcallError> {
-        if curve != CurveKind::Secp256k1 as u32 {
+        let Some(curve) = CurveKind::from_u32(curve) else {
             return Err(CommEcallError::InvalidParameters("Unsupported curve"));
+        };
+        match curve.point_len() {
+            65 => self.handle_ecfp_add_point_256::<E>(cpu, curve as u8, r, p, q),
+            97 => self.handle_ecfp_add_point_384::<E>(cpu, curve as u8, r, p, q),
+            _ => Err(CommEcallError::InvalidParameters("Unsupported curve")),
         }
-
-        // copy inputs to local memory
-        let mut p_local: sys::cx_ecfp_public_key_t = Default::default();
-        p_local.curve = curve as u8;
-        p_local.W_len = 65;
-        cpu.get_segment::<E>(p.0)?
-            .read_buffer(p.0, &mut p_local.W)?;
-
-        let mut q_local: sys::cx_ecfp_public_key_t = Default::default();
-        q_local.curve = curve as u8;
-        q_local.W_len = 65;
-        cpu.get_segment::<E>(q.0)?
-            .read_buffer(q.0, &mut q_local.W)?;
-
-        let mut r_local: sys::cx_ecfp_public_key_t = Default::default();
-
-        // Check for point at infinity cases (first byte is 0)
-        let p_is_infinity = p_local.W[0] == 0;
-        let q_is_infinity = q_local.W[0] == 0;
-
-        if p_is_infinity && q_is_infinity {
-            // Both are infinity - return infinity
-            r_local.W = [0u8; 65];
-        } else if p_is_infinity {
-            // p is infinity - return q
-            r_local.W = q_local.W;
-        } else if q_is_infinity {
-            // q is infinity - return p
-            r_local.W = p_local.W;
-        } else {
-            // Neither is infinity - perform the addition
-            unsafe {
-                let res = sys::cx_ecfp_add_point_no_throw(
-                    curve as u8,
-                    r_local.W.as_mut_ptr(),
-                    p_local.W.as_ptr(),
-                    q_local.W.as_ptr(),
-                );
-                if res == sys::CX_EC_INFINITE_POINT {
-                    // Point at infinity - represent as 65 bytes of 0x00
-                    r_local.W = [0u8; 65];
-                } else if res != CX_OK {
-                    return Err(CommEcallError::GenericError("add_point failed"));
-                }
-            }
-        }
-
-        // copy r_local to r
-        let segment = cpu.get_segment::<E>(r.0)?;
-        segment.write_buffer(r.0, &r_local.W)?;
-
-        Ok(1)
     }
 
     fn handle_ecfp_scalar_mult<E: fmt::Debug>(
@@ -1253,64 +1394,17 @@ impl<'a, const N: usize> CommEcallHandler<'a, N> {
         k: GuestPointer,
         k_len: usize,
     ) -> Result<u32, CommEcallError> {
-        if curve != CurveKind::Secp256k1 as u32 {
+        let Some(curve) = CurveKind::from_u32(curve) else {
             return Err(CommEcallError::InvalidParameters("Unsupported curve"));
-        }
-
-        if k_len > 32 {
+        };
+        if k_len > curve.scalar_len() {
             return Err(CommEcallError::InvalidParameters("k_len is too large"));
         }
-
-        // copy inputs to local memory
-        // we use r_local also for the final result
-        let mut r_local: sys::cx_ecfp_public_key_t = Default::default();
-        r_local.curve = curve as u8;
-        r_local.W_len = 65;
-        cpu.get_segment::<E>(p.0)?
-            .read_buffer(p.0, &mut r_local.W)?;
-
-        // Check if p is the point at infinity (first byte is 0)
-        if r_local.W[0] == 0 {
-            // Point at infinity - return directly
-            let segment = cpu.get_segment::<E>(r.0)?;
-            segment.write_buffer(r.0, &r_local.W)?;
-            return Ok(1);
+        match curve.point_len() {
+            65 => self.handle_ecfp_scalar_mult_256::<E>(cpu, curve as u8, r, p, k, k_len),
+            97 => self.handle_ecfp_scalar_mult_384::<E>(cpu, curve as u8, r, p, k, k_len),
+            _ => Err(CommEcallError::InvalidParameters("Unsupported curve")),
         }
-
-        let mut k_local: [u8; 32] = [0; 32];
-        cpu.get_segment::<E>(k.0)?
-            .read_buffer(k.0, &mut k_local[0..k_len])?;
-
-        // Check if scalar is identically 0
-        let mut any_nonzero = 0u8;
-        for &b in &k_local[0..k_len] {
-            any_nonzero |= b;
-        }
-        if any_nonzero == 0 {
-            // Return point at infinity directly
-            r_local.W = [0u8; 65];
-        } else {
-            unsafe {
-                let res = sys::cx_ecfp_scalar_mult_no_throw(
-                    curve as u8,
-                    r_local.W.as_mut_ptr(),
-                    k_local.as_ptr(),
-                    k_len,
-                );
-                if res == sys::CX_EC_INFINITE_POINT {
-                    // Point at infinity - represent as 65 bytes of 0x00
-                    r_local.W = [0u8; 65];
-                } else if res != CX_OK {
-                    return Err(CommEcallError::GenericError("scalar_mult failed"));
-                }
-            }
-        }
-
-        // copy r_local to r
-        let segment = cpu.get_segment::<E>(r.0)?;
-        segment.write_buffer(r.0, &r_local.W)?;
-
-        Ok(1)
     }
 
     fn handle_get_random_bytes<E: fmt::Debug>(
@@ -1420,52 +1514,65 @@ impl<'a, const N: usize> CommEcallHandler<'a, N> {
         Ok(signature_len)
     }
 
+    impl_ecdsa_verify_for_width!(
+        handle_ecdsa_verify_256,
+        sys::cx_ecfp_public_key_t,
+        65,
+        CurveKind::Secp256k1.max_der_signature_len()
+    );
+    impl_ecdsa_verify_for_width!(
+        handle_ecdsa_verify_384,
+        sys::cx_ecfp_384_public_key_s,
+        97,
+        CurveKind::Secp384r1.max_der_signature_len()
+    );
+
     fn handle_ecdsa_verify<E: fmt::Debug>(
         &self,
         cpu: &mut Cpu<OutsourcedMemory<'_, N>>,
         curve: u32,
         pubkey: GuestPointer,
         msg_hash: GuestPointer,
+        msg_hash_len: usize,
         signature: GuestPointer,
         signature_len: usize,
     ) -> Result<u32, CommEcallError> {
-        if curve != CurveKind::Secp256k1 as u32 {
+        let Some(curve) = CurveKind::from_u32(curve) else {
             return Err(CommEcallError::InvalidParameters("Unsupported curve"));
-        }
-
-        if signature_len > 72 {
+        };
+        if signature_len > curve.max_der_signature_len() {
             return Err(CommEcallError::InvalidParameters(
                 "signature_len is too large",
             ));
         }
-
-        // copy inputs to local memory
-        let mut pubkey_local: sys::cx_ecfp_public_key_t = Default::default();
-        pubkey_local.curve = curve as u8;
-        pubkey_local.W_len = 65;
-        cpu.get_segment::<E>(pubkey.0)?
-            .read_buffer(pubkey.0, &mut pubkey_local.W)?;
-
-        let mut msg_hash_local: [u8; 32] = [0; 32];
-        cpu.get_segment::<E>(msg_hash.0)?
-            .read_buffer(msg_hash.0, &mut msg_hash_local)?;
-
-        let mut signature_local: [u8; 72] = [0; 72];
-        cpu.get_segment::<E>(signature.0)?
-            .read_buffer(signature.0, &mut signature_local[0..signature_len])?;
-
-        // verify the signature
-        let res = unsafe {
-            sys::cx_ecdsa_verify_no_throw(
-                &pubkey_local,
-                msg_hash_local.as_ptr(),
-                msg_hash_local.len(),
-                signature_local.as_ptr(),
+        // ECDSA places no lower bound on the digest length -- a digest shorter than the curve
+        // order is legal, and one longer is truncated -- so this is only a buffer bound.
+        if msg_hash_len > MAX_ECDSA_HASH_SIZE {
+            return Err(CommEcallError::InvalidParameters(
+                "msg_hash_len is too large",
+            ));
+        }
+        match curve.point_len() {
+            65 => self.handle_ecdsa_verify_256::<E>(
+                cpu,
+                curve as u8,
+                pubkey,
+                msg_hash,
+                msg_hash_len,
+                signature,
                 signature_len,
-            )
-        };
-
-        Ok(res as u32)
+            ),
+            97 => self.handle_ecdsa_verify_384::<E>(
+                cpu,
+                curve as u8,
+                pubkey,
+                msg_hash,
+                msg_hash_len,
+                signature,
+                signature_len,
+            ),
+            _ => Err(CommEcallError::InvalidParameters("Unsupported curve")),
+        }
     }
 
     fn handle_schnorr_sign<E: fmt::Debug>(
@@ -2018,8 +2125,9 @@ impl<'a, const N: usize> EcallHandler for CommEcallHandler<'a, N> {
                     reg!(A0),
                     GPreg!(A1),
                     GPreg!(A2),
-                    GPreg!(A3),
-                    reg!(A4) as usize,
+                    reg!(A3) as usize,
+                    GPreg!(A4),
+                    reg!(A5) as usize,
                 )?;
             }
             ECALL_SCHNORR_SIGN => {
