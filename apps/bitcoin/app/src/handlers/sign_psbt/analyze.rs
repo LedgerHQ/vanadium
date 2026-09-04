@@ -9,10 +9,16 @@
 //! It also owns [`input_prevout`], the single definition of what an input's prevout is,
 //! which the signing paths reach through [`ensure_prevouts`].
 
-use alloc::{string::String, vec, vec::Vec};
+use alloc::{
+    format,
+    string::{String, ToString},
+    vec,
+    vec::Vec,
+};
 
 use common::{
     bip388::SegwitVersion,
+    dns_identity::{verify_dnssec_identity_key, MAX_DNSSEC_IDENTITY_KEYS},
     errors::Error,
     fastpsbt,
     identity::{build_identity_message, IdentityKey, MSG_TYPE_OUTPUT},
@@ -26,6 +32,40 @@ use common::{
 
 use bitcoin::{hashes::Hash, ScriptBuf, TxOut};
 use sdk::curve::EcfpPublicKey;
+
+/// How trust in an identity key was established.
+///
+/// This is shown to the user, because the two are not interchangeable: a registered name is one the
+/// user typed during a ceremony they took part in, while a DNS name is a claim by whoever controls
+/// the zone. See `docs/identity.md`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(super) enum TrustSource {
+    /// Registered on this device, under a name chosen by the user.
+    Registered,
+    /// Proven by a DNSSEC chain to be published by a human-readable name.
+    Dnssec,
+}
+
+/// The name of an identity key, together with how it came to be trusted.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub(super) struct AuthLabel {
+    pub(super) name: String,
+    pub(super) source: TrustSource,
+}
+
+impl AuthLabel {
+    /// The name as it should appear on screen.
+    ///
+    /// BIP-353 asks that a DNSSEC-verified name be prefixed with `₿`. The prefix is not load-bearing
+    /// here: the provenance is also stated in the tag of the review row, so a device whose font
+    /// cannot render U+20BF still distinguishes the two sources.
+    pub(super) fn display_name(&self) -> String {
+        match self.source {
+            TrustSource::Registered => self.name.clone(),
+            TrustSource::Dnssec => format!("₿{}", self.name),
+        }
+    }
+}
 
 /// A script derivation check to be verified in the background task.
 struct ScriptCheck {
@@ -51,9 +91,12 @@ pub(super) struct TransactionSummary {
     pub(super) input_coordinates: Vec<(u32, PsbtAccountCoordinates)>,
     pub(super) account_spent_amounts: Vec<i64>,
     pub(super) external_outputs_indexes: Vec<usize>,
-    /// Parallel to `external_outputs_indexes`: `Some(name)` if the output carries a valid
-    /// id_auth proof from a registered identity key, `None` otherwise.
-    pub(super) external_output_auth_names: Vec<Option<String>>,
+    /// Parallel to `external_outputs_indexes`: `Some(label)` if the output carries a valid
+    /// id_auth proof from a trusted identity key, `None` otherwise.
+    pub(super) external_output_auth_names: Vec<Option<AuthLabel>>,
+    /// The time a DNSSEC proof was validated against, if the PSBT carried any. Shown to the user,
+    /// since it comes from the untrusted host.
+    pub(super) dnssec_validation_time: Option<u64>,
     pub(super) inputs_total_amount: u64,
     pub(super) outputs_total_amount: u64,
     pub(super) warn_unverified_inputs: bool,
@@ -104,15 +147,22 @@ fn read_accounts(psbt: &fastpsbt::Psbt) -> Result<Accounts, Error> {
     })
 }
 
-/// Reads the identity keys registered in the PSBT's global section, checking each
-/// one's proof of registration, and returns the compressed-pubkey → name lookup that
-/// output auth proofs resolve against.
-fn read_identity_keys(psbt: &fastpsbt::Psbt) -> Result<Vec<([u8; 33], String)>, Error> {
+/// Reads the identity keys trusted for this PSBT — both registered on this device and
+/// DNSSEC-authenticated — checking each one's proof, and returns the compressed-pubkey → label
+/// lookup that output auth proofs resolve against.
+///
+/// Validating any DNSSEC proofs happens here too, and is the one expensive part: the names it
+/// yields are needed before the review screens can be built, so it is deliberately eager rather
+/// than deferred to [`DeferredChecks::verify`].
+fn read_identity_keys(
+    psbt: &fastpsbt::Psbt,
+    current_time: Option<u64>,
+) -> Result<(Vec<([u8; 33], AuthLabel)>, Option<u64>), Error> {
     let registered_identity_keys = psbt
         .get_registered_identity_keys()
         .map_err(|_| Error::InvalidIdentitySignature)?;
 
-    let mut identity_key_names: Vec<([u8; 33], String)> =
+    let mut identity_key_names: Vec<([u8; 33], AuthLabel)> =
         Vec::with_capacity(registered_identity_keys.len());
     for rik in &registered_identity_keys {
         let ik = IdentityKey::new(rik.pubkey).map_err(|_| Error::InvalidIdentitySignature)?;
@@ -121,10 +171,47 @@ fn read_identity_keys(psbt: &fastpsbt::Psbt) -> Result<Vec<([u8; 33], String)>, 
         if actual_por != expected_por {
             return Err(Error::InvalidProofOfRegistration);
         }
-        identity_key_names.push((rik.pubkey, rik.name.clone()));
+        identity_key_names.push((
+            rik.pubkey,
+            AuthLabel {
+                name: rik.name.clone(),
+                source: TrustSource::Registered,
+            },
+        ));
     }
 
-    Ok(identity_key_names)
+    // Identity keys published in the DNS: validate each authentication chain, which proves that a
+    // human-readable name publishes that public key.
+    let dnssec_identity_keys = psbt
+        .get_dnssec_identity_keys()
+        .map_err(|_| Error::InvalidIdentitySignature)?;
+    let mut dnssec_validation_time = None;
+    if !dnssec_identity_keys.is_empty() {
+        // Bound the work a host can ask for before the user sees anything.
+        if dnssec_identity_keys.len() > MAX_DNSSEC_IDENTITY_KEYS {
+            return Err(Error::DnssecValidationFailed);
+        }
+        let now = current_time.ok_or(Error::MissingCurrentTime)?;
+        for dik in &dnssec_identity_keys {
+            // A key trusted for two different reasons would leave it ambiguous which name to show,
+            // and a coordinator has no reason to send both.
+            if identity_key_names.iter().any(|(pk, _)| pk == &dik.pubkey) {
+                return Err(Error::DuplicateIdentityKey);
+            }
+            IdentityKey::new(dik.pubkey).map_err(|_| Error::InvalidIdentitySignature)?;
+            verify_dnssec_identity_key(dik.name, dik.chain, &dik.pubkey, now)?;
+            identity_key_names.push((
+                dik.pubkey,
+                AuthLabel {
+                    name: dik.name.to_string(),
+                    source: TrustSource::Dnssec,
+                },
+            ));
+        }
+        dnssec_validation_time = Some(now);
+    }
+
+    Ok((identity_key_names, dnssec_validation_time))
 }
 
 /// Resolves an input's prevout: its witness UTXO if it has one, otherwise the output
@@ -271,9 +358,9 @@ enum AnalyzedOutput {
     /// Pays back to one of the PSBT's own accounts; its script goes to the deferred
     /// derivation check.
     Internal(ScriptCheck),
-    /// Pays elsewhere. `Some(name)` if it carries a valid id_auth proof from an
-    /// identity key registered in this PSBT.
-    External(Option<String>),
+    /// Pays elsewhere. `Some(label)` if it carries a valid id_auth proof from a trusted
+    /// identity key.
+    External(Option<AuthLabel>),
 }
 
 /// Classifies one output and, when it is external, verifies any identity-key auth
@@ -287,7 +374,7 @@ fn analyze_output(
     output: &fastpsbt::Output<'_>,
     coordinates: Option<&(u32, PsbtAccountCoordinates)>,
     n_accounts: usize,
-    identity_key_names: &[([u8; 33], String)],
+    identity_key_names: &[([u8; 33], AuthLabel)],
 ) -> Result<AnalyzedOutput, Error> {
     let Some((account_id, coords)) = coordinates else {
         let proofs = output
@@ -295,7 +382,7 @@ fn analyze_output(
             .map_err(|_| Error::InvalidIdentitySignature)?;
         let out_script_bytes = output.script.ok_or(Error::OutputScriptMissing)?.to_vec();
 
-        let mut first_auth_name: Option<String> = None;
+        let mut first_auth_name: Option<AuthLabel> = None;
         for proof in proofs {
             match proof {
                 common::psbt::OutputAuthProof::IdentitySignature { pubkey, sig } => {
@@ -308,12 +395,12 @@ fn analyze_output(
                     ecfp_pubkey
                         .schnorr_verify(&msg, &sig)
                         .map_err(|_| Error::InvalidIdentitySignature)?;
-                    // Look up the registered name for this pubkey
+                    // Look up the name of this pubkey, if it is one we trust
                     if first_auth_name.is_none() {
                         first_auth_name = identity_key_names
                             .iter()
                             .find(|(pk, _)| *pk == pubkey)
-                            .map(|(_, name)| name.clone());
+                            .map(|(_, label)| label.clone());
                     }
                 }
             }
@@ -346,17 +433,18 @@ fn analyze_output(
 /// performed here — they are deferred to [`DeferredChecks::verify`].
 pub(super) fn analyze_transaction(
     psbt: &fastpsbt::Psbt,
+    current_time: Option<u64>,
 ) -> Result<(TransactionSummary, DeferredChecks), Error> {
     let Accounts {
         accounts,
         names: account_names,
         proofs: account_proofs,
     } = read_accounts(psbt)?;
-    let identity_key_names = read_identity_keys(psbt)?;
+    let (identity_key_names, dnssec_validation_time) = read_identity_keys(psbt, current_time)?;
 
     let mut account_spent_amounts: Vec<i64> = vec![0; accounts.len()];
     let mut external_outputs_indexes = Vec::new();
-    let mut external_output_auth_names: Vec<Option<String>> = Vec::new();
+    let mut external_output_auth_names: Vec<Option<AuthLabel>> = Vec::new();
     let mut inputs_total_amount: u64 = 0;
     let mut outputs_total_amount: u64 = 0;
     let mut warn_unverified_inputs = false;
@@ -446,6 +534,7 @@ pub(super) fn analyze_transaction(
         account_spent_amounts,
         external_outputs_indexes,
         external_output_auth_names,
+        dnssec_validation_time,
         inputs_total_amount,
         outputs_total_amount,
         warn_unverified_inputs,
@@ -510,7 +599,7 @@ mod tests {
     fn analyze(psbt: &bitcoin::psbt::Psbt) -> Result<(TransactionSummary, DeferredChecks), Error> {
         let serialized = serialize_as_psbtv2(psbt);
         let parsed = fastpsbt::Psbt::parse(&serialized).unwrap();
-        analyze_transaction(&parsed)
+        analyze_transaction(&parsed, None)
     }
 
     /// A scriptPubKey that is not the P2SH of anything the fixtures carry.
@@ -685,5 +774,20 @@ mod tests {
             ensure_prevouts(&mut cache, &parsed).unwrap(),
             &[witness_prevout, legacy_prevout]
         );
+    }
+
+    #[test]
+    fn auth_label_display_name_marks_dnssec_sourced_names() {
+        let registered = AuthLabel {
+            name: "Satoshi Nakamoto".to_string(),
+            source: TrustSource::Registered,
+        };
+        assert_eq!(registered.display_name(), "Satoshi Nakamoto");
+
+        let dnssec = AuthLabel {
+            name: "alice@example.com".to_string(),
+            source: TrustSource::Dnssec,
+        };
+        assert_eq!(dnssec.display_name(), "₿alice@example.com");
     }
 }

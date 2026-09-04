@@ -14,7 +14,7 @@ use sdk::ux::{Icon, TagValue};
 
 use crate::constants::COIN_TICKER;
 
-use super::analyze::TransactionSummary;
+use super::analyze::{TransactionSummary, TrustSource};
 
 const AUTO_APPROVE: bool = cfg!(any(test, feature = "autoapprove"));
 
@@ -96,6 +96,26 @@ fn format_amount(value: u64, ticker: &str) -> String {
     format!("{}.{:08} {}", whole_part, fractional_part, ticker)
 }
 
+/// Formats a UNIX timestamp as a `YYYY-MM-DD` date, in UTC.
+///
+/// Used to show the user which date a DNSSEC proof was validated against. Days are converted with
+/// Howard Hinnant's `civil_from_days`, which avoids pulling in a date library for one screen.
+fn format_unix_date(secs: u64) -> String {
+    let days = (secs / 86400) as i64;
+    // Shift the epoch to 0000-03-01, so that leap days land at the end of the cycle.
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097); // [0, 146096]
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365; // [0, 399]
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100); // [0, 365]
+    let mp = (5 * doy + 2) / 153; // [0, 11], with March as 0
+    let d = doy - (153 * mp + 2) / 5 + 1; // [1, 31]
+    let m = if mp < 10 { mp + 3 } else { mp - 9 }; // [1, 12]
+    let y = if m <= 2 { y + 1 } else { y };
+    format!("{:04}-{:02}-{:02}", y, m, d)
+}
+
 /// Build the `TagValue` pairs shown to the user during transaction review.
 pub(super) fn build_display_pairs(
     psbt: &fastpsbt::Psbt,
@@ -159,7 +179,9 @@ pub(super) fn build_display_pairs(
         let address = Address::from_script(&out_script_pubkey, bitcoin::Network::Testnet)
             .map_err(|_| Error::AddressFromScriptFailed)?;
 
-        let address_value = if let Some(ref name) = summary.external_output_auth_names[i] {
+        let label = summary.external_output_auth_names[i].as_ref();
+        let address_value = if let Some(label) = label {
+            let name = label.display_name();
             if sdk::ux::has_page_api() {
                 // on large screens, go to a new line for the address
                 format!("{}\n\n{}", name, address)
@@ -170,8 +192,16 @@ pub(super) fn build_display_pairs(
             format!("{}", address)
         };
 
+        // State the provenance in the tag as well as in the name. The tag is plain ASCII, so it
+        // renders on every device, and it keeps the two trust sources distinguishable in a
+        // transaction that mixes them.
+        let tag = match label.map(|l| l.source) {
+            Some(TrustSource::Dnssec) => format!("Output {} (DNS)", output_index),
+            _ => format!("Output {}", output_index),
+        };
+
         pairs.push(TagValue {
-            tag: format!("Output {}", output_index),
+            tag,
             value: address_value,
         });
         pairs.push(TagValue {
@@ -185,6 +215,15 @@ pub(super) fn build_display_pairs(
         tag: "Fee".to_string(),
         value: format_amount(fee, COIN_TICKER),
     });
+
+    // The device has no clock, so the date the DNS proofs were checked against was supplied by the
+    // host. Show it: a host replaying a long-expired proof is otherwise undetectable.
+    if let Some(now) = summary.dnssec_validation_time {
+        pairs.push(TagValue {
+            tag: "DNS checked on".to_string(),
+            value: format!("{} (per host)", format_unix_date(now)),
+        });
+    }
 
     Ok(pairs)
 }
@@ -205,6 +244,18 @@ mod tests {
         assert_eq!(format_amount(123_456_789, "TEST"), "1.23456789 TEST");
     }
 
+    #[test]
+    fn format_unix_date_handles_leap_years() {
+        assert_eq!(format_unix_date(0), "1970-01-01");
+        assert_eq!(format_unix_date(86_399), "1970-01-01");
+        assert_eq!(format_unix_date(86_400), "1970-01-02");
+        // 2000-02-29: a leap year divisible by 400.
+        assert_eq!(format_unix_date(951_782_400), "2000-02-29");
+        // 2100-03-01: the day after 2100-02-28, which is not a leap year.
+        assert_eq!(format_unix_date(4_107_542_400), "2100-03-01");
+        assert_eq!(format_unix_date(1_754_000_000), "2025-07-31");
+    }
+
     /// Every amount on the review screen must be denominated in whole coins — the fee
     /// included. It used to be rendered as a raw satoshi count under the same ticker.
     #[test]
@@ -212,7 +263,7 @@ mod tests {
         let psbt = legacy_pkh_psbt();
         let serialized = serialize_as_psbtv2(&psbt);
         let parsed = fastpsbt::Psbt::parse(&serialized).unwrap();
-        let (summary, _) = analyze_transaction(&parsed).unwrap();
+        let (summary, _) = analyze_transaction(&parsed, None).unwrap();
 
         assert_eq!(summary.fee(), 200);
 
@@ -228,7 +279,7 @@ mod tests {
         let psbt = legacy_pkh_psbt();
         let serialized = serialize_as_psbtv2(&psbt);
         let parsed = fastpsbt::Psbt::parse(&serialized).unwrap();
-        let (summary, _) = analyze_transaction(&parsed).unwrap();
+        let (summary, _) = analyze_transaction(&parsed, None).unwrap();
 
         let pairs = build_display_pairs(&parsed, &summary).unwrap();
         let tags: Vec<&str> = pairs.iter().map(|p| p.tag.as_str()).collect();

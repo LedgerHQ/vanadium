@@ -655,3 +655,220 @@ async fn test_storage_multiple_slots() {
     assert_eq!(setup.client.read_storage(2).await.unwrap(), data2.to_vec());
     assert_eq!(setup.client.read_storage(3).await.unwrap(), data3.to_vec());
 }
+
+// ---------------------------------------------------------------------------
+// Verification-only curves: P-256 and P-384.
+//
+// Each test produces its own vector with the corresponding RustCrypto crate and then asks the
+// V-App to agree, so the expected values are independently derived rather than copied from an
+// unverifiable source. Under `speculos-tests` these exercise the VM's ECALL handlers; under
+// `native-tests`, `app-sdk`'s host implementations.
+// ---------------------------------------------------------------------------
+
+/// The message every curve test below signs.
+const CURVE_TEST_MSG: &[u8] = b"Vanadium P-256/P-384 ecdsa_verify test vector";
+
+#[tokio::test]
+async fn test_secp256r1_ecdsa_verify() {
+    use p256::ecdsa::{signature::hazmat::PrehashSigner, SigningKey};
+    use p256::elliptic_curve::sec1::ToEncodedPoint;
+
+    let mut setup = setup().await;
+
+    let signing_key = SigningKey::from_bytes(&[0x42u8; 32].into()).unwrap();
+    let pubkey = signing_key
+        .verifying_key()
+        .as_affine()
+        .to_encoded_point(false);
+    let pubkey = pubkey.as_bytes();
+    assert_eq!(pubkey.len(), 65);
+
+    let msg_hash = sha2::Sha256::digest(CURVE_TEST_MSG).to_vec();
+    let (sig, _) = signing_key.sign_prehash(&msg_hash).unwrap();
+    let signature: p256::ecdsa::DerSignature = sig.to_der();
+    let signature = signature.as_bytes();
+
+    let result = setup
+        .client
+        .ecdsa_verify(common::Curve::Secp256r1, pubkey, &msg_hash, signature)
+        .await
+        .unwrap();
+    assert_eq!(result, vec![1], "a valid P-256 signature must verify");
+
+    // Flip one byte of the DER-encoded r/s and it must not.
+    let mut sig_wrong = signature.to_vec();
+    let last = sig_wrong.len() - 1;
+    sig_wrong[last] ^= 0x01;
+    let result = setup
+        .client
+        .ecdsa_verify(common::Curve::Secp256r1, pubkey, &msg_hash, &sig_wrong)
+        .await
+        .unwrap();
+    assert_eq!(result, vec![0], "a tampered signature must not verify");
+
+    // The same signature must not verify against a different digest.
+    let other_hash = sha2::Sha256::digest(b"a different message").to_vec();
+    let result = setup
+        .client
+        .ecdsa_verify(common::Curve::Secp256r1, pubkey, &other_hash, signature)
+        .await
+        .unwrap();
+    assert_eq!(result, vec![0], "a signature over another digest must not verify");
+}
+
+#[tokio::test]
+async fn test_secp384r1_ecdsa_verify() {
+    use p384::ecdsa::{signature::hazmat::PrehashSigner, SigningKey};
+    use p384::elliptic_curve::sec1::ToEncodedPoint;
+    use sha2::Sha384;
+
+    let mut setup = setup().await;
+
+    let signing_key = SigningKey::from_bytes(&[0x37u8; 48].into()).unwrap();
+    let pubkey = signing_key
+        .verifying_key()
+        .as_affine()
+        .to_encoded_point(false);
+    let pubkey = pubkey.as_bytes();
+    assert_eq!(pubkey.len(), 97, "a P-384 point is 97 bytes uncompressed");
+
+    let msg_hash = Sha384::digest(CURVE_TEST_MSG).to_vec();
+    assert_eq!(msg_hash.len(), 48);
+    let (sig, _) = signing_key.sign_prehash(&msg_hash).unwrap();
+    let signature: p384::ecdsa::DerSignature = sig.to_der();
+    let signature = signature.as_bytes();
+
+    let result = setup
+        .client
+        .ecdsa_verify(common::Curve::Secp384r1, pubkey, &msg_hash, signature)
+        .await
+        .unwrap();
+    assert_eq!(result, vec![1], "a valid P-384 signature must verify");
+
+    let mut sig_wrong = signature.to_vec();
+    let last = sig_wrong.len() - 1;
+    sig_wrong[last] ^= 0x01;
+    let result = setup
+        .client
+        .ecdsa_verify(common::Curve::Secp384r1, pubkey, &msg_hash, &sig_wrong)
+        .await
+        .unwrap();
+    assert_eq!(result, vec![0], "a tampered signature must not verify");
+}
+
+/// P-384 with a 32-byte digest.
+///
+/// This is the case that made `msg_hash_len` a parameter of the ECALL rather than something
+/// derived from the curve: ECDSA permits a digest shorter than the curve order.
+#[tokio::test]
+async fn test_secp384r1_ecdsa_verify_with_sha256_digest() {
+    use p384::ecdsa::{signature::hazmat::PrehashSigner, SigningKey};
+    use p384::elliptic_curve::sec1::ToEncodedPoint;
+
+    let mut setup = setup().await;
+
+    let signing_key = SigningKey::from_bytes(&[0x37u8; 48].into()).unwrap();
+    let pubkey = signing_key
+        .verifying_key()
+        .as_affine()
+        .to_encoded_point(false);
+    let pubkey = pubkey.as_bytes();
+
+    let msg_hash = sha2::Sha256::digest(CURVE_TEST_MSG).to_vec();
+    assert_eq!(msg_hash.len(), 32);
+    let (sig, _) = signing_key.sign_prehash(&msg_hash).unwrap();
+    let signature: p384::ecdsa::DerSignature = sig.to_der();
+
+    let result = setup
+        .client
+        .ecdsa_verify(
+            common::Curve::Secp384r1,
+            pubkey,
+            &msg_hash,
+            signature.as_bytes(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(result, vec![1], "P-384 with a SHA-256 digest must verify");
+}
+
+#[tokio::test]
+async fn test_secp256r1_point_operations() {
+    use p256::elliptic_curve::group::Group;
+    use p256::elliptic_curve::sec1::ToEncodedPoint;
+    use p256::elliptic_curve::PrimeField;
+    use p256::{ProjectivePoint, Scalar};
+
+    let mut setup = setup().await;
+
+    let g = ProjectivePoint::generator();
+    let two = Scalar::from_repr({
+        let mut r = [0u8; 32];
+        r[31] = 2;
+        r.into()
+    })
+    .unwrap();
+    let g2 = g * two;
+
+    let g_bytes = g.to_encoded_point(false).as_bytes().to_vec();
+    let g2_bytes = g2.to_encoded_point(false).as_bytes().to_vec();
+
+    // G + 2G == 3G
+    let expected = (g + g2).to_encoded_point(false).as_bytes().to_vec();
+    let result = setup
+        .client
+        .ecpoint_add(common::Curve::Secp256r1, &g_bytes, &g2_bytes)
+        .await
+        .unwrap();
+    assert_eq!(result, expected);
+
+    // G * 2 == 2G
+    let mut k = [0u8; 32];
+    k[31] = 2;
+    let result = setup
+        .client
+        .ecpoint_scalarmult(common::Curve::Secp256r1, &g_bytes, &k)
+        .await
+        .unwrap();
+    assert_eq!(result, g2_bytes);
+}
+
+#[tokio::test]
+async fn test_secp384r1_point_operations() {
+    use p384::elliptic_curve::group::Group;
+    use p384::elliptic_curve::sec1::ToEncodedPoint;
+    use p384::elliptic_curve::PrimeField;
+    use p384::{ProjectivePoint, Scalar};
+
+    let mut setup = setup().await;
+
+    let g = ProjectivePoint::generator();
+    let two = Scalar::from_repr({
+        let mut r = [0u8; 48];
+        r[47] = 2;
+        r.into()
+    })
+    .unwrap();
+    let g2 = g * two;
+
+    let g_bytes = g.to_encoded_point(false).as_bytes().to_vec();
+    let g2_bytes = g2.to_encoded_point(false).as_bytes().to_vec();
+    assert_eq!(g_bytes.len(), 97);
+
+    let expected = (g + g2).to_encoded_point(false).as_bytes().to_vec();
+    let result = setup
+        .client
+        .ecpoint_add(common::Curve::Secp384r1, &g_bytes, &g2_bytes)
+        .await
+        .unwrap();
+    assert_eq!(result, expected);
+
+    let mut k = [0u8; 48];
+    k[47] = 2;
+    let result = setup
+        .client
+        .ecpoint_scalarmult(common::Curve::Secp384r1, &g_bytes, &k)
+        .await
+        .unwrap();
+    assert_eq!(result, g2_bytes);
+}

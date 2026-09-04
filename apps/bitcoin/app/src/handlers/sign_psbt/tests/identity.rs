@@ -17,6 +17,7 @@ fn test_handle_sign_psbt_identity_key_failures() {
     let result = sdk::executor::block_on(handle_sign_psbt(
         &mut sdk::App::singleton(),
         &serialize_as_psbtv2(&psbt),
+        None,
     ));
     assert_eq!(result, Err(Error::InvalidProofOfRegistration));
 
@@ -26,6 +27,7 @@ fn test_handle_sign_psbt_identity_key_failures() {
     let result = sdk::executor::block_on(handle_sign_psbt(
         &mut sdk::App::singleton(),
         &serialize_as_psbtv2(&psbt),
+        None,
     ));
     assert_eq!(result, Err(Error::InvalidIdentitySignature));
 }
@@ -37,6 +39,7 @@ fn test_handle_sign_psbt_identity_key_success() {
     let result = sdk::executor::block_on(handle_sign_psbt(
         &mut sdk::App::singleton(),
         &serialize_as_psbtv2(&psbt),
+        None,
     ));
 
     assert!(result.is_ok(), "Expected Ok result, got {:?}", result);

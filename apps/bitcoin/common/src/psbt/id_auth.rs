@@ -9,6 +9,9 @@ pub const PSBT_IDAUTH_PROPRIETARY_IDENTIFIER: [u8; 6] = *b"IDAUTH";
 /// Subkey type for a registered identity key in the global PSBT map
 pub const PSBT_IDAUTH_GLOBAL_REGISTERED_IDENTITY_KEY: u8 = 0x00;
 
+/// Subkey type for a DNSSEC-authenticated identity key in the global PSBT map
+pub const PSBT_IDAUTH_GLOBAL_DNSSEC_IDENTITY_KEY: u8 = 0x01;
+
 /// Subkey type for output authentication proof (per-output only)
 pub const PSBT_IDAUTH_OUT_SIGNATURE: u8 = 0x00;
 
@@ -32,6 +35,20 @@ pub struct RegisteredIdentityKey {
     pub name: String,
     /// The 32-byte proof of registration.
     pub por: [u8; 32],
+}
+
+/// A DNSSEC-authenticated identity key entry stored in the global PSBT section.
+///
+/// Unlike [`RegisteredIdentityKey`], the fields borrow from the PSBT: an authentication chain is
+/// kilobytes long, and copying it out of a PSBT the device is already holding would be pure waste.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DnssecIdentityKey<'a> {
+    /// The compressed secp256k1 public key (33 bytes).
+    pub pubkey: [u8; 33],
+    /// The human-readable name publishing this key, without any `₿` prefix.
+    pub name: &'a str,
+    /// The RFC 9102 `AuthenticationChain` proving that `name` publishes `pubkey`.
+    pub chain: &'a [u8],
 }
 
 /// An output authentication proof, stored in a per-output PSBT proprietary field.
@@ -85,6 +102,54 @@ pub trait PsbtIdAuthGlobalRead: GlobalHasProprietaryFields {
         }
         Ok(entries)
     }
+
+    /// Returns all well-formed DNSSEC-authenticated identity key entries from the global PSBT map.
+    /// Malformed entries return an error.
+    ///
+    /// The chains are *not* validated here; that requires the current time and is done by the
+    /// signer. This only checks that the entries are structurally sound.
+    fn get_dnssec_identity_keys(
+        &self,
+    ) -> Result<Vec<DnssecIdentityKey<'_>>, PsbtIdAuthError> {
+        let mut entries = Vec::new();
+        for entry in self.iter_proprietary() {
+            if entry.prefix != PSBT_IDAUTH_PROPRIETARY_IDENTIFIER {
+                continue;
+            }
+            if entry.subtype != PSBT_IDAUTH_GLOBAL_DNSSEC_IDENTITY_KEY {
+                continue;
+            }
+            if entry.key.len() != 33 {
+                return Err(PsbtIdAuthError::MalformedEntry);
+            }
+            let mut pubkey = [0u8; 33];
+            pubkey.copy_from_slice(entry.key);
+
+            let value = entry.value;
+            // At least a length byte, a one-byte name, and a non-empty chain.
+            if value.len() < 1 + 1 + 1 {
+                return Err(PsbtIdAuthError::MalformedEntry);
+            }
+            let name_len = value[0] as usize;
+            if name_len == 0 {
+                return Err(PsbtIdAuthError::MalformedEntry);
+            }
+            // The chain must be present, so the name cannot run to the end of the value.
+            if value.len() <= 1 + name_len {
+                return Err(PsbtIdAuthError::MalformedEntry);
+            }
+            let name = core::str::from_utf8(&value[1..1 + name_len])
+                .map_err(|_| PsbtIdAuthError::InvalidUtf8)?;
+            let chain = &value[1 + name_len..];
+
+            entries.push(DnssecIdentityKey {
+                pubkey,
+                name,
+                chain,
+            });
+        }
+        Ok(entries)
+    }
 }
 
 impl<T: GlobalHasProprietaryFields> PsbtIdAuthGlobalRead for T {}
@@ -95,11 +160,18 @@ pub trait PsbtIdAuthGlobalWrite {
         &mut self,
         entry: &RegisteredIdentityKey,
     ) -> Result<(), PsbtIdAuthError>;
+
+    /// Adds a DNSSEC-authenticated identity key entry to the global PSBT map.
+    fn add_dnssec_identity_key(
+        &mut self,
+        entry: &DnssecIdentityKey<'_>,
+    ) -> Result<(), PsbtIdAuthError>;
 }
 
 pub trait PsbtOutputAuthRead: OutputHasProprietaryFields {
-    /// Returns all well-formed output authentication proofs for this output.
-    /// Unknown auth_tag values and malformed entries are silently skipped.
+    /// Returns all output authentication proofs for this output.
+    /// Malformed entries, and entries with an unknown auth_tag, return an error: a signer must not
+    /// silently ignore authentication data it cannot check.
     fn get_auth_proofs(&self) -> Result<Vec<OutputAuthProof>, PsbtIdAuthError> {
         let mut proofs = Vec::new();
         for entry in self.iter_proprietary() {
@@ -160,6 +232,31 @@ impl PsbtIdAuthGlobalWrite for Psbt {
         value.push(name_bytes.len() as u8);
         value.extend_from_slice(name_bytes);
         value.extend_from_slice(&entry.por);
+        self.proprietary.insert(key, value);
+        Ok(())
+    }
+
+    fn add_dnssec_identity_key(
+        &mut self,
+        entry: &DnssecIdentityKey<'_>,
+    ) -> Result<(), PsbtIdAuthError> {
+        if entry.name.is_empty() || entry.name.len() > 255 {
+            return Err(PsbtIdAuthError::InvalidNameLength);
+        }
+        if entry.chain.is_empty() {
+            return Err(PsbtIdAuthError::MalformedEntry);
+        }
+        let name_bytes = entry.name.as_bytes();
+        let key = ProprietaryKey {
+            prefix: PSBT_IDAUTH_PROPRIETARY_IDENTIFIER.to_vec(),
+            subtype: PSBT_IDAUTH_GLOBAL_DNSSEC_IDENTITY_KEY,
+            key: entry.pubkey.to_vec(),
+        };
+        // value: <name_len (1 byte)> <name> <RFC 9102 authentication chain>
+        let mut value = Vec::with_capacity(1 + name_bytes.len() + entry.chain.len());
+        value.push(name_bytes.len() as u8);
+        value.extend_from_slice(name_bytes);
+        value.extend_from_slice(entry.chain);
         self.proprietary.insert(key, value);
         Ok(())
     }
@@ -264,6 +361,138 @@ mod tests {
             por: [0xAAu8; 32],
         };
         assert!(psbt.add_registered_identity_key(&entry).is_err());
+    }
+
+    // --- DNSSEC identity key tests ---
+
+    fn empty_psbt() -> Psbt {
+        let unsigned_tx = bitcoin::Transaction {
+            version: bitcoin::transaction::Version::TWO,
+            lock_time: bitcoin::absolute::LockTime::ZERO,
+            input: vec![],
+            output: vec![],
+        };
+        Psbt::from_unsigned_tx(unsigned_tx).unwrap()
+    }
+
+    #[test]
+    fn test_add_and_get_dnssec_identity_key() {
+        let mut psbt = empty_psbt();
+        let chain = vec![0xAB; 512];
+        let entry = DnssecIdentityKey {
+            pubkey: [0x02u8; 33],
+            name: "alice@example.com",
+            chain: &chain,
+        };
+
+        psbt.add_dnssec_identity_key(&entry).unwrap();
+
+        let entries = psbt.get_dnssec_identity_keys().unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0], entry);
+    }
+
+    #[test]
+    fn test_dnssec_and_registered_keys_do_not_interfere() {
+        // The two subtypes share the IDAUTH prefix and are keyed identically, so each reader must
+        // see only its own entries.
+        let mut psbt = empty_psbt();
+        let chain = vec![0xAB; 64];
+        psbt.add_registered_identity_key(&RegisteredIdentityKey {
+            pubkey: [0x02u8; 33],
+            name: "Bob".to_string(),
+            por: [0x11u8; 32],
+        })
+        .unwrap();
+        psbt.add_dnssec_identity_key(&DnssecIdentityKey {
+            pubkey: [0x03u8; 33],
+            name: "alice@example.com",
+            chain: &chain,
+        })
+        .unwrap();
+
+        let registered = psbt.get_registered_identity_keys().unwrap();
+        assert_eq!(registered.len(), 1);
+        assert_eq!(registered[0].name, "Bob");
+
+        let dnssec = psbt.get_dnssec_identity_keys().unwrap();
+        assert_eq!(dnssec.len(), 1);
+        assert_eq!(dnssec[0].name, "alice@example.com");
+    }
+
+    #[test]
+    fn test_dnssec_identity_key_empty_name_or_chain_rejected() {
+        let mut psbt = empty_psbt();
+        let chain = vec![0xAB; 16];
+        assert!(psbt
+            .add_dnssec_identity_key(&DnssecIdentityKey {
+                pubkey: [0x02u8; 33],
+                name: "",
+                chain: &chain,
+            })
+            .is_err());
+        assert!(psbt
+            .add_dnssec_identity_key(&DnssecIdentityKey {
+                pubkey: [0x02u8; 33],
+                name: "alice@example.com",
+                chain: &[],
+            })
+            .is_err());
+    }
+
+    #[test]
+    fn test_dnssec_identity_key_malformed_entries_return_error() {
+        // A name length that leaves no room for a chain.
+        let mut psbt = empty_psbt();
+        let key = ProprietaryKey {
+            prefix: PSBT_IDAUTH_PROPRIETARY_IDENTIFIER.to_vec(),
+            subtype: PSBT_IDAUTH_GLOBAL_DNSSEC_IDENTITY_KEY,
+            key: vec![0x02u8; 33],
+        };
+        let mut value = vec![5u8];
+        value.extend_from_slice(b"alice");
+        psbt.proprietary.insert(key.clone(), value);
+        assert_eq!(
+            psbt.get_dnssec_identity_keys(),
+            Err(PsbtIdAuthError::MalformedEntry)
+        );
+
+        // A name length that overruns the value.
+        let mut psbt = empty_psbt();
+        let mut value = vec![200u8];
+        value.extend_from_slice(b"alice");
+        value.extend_from_slice(&[0xAB; 16]);
+        psbt.proprietary.insert(key.clone(), value);
+        assert_eq!(
+            psbt.get_dnssec_identity_keys(),
+            Err(PsbtIdAuthError::MalformedEntry)
+        );
+
+        // A subkey that is not a 33-byte public key.
+        let mut psbt = empty_psbt();
+        let short_key = ProprietaryKey {
+            prefix: PSBT_IDAUTH_PROPRIETARY_IDENTIFIER.to_vec(),
+            subtype: PSBT_IDAUTH_GLOBAL_DNSSEC_IDENTITY_KEY,
+            key: vec![0x02u8; 32],
+        };
+        let mut value = vec![5u8];
+        value.extend_from_slice(b"alice");
+        value.extend_from_slice(&[0xAB; 16]);
+        psbt.proprietary.insert(short_key, value);
+        assert_eq!(
+            psbt.get_dnssec_identity_keys(),
+            Err(PsbtIdAuthError::MalformedEntry)
+        );
+
+        // A name that is not valid UTF-8.
+        let mut psbt = empty_psbt();
+        let mut value = vec![2u8, 0xff, 0xfe];
+        value.extend_from_slice(&[0xAB; 16]);
+        psbt.proprietary.insert(key, value);
+        assert_eq!(
+            psbt.get_dnssec_identity_keys(),
+            Err(PsbtIdAuthError::InvalidUtf8)
+        );
     }
 
     // --- Per-output auth proof tests ---

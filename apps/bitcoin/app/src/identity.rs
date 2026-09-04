@@ -1,6 +1,6 @@
 use alloc::vec::Vec;
 use common::{errors::Error, identity, message::IdentitySignature};
-use sdk::curve::{Curve, EcfpPrivateKey, Secp256k1, ToPublicKey};
+use sdk::curve::{EcfpPrivateKey, HdCurve, Secp256k1, ToPublicKey};
 
 /// Derives the i-th identity key and signs the given object with it.
 pub(crate) fn compute_identity_signature(

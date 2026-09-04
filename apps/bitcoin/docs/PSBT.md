@@ -76,13 +76,15 @@ The specs for the signature over the output script as specified in [identity.md]
 
 Authentication data is carried in proprietary PSBT fields (`PSBT_OUT_PROPRIETARY`), using proprietary identifier `IDAUTH` (all capital letters).
 
+Each global subkey type carries an identity key together with whatever establishes trust in it: a proof of registration for a key registered on the device, or a DNSSEC proof for a key published in the DNS. The two are interchangeable as far as the per-output fields are concerned, and only affect how the signer describes the key to the user.
+
 ## Authentication types
 
 Each output authentication proof has an `auth_tag`, implemented as a single unsigned byte.
 
 ### Identity-based signature for output scripts
 
-`auth_tag` is 0 for identity-based signatures.
+`auth_tag` is 0 for identity-based signatures. It is the same regardless of how trust in the identity key was established.
 
 
 ## Global subkey types
@@ -90,6 +92,7 @@ Each output authentication proof has an `auth_tag`, implemented as a single unsi
 | Name&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;| `<subkeytype>`&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;| `<subkeydata>`&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;| `<subkeydata>` Description | `<valuedata>`&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;| `<valuedata>`&nbsp;Description&nbsp;&nbsp; | Versions Requiring Inclusion | Versions Requiring Exclusion | Versions Allowing Inclusion | Parent BIP |
 |---------------------------|-----------------------------------------|-----------------------------------|-----------------------------|----------------------|-------------------------------------------------------------------------------------|-|-|------|--------|
 | Identity Key | `PSBT_IDAUTH_GLOBAL_REGISTERED_IDENTITY_KEY = 0x00` | `<33-byte identity pubkey>` | The compressed secp256k1 public key of the identity key | `<1-byte name length> <name> <32-byte proof of registration>` | The non-zero length of the registered name, followed by the name, followed by the 32-byte proof of registration for this identity key | | | 0, 2 | No BIP |
+| DNSSEC Identity Key | `PSBT_IDAUTH_GLOBAL_DNSSEC_IDENTITY_KEY = 0x01` | `<33-byte identity pubkey>` | The compressed secp256k1 public key of the identity key | `<1-byte name length> <name> <RFC 9102 AuthenticationChain>` | The non-zero length of the human-readable name (without any `₿` prefix), followed by the name, followed by an [RFC 9102](https://www.rfc-editor.org/rfc/rfc9102) DNSSEC `AuthenticationChain` proving that the name publishes this public key, as specified in [dns-identity.md](dns-identity.md) | | | 0, 2 | No BIP |
 
 ## Per-output subkey types
 
@@ -101,3 +104,10 @@ For each output, a signer should verify each provided proof against that output'
 
 - If a proof is well-formed and valid, it may be used for UX authentication if the pubkey is trusted.
 - If a proof is malformed or invalid, signing should be aborted.
+
+The same rule applies to whatever establishes trust in an identity key: an invalid proof of
+registration or an invalid DNSSEC proof aborts signing, rather than being ignored. Conversely, a
+valid entry for a key that signs no output is not an error, it is simply unused.
+
+The same public key must not appear both as a registered identity key and as a DNSSEC identity key; a
+signer encountering both must abort.

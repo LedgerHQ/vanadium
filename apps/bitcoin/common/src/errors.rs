@@ -121,6 +121,22 @@ pub enum Error {
     MissingMusigSession,
     #[n(47)]
     MissingMusigPubnonce,
+
+    // DNSSEC-authenticated identity keys
+    #[n(48)]
+    MissingCurrentTime,
+    #[n(49)]
+    InvalidHumanReadableName,
+    #[n(50)]
+    DnssecValidationFailed,
+    #[n(51)]
+    DnssecProofExpired,
+    #[n(52)]
+    DnsIdentityRecordInvalid,
+    #[n(53)]
+    DnsIdentityKeyMismatch,
+    #[n(54)]
+    DuplicateIdentityKey,
 }
 
 impl fmt::Display for Error {
@@ -199,6 +215,29 @@ impl fmt::Display for Error {
             MissingMusigPubnonce => write!(
                 f,
                 "MuSig2 round 2 requires this device's pubnonce in the PSBT but it is missing"
+            ),
+
+            MissingCurrentTime => write!(
+                f,
+                "Validating a DNSSEC proof requires the current time, which the request did not provide"
+            ),
+            InvalidHumanReadableName => {
+                write!(f, "Human-readable name is not a valid ASCII user@domain")
+            }
+            DnssecValidationFailed => write!(f, "DNSSEC proof is malformed or does not validate"),
+            DnssecProofExpired => {
+                write!(f, "DNSSEC proof is not valid at the current time")
+            }
+            DnsIdentityRecordInvalid => {
+                write!(f, "DNS record does not contain exactly one valid identity key")
+            }
+            DnsIdentityKeyMismatch => write!(
+                f,
+                "DNS record publishes a different public key than the one it is claimed to authenticate"
+            ),
+            DuplicateIdentityKey => write!(
+                f,
+                "The same identity key is both registered and DNSSEC-authenticated"
             ),
         }
     }

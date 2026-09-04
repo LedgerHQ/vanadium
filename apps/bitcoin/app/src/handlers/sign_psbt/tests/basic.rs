@@ -34,6 +34,7 @@ fn test_handle_sign_psbt_pkh() {
     let response = sdk::executor::block_on(handle_sign_psbt(
         &mut sdk::App::singleton(),
         &serialize_as_psbtv2(&psbt),
+        None,
     ))
     .unwrap();
 
@@ -70,6 +71,7 @@ fn test_handle_sign_psbt_wpkh() {
     let response = sdk::executor::block_on(handle_sign_psbt(
         &mut sdk::App::singleton(),
         &serialize_as_psbtv2(&psbt),
+        None,
     ))
     .unwrap();
 
@@ -107,6 +109,7 @@ fn test_handle_sign_psbt_tr() {
     let response = sdk::executor::block_on(handle_sign_psbt(
         &mut sdk::App::singleton(),
         &serialize_as_psbtv2(&psbt),
+        None,
     ))
     .unwrap();
 
@@ -162,6 +165,7 @@ fn test_handle_sign_psbt_with_resident_pubkey() {
     let response = sdk::executor::block_on(handle_sign_psbt(
         &mut sdk::App::singleton(),
         &serialize_as_psbtv2(&psbt),
+        None,
     ))
     .unwrap();
 

@@ -1,0 +1,77 @@
+[package]
+name = "dnssec-prover"
+version = "0.6.10"
+authors = ["Matt Corallo"]
+license = "MIT OR Apache-2.0"
+repository = "https://git.bitcoin.ninja/index.cgi?p=dnssec-prover"
+description = "A simple crate which allows for the creation and validation of transferrable proofs of entries in the DNS."
+keywords = ["dns", "dnssec", "rfc9102", "no-std"]
+categories = ["cryptography", "no-std"]
+edition = "2021"
+rust-version = "1.61.0"
+
+[package.metadata.docs.rs]
+features = ["std", "validation", "tokio"]
+
+[features]
+default = ["validation", "target_native"]
+std = []
+validation = ["bitcoin_hashes"]
+tokio = ["tokio_crate/net", "tokio_crate/io-util", "std"]
+build_server = ["tokio", "tokio_crate/rt-multi-thread", "tokio_crate/macros"]
+slower_smaller_binary = []
+target_native = ["sdk/target_native"]
+target_vanadium_ledger = ["sdk/target_vanadium_ledger"]
+
+[dependencies]
+# The RSA and P-256/P-384 arithmetic upstream implements in `crypto/bigint.rs` is delegated to the
+# modular-arithmetic ECALLs instead; see `src/crypto/mod.rs`.
+sdk = { package = "vanadium-app-sdk", path = "../../app-sdk", default-features = false }
+
+bitcoin_hashes = { version = "0.14", default-features = false, optional = true }
+tokio_crate = { package = "tokio", version = "1.0", default-features = false, optional = true }
+
+[dev-dependencies]
+hex-conservative = { version = "0.1", default-features = false, features = ["alloc"] }
+base64 = "0.21"
+rand = { version = "0.8", default-features = false, features = ["getrandom"] }
+tokio_crate = { package = "tokio", version = "1.0", features = ["rt", "macros", "net", "rt-multi-thread"] }
+minreq = { version = "2.0" }
+serde_json = { version = "1.0", default-features = false, features = ["std"] }
+
+[profile.dev]
+opt-level = 1
+
+[profile.release]
+opt-level = 3
+lto = true
+
+[lib]
+name = "dnssec_prover"
+path = "src/lib.rs"
+
+[[bin]]
+name = "http_proof_gen"
+path = "src/http.rs"
+required-features = ["build_server"]
+
+[workspace]
+
+[lints.rust.unexpected_cfgs]
+level = "forbid"
+# When adding a new cfg attribute, ensure that it is added to this list.
+#
+# Note that Cargo automatically declares corresponding cfgs for every feature
+# defined in the member-level [features] tables as "expected".
+check-cfg = [
+	"cfg(fuzzing)",
+	"cfg(dnssec_prover_fuzzing)",
+	"cfg(dnssec_validate_bench)",
+	"cfg(dnssec_prover_c_hashers)",
+	"cfg(dnssec_prover_c_hashers_test)"
+]
+
+[patch.crates-io.bitcoin_hashes]
+path = "../bitcoin_hashes"
+[patch.crates-io.getrandom]
+path = "../getrandom"
