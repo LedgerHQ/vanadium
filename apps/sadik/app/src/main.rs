@@ -2,7 +2,7 @@
 
 use sdk::{
     bignum::{BigNum, BigNumMod, ModulusProvider, PrimeModulusProvider},
-    curve::{Curve as _, EcfpPrivateKey, EcfpPublicKey, Secp256k1Point},
+    curve::{Curve as _, EcfpPrivateKey, EcfpPublicKey, HdCurve as _, Secp256k1Point},
     hash::Hasher,
     App, AppBuilder,
 };

@@ -28,14 +28,9 @@ use common::{
 
 use bip32::{ChildNumber, XPrv};
 use hex_literal::hex;
-use k256::{
-    ecdsa::{self, signature::hazmat::PrehashVerifier},
-    elliptic_curve::{
-        sec1::{FromEncodedPoint, ToEncodedPoint},
-        Group, PrimeField,
-    },
-    schnorr, EncodedPoint, ProjectivePoint, Scalar,
-};
+// Only the secp256k1-specific operations import from `k256` here; the point and ECDSA-verify
+// operations are generated once per curve by `impl_curve_ops!` below, each with its own imports.
+use k256::{ecdsa, schnorr};
 
 use num_bigint::BigUint;
 use num_traits::Zero;
@@ -728,146 +723,198 @@ pub fn derive_slip21_node(labels: *const u8, labels_len: usize, out: *mut u8) ->
     1
 }
 
-pub fn ecfp_add_point(curve: u32, r: *mut u8, p: *const u8, q: *const u8) -> u32 {
-    if curve != CurveKind::Secp256k1 as u32 {
-        return 0;
-    }
+/// Host implementations of the curve ECALLs, instantiated once per supported curve.
+///
+/// The bodies cannot be written once against a generic bound: `k256`, `p256` and `p384` each
+/// define their own `EncodedPoint`, `ProjectivePoint`, `Scalar` and `ecdsa` types, and those are
+/// distinct types even though the traits they implement line up. So the module is generated per
+/// curve, and the public ECALL entry points below dispatch to it.
+macro_rules! impl_curve_ops {
+    ($mod_name:ident, $curve_crate:ident, $scalar_len:expr) => {
+        mod $mod_name {
+            use $curve_crate::{
+                ecdsa::{self, signature::hazmat::PrehashVerifier},
+                elliptic_curve::{
+                    sec1::{FromEncodedPoint, ToEncodedPoint},
+                    Group, PrimeField,
+                },
+                EncodedPoint, ProjectivePoint, Scalar,
+            };
 
-    let p_slice = unsafe { std::slice::from_raw_parts(p, 65) };
-    let q_slice = unsafe { std::slice::from_raw_parts(q, 65) };
+            const SCALAR_LEN: usize = $scalar_len;
+            /// Uncompressed SEC1: `0x04 || X || Y`.
+            const POINT_LEN: usize = 1 + 2 * SCALAR_LEN;
 
-    // Helper to validate a point and copy it to the result
-    let validate_and_copy = |point_slice: &[u8], source: *const u8| -> u32 {
-        let encoded = match EncodedPoint::from_bytes(point_slice) {
-            Ok(enc) => enc,
-            Err(_) => return 0,
-        };
-        if ProjectivePoint::from_encoded_point(&encoded)
-            .is_none()
-            .into()
-        {
-            return 0;
-        }
-        // Use ptr::copy (memmove semantics) to handle the case where source == r.
-        unsafe {
-            std::ptr::copy(source, r, 65);
-        }
-        1
-    };
-
-    // Handle point at infinity: represented as prefix byte 0x00
-    match (p_slice[0] == 0x00, q_slice[0] == 0x00) {
-        (true, true) => {
-            unsafe {
-                std::ptr::write_bytes(r, 0, 65);
+            /// Writes the point at infinity, which this ABI encodes as all-zero bytes.
+            ///
+            /// # Safety
+            /// `r` must be writable for `POINT_LEN` bytes.
+            unsafe fn write_infinity(r: *mut u8) -> u32 {
+                unsafe {
+                    core::ptr::write_bytes(r, 0, POINT_LEN);
+                }
+                1
             }
-            return 1;
+
+            /// # Safety
+            /// `r` must be writable for `POINT_LEN` bytes.
+            unsafe fn write_point(r: *mut u8, point: ProjectivePoint) -> u32 {
+                // Encoding the identity panics in these crates, so it is handled separately.
+                if bool::from(point.is_identity()) {
+                    return unsafe { write_infinity(r) };
+                }
+                let encoded = point.to_encoded_point(false);
+                let bytes = encoded.as_bytes();
+                debug_assert_eq!(bytes.len(), POINT_LEN);
+                unsafe {
+                    core::ptr::copy_nonoverlapping(bytes.as_ptr(), r, bytes.len());
+                }
+                1
+            }
+
+            fn decode_point(slice: &[u8]) -> Option<ProjectivePoint> {
+                let encoded = EncodedPoint::from_bytes(slice).ok()?;
+                ProjectivePoint::from_encoded_point(&encoded).into()
+            }
+
+            /// # Safety
+            /// `r` must be writable, and `p` and `q` readable, for `POINT_LEN` bytes each.
+            pub unsafe fn add_point(r: *mut u8, p: *const u8, q: *const u8) -> u32 {
+                let p_slice = unsafe { core::slice::from_raw_parts(p, POINT_LEN) };
+                let q_slice = unsafe { core::slice::from_raw_parts(q, POINT_LEN) };
+
+                // Validates a point and copies it through to the result. `copy` rather than
+                // `copy_nonoverlapping` because the caller is allowed to pass `r == p`.
+                let validate_and_copy = |point_slice: &[u8], source: *const u8| -> u32 {
+                    if decode_point(point_slice).is_none() {
+                        return 0;
+                    }
+                    unsafe {
+                        core::ptr::copy(source, r, POINT_LEN);
+                    }
+                    1
+                };
+
+                match (p_slice[0] == 0x00, q_slice[0] == 0x00) {
+                    (true, true) => return unsafe { write_infinity(r) },
+                    (true, false) => return validate_and_copy(q_slice, q),
+                    (false, true) => return validate_and_copy(p_slice, p),
+                    (false, false) => { /* fall through to the actual addition */ }
+                }
+
+                let Some(p_point) = decode_point(p_slice) else {
+                    return 0;
+                };
+                let Some(q_point) = decode_point(q_slice) else {
+                    return 0;
+                };
+
+                unsafe { write_point(r, p_point + q_point) }
+            }
+
+            /// # Safety
+            /// `r` must be writable and `p` readable for `POINT_LEN` bytes; `k` readable for
+            /// `k_len` bytes.
+            pub unsafe fn scalar_mult(
+                r: *mut u8,
+                p: *const u8,
+                k: *const u8,
+                k_len: usize,
+            ) -> u32 {
+                if k_len > SCALAR_LEN {
+                    return 0;
+                }
+
+                let p_slice = unsafe { core::slice::from_raw_parts(p, POINT_LEN) };
+                let k_slice = unsafe { core::slice::from_raw_parts(k, k_len) };
+
+                // O * k = O
+                if p_slice[0] == 0x00 {
+                    return unsafe { write_infinity(r) };
+                }
+
+                let Some(p_point) = decode_point(p_slice) else {
+                    return 0;
+                };
+
+                let mut k_padded = [0u8; SCALAR_LEN];
+                k_padded[SCALAR_LEN - k_len..].copy_from_slice(k_slice);
+                let Some(k_scalar) = Option::<Scalar>::from(Scalar::from_repr(k_padded.into()))
+                else {
+                    return 0;
+                };
+
+                unsafe { write_point(r, p_point * k_scalar) }
+            }
+
+            /// # Safety
+            /// `pubkey` must be readable for `POINT_LEN` bytes, `msg_hash` for `msg_hash_len`,
+            /// and `signature` for `signature_len`.
+            pub unsafe fn verify(
+                pubkey: *const u8,
+                msg_hash: *const u8,
+                msg_hash_len: usize,
+                signature: *const u8,
+                signature_len: usize,
+            ) -> u32 {
+                let pubkey_slice = unsafe { core::slice::from_raw_parts(pubkey, POINT_LEN) };
+                let msg_hash_slice = unsafe { core::slice::from_raw_parts(msg_hash, msg_hash_len) };
+                let signature_slice =
+                    unsafe { core::slice::from_raw_parts(signature, signature_len) };
+
+                let pubkey_point =
+                    EncodedPoint::from_bytes(pubkey_slice).expect("Invalid public key");
+                let verifying_key = ecdsa::VerifyingKey::from_encoded_point(&pubkey_point)
+                    .expect("Failed to create verifying key");
+
+                let signature = ecdsa::DerSignature::from_bytes(signature_slice)
+                    .expect("Invalid signature");
+
+                match verifying_key.verify_prehash(msg_hash_slice, &signature) {
+                    Ok(_) => 1,
+                    Err(_) => 0,
+                }
+            }
         }
-        (true, false) => return validate_and_copy(q_slice, q),
-        (false, true) => return validate_and_copy(p_slice, p),
-        (false, false) => { /* Continue with normal addition */ }
-    }
-
-    // Validate and decode point P
-    let p_point = match EncodedPoint::from_bytes(p_slice) {
-        Ok(enc) => enc,
-        Err(_) => return 0,
     };
-    let p_point: ProjectivePoint = match ProjectivePoint::from_encoded_point(&p_point).into() {
-        Some(pt) => pt,
-        None => return 0,
-    };
-
-    // Validate and decode point Q
-    let q_point = match EncodedPoint::from_bytes(q_slice) {
-        Ok(enc) => enc,
-        Err(_) => return 0,
-    };
-    let q_point: ProjectivePoint = match ProjectivePoint::from_encoded_point(&q_point).into() {
-        Some(pt) => pt,
-        None => return 0,
-    };
-
-    let result_point: ProjectivePoint = p_point + q_point;
-
-    // Check if result is the point at infinity
-    // The k256 library may panic when encoding the point at infinity,
-    // so we check for it first
-    if bool::from(result_point.is_identity()) {
-        // Encode point at infinity as all zeros (65 bytes)
-        unsafe {
-            std::ptr::write_bytes(r, 0, 65);
-        }
-        return 1;
-    }
-
-    let result_encoded = result_point.to_encoded_point(false);
-    let result_bytes = result_encoded.as_bytes();
-
-    unsafe {
-        std::ptr::copy_nonoverlapping(result_bytes.as_ptr(), r, result_bytes.len());
-    }
-
-    1
 }
 
-pub fn ecfp_scalar_mult(curve: u32, r: *mut u8, p: *const u8, k: *const u8, k_len: usize) -> u32 {
-    if curve != CurveKind::Secp256k1 as u32 {
-        return 0;
-    }
-    if k_len > 32 {
-        return 0;
-    }
+impl_curve_ops!(curve_secp256k1, k256, 32);
+impl_curve_ops!(curve_secp256r1, p256, 32);
+impl_curve_ops!(curve_secp384r1, p384, 48);
 
-    let p_slice = unsafe { std::slice::from_raw_parts(p, 65) };
-    let k_slice = unsafe { std::slice::from_raw_parts(k, k_len) };
-
-    // Handle point at infinity: represented as prefix byte 0x00
-    if p_slice[0] == 0x00 {
-        // O * k = O
-        unsafe {
-            std::ptr::write_bytes(r, 0, 65);
-        }
-        return 1;
-    }
-
-    // Validate and decode point P
-    let p_point = match EncodedPoint::from_bytes(p_slice) {
-        Ok(enc) => enc,
-        Err(_) => return 0,
-    };
-    let p_point: ProjectivePoint = match ProjectivePoint::from_encoded_point(&p_point).into() {
-        Some(pt) => pt,
-        None => return 0,
-    };
-
-    // pad k_scalar to 32 bytes with initial zeros without using unsafe code
-    let mut k_scalar = [0u8; 32];
-    k_scalar[32 - k_len..].copy_from_slice(k_slice);
-    let k_scalar: Scalar = match Scalar::from_repr(k_scalar.into()).into() {
-        Some(scalar) => scalar,
-        None => return 0,
-    };
-
-    let result_point: ProjectivePoint = p_point * k_scalar;
-
-    // Check if result is the point at infinity
-    if bool::from(result_point.is_identity()) {
-        // Encode point at infinity as all zeros (65 bytes)
-        unsafe {
-            std::ptr::write_bytes(r, 0, 65);
-        }
-        return 1;
-    }
-
-    let result_encoded = result_point.to_encoded_point(false);
-    let result_bytes = result_encoded.as_bytes();
-
+/// Dispatches to the per-curve implementation above.
+///
+/// An unknown curve returns 0 rather than panicking, matching the behaviour this function had
+/// when secp256k1 was the only curve.
+pub fn ecfp_add_point(curve: u32, r: *mut u8, p: *const u8, q: *const u8) -> u32 {
+    // SAFETY: the caller guarantees r/p/q are valid for the curve's point length, per the
+    // `# Safety` contract on `ecalls::ecfp_add_point`.
     unsafe {
-        std::ptr::copy_nonoverlapping(result_bytes.as_ptr(), r, result_bytes.len());
+        match CurveKind::from_u32(curve) {
+            Some(CurveKind::Secp256k1) => curve_secp256k1::add_point(r, p, q),
+            Some(CurveKind::Secp256r1) => curve_secp256r1::add_point(r, p, q),
+            Some(CurveKind::Secp384r1) => curve_secp384r1::add_point(r, p, q),
+            None => 0,
+        }
     }
+}
 
-    1
+/// Dispatches to the per-curve implementation above.
+///
+/// An unknown curve returns 0 rather than panicking, matching the behaviour this function had
+/// when secp256k1 was the only curve.
+pub fn ecfp_scalar_mult(curve: u32, r: *mut u8, p: *const u8, k: *const u8, k_len: usize) -> u32 {
+    // SAFETY: the caller guarantees r/p are valid for the curve's point length and k for k_len,
+    // per the `# Safety` contract on `ecalls::ecfp_scalar_mult`.
+    unsafe {
+        match CurveKind::from_u32(curve) {
+            Some(CurveKind::Secp256k1) => curve_secp256k1::scalar_mult(r, p, k, k_len),
+            Some(CurveKind::Secp256r1) => curve_secp256r1::scalar_mult(r, p, k, k_len),
+            Some(CurveKind::Secp384r1) => curve_secp384r1::scalar_mult(r, p, k, k_len),
+            None => 0,
+        }
+    }
 }
 
 pub fn get_random_bytes(buffer: *mut u8, size: usize) -> u32 {
@@ -932,35 +979,39 @@ pub fn ecdsa_sign(
     signature_bytes.len()
 }
 
+/// Dispatches to the per-curve implementation above.
+///
+/// Panics on an unsupported curve or an over-long signature, which mirrors the VM: both are
+/// caller bugs rather than an invalid signature, and the VM terminates the V-App for them.
 pub fn ecdsa_verify(
     curve: u32,
     pubkey: *const u8,
     msg_hash: *const u8,
+    msg_hash_len: usize,
     signature: *const u8,
     signature_len: usize,
 ) -> u32 {
-    if curve != CurveKind::Secp256k1 as u32 {
+    let Some(curve) = CurveKind::from_u32(curve) else {
         panic!("Unsupported curve");
-    }
-
-    if signature_len > 72 {
+    };
+    if signature_len > curve.max_der_signature_len() {
         panic!("signature_len is too large");
     }
 
-    let pubkey_slice = unsafe { std::slice::from_raw_parts(pubkey, 65) };
-    let msg_hash_slice = unsafe { std::slice::from_raw_parts(msg_hash, 32) };
-    let signature_slice = unsafe { std::slice::from_raw_parts(signature, signature_len) };
-
-    let pubkey_point = EncodedPoint::from_bytes(pubkey_slice).expect("Invalid public key");
-    let verifying_key = ecdsa::VerifyingKey::from_encoded_point(&pubkey_point)
-        .expect("Failed to create verifying key");
-
-    let signature =
-        ecdsa::DerSignature::from_bytes(signature_slice.into()).expect("Invalid signature");
-
-    match verifying_key.verify_prehash(msg_hash_slice, &signature) {
-        Ok(_) => 1,
-        Err(_) => 0,
+    // SAFETY: the caller guarantees pubkey is valid for the curve's point length, msg_hash for
+    // msg_hash_len and signature for signature_len, per `ecalls::ecdsa_verify`.
+    unsafe {
+        match curve {
+            CurveKind::Secp256k1 => {
+                curve_secp256k1::verify(pubkey, msg_hash, msg_hash_len, signature, signature_len)
+            }
+            CurveKind::Secp256r1 => {
+                curve_secp256r1::verify(pubkey, msg_hash, msg_hash_len, signature, signature_len)
+            }
+            CurveKind::Secp384r1 => {
+                curve_secp384r1::verify(pubkey, msg_hash, msg_hash_len, signature, signature_len)
+            }
+        }
     }
 }
 

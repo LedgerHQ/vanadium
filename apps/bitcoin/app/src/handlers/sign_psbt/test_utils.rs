@@ -13,7 +13,7 @@ use common::{
     por::{ProofOfRegistration, Registerable},
     psbt::prepare_psbt,
 };
-use sdk::curve::{Curve, EcfpPrivateKey, ToPublicKey};
+use sdk::curve::{EcfpPrivateKey, HdCurve, ToPublicKey};
 
 /// rust-bitcoin doesn't support PSBTv2, so we use this helper for conversion.
 pub(super) fn serialize_as_psbtv2(psbt: &Psbt) -> Vec<u8> {

@@ -3,7 +3,7 @@
 /// seed that is generated in the app and stored in its storage, and never exported.
 /// This module implements simple derivation logic for both trees.
 use common::errors::Error;
-use sdk::curve::{Curve, HDPrivNode, Secp256k1};
+use sdk::curve::{HDPrivNode, HdCurve, Secp256k1};
 
 use crate::resident_key::{derive_resident_hd_node, get_resident_master_fingerprint};
 

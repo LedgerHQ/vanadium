@@ -5,7 +5,7 @@ use alloc::vec::Vec;
 
 use bitcoin::bip32::ChildNumber;
 use common::{bip388::KeyInformation, errors::Error};
-use sdk::curve::{Curve, EcfpPrivateKey, HDPrivNode, ToPublicKey};
+use sdk::curve::{EcfpPrivateKey, HDPrivNode, HdCurve, ToPublicKey};
 
 use crate::bip32::KeyTree;
 use crate::resident_key::{derive_resident_hd_node, get_resident_master_fingerprint};

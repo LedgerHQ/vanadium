@@ -362,7 +362,7 @@ ecall5!(ecfp_scalar_mult, ECALL_ECFP_SCALAR_MULT, (curve: u32), (r: *mut u8), (p
 ecall2!(get_random_bytes, ECALL_GET_RANDOM_BYTES, (buffer: *mut u8), (size: usize), u32);
 
 ecall6!(ecdsa_sign, ECALL_ECDSA_SIGN, (curve: u32), (mode: u32), (hash_id: u32), (privkey: *const u8), (msg_hash: *const u8), (signature: *mut u8), usize);
-ecall5!(ecdsa_verify, ECALL_ECDSA_VERIFY, (curve: u32), (pubkey: *const u8), (msg_hash: *const u8), (signature: *const u8), (signature_len: usize), u32);
+ecall6!(ecdsa_verify, ECALL_ECDSA_VERIFY, (curve: u32), (pubkey: *const u8), (msg_hash: *const u8), (msg_hash_len: usize), (signature: *const u8), (signature_len: usize), u32);
 ecall8!(schnorr_sign, ECALL_SCHNORR_SIGN, (curve: u32), (mode: u32), (hash_id: u32), (privkey: *const u8), (msg: *const u8), (msg_len: usize), (signature: *mut u8), (entropy: *const [u8; 32]), usize);
 ecall8!(schnorr_verify, ECALL_SCHNORR_VERIFY, (curve: u32), (mode: u32), (hash_id: u32), (pubkey: *const u8), (msg: *const u8), (msg_len: usize), (signature: *const u8), (signature_len: usize), u32);
 

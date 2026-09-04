@@ -102,6 +102,12 @@ pub const MAX_CURVE_POINT_SIZE: usize = CurveKind::Secp384r1.point_len();
 /// Largest [`CurveKind::max_der_signature_len`] over all supported curves.
 pub const MAX_DER_SIGNATURE_SIZE: usize = CurveKind::Secp384r1.max_der_signature_len();
 
+/// Largest message digest `ecdsa_verify` will accept, in bytes.
+///
+/// ECDSA does not constrain the digest length, so the bound is a buffer bound rather than a
+/// cryptographic one: 64 bytes covers every hash the SDK offers, SHA-512 included.
+pub const MAX_ECDSA_HASH_SIZE: usize = 64;
+
 // TODO: IDs for now are matching the ones in the ledger SDK
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 #[repr(C)]

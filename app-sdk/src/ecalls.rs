@@ -56,7 +56,9 @@ pub fn get_device_property(property_id: u32) -> u32 {
 /// Retrieves the fingerprint for the master public key for the specified curve.
 ///
 /// # Parameters
-/// - `curve`: The elliptic curve identifier. Currently only `Secp256k1` is supported.
+/// - `curve`: The elliptic curve identifier. Only `Secp256k1` is supported, and that is
+///   deliberate rather than provisional: this operation needs the device seed, which the VM
+///   only derives on secp256k1. The verification-only curves are rejected.
 ///
 /// # Returns
 /// The master fingerprint as a 32-bit unsigned integer, computed as the first 32 bits of
@@ -300,7 +302,9 @@ forward_to_ecall! {
     /// Derives a hierarchical deterministic (HD) node, made of the private key and the corresponding chain code.
     ///
     /// # Parameters
-    /// - `curve`: The elliptic curve identifier. Currently only `Secp256k1` is supported.
+    /// - `curve`: The elliptic curve identifier. Only `Secp256k1` is supported, and that is
+    ///   deliberate rather than provisional: this operation needs the device seed, which the VM
+    ///   only derives on secp256k1. The verification-only curves are rejected.
     /// - `path`: Pointer to the derivation path array.
     /// - `path_len`: Length of the derivation path array.
     /// - `privkey`: Pointer to the buffer to store the derived private key.
@@ -349,8 +353,13 @@ forward_to_ecall! {
 
     /// Adds two elliptic curve points `p` and `q`, storing the result in `r`.
     ///
+    /// Points are in uncompressed SEC1 form, `0x04 || X || Y`, except for the point at infinity,
+    /// which is all zero bytes. Their length is `CurveKind::point_len()` for the given curve: 65
+    /// bytes for `Secp256k1` and `Secp256r1`, 97 bytes for `Secp384r1`.
+    ///
     /// # Parameters
-    /// - `curve`: The elliptic curve identifier. Currently only `Secp256k1` is supported.
+    /// - `curve`: The elliptic curve identifier. `Secp256k1`, `Secp256r1` and `Secp384r1` are
+    ///   supported.
     /// - `r`: Pointer to the result buffer.
     /// - `p`: Pointer to the first point buffer.
     /// - `q`: Pointer to the second point buffer.
@@ -359,25 +368,27 @@ forward_to_ecall! {
     /// 1 on success, 0 on error.
     ///
     /// # Safety
-    /// - `r` must be a valid pointer to at least 65 bytes of writable memory.
-    /// - `p` and `q` must each be a valid pointer to at least 65 bytes of readable memory.
+    /// - `r` must be a valid pointer to at least `CurveKind::point_len()` bytes of writable memory.
+    /// - `p` and `q` must each be a valid pointer to at least `CurveKind::point_len()` bytes of
+    ///   readable memory.
     pub unsafe fn ecfp_add_point(curve: u32, r: *mut u8, p: *const u8, q: *const u8) -> u32;
 
     /// Multiplies an elliptic curve point `p` by a scalar `k`, storing the result in `r`.
     ///
     /// # Parameters
-    /// - `curve`: The elliptic curve identifier. Currently only `Secp256k1` is supported.
+    /// - `curve`: The elliptic curve identifier. `Secp256k1`, `Secp256r1` and `Secp384r1` are
+    ///   supported.
     /// - `r`: Pointer to the result buffer.
     /// - `p`: Pointer to the point buffer.
     /// - `k`: Pointer to the scalar buffer.
-    /// - `k_len`: Length of the scalar buffer.
+    /// - `k_len`: Length of the scalar buffer. At most `CurveKind::scalar_len()` for the curve.
     ///
     /// # Returns
     /// 1 on success, 0 on error.
     ///
     /// # Safety
-    /// - `r` must be a valid pointer to at least 65 bytes of writable memory.
-    /// - `p` must be a valid pointer to at least 65 bytes of readable memory.
+    /// - `r` must be a valid pointer to at least `CurveKind::point_len()` bytes of writable memory.
+    /// - `p` must be a valid pointer to at least `CurveKind::point_len()` bytes of readable memory.
     /// - `k` must be a valid pointer to at least `k_len` bytes of readable memory.
     pub unsafe fn ecfp_scalar_mult(curve: u32, r: *mut u8, p: *const u8, k: *const u8, k_len: usize) -> u32;
 
@@ -401,7 +412,9 @@ forward_to_ecall! {
     /// **This ecall is unstable and subject to change in future versions.**
     ///
     /// # Parameters
-    /// - `curve`: The elliptic curve identifier. Currently only `Secp256k1` is supported.
+    /// - `curve`: The elliptic curve identifier. Only `Secp256k1` is supported, and that is
+    ///   deliberate rather than provisional: the other curves are offered for verification
+    ///   only, so the VM has no private-key path for them.
     /// - `mode`: The signing mode. Only `RFC6979` is supported.
     /// - `hash_id`: The hash identifier. Only `Sha256` is supported.
     /// - `privkey`: Pointer to the private key buffer.
@@ -431,23 +444,32 @@ forward_to_ecall! {
     /// **This ecall is unstable and subject to change in future versions.**
     ///
     /// # Parameters
-    /// - `curve`: The elliptic curve identifier. Currently only `Secp256k1` is supported.
-    /// - `pubkey`: Pointer to the public key buffer.
+    /// - `curve`: The elliptic curve identifier. `Secp256k1`, `Secp256r1` and `Secp384r1` are
+    ///   supported.
+    /// - `pubkey`: Pointer to the public key, in uncompressed SEC1 form (`0x04 || X || Y`).
     /// - `msg_hash`: Pointer to the message hash buffer.
-    /// - `signature`: Pointer to the signature buffer.
+    /// - `msg_hash_len`: Length of the message hash. This is *not* implied by the curve: a digest
+    ///   shorter than the curve order is legal (DNSSEC algorithm 14, for instance, is P-384 with
+    ///   SHA-384, but ECDSA permits any digest length).
+    /// - `signature`: Pointer to the DER-encoded signature.
     /// - `signature_len`: Length of the signature buffer.
     ///
     /// # Returns
-    /// 1 on success, 0 on error.
+    /// 1 if the signature is valid, 0 if it is not.
+    ///
+    /// Passing a curve the VM does not support, or a signature longer than the curve's maximum
+    /// DER encoding, is a caller bug rather than an invalid signature, and terminates the V-App.
     ///
     /// # Safety
-    /// - `pubkey` must be a valid pointer to at least 65 bytes of readable memory.
-    /// - `msg_hash` must be a valid pointer to at least 32 bytes of readable memory.
+    /// - `pubkey` must be a valid pointer to at least `CurveKind::point_len()` bytes of readable
+    ///   memory for the given curve: 65 bytes for `Secp256k1` and `Secp256r1`, 97 for `Secp384r1`.
+    /// - `msg_hash` must be a valid pointer to at least `msg_hash_len` bytes of readable memory.
     /// - `signature` must be a valid pointer to at least `signature_len` bytes of readable memory.
     pub unsafe fn ecdsa_verify(
         curve: u32,
         pubkey: *const u8,
         msg_hash: *const u8,
+        msg_hash_len: usize,
         signature: *const u8,
         signature_len: usize,
     ) -> u32;
@@ -458,7 +480,9 @@ forward_to_ecall! {
     /// **This ecall is unstable and subject to change in future versions.**
     ///
     /// # Parameters
-    /// - `curve`: The elliptic curve identifier. Currently only `Secp256k1` is supported.
+    /// - `curve`: The elliptic curve identifier. Only `Secp256k1` is supported, and that is
+    ///   deliberate rather than provisional: the only mode is BIP-340, which is defined for
+    ///   secp256k1 alone.
     /// - `mode`: The signing mode. Only `BIP340` is supported.
     /// - `hash_id`: The hash identifier.
     /// - `privkey`: Pointer to the private key buffer.
@@ -492,7 +516,9 @@ forward_to_ecall! {
     /// **This ecall is unstable and subject to change in future versions.**
     ///
     /// # Parameters
-    /// - `curve`: The elliptic curve identifier. Currently only `Secp256k1` is supported.
+    /// - `curve`: The elliptic curve identifier. Only `Secp256k1` is supported, and that is
+    ///   deliberate rather than provisional: the only mode is BIP-340, which is defined for
+    ///   secp256k1 alone.
     /// - `mode`: The verification mode. It must match the mode used for signing.
     /// - `hash_id`: The hash identifier. Only `Sha256` is supported.
     /// - `pubkey`: Pointer to the public key buffer.

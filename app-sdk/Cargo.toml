@@ -23,6 +23,10 @@ k256 = { version = "0.13.4", default-features = false, features = ["alloc", "ecd
 lazy_static = { version = "1.5.0", optional = true }
 num-bigint = { version = "0.4.6", optional = true }
 num-traits = { version = "0.2.19", optional = true }
+# Verification-only curves. The host implementations of the curve ECALLs need one crate per
+# curve: the k256/p256/p384 point and scalar types are distinct, even though their traits match.
+p256 = { version = "0.13.2", default-features = false, features = ["alloc", "arithmetic", "ecdsa"], optional = true }
+p384 = { version = "0.13.1", default-features = false, features = ["alloc", "arithmetic", "ecdsa"], optional = true }
 rand = { version = "0.9.1", optional = true }
 ripemd = { version = "0.1.3", optional = true }
 sha2 = { version = "0.10.8", optional = true }
@@ -39,6 +43,8 @@ target_native = [
     "dep:lazy_static",
     "dep:num-bigint",
     "dep:num-traits",
+    "dep:p256",
+    "dep:p384",
     "dep:rand",
     "dep:ripemd",
     "dep:sha2",

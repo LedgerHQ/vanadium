@@ -12,10 +12,24 @@ use common::ecall_constants::{CurveKind, EcdsaSignMode, HashId, SchnorrSignMode}
 
 use crate::ecalls;
 
-/// A trait representing a cryptographic curve with hierarchical deterministic (HD) key derivation capabilities.
+/// A cryptographic curve that the ECALL interface can operate on.
+///
+/// This is the minimum a curve needs in order to be used for public-key work: point arithmetic
+/// and signature verification. It deliberately says nothing about private keys, because the
+/// verification-only curves ([`Secp256r1`], [`Secp384r1`]) have none on the device — see
+/// [`HdCurve`].
 ///
 /// # Constants
 /// - `SCALAR_LENGTH`: The length of the scalar in bytes.
+pub trait Curve<const SCALAR_LENGTH: usize>: Sized {
+    fn curve_kind() -> CurveKind;
+}
+
+/// A curve whose keys the device can derive from its seed.
+///
+/// Only [`Secp256k1`] qualifies: it is the curve the VM derives BIP-32 nodes on. Splitting this
+/// out of [`Curve`] is what lets a verification-only curve exist without having to supply — or
+/// stub out, and fail at runtime — operations that are meaningless for it.
 ///
 /// # Required Methods
 ///
@@ -29,10 +43,9 @@ use crate::ecalls;
 /// Retrieves the fingerprint of the master key.
 ///
 /// - Returns: A `u32` value representing the fingerprint of the master key.
-pub trait Curve<const SCALAR_LENGTH: usize>: Sized {
+pub trait HdCurve<const SCALAR_LENGTH: usize>: Curve<SCALAR_LENGTH> {
     fn derive_hd_node(path: &[u32]) -> Result<HDPrivNode<Self, SCALAR_LENGTH>, &'static str>;
     fn get_master_fingerprint() -> u32;
-    fn curve_kind() -> CurveKind;
 }
 
 /// A struct representing a Hierarchical Deterministic (HD) node composed of a private key, and a 32-byte chaincode.
@@ -217,6 +230,37 @@ where
             public_key: Point::new(x, y),
         }
     }
+
+    /// Verifies a DER-encoded ECDSA signature over a message digest.
+    ///
+    /// `msg_hash` is the digest of the signed message. Its length need not match the curve's
+    /// scalar length: ECDSA accepts a shorter digest, and pairings like P-384 with SHA-256 do
+    /// occur in practice.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` if the signature is valid, `Err` if it is not.
+    pub fn ecdsa_verify_hash(
+        &self,
+        msg_hash: &[u8],
+        signature: &[u8],
+    ) -> Result<(), &'static str> {
+        // SAFETY: `self.public_key` is a valid uncompressed SEC1 point of this curve's length;
+        // msg_hash and signature are valid slices passed with their own lengths.
+        if 1 != unsafe {
+            ecalls::ecdsa_verify(
+                C::curve_kind() as u32,
+                self.public_key.as_ptr(),
+                msg_hash.as_ptr(),
+                msg_hash.len(),
+                signature.as_ptr(),
+                signature.len(),
+            )
+        } {
+            return Err("Failed to verify hash with ecdsa");
+        }
+        Ok(())
+    }
 }
 
 impl<C, const SCALAR_LENGTH: usize> From<Point<C, SCALAR_LENGTH>>
@@ -302,73 +346,89 @@ where
     fn to_public_key(&self) -> EcfpPublicKey<C, SCALAR_LENGTH>;
 }
 
-// We could implement this for any SCALAR_LENGTH, but this currently requires
-// the #![feature(generic_const_exprs)], as the byte size is 1 + 2*SCALAR_LENGTH.
-impl<C: Curve<32>> Point<C, 32> {
-    const SCALAR_ONE: [u8; 32] = [
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 1,
-    ];
+/// Generates the byte-array conversions for one scalar width.
+///
+/// These cannot be written once for every `SCALAR_LENGTH`: the encoded length is
+/// `1 + 2 * SCALAR_LENGTH`, and expressing that as an array size needs
+/// `#![feature(generic_const_exprs)]`. So the impl is generated for each width actually in use —
+/// 32 bytes for secp256k1 and P-256, 48 for P-384.
+macro_rules! impl_point_bytes {
+    ($scalar_length:expr, $point_length:expr) => {
+        impl<C: Curve<$scalar_length>> Point<C, $scalar_length> {
+            const SCALAR_ONE: [u8; $scalar_length] = {
+                let mut one = [0u8; $scalar_length];
+                one[$scalar_length - 1] = 1;
+                one
+            };
 
-    /// Converts the point to a byte array.
-    ///
-    /// # Returns
-    ///
-    /// A byte array of length `1 + 2 * 32` representing the point.
-    pub fn to_bytes(&self) -> &[u8; 65] {
-        // SAFETY: `Point` is `#[repr(C)]` with a known layout:
-        // prefix (1 byte), x (32 bytes), y (32 bytes) = 65 bytes total.
-        // Therefore, we can safely reinterpret the memory as a [u8; 65].
-        unsafe { &*(self as *const Self as *const [u8; 65]) }
-    }
+            /// Converts the point to a byte array.
+            ///
+            /// # Returns
+            ///
+            /// A byte array of length `1 + 2 * SCALAR_LENGTH` representing the point.
+            pub fn to_bytes(&self) -> &[u8; $point_length] {
+                // Guards a mistyped macro invocation, e.g. `impl_point_bytes!(48, 96)`.
+                const _: () = assert!(1 + 2 * $scalar_length == $point_length);
+                // SAFETY: `Point` is `#[repr(C)]` with a known layout: a zero-sized `PhantomData`,
+                // then prefix (1 byte), x and y (SCALAR_LENGTH bytes each). Every field is
+                // byte-aligned, so there is no padding and the total is exactly
+                // 1 + 2 * SCALAR_LENGTH == $point_length bytes. `point_layout_has_no_padding` in
+                // the tests below checks that for each instantiated width.
+                unsafe { &*(self as *const Self as *const [u8; $point_length]) }
+            }
 
-    /// Creates a point from a byte array, validating that it lies on the curve.
-    ///
-    /// # Arguments
-    ///
-    /// * `bytes` - A byte array of length `1 + 2 * 32` representing the point.
-    ///
-    /// # Returns
-    ///
-    /// A `Result` containing the `Point` on success, or an error message if:
-    /// - The prefix byte is not `0x04` (uncompressed point format) or `0x00` (point at infinity)
-    /// - For `0x04` prefix, the point does not lie on the curve
-    pub fn from_bytes(bytes: &[u8; 65]) -> Result<Self, &'static str> {
-        if bytes[0] == 0x00 {
-            return Ok(Point::default());
+            /// Creates a point from a byte array, validating that it lies on the curve.
+            ///
+            /// # Arguments
+            ///
+            /// * `bytes` - A byte array of length `1 + 2 * SCALAR_LENGTH` representing the point.
+            ///
+            /// # Returns
+            ///
+            /// A `Result` containing the `Point` on success, or an error message if:
+            /// - The prefix byte is not `0x04` (uncompressed point format) or `0x00` (point at infinity)
+            /// - For `0x04` prefix, the point does not lie on the curve
+            pub fn from_bytes(bytes: &[u8; $point_length]) -> Result<Self, &'static str> {
+                if bytes[0] == 0x00 {
+                    return Ok(Point::default());
+                }
+
+                if bytes[0] != 0x04 {
+                    return Err("Invalid point prefix. Expected 0x04 or 0x00");
+                }
+
+                let point: Self = Self {
+                    curve_marker: PhantomData,
+                    prefix: bytes[0],
+                    x: bytes[1..1 + $scalar_length].try_into().unwrap(),
+                    y: bytes[1 + $scalar_length..$point_length].try_into().unwrap(),
+                };
+
+                // Validate point is on curve by attempting scalar multiplication by 1.
+                // If the point is not on the curve, the underlying ecall will fail.
+                let mut result: Point<C, $scalar_length> = Point::default();
+                // SAFETY: result is a valid point-sized output buffer; point is a valid
+                // uncompressed SEC1 point; SCALAR_ONE is a SCALAR_LENGTH-byte scalar.
+                if 1 != unsafe {
+                    ecalls::ecfp_scalar_mult(
+                        C::curve_kind() as u32,
+                        result.as_mut_ptr(),
+                        point.as_ptr(),
+                        Self::SCALAR_ONE.as_ptr(),
+                        $scalar_length,
+                    )
+                } {
+                    return Err("Point is not on the curve");
+                }
+
+                Ok(point)
+            }
         }
-
-        if bytes[0] != 0x04 {
-            return Err("Invalid point prefix. Expected 0x04 or 0x00");
-        }
-
-        let point: Self = Self {
-            curve_marker: PhantomData,
-            prefix: bytes[0],
-            x: bytes[1..33].try_into().unwrap(),
-            y: bytes[33..65].try_into().unwrap(),
-        };
-
-        // Validate point is on curve by attempting scalar multiplication by 1.
-        // If the point is not on the curve, the underlying ecall will fail.
-        let mut result: Point<C, 32> = Point::default();
-        // SAFETY: result is a valid 65-byte output buffer; point is a valid uncompressed SEC1 point;
-        // SCALAR_ONE is a 32-byte scalar.
-        if 1 != unsafe {
-            ecalls::ecfp_scalar_mult(
-                C::curve_kind() as u32,
-                result.as_mut_ptr(),
-                point.as_ptr(),
-                Self::SCALAR_ONE.as_ptr(),
-                32,
-            )
-        } {
-            return Err("Point is not on the curve");
-        }
-
-        Ok(point)
-    }
+    };
 }
+
+impl_point_bytes!(32, 65);
+impl_point_bytes!(48, 97);
 
 impl<C, const SCALAR_LENGTH: usize> Add for &Point<C, SCALAR_LENGTH>
 where
@@ -425,6 +485,12 @@ where
 pub struct Secp256k1;
 
 impl Curve<32> for Secp256k1 {
+    fn curve_kind() -> CurveKind {
+        CurveKind::Secp256k1
+    }
+}
+
+impl HdCurve<32> for Secp256k1 {
     fn derive_hd_node(path: &[u32]) -> Result<HDPrivNode<Self, 32>, &'static str> {
         let mut result = HDPrivNode::default();
         // SAFETY: path is a valid slice; privkey and chaincode are valid 32-byte output arrays.
@@ -446,13 +512,38 @@ impl Curve<32> for Secp256k1 {
     fn get_master_fingerprint() -> u32 {
         ecalls::get_master_fingerprint(Self::curve_kind() as u32)
     }
-
-    fn curve_kind() -> CurveKind {
-        CurveKind::Secp256k1
-    }
 }
 
 pub type Secp256k1Point = Point<Secp256k1, 32>;
+
+/// NIST P-256, also known as prime256v1.
+///
+/// Verification only: the device holds no P-256 private keys, so this implements [`Curve`] but
+/// not [`HdCurve`]. Used for signatures produced elsewhere — DNSSEC algorithm 13, for instance.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Secp256r1;
+
+impl Curve<32> for Secp256r1 {
+    fn curve_kind() -> CurveKind {
+        CurveKind::Secp256r1
+    }
+}
+
+pub type Secp256r1Point = Point<Secp256r1, 32>;
+
+/// NIST P-384.
+///
+/// Verification only, like [`Secp256r1`]. Used for DNSSEC algorithm 14, among others.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Secp384r1;
+
+impl Curve<48> for Secp384r1 {
+    fn curve_kind() -> CurveKind {
+        CurveKind::Secp384r1
+    }
+}
+
+pub type Secp384r1Point = Point<Secp384r1, 48>;
 
 impl Secp256k1 {
     // secp256k1 field prime p
@@ -652,27 +743,6 @@ impl EcfpPublicKey<Secp256k1, 32> {
         compressed[0] = bytes[64] % 2 + 0x02;
         compressed[1..33].copy_from_slice(&bytes[1..33]);
         compressed
-    }
-
-    pub fn ecdsa_verify_hash(
-        &self,
-        msg_hash: &[u8; 32],
-        signature: &[u8],
-    ) -> Result<(), &'static str> {
-        // SAFETY: pubkey is a 65-byte uncompressed SEC1 key; msg_hash is 32 bytes;
-        // signature is a valid slice.
-        if 1 != unsafe {
-            ecalls::ecdsa_verify(
-                Secp256k1::curve_kind() as u32,
-                self.public_key.as_ptr(),
-                msg_hash.as_ptr(),
-                signature.as_ptr(),
-                signature.len(),
-            )
-        } {
-            return Err("Failed to verify hash with ecdsa");
-        }
-        Ok(())
     }
 
     pub fn schnorr_verify(&self, msg: &[u8], signature: &[u8]) -> Result<(), &'static str> {
