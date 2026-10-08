@@ -933,6 +933,7 @@ impl<'a, const N: usize> CommEcallHandler<'a, N> {
     /// Computes `n mod m` into `r` (`len` bytes).
     ///
     /// Returns 1 on success, 0 if `len > MAX_BIGNUMBER_SIZE`, `len_m > len`, or `m` is zero.
+    #[inline(never)]
     fn handle_bn_modm<E: fmt::Debug>(
         &self,
         cpu: &mut Cpu<OutsourcedMemory<'_, N>>,
@@ -978,6 +979,7 @@ impl<'a, const N: usize> CommEcallHandler<'a, N> {
     ///
     /// Returns 1 on success, 0 if `len > MAX_BIGNUMBER_SIZE`, `m` is zero (or even for `bn_multm`),
     /// or `a` or `b` is not smaller than `m`.
+    #[inline(never)]
     fn handle_bn_binop<E: fmt::Debug>(
         &self,
         cpu: &mut Cpu<OutsourcedMemory<'_, N>>,
@@ -994,37 +996,36 @@ impl<'a, const N: usize> CommEcallHandler<'a, N> {
         let padded_len = bn_padded_len(len);
         let range = padded_len - len..padded_len;
 
+        // the result is written over `a`, to keep the stack frame small
         let mut a_local = [0u8; MAX_BIGNUMBER_SIZE];
         let mut b_local = [0u8; MAX_BIGNUMBER_SIZE];
         let mut m_local = [0u8; MAX_BIGNUMBER_SIZE];
         read_guest::<E, N>(cpu, a, &mut a_local[range.clone()])?;
         read_guest::<E, N>(cpu, b, &mut b_local[range.clone()])?;
         read_guest::<E, N>(cpu, m, &mut m_local[range.clone()])?;
-        let (a_local, b_local, m_local) = (
-            &a_local[..padded_len],
-            &b_local[..padded_len],
-            &m_local[..padded_len],
-        );
+        let (b_local, m_local) = (&b_local[..padded_len], &m_local[..padded_len]);
         if !is_modulus(m_local, op == BnBinop::Mul)
-            || !is_reduced(a_local, m_local)
+            || !is_reduced(&a_local[..padded_len], m_local)
             || !is_reduced(b_local, m_local)
         {
             return Ok(0);
         }
 
-        let mut r_local = [0u8; MAX_BIGNUMBER_SIZE];
-        // a, b < m = 1 means that a = b = 0; the result is 0, whatever cx would do with m = 1
-        if !is_one(m_local) {
+        if is_one(m_local) {
+            // a, b < m = 1 means that a = b = 0; so is the result, whatever cx does with m = 1
+            a_local.fill(0);
+        } else {
             let f = match op {
                 BnBinop::Add => sys::cx_math_addm_no_throw,
                 BnBinop::Sub => sys::cx_math_subm_no_throw,
                 BnBinop::Mul => sys::cx_math_multm_no_throw,
             };
             // SAFETY: all buffers hold `padded_len` bytes, as cx_bn_lock requires; the operands
-            // are smaller than the modulus, which is odd for the multiplication.
+            // are smaller than the modulus, which is odd for the multiplication. cx copies the
+            // operands into its own memory before exporting the result, so r may alias a.
             let res = unsafe {
                 f(
-                    r_local.as_mut_ptr(),
+                    a_local.as_mut_ptr(),
                     a_local.as_ptr(),
                     b_local.as_ptr(),
                     m_local.as_ptr(),
@@ -1036,7 +1037,7 @@ impl<'a, const N: usize> CommEcallHandler<'a, N> {
             }
         }
 
-        write_guest::<E, N>(cpu, r, &r_local[range])?;
+        write_guest::<E, N>(cpu, r, &a_local[range])?;
         Ok(1)
     }
 
@@ -1044,6 +1045,7 @@ impl<'a, const N: usize> CommEcallHandler<'a, N> {
     ///
     /// Returns 1 on success, 0 if `len > MAX_BIGNUMBER_SIZE`, `p` is zero or even, or `a` is zero
     /// or not smaller than `p`. The result is unspecified if `p` is not prime.
+    #[inline(never)]
     fn handle_bn_modinv_prime<E: fmt::Debug>(
         &self,
         cpu: &mut Cpu<OutsourcedMemory<'_, N>>,
@@ -1058,20 +1060,24 @@ impl<'a, const N: usize> CommEcallHandler<'a, N> {
         let padded_len = bn_padded_len(len);
         let range = padded_len - len..padded_len;
 
+        // the result is written over `a`, to keep the stack frame small
         let mut a_local = [0u8; MAX_BIGNUMBER_SIZE];
         let mut p_local = [0u8; MAX_BIGNUMBER_SIZE];
         read_guest::<E, N>(cpu, a, &mut a_local[range.clone()])?;
         read_guest::<E, N>(cpu, p, &mut p_local[range.clone()])?;
-        let (a_local, p_local) = (&a_local[..padded_len], &p_local[..padded_len]);
-        if !is_modulus(p_local, true) || is_zero(a_local) || !is_reduced(a_local, p_local) {
+        let p_local = &p_local[..padded_len];
+        if !is_modulus(p_local, true)
+            || is_zero(&a_local[..padded_len])
+            || !is_reduced(&a_local[..padded_len], p_local)
+        {
             return Ok(0);
         }
 
-        let mut r_local = [0u8; MAX_BIGNUMBER_SIZE];
-        // SAFETY: all buffers hold `padded_len` bytes; 0 < a < p, with p odd.
+        // SAFETY: all buffers hold `padded_len` bytes; 0 < a < p, with p odd. cx copies the
+        // operands into its own memory before exporting the result, so r may alias a.
         let res = unsafe {
             sys::cx_math_invprimem_no_throw(
-                r_local.as_mut_ptr(),
+                a_local.as_mut_ptr(),
                 a_local.as_ptr(),
                 p_local.as_ptr(),
                 padded_len,
@@ -1081,7 +1087,7 @@ impl<'a, const N: usize> CommEcallHandler<'a, N> {
             return Ok(0);
         }
 
-        write_guest::<E, N>(cpu, r, &r_local[range])?;
+        write_guest::<E, N>(cpu, r, &a_local[range])?;
         Ok(1)
     }
 
@@ -1089,6 +1095,7 @@ impl<'a, const N: usize> CommEcallHandler<'a, N> {
     ///
     /// Returns 1 on success, 0 if `len` or `len_e` exceeds `MAX_BIGNUMBER_SIZE`, `m` is zero or
     /// even, or `a` is not smaller than `m`.
+    #[inline(never)]
     fn handle_bn_powm<E: fmt::Debug>(
         &self,
         cpu: &mut Cpu<OutsourcedMemory<'_, N>>,
@@ -1105,33 +1112,32 @@ impl<'a, const N: usize> CommEcallHandler<'a, N> {
         let padded_len = bn_padded_len(len);
         let range = padded_len - len..padded_len;
 
+        // the result is written over `a`, to keep the stack frame small
         let mut a_local = [0u8; MAX_BIGNUMBER_SIZE];
         let mut e_local = [0u8; MAX_BIGNUMBER_SIZE];
         let mut m_local = [0u8; MAX_BIGNUMBER_SIZE];
         read_guest::<E, N>(cpu, a, &mut a_local[range.clone()])?;
         read_guest::<E, N>(cpu, e, &mut e_local[..len_e])?;
         read_guest::<E, N>(cpu, m, &mut m_local[range.clone()])?;
-        let (a_local, e_local, m_local) = (
-            &a_local[..padded_len],
-            &e_local[..len_e],
-            &m_local[..padded_len],
-        );
-        if !is_modulus(m_local, true) || !is_reduced(a_local, m_local) {
+        let (e_local, m_local) = (&e_local[..len_e], &m_local[..padded_len]);
+        if !is_modulus(m_local, true) || !is_reduced(&a_local[..padded_len], m_local) {
             return Ok(0);
         }
 
-        let mut r_local = [0u8; MAX_BIGNUMBER_SIZE];
         if is_one(m_local) {
             // everything is 0 modulo 1
+            a_local.fill(0);
         } else if is_zero(e_local) {
             // a^0 = 1, whatever cx would do with an empty or zero exponent
-            r_local[padded_len - 1] = 1;
+            a_local.fill(0);
+            a_local[padded_len - 1] = 1;
         } else {
             // SAFETY: a, m and r hold `padded_len` bytes, as cx_bn_lock requires; e is passed as
-            // a byte string; a < m, with m odd.
+            // a byte string; a < m, with m odd. cx copies the operands into its own memory before
+            // exporting the result, so r may alias a.
             let res = unsafe {
                 sys::cx_math_powm_no_throw(
-                    r_local.as_mut_ptr(),
+                    a_local.as_mut_ptr(),
                     a_local.as_ptr(),
                     e_local.as_ptr(),
                     len_e,
@@ -1144,13 +1150,14 @@ impl<'a, const N: usize> CommEcallHandler<'a, N> {
             }
         }
 
-        write_guest::<E, N>(cpu, r, &r_local[range])?;
+        write_guest::<E, N>(cpu, r, &a_local[range])?;
         Ok(1)
     }
 
     /// Initializes the hash context `ctx` for `hash_identifier`.
     ///
     /// Returns 1 on success, 0 if `hash_identifier` is not a supported algorithm and output size.
+    #[inline(never)]
     fn handle_hash_init<E: fmt::Debug>(
         &self,
         cpu: &mut Cpu<OutsourcedMemory<'_, N>>,
@@ -1176,6 +1183,7 @@ impl<'a, const N: usize> CommEcallHandler<'a, N> {
     ///
     /// Returns 1 on success, 0 if `hash_identifier` is invalid or `ctx` is not a context that the
     /// hash ECALLs produced for it.
+    #[inline(never)]
     fn handle_hash_update<E: fmt::Debug>(
         &self,
         cpu: &mut Cpu<OutsourcedMemory<'_, N>>,
@@ -1237,6 +1245,7 @@ impl<'a, const N: usize> CommEcallHandler<'a, N> {
     ///
     /// Returns 1 on success, 0 if `hash_identifier` is invalid or `ctx` is not a context that the
     /// hash ECALLs produced for it.
+    #[inline(never)]
     fn handle_hash_digest<E: fmt::Debug>(
         &self,
         cpu: &mut Cpu<OutsourcedMemory<'_, N>>,
@@ -1273,6 +1282,7 @@ impl<'a, const N: usize> CommEcallHandler<'a, N> {
     /// code to `private_key` and `chain_code` (32 bytes each).
     ///
     /// Returns 1 on success, 0 if the curve is not supported or `path_len > MAX_BIP32_PATH_LEN`.
+    #[inline(never)]
     fn handle_derive_hd_node<E: fmt::Debug>(
         &self,
         cpu: &mut Cpu<OutsourcedMemory<'_, N>>,
@@ -1305,6 +1315,7 @@ impl<'a, const N: usize> CommEcallHandler<'a, N> {
     /// `ripemd160(sha256(pk))`, where `pk` is the compressed public key, as a `u32`.
     ///
     /// Returns 1 on success, 0 if the curve is not supported.
+    #[inline(never)]
     fn handle_get_master_fingerprint<E: fmt::Debug>(
         &self,
         cpu: &mut Cpu<OutsourcedMemory<'_, N>>,
@@ -1326,6 +1337,7 @@ impl<'a, const N: usize> CommEcallHandler<'a, N> {
     /// Returns 1 on success, 0 if the labels buffer is longer than `MAX_SLIP21_LABELS_LEN`, a label
     /// is longer than `MAX_SLIP21_LABEL_LEN`, or the last label is truncated. An empty buffer
     /// gives the master node.
+    #[inline(never)]
     fn handle_derive_slip21_node<E: fmt::Debug>(
         &self,
         cpu: &mut Cpu<OutsourcedMemory<'_, N>>,
@@ -1409,6 +1421,7 @@ impl<'a, const N: usize> CommEcallHandler<'a, N> {
     /// Fills `size` bytes at `buffer` with random bytes.
     ///
     /// Returns 1 on success, 0 if `size > MAX_RANDOM_BYTES`.
+    #[inline(never)]
     fn handle_get_random_bytes<E: fmt::Debug>(
         &self,
         cpu: &mut Cpu<OutsourcedMemory<'_, N>>,
@@ -1741,6 +1754,7 @@ impl<'a, const N: usize> CommEcallHandler<'a, N> {
         }
     }
 
+    #[inline(never)]
     fn handle_show_page<E: fmt::Debug>(
         &mut self,
         cpu: &mut Cpu<OutsourcedMemory<'_, N>>,
@@ -1763,6 +1777,7 @@ impl<'a, const N: usize> CommEcallHandler<'a, N> {
         Ok(1)
     }
 
+    #[inline(never)]
     fn handle_show_step<E: fmt::Debug>(
         &mut self,
         cpu: &mut Cpu<OutsourcedMemory<'_, N>>,
@@ -1850,6 +1865,9 @@ impl<'a, const N: usize> EcallHandler for CommEcallHandler<'a, N> {
     type Memory = OutsourcedMemory<'a, N>;
     type Error = CommEcallError;
 
+    // Not inlined into the CPU loop: the dispatcher's frame must only be paid while an ECALL runs,
+    // and the crypto handlers are kept out of it for the same reason.
+    #[inline(never)]
     fn handle_ecall(
         &mut self,
         cpu: &mut Cpu<OutsourcedMemory<'a, N>>,
