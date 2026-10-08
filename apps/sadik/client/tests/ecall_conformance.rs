@@ -564,3 +564,139 @@ async fn test_ecfp_scalar_mult() {
     let call = RawEcall::EcfpScalarMult { curve: 0x22, p: point_kg(1), k: be(1, 32) };
     check(c, call, 0, INFINITY.to_vec()).await;
 }
+
+const ECDSA_RFC6979: u32 = 3 << 9;
+const SHA256_ID: u32 = 3;
+
+/// The DER-encoded RFC 6979 signature of `msg_hash`, reduced modulo n, computed on the host.
+fn host_ecdsa_sign(privkey: &[u8; 32], msg_hash: &[u8; 32]) -> Vec<u8> {
+    use k256::ecdsa::{signature::hazmat::PrehashSigner, Signature, SigningKey};
+    use k256::elliptic_curve::{ops::Reduce, PrimeField};
+    let reduced = k256::Scalar::reduce(k256::U256::from_be_slice(msg_hash)).to_repr();
+    let key = SigningKey::from_bytes(privkey.into()).unwrap();
+    let sig: Signature = key.sign_prehash(&reduced).unwrap();
+    sig.to_der().as_bytes().to_vec()
+}
+
+/// The high-S twin of a DER-encoded signature: same r, with s replaced by n - s.
+fn high_s(der: &[u8]) -> Vec<u8> {
+    let sig = k256::ecdsa::Signature::from_der(der).unwrap();
+    let (r, s) = sig.split_scalars();
+    let twin = k256::ecdsa::Signature::from_scalars(r.to_bytes(), (-*s).to_bytes()).unwrap();
+    twin.to_der().as_bytes().to_vec()
+}
+
+fn privkey(k: u64) -> [u8; 32] {
+    be(k, 32).try_into().unwrap()
+}
+
+#[tokio::test]
+async fn test_ecdsa_sign() {
+    let mut setup = setup().await;
+    let c = &mut setup.client;
+    let sign = |privkey: [u8; 32], msg_hash: [u8; 32]| RawEcall::EcdsaSign {
+        curve: SECP256K1,
+        mode: ECDSA_RFC6979,
+        hash_id: SHA256_ID,
+        privkey: privkey.to_vec(),
+        msg_hash: msg_hash.to_vec(),
+    };
+    let n_minus_1: [u8; 32] = {
+        let mut k = SECP256K1_N;
+        k[31] -= 1;
+        k
+    };
+    let hash = [0x42u8; 32];
+
+    for (key, msg_hash) in [
+        (privkey(1), hash),
+        (privkey(0xdeadbeef), [0u8; 32]),
+        (n_minus_1, hash),
+        // hashes that are not smaller than n are reduced
+        (privkey(7), SECP256K1_N),
+        (privkey(7), [0xff; 32]),
+    ] {
+        let expected = host_ecdsa_sign(&key, &msg_hash);
+        check(c, sign(key, msg_hash), expected.len() as u32, expected).await;
+    }
+
+    // invalid private keys
+    check(c, sign(privkey(0), hash), 0, vec![]).await;
+    check(c, sign(SECP256K1_N, hash), 0, vec![]).await;
+    check(c, sign([0xff; 32], hash), 0, vec![]).await;
+
+    // unsupported curve, mode and hash
+    for (curve, mode, hash_id) in [
+        (0x22, ECDSA_RFC6979, SHA256_ID),
+        (SECP256K1, 0, SHA256_ID),
+        (SECP256K1, ECDSA_RFC6979, 5),
+    ] {
+        let call = RawEcall::EcdsaSign {
+            curve,
+            mode,
+            hash_id,
+            privkey: privkey(1).to_vec(),
+            msg_hash: hash.to_vec(),
+        };
+        check(c, call, 0, vec![]).await;
+    }
+}
+
+#[tokio::test]
+async fn test_ecdsa_verify() {
+    let mut setup = setup().await;
+    let c = &mut setup.client;
+    let verify = |pubkey: Vec<u8>, msg_hash: [u8; 32], signature: Vec<u8>| RawEcall::EcdsaVerify {
+        curve: SECP256K1,
+        pubkey,
+        msg_hash: msg_hash.to_vec(),
+        signature,
+    };
+
+    let key = privkey(0x1234);
+    let pubkey = point_kg(0x1234);
+    let hash = [0x42u8; 32];
+    let sig = host_ecdsa_sign(&key, &hash);
+
+    check(c, verify(pubkey.clone(), hash, sig.clone()), 1, vec![]).await;
+    // high-S signatures are valid
+    check(c, verify(pubkey.clone(), hash, high_s(&sig)), 1, vec![]).await;
+    // wrong message or key
+    check(c, verify(pubkey.clone(), [0x43; 32], sig.clone()), 0, vec![]).await;
+    check(c, verify(point_kg(0x1235), hash, sig.clone()), 0, vec![]).await;
+
+    // a hash that is not smaller than n verifies like its reduction
+    let big_hash = [0xffu8; 32];
+    let big_sig = host_ecdsa_sign(&key, &big_hash);
+    check(c, verify(pubkey.clone(), big_hash, big_sig.clone()), 1, vec![]).await;
+    let mut reduced = [0u8; 32];
+    reduced[15] = 1;
+    reduced[16..].copy_from_slice(&hex_literal::hex!("4551231950b75fc4402da1732fc9bebe"));
+    check(c, verify(pubkey.clone(), reduced, big_sig), 1, vec![]).await;
+
+    // signatures that are not strict DER
+    let mut padded = sig.clone();
+    padded[1] += 1;
+    padded.push(0);
+    let mut wrong_tag = sig.clone();
+    wrong_tag[0] = 0x31;
+    for bad in [vec![], sig[..sig.len() - 1].to_vec(), padded, wrong_tag, vec![0x30; 73]] {
+        check(c, verify(pubkey.clone(), hash, bad), 0, vec![]).await;
+    }
+
+    // invalid public keys
+    let mut compressed_prefix = pubkey.clone();
+    compressed_prefix[0] = 0x02;
+    for bad in [INFINITY.to_vec(), off_curve_point(), compressed_prefix] {
+        check(c, verify(bad, hash, sig.clone()), 0, vec![]).await;
+    }
+
+    // unsupported curve
+    let call = RawEcall::EcdsaVerify {
+        curve: 0x22,
+        pubkey,
+        msg_hash: hash.to_vec(),
+        signature: sig,
+    };
+    check(c, call, 0, vec![]).await;
+}
