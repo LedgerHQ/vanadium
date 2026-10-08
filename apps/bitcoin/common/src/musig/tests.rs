@@ -2,7 +2,6 @@ use alloc::vec;
 use alloc::vec::Vec;
 use hex_literal::hex;
 
-use sdk::bignum::BigNumMod;
 use sdk::curve::{EcfpPrivateKey, EcfpPublicKey, Secp256k1, ToPublicKey};
 
 use super::*;
@@ -143,8 +142,7 @@ fn round_trip_two_party_keypath_no_tweaks() {
         .schnorr_verify(&msg, &sig)
         .expect("aggregated musig2 schnorr signature must verify under the tweaked aggregate key");
 
-    // Silence unused-warning on the BigNumMod / N imports if any.
-    let _ = (tweaked_q_x, BigNumMod::<32, N>::from_u32(0));
+    let _ = tweaked_q_x;
 }
 
 /// Same as the previous round-trip, but with **two non-xonly tweaks and one
