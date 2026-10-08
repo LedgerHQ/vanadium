@@ -26,6 +26,90 @@ pub enum Curve {
     Secp256k1,
 }
 
+/// A single ECALL, made with exactly the given arguments and bypassing the SDK's wrappers, to test
+/// the ECALL's own contract. The V-App allocates the output buffers, sized as each ECALL requires.
+///
+/// Lengths that the ECALL takes as a parameter are the lengths of the vectors, so a test can pass
+/// any length while every pointer stays valid.
+#[derive(Serialize, Deserialize, Debug, PartialEq, Clone)]
+pub enum RawEcall {
+    /// `bn_modm(r, n, n.len(), m, m.len())`
+    BnModm { n: Vec<u8>, m: Vec<u8> },
+    /// `bn_addm(r, a, b, m, len)`; `a`, `b` and `m` must have the same length
+    BnAddm { a: Vec<u8>, b: Vec<u8>, m: Vec<u8> },
+    /// `bn_subm(r, a, b, m, len)`; `a`, `b` and `m` must have the same length
+    BnSubm { a: Vec<u8>, b: Vec<u8>, m: Vec<u8> },
+    /// `bn_multm(r, a, b, m, len)`; `a`, `b` and `m` must have the same length
+    BnMultm { a: Vec<u8>, b: Vec<u8>, m: Vec<u8> },
+    /// `bn_powm(r, a, e, e.len(), m, len)`; `a` and `m` must have the same length
+    BnPowm { a: Vec<u8>, e: Vec<u8>, m: Vec<u8> },
+    /// `bn_modinv_prime(r, a, p, len)`; `a` and `p` must have the same length
+    BnModinvPrime { a: Vec<u8>, p: Vec<u8> },
+    /// `hash_init`, then `hash_update` with each chunk, then `hash_final` into a 64-byte buffer.
+    /// If `tamper` is `Some((offset, value))`, the context byte at `offset` is overwritten after
+    /// `hash_init`. Stops at the first call that does not return 1.
+    Hash {
+        hash_id: u32,
+        chunks: Vec<Vec<u8>>,
+        tamper: Option<(u32, u8)>,
+    },
+    /// `get_random_bytes(buffer, size)`
+    GetRandomBytes { size: u32 },
+    /// `derive_hd_node(curve, path, path.len(), privkey, chain_code)`; output `privkey || chain_code`
+    DeriveHdNode { curve: u32, path: Vec<u32> },
+    /// `get_master_fingerprint(curve)`; output the fingerprint, big-endian
+    GetMasterFingerprint { curve: u32 },
+    /// `derive_slip21_node(labels, labels.len(), out)` with the raw length-prefixed labels buffer
+    DeriveSlip21Node { labels: Vec<u8> },
+    /// `ecfp_add_point(curve, r, p, q)`; `p` and `q` must be 65 bytes
+    EcfpAddPoint { curve: u32, p: Vec<u8>, q: Vec<u8> },
+    /// `ecfp_scalar_mult(curve, r, p, k, k.len())`; `p` must be 65 bytes
+    EcfpScalarMult { curve: u32, p: Vec<u8>, k: Vec<u8> },
+    /// `ecdsa_sign(curve, mode, hash_id, privkey, msg_hash, signature)`; `privkey` and `msg_hash`
+    /// must be 32 bytes; output the signature, whose length is the status
+    EcdsaSign {
+        curve: u32,
+        mode: u32,
+        hash_id: u32,
+        privkey: Vec<u8>,
+        msg_hash: Vec<u8>,
+    },
+    /// `ecdsa_verify(curve, pubkey, msg_hash, signature, signature.len())`; `pubkey` must be 65
+    /// bytes and `msg_hash` 32
+    EcdsaVerify {
+        curve: u32,
+        pubkey: Vec<u8>,
+        msg_hash: Vec<u8>,
+        signature: Vec<u8>,
+    },
+    /// `schnorr_sign(curve, mode, hash_id, privkey, msg, msg.len(), signature, entropy)`;
+    /// `privkey` must be 32 bytes; output the signature, whose length is the status
+    SchnorrSign {
+        curve: u32,
+        mode: u32,
+        hash_id: u32,
+        privkey: Vec<u8>,
+        msg: Vec<u8>,
+        entropy: Option<[u8; 32]>,
+    },
+    /// `schnorr_verify(curve, mode, hash_id, pubkey, msg, msg.len(), signature, signature.len())`
+    SchnorrVerify {
+        curve: u32,
+        mode: u32,
+        hash_id: u32,
+        pubkey: Vec<u8>,
+        msg: Vec<u8>,
+        signature: Vec<u8>,
+    },
+}
+
+/// What a [`RawEcall`] returned: the ECALL's return value, and the content of its output buffer.
+#[derive(Serialize, Deserialize, Debug, PartialEq, Eq, Clone)]
+pub struct RawEcallResult {
+    pub status: u32,
+    pub output: Vec<u8>,
+}
+
 #[derive(Serialize, Deserialize, Debug, PartialEq)]
 pub enum Command {
     BigIntOperation {
@@ -84,6 +168,7 @@ pub enum Command {
     ReadStorage {
         slot: u32,
     },
+    RawEcall(RawEcall),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]

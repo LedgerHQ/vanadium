@@ -31,7 +31,12 @@ pub mod ux;
 pub use app::{App, AppBuilder, IsReady, TaskHandle};
 pub use vanadium_macros::handler;
 
+#[cfg(not(feature = "raw_ecalls"))]
 mod ecalls;
+
+/// The raw ECALLs, bypassing the SDK's wrappers. Only meant for testing the ECALLs themselves.
+#[cfg(feature = "raw_ecalls")]
+pub mod ecalls;
 
 #[cfg(feature = "target_vanadium_ledger")]
 mod ecalls_riscv;

@@ -1,4 +1,4 @@
-use common::{BigIntOperator, Command, Curve, HashId};
+use common::{BigIntOperator, Command, Curve, HashId, RawEcall, RawEcallResult};
 use sdk::{
     comm::{send_message, SendMessageError},
     vanadium_client::{VAppExecutionError, VAppTransport},
@@ -273,6 +273,19 @@ impl SadikClient {
         Ok(send_message(&mut self.vapp_transport, &msg)
             .await
             .expect("Error sending message"))
+    }
+
+    /// Makes a single ECALL with exactly the given arguments. Returns an error, rather than
+    /// panicking, if the V-App does not survive it.
+    pub async fn raw_ecall(&mut self, call: RawEcall) -> Result<RawEcallResult, SadikClientError> {
+        let msg = postcard::to_allocvec(&Command::RawEcall(call)).expect("Serialization failed");
+        match send_message(&mut self.vapp_transport, &msg).await {
+            Ok(response) => {
+                postcard::from_bytes(&response).map_err(|_| "Invalid raw ECALL response".into())
+            }
+            Err(SendMessageError::VAppExecutionError(e)) => Err(e.into()),
+            Err(_) => Err("Error sending message".into()),
+        }
     }
 
     pub async fn exit(&mut self) -> Result<i32, &'static str> {

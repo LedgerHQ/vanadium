@@ -12,6 +12,8 @@ extern crate alloc;
 use alloc::{vec, vec::Vec};
 use common::{Command, Curve, ECPointOperation, HashId};
 
+mod raw;
+
 sdk::bootstrap!();
 
 /// The curve order of the Secp256k1 curve, represented as a ModulusProvider from Vanadium's app-sdk
@@ -291,6 +293,9 @@ async fn process_message(_app: &mut App, msg: &[u8]) -> Vec<u8> {
         Command::ReadStorage { slot } => sdk::storage::read_slot(slot)
             .expect("Failed to read storage")
             .to_vec(),
+        Command::RawEcall(call) => {
+            postcard::to_allocvec(&raw::raw_ecall(call)).expect("Serialization failed")
+        }
     };
 
     response

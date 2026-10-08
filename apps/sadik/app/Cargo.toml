@@ -16,7 +16,7 @@ target_vanadium_ledger = ["sdk/target_vanadium_ledger"]
 [dependencies]
 common = { package = "vnd-sadik-common", path = "../common"}
 postcard = { version = "1.1.1", default-features = false, features = ["alloc"] }
-sdk = { package = "vanadium-app-sdk", path = "../../../app-sdk", default-features = false }
+sdk = { package = "vanadium-app-sdk", path = "../../../app-sdk", default-features = false, features = ["raw_ecalls"] }
 serde = { version = "1.0.215", default-features = false, features = ["alloc"] }
 
 [workspace]
