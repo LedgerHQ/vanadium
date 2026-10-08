@@ -6,13 +6,12 @@
 use core::ops::{self, BitXor};
 use core::{fmt, str};
 
-use sdk::bignum::BigNumMod;
 use sdk::curve::Secp256k1Point;
 #[cfg(feature = "serde")]
 use serde::ser::SerializeTuple;
 use subtle::{Choice, ConstantTimeEq};
 
-use crate::constants::{self, G, N, P};
+use crate::constants::{self, G};
 use crate::Error::{self, InvalidPublicKey, InvalidSecretKey, InvalidTweak};
 #[cfg(feature = "hashes")]
 #[allow(deprecated)]
@@ -227,8 +226,7 @@ impl SecretKey {
     #[inline]
     #[must_use = "you forgot to use the negated secret key"]
     pub fn negate(mut self) -> SecretKey {
-        self.0 = *(-BigNumMod::<32, N>::from_be_bytes_noreduce(self.0)).as_be_bytes();
-
+        self.0 = *(-&sdk_scalar(&self.0)).as_be_bytes();
         self
     }
 
@@ -239,15 +237,11 @@ impl SecretKey {
     /// Returns an error if the resulting key would be invalid.
     #[inline]
     pub fn add_tweak(mut self, tweak: &Scalar) -> Result<SecretKey, Error> {
-        let self_bn = BigNumMod::<32, N>::from_be_bytes_noreduce(self.0);
-        let tweak_bn = BigNumMod::<32, N>::from_be_bytes_noreduce(*tweak.as_be_bytes());
-        let result_bn = &self_bn + &tweak_bn;
-        let result = result_bn.as_be_bytes();
-
-        if bool::from(result.ct_eq(&crate::constants::ZERO)) {
+        let result = &sdk_scalar(&self.0) + &sdk_scalar(tweak.as_be_bytes());
+        if result.is_zero() {
             return Err(InvalidTweak);
         }
-        self.0 = *result;
+        self.0 = *result.as_be_bytes();
         Ok(self)
     }
 
@@ -257,7 +251,15 @@ impl SecretKey {
     ///
     /// Returns an error if the resulting key would be invalid.
     #[inline]
-    pub fn mul_tweak(mut self, tweak: &Scalar) -> Result<SecretKey, Error> { todo!() }
+    pub fn mul_tweak(mut self, tweak: &Scalar) -> Result<SecretKey, Error> {
+        // the key is not 0, so the product is 0 only for a zero tweak
+        let result = &sdk_scalar(&self.0) * &sdk_scalar(tweak.as_be_bytes());
+        if result.is_zero() {
+            return Err(InvalidTweak);
+        }
+        self.0 = *result.as_be_bytes();
+        Ok(self)
+    }
 
     /// Returns the [`Keypair`] for this [`SecretKey`].
     ///
@@ -428,7 +430,10 @@ impl PublicKey {
     /// Negates the public key.
     #[inline]
     #[must_use = "you forgot to use the negated public key"]
-    pub fn negate<C: Verification>(mut self, secp: &Secp256k1<C>) -> PublicKey { todo!() }
+    pub fn negate<C: Verification>(mut self, secp: &Secp256k1<C>) -> PublicKey {
+        self.0 = -&self.0;
+        self
+    }
 
     /// Tweaks a [`PublicKey`] by adding `tweak * G` modulo the curve order.
     ///
@@ -463,7 +468,13 @@ impl PublicKey {
         secp: &Secp256k1<C>,
         other: &Scalar,
     ) -> Result<PublicKey, Error> {
-        todo!()
+        // the key is not infinity, so the product is infinity only for a zero tweak
+        let result = &self.0 * &sdk_scalar(other.as_be_bytes());
+        if result.is_zero() {
+            return Err(Error::InvalidTweak);
+        }
+        self.0 = result;
+        Ok(self)
     }
 
     /// Adds a second key to this one, returning the sum.
@@ -496,7 +507,6 @@ impl PublicKey {
     /// Errors under any of the following conditions:
     /// - The result would be the point at infinity, i.e. adding a point to its own negation.
     /// - The provided slice is empty.
-    /// - The number of elements in the provided slice is greater than `i32::MAX`.
     ///
     /// # Examples
     ///
@@ -512,7 +522,17 @@ impl PublicKey {
     /// let sum = PublicKey::combine_keys(&[&pk1, &pk2, &pk3]).expect("It's improbable to fail for 3 random public keys");
     /// # }
     /// ```
-    pub fn combine_keys(keys: &[&PublicKey]) -> Result<PublicKey, Error> { todo!() }
+    pub fn combine_keys(keys: &[&PublicKey]) -> Result<PublicKey, Error> {
+        let sum = keys.iter().fold(Secp256k1Point::default(), |acc, key| &acc + &key.0);
+        if sum.is_zero() {
+            // also the case of an empty slice
+            return Err(Error::InvalidPublicKeySum);
+        }
+        Ok(PublicKey(sum))
+    }
+
+    /// The SDK point of this public key.
+    pub(crate) fn as_point(&self) -> &Secp256k1Point { &self.0 }
 
     /// Returns the [`XOnlyPublicKey`] (and it's [`Parity`]) for this [`PublicKey`].
     #[inline]

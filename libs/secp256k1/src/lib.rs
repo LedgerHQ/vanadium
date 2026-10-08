@@ -168,7 +168,11 @@ mod secret;
 mod context;
 mod key;
 
+#[cfg(test)]
+mod k256_crosscheck;
+
 pub mod constants;
+pub mod ecdh;
 pub mod ecdsa;
 pub mod scalar;
 pub mod schnorr;
