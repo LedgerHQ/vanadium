@@ -452,3 +452,115 @@ async fn test_derive_slip21_node() {
     // a buffer longer than 256 bytes
     check(c, slip21(vec![0; 257]), 0, vec![0; 64]).await;
 }
+
+const INFINITY: [u8; 65] = [0u8; 65];
+
+/// The uncompressed encoding of `k * G`, or 65 zero bytes for infinity.
+fn point_kg(k: u64) -> Vec<u8> {
+    point_to_bytes(&(k256::ProjectivePoint::GENERATOR * k256::Scalar::from(k)))
+}
+
+fn point_to_bytes(p: &k256::ProjectivePoint) -> Vec<u8> {
+    use k256::elliptic_curve::{group::Group, sec1::ToEncodedPoint};
+    if bool::from(p.is_identity()) {
+        INFINITY.to_vec()
+    } else {
+        p.to_affine().to_encoded_point(false).as_bytes().to_vec()
+    }
+}
+
+/// The generator with its y-coordinate incremented: not on the curve.
+fn off_curve_point() -> Vec<u8> {
+    let mut p = point_kg(1);
+    p[64] = p[64].wrapping_add(1);
+    p
+}
+
+#[tokio::test]
+async fn test_ecfp_add_point() {
+    let mut setup = setup().await;
+    let c = &mut setup.client;
+    let add = |p: Vec<u8>, q: Vec<u8>| RawEcall::EcfpAddPoint { curve: SECP256K1, p, q };
+    let neg_g = point_to_bytes(&-k256::ProjectivePoint::GENERATOR);
+
+    check(c, add(point_kg(1), point_kg(2)), 1, point_kg(3)).await;
+    // doubling
+    check(c, add(point_kg(5), point_kg(5)), 1, point_kg(10)).await;
+    // P + (-P) is infinity
+    check(c, add(point_kg(1), neg_g.clone()), 1, INFINITY.to_vec()).await;
+    // infinity is the identity
+    check(c, add(INFINITY.to_vec(), point_kg(7)), 1, point_kg(7)).await;
+    check(c, add(point_kg(7), INFINITY.to_vec()), 1, point_kg(7)).await;
+    check(c, add(INFINITY.to_vec(), INFINITY.to_vec()), 1, INFINITY.to_vec()).await;
+
+    // invalid encodings, also next to infinity
+    let mut compressed_prefix = point_kg(1);
+    compressed_prefix[0] = 0x02;
+    let mut bad_infinity = INFINITY.to_vec();
+    bad_infinity[64] = 1;
+    let mut x_too_large = point_kg(1);
+    x_too_large[1..33].copy_from_slice(&hex_literal::hex!(
+        "fffffffffffffffffffffffffffffffffffffffffffffffffffffffefffffc2f"
+    ));
+    for invalid in [compressed_prefix, bad_infinity, x_too_large, off_curve_point()] {
+        check(c, add(invalid.clone(), point_kg(2)), 0, INFINITY.to_vec()).await;
+        check(c, add(point_kg(2), invalid.clone()), 0, INFINITY.to_vec()).await;
+        check(c, add(INFINITY.to_vec(), invalid.clone()), 0, INFINITY.to_vec()).await;
+        check(c, add(invalid, INFINITY.to_vec()), 0, INFINITY.to_vec()).await;
+    }
+
+    // unsupported curve
+    let call = RawEcall::EcfpAddPoint { curve: 0x22, p: point_kg(1), q: point_kg(2) };
+    check(c, call, 0, INFINITY.to_vec()).await;
+}
+
+#[tokio::test]
+async fn test_ecfp_scalar_mult() {
+    let mut setup = setup().await;
+    let c = &mut setup.client;
+    let mul = |p: Vec<u8>, k: Vec<u8>| RawEcall::EcfpScalarMult { curve: SECP256K1, p, k };
+    let n_minus = |d: u8| {
+        let mut k = SECP256K1_N.to_vec();
+        k[31] -= d;
+        k
+    };
+
+    check(c, mul(point_kg(1), be(3, 32)), 1, point_kg(3)).await;
+    check(c, mul(point_kg(7), be(1, 32)), 1, point_kg(7)).await;
+    check(c, mul(point_kg(7), be(5, 32)), 1, point_kg(35)).await;
+    // scalars shorter than 32 bytes, including the empty scalar 0
+    check(c, mul(point_kg(1), be(3, 1)), 1, point_kg(3)).await;
+    check(c, mul(point_kg(1), be(0x0102, 2)), 1, point_kg(0x0102)).await;
+    check(c, mul(point_kg(1), vec![]), 1, INFINITY.to_vec()).await;
+    // zero, and the largest scalar: (n - 1) * G = -G
+    check(c, mul(point_kg(1), be(0, 32)), 1, INFINITY.to_vec()).await;
+    check(
+        c,
+        mul(point_kg(1), n_minus(1)),
+        1,
+        point_to_bytes(&-k256::ProjectivePoint::GENERATOR),
+    )
+    .await;
+    // infinity
+    check(c, mul(INFINITY.to_vec(), be(5, 32)), 1, INFINITY.to_vec()).await;
+
+    // scalars that are not smaller than n, or too long
+    check(c, mul(point_kg(1), SECP256K1_N.to_vec()), 0, INFINITY.to_vec()).await;
+    let mut n_plus_1 = SECP256K1_N.to_vec();
+    n_plus_1[31] += 1;
+    check(c, mul(point_kg(1), n_plus_1), 0, INFINITY.to_vec()).await;
+    check(c, mul(point_kg(1), vec![0xff; 32]), 0, INFINITY.to_vec()).await;
+    check(c, mul(point_kg(1), be(1, 33)), 0, INFINITY.to_vec()).await;
+
+    // invalid points, even with the scalars 0 and 1
+    for k in [be(0, 32), be(1, 32), vec![]] {
+        check(c, mul(off_curve_point(), k), 0, INFINITY.to_vec()).await;
+    }
+    let mut compressed_prefix = point_kg(1);
+    compressed_prefix[0] = 0x03;
+    check(c, mul(compressed_prefix, be(1, 32)), 0, INFINITY.to_vec()).await;
+
+    // unsupported curve
+    let call = RawEcall::EcfpScalarMult { curve: 0x22, p: point_kg(1), k: be(1, 32) };
+    check(c, call, 0, INFINITY.to_vec()).await;
+}

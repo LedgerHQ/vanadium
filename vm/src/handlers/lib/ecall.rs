@@ -13,8 +13,9 @@ use common::{
     constants::{MAX_STORAGE_SLOTS, STORAGE_SLOT_SIZE},
     ecall_constants::{self, *},
     ecall_validation::{
-        is_bignum_len, is_modulus, is_reduced, is_zero, parse_hash_identifier, parse_slip21_labels,
-        MAX_BIP32_PATH_LEN, MAX_RANDOM_BYTES, MAX_SLIP21_LABELS_LEN,
+        classify_secp256k1_point, is_bignum_len, is_modulus, is_reduced, is_secp256k1_scalar,
+        is_zero, parse_hash_identifier, parse_slip21_labels, PointEncoding, MAX_BIP32_PATH_LEN,
+        MAX_RANDOM_BYTES, MAX_SLIP21_LABELS_LEN, SECP256K1_P,
     },
     ux::Deserializable,
     vm::{Cpu, CpuError, EcallHandler, MemoryError},
@@ -493,6 +494,104 @@ fn secp256k1_master_fingerprint() -> Option<u32> {
     let mut rip = [0u8; 20];
     ripemd160_hasher.finalize(&mut rip).unwrap();
     Some(u32::from_be_bytes([rip[0], rip[1], rip[2], rip[3]]))
+}
+
+/// Computes `k * P` with cx, for a point `P` on the curve other than infinity, and a scalar
+/// `0 < k < n`; the result is then never infinity. Returns `None` if cx fails.
+fn secp256k1_scalar_mult(p: &[u8; 65], k: &[u8; 32]) -> Option<[u8; 65]> {
+    let mut res = *p;
+    // SAFETY: res holds a 65-byte uncompressed point, and k 32 bytes.
+    let err = unsafe {
+        sys::cx_ecfp_scalar_mult_no_throw(
+            CurveKind::Secp256k1 as u8,
+            res.as_mut_ptr(),
+            k.as_ptr(),
+            k.len(),
+        )
+    };
+    (err == CX_OK).then_some(res)
+}
+
+/// Whether the canonical coordinates `x, y < p` satisfy the secp256k1 equation y^2 = x^3 + 7.
+///
+/// The check is done here, rather than left to cx, because cx's behaviour on points that are not
+/// on the curve is not documented.
+fn is_on_secp256k1(x: &[u8], y: &[u8]) -> bool {
+    let mut seven = [0u8; 32];
+    seven[31] = 7;
+    let (mut y2, mut x2, mut x3, mut rhs) = ([0u8; 32], [0u8; 32], [0u8; 32], [0u8; 32]);
+    let p = SECP256K1_P.as_ptr();
+    // SAFETY: all operands are 32 bytes (a multiple of 16) and smaller than the odd modulus p.
+    let ok = unsafe {
+        sys::cx_math_multm_no_throw(y2.as_mut_ptr(), y.as_ptr(), y.as_ptr(), p, 32) == CX_OK
+            && sys::cx_math_multm_no_throw(x2.as_mut_ptr(), x.as_ptr(), x.as_ptr(), p, 32) == CX_OK
+            && sys::cx_math_multm_no_throw(x3.as_mut_ptr(), x2.as_ptr(), x.as_ptr(), p, 32) == CX_OK
+            && sys::cx_math_addm_no_throw(rhs.as_mut_ptr(), x3.as_ptr(), seven.as_ptr(), p, 32)
+                == CX_OK
+    };
+    ok && y2 == rhs
+}
+
+/// Whether a 65-byte point is valid: either infinity, encoded as 65 zero bytes, or
+/// `0x04 || x || y` with canonical coordinates of a point on the curve.
+fn is_valid_secp256k1_point(p: &[u8; 65]) -> bool {
+    match classify_secp256k1_point(p) {
+        Some(PointEncoding::Infinity) => true,
+        Some(PointEncoding::Affine) => is_on_secp256k1(&p[1..33], &p[33..]),
+        None => false,
+    }
+}
+
+/// `P + Q`, or `None` if a point is invalid.
+///
+/// Like the other curve helpers, it is not inlined, so that its buffers are not on the stack while
+/// the handlers read or write the V-App's memory, which can page in.
+#[inline(never)]
+fn secp256k1_add(p: &[u8; 65], q: &[u8; 65]) -> Option<[u8; 65]> {
+    if !is_valid_secp256k1_point(p) || !is_valid_secp256k1_point(q) {
+        return None;
+    }
+
+    if is_zero(p) {
+        Some(*q)
+    } else if is_zero(q) {
+        Some(*p)
+    } else if p[1..33] != q[1..33] {
+        // distinct x-coordinates: the only case that cx_ecfp_add_point needs to handle
+        let mut res = [0u8; 65];
+        // SAFETY: all buffers are 65 bytes; both points are valid and neither is the negation of
+        // the other.
+        let err = unsafe {
+            sys::cx_ecfp_add_point_no_throw(
+                CurveKind::Secp256k1 as u8,
+                res.as_mut_ptr(),
+                p.as_ptr(),
+                q.as_ptr(),
+            )
+        };
+        (err == CX_OK).then_some(res)
+    } else if p[33..] == q[33..] {
+        // P + P = 2P
+        let mut two = [0u8; 32];
+        two[31] = 2;
+        secp256k1_scalar_mult(p, &two)
+    } else {
+        // same x-coordinate and different y-coordinate: Q = -P, and P + Q is infinity
+        Some([0u8; 65])
+    }
+}
+
+/// `k * P`, or `None` if the point is invalid or `k >= n`.
+#[inline(never)]
+fn secp256k1_mul(p: &[u8; 65], k: &[u8; 32]) -> Option<[u8; 65]> {
+    if !is_valid_secp256k1_point(p) || !is_secp256k1_scalar(k) {
+        return None;
+    }
+    if is_zero(p) || is_zero(k) {
+        Some([0u8; 65])
+    } else {
+        secp256k1_scalar_mult(p, k)
+    }
 }
 
 pub enum CommEcallError {
@@ -1249,6 +1348,11 @@ impl<'a, const N: usize> CommEcallHandler<'a, N> {
         Ok(1)
     }
 
+    /// Adds the points `p` and `q`, writing the result to `r`.
+    ///
+    /// Returns 1 on success, 0 if the curve is not supported or a point is invalid (see
+    /// `is_valid_secp256k1_point`).
+    #[inline(never)]
     fn handle_ecfp_add_point<E: fmt::Debug>(
         &self,
         cpu: &mut Cpu<OutsourcedMemory<'_, N>>,
@@ -1258,62 +1362,25 @@ impl<'a, const N: usize> CommEcallHandler<'a, N> {
         q: GuestPointer,
     ) -> Result<u32, CommEcallError> {
         if curve != CurveKind::Secp256k1 as u32 {
-            return Err(CommEcallError::InvalidParameters("Unsupported curve"));
+            return Ok(0);
         }
+        let (mut p_local, mut q_local) = ([0u8; 65], [0u8; 65]);
+        read_guest::<E, N>(cpu, p, &mut p_local)?;
+        read_guest::<E, N>(cpu, q, &mut q_local)?;
 
-        // copy inputs to local memory
-        let mut p_local: sys::cx_ecfp_public_key_t = Default::default();
-        p_local.curve = curve as u8;
-        p_local.W_len = 65;
-        cpu.get_segment::<E>(p.0)?
-            .read_buffer(p.0, &mut p_local.W)?;
-
-        let mut q_local: sys::cx_ecfp_public_key_t = Default::default();
-        q_local.curve = curve as u8;
-        q_local.W_len = 65;
-        cpu.get_segment::<E>(q.0)?
-            .read_buffer(q.0, &mut q_local.W)?;
-
-        let mut r_local: sys::cx_ecfp_public_key_t = Default::default();
-
-        // Check for point at infinity cases (first byte is 0)
-        let p_is_infinity = p_local.W[0] == 0;
-        let q_is_infinity = q_local.W[0] == 0;
-
-        if p_is_infinity && q_is_infinity {
-            // Both are infinity - return infinity
-            r_local.W = [0u8; 65];
-        } else if p_is_infinity {
-            // p is infinity - return q
-            r_local.W = q_local.W;
-        } else if q_is_infinity {
-            // q is infinity - return p
-            r_local.W = p_local.W;
-        } else {
-            // Neither is infinity - perform the addition
-            unsafe {
-                let res = sys::cx_ecfp_add_point_no_throw(
-                    curve as u8,
-                    r_local.W.as_mut_ptr(),
-                    p_local.W.as_ptr(),
-                    q_local.W.as_ptr(),
-                );
-                if res == sys::CX_EC_INFINITE_POINT {
-                    // Point at infinity - represent as 65 bytes of 0x00
-                    r_local.W = [0u8; 65];
-                } else if res != CX_OK {
-                    return Err(CommEcallError::GenericError("add_point failed"));
-                }
-            }
-        }
-
-        // copy r_local to r
-        let segment = cpu.get_segment::<E>(r.0)?;
-        segment.write_buffer(r.0, &r_local.W)?;
-
+        let Some(r_local) = secp256k1_add(&p_local, &q_local) else {
+            return Ok(0);
+        };
+        write_guest::<E, N>(cpu, r, &r_local)?;
         Ok(1)
     }
 
+    /// Multiplies the point `p` by the scalar `k` (`k_len` bytes, big-endian), writing the result
+    /// to `r`.
+    ///
+    /// Returns 1 on success, 0 if the curve is not supported, the point is invalid (see
+    /// `is_valid_secp256k1_point`), `k_len > 32` or `k >= n`.
+    #[inline(never)]
     fn handle_ecfp_scalar_mult<E: fmt::Debug>(
         &self,
         cpu: &mut Cpu<OutsourcedMemory<'_, N>>,
@@ -1323,63 +1390,18 @@ impl<'a, const N: usize> CommEcallHandler<'a, N> {
         k: GuestPointer,
         k_len: usize,
     ) -> Result<u32, CommEcallError> {
-        if curve != CurveKind::Secp256k1 as u32 {
-            return Err(CommEcallError::InvalidParameters("Unsupported curve"));
+        if curve != CurveKind::Secp256k1 as u32 || k_len > 32 {
+            return Ok(0);
         }
+        let mut p_local = [0u8; 65];
+        let mut k_local = Zeroizing::new([0u8; 32]);
+        read_guest::<E, N>(cpu, p, &mut p_local)?;
+        read_guest::<E, N>(cpu, k, &mut k_local[32 - k_len..])?;
 
-        if k_len > 32 {
-            return Err(CommEcallError::InvalidParameters("k_len is too large"));
-        }
-
-        // copy inputs to local memory
-        // we use r_local also for the final result
-        let mut r_local: sys::cx_ecfp_public_key_t = Default::default();
-        r_local.curve = curve as u8;
-        r_local.W_len = 65;
-        cpu.get_segment::<E>(p.0)?
-            .read_buffer(p.0, &mut r_local.W)?;
-
-        // Check if p is the point at infinity (first byte is 0)
-        if r_local.W[0] == 0 {
-            // Point at infinity - return directly
-            let segment = cpu.get_segment::<E>(r.0)?;
-            segment.write_buffer(r.0, &r_local.W)?;
-            return Ok(1);
-        }
-
-        let mut k_local: [u8; 32] = [0; 32];
-        cpu.get_segment::<E>(k.0)?
-            .read_buffer(k.0, &mut k_local[0..k_len])?;
-
-        // Check if scalar is identically 0
-        let mut any_nonzero = 0u8;
-        for &b in &k_local[0..k_len] {
-            any_nonzero |= b;
-        }
-        if any_nonzero == 0 {
-            // Return point at infinity directly
-            r_local.W = [0u8; 65];
-        } else {
-            unsafe {
-                let res = sys::cx_ecfp_scalar_mult_no_throw(
-                    curve as u8,
-                    r_local.W.as_mut_ptr(),
-                    k_local.as_ptr(),
-                    k_len,
-                );
-                if res == sys::CX_EC_INFINITE_POINT {
-                    // Point at infinity - represent as 65 bytes of 0x00
-                    r_local.W = [0u8; 65];
-                } else if res != CX_OK {
-                    return Err(CommEcallError::GenericError("scalar_mult failed"));
-                }
-            }
-        }
-
-        // copy r_local to r
-        let segment = cpu.get_segment::<E>(r.0)?;
-        segment.write_buffer(r.0, &r_local.W)?;
-
+        let Some(r_local) = secp256k1_mul(&p_local, &k_local) else {
+            return Ok(0);
+        };
+        write_guest::<E, N>(cpu, r, &r_local)?;
         Ok(1)
     }
 
