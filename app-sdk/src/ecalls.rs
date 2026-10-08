@@ -53,22 +53,6 @@ pub fn get_device_property(property_id: u32) -> u32 {
     ecalls_module::get_device_property(property_id)
 }
 
-/// Retrieves the fingerprint for the master public key for the specified curve.
-///
-/// # Parameters
-/// - `curve`: The elliptic curve identifier. Currently only `Secp256k1` is supported.
-///
-/// # Returns
-/// The master fingerprint as a 32-bit unsigned integer, computed as the first 32 bits of
-/// `ripemd160(sha256(pk))`, where `pk` is the compressed public key.
-///
-/// # Panics
-/// This function panics if the curve is not supported.
-#[inline(always)]
-pub fn get_master_fingerprint(curve: u32) -> u32 {
-    ecalls_module::get_master_fingerprint(curve)
-}
-
 forward_to_ecall! {
     /// Prints a fatal error message and exits the V-App.
     ///
@@ -306,20 +290,33 @@ forward_to_ecall! {
     /// - `a` and `p` must each be a valid pointer to at least `len` bytes of readable memory.
     pub unsafe fn bn_modinv_prime(r: *mut u8, a: *const u8, p: *const u8, len: usize) -> u32;
 
+    /// Retrieves the fingerprint of the master public key for the specified curve.
+    ///
+    /// # Parameters
+    /// - `curve`: The elliptic curve identifier. Currently only `Secp256k1` is supported.
+    /// - `fingerprint`: Pointer to where the fingerprint is written: the first 32 bits of
+    ///   `ripemd160(sha256(pk))`, read as a big-endian integer, where `pk` is the compressed
+    ///   public key.
+    ///
+    /// # Returns
+    /// 1 on success, 0 if the curve is not supported.
+    ///
+    /// # Safety
+    /// - `fingerprint` must be a valid pointer to a writable `u32`.
+    pub unsafe fn get_master_fingerprint(curve: u32, fingerprint: *mut u32) -> u32;
+
     /// Derives a hierarchical deterministic (HD) node, made of the private key and the corresponding chain code.
     ///
     /// # Parameters
     /// - `curve`: The elliptic curve identifier. Currently only `Secp256k1` is supported.
     /// - `path`: Pointer to the derivation path array.
-    /// - `path_len`: Length of the derivation path array.
+    /// - `path_len`: Length of the derivation path array, at most
+    ///   [`MAX_BIP32_PATH_LEN`](common::ecall_validation::MAX_BIP32_PATH_LEN).
     /// - `privkey`: Pointer to the buffer to store the derived private key.
     /// - `chain_code`: Pointer to the buffer to store the derived chain code.
     ///
     /// # Returns
-    /// 1 on success, 0 on error.
-    ///
-    /// # Panics
-    /// This function panics if the curve is not supported.
+    /// 1 on success, 0 if the curve is not supported or the path is too long.
     ///
     /// # Safety
     /// - `path` must be a valid pointer to at least `path_len` `u32` values of readable memory.
@@ -338,10 +335,7 @@ forward_to_ecall! {
     ///
     /// The `labels` buffer (with length `labels_len`) must contain the concatenated labels, each prefixed by its length.
     /// `labels_len` must be at most 256 bytes. Each of the labels must not be longer than 252 bytes.
-    ///
-    /// Ledger-specific limitations:
-    /// - The `labels` buffer must not be empty (no master key derivation).
-    /// - Each label must not contain a '/' character.
+    /// An empty buffer derives the master node.
     ///
     /// # Parameters
     /// - `labels`: Pointer to the concatenated, length-prefixed labels used for SLIP-21 derivation.
@@ -349,7 +343,7 @@ forward_to_ecall! {
     /// - `out`: Pointer to the buffer where the result will be written. It must be at least 64 bytes long.
     ///
     /// # Returns
-    /// 1 on success, 0 on error.
+    /// 1 on success, 0 if the labels buffer is malformed or too long.
     ///
     /// # Safety
     /// - `labels` must be a valid pointer to at least `labels_len` bytes of readable memory.

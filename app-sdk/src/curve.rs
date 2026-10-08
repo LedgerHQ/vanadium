@@ -444,7 +444,14 @@ impl Curve<32> for Secp256k1 {
     }
 
     fn get_master_fingerprint() -> u32 {
-        ecalls::get_master_fingerprint(Self::curve_kind() as u32)
+        let mut fingerprint = 0u32;
+        // SAFETY: fingerprint is a valid, writable u32.
+        if 1 != unsafe {
+            ecalls::get_master_fingerprint(Self::curve_kind() as u32, &mut fingerprint)
+        } {
+            panic!("Failed to get the master fingerprint");
+        }
+        fingerprint
     }
 
     fn curve_kind() -> CurveKind {

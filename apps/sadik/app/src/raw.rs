@@ -108,8 +108,9 @@ pub fn raw_ecall(call: RawEcall) -> RawEcallResult {
                 result(status, node.to_vec())
             }
             RawEcall::GetMasterFingerprint { curve } => {
-                let fingerprint = ecalls::get_master_fingerprint(curve);
-                result(1, fingerprint.to_be_bytes().to_vec())
+                let mut fingerprint = 0u32;
+                let status = ecalls::get_master_fingerprint(curve, &mut fingerprint);
+                result(status, fingerprint.to_be_bytes().to_vec())
             }
             RawEcall::DeriveSlip21Node { labels } => {
                 let mut out = [0u8; 64];

@@ -13,7 +13,8 @@ use common::{
     constants::{MAX_STORAGE_SLOTS, STORAGE_SLOT_SIZE},
     ecall_constants::{self, *},
     ecall_validation::{
-        is_bignum_len, is_modulus, is_reduced, is_zero, parse_hash_identifier, MAX_RANDOM_BYTES,
+        is_bignum_len, is_modulus, is_reduced, is_zero, parse_hash_identifier, parse_slip21_labels,
+        MAX_BIP32_PATH_LEN, MAX_RANDOM_BYTES, MAX_SLIP21_LABELS_LEN,
     },
     ux::Deserializable,
     vm::{Cpu, CpuError, EcallHandler, MemoryError},
@@ -86,9 +87,6 @@ mod device_props {
 compile_error!("Unsupported target OS. Only nanox, nanosplus, stax, and flex are supported.");
 
 use device_props::*;
-
-// BIP32 supports up to 255, but we don't want that many, and it would be very slow anyway
-const MAX_BIP32_PATH: usize = 16;
 
 const MAX_UX_STEP_LEN: usize = 512;
 const MAX_UX_PAGE_LEN: usize = 512;
@@ -420,6 +418,81 @@ fn write_guest<E: fmt::Debug, const N: usize>(
     }
     cpu.get_segment::<E>(ptr.0)?.write_buffer(ptr.0, buf)?;
     Ok(())
+}
+
+/// Derives the secp256k1 BIP-32 node at `path` from the device's seed, returning its private key
+/// and chain code.
+///
+/// The derivation syscall reports errors by throwing, which would kill the V-App, and its
+/// non-throwing replacement (`sys_hdkey_derive`) does not implement plain BIP-32 everywhere. So the
+/// callers only pass inputs that it accepts: the secp256k1 curve, which the VM's manifest
+/// authorizes for every path, and at most `MAX_BIP32_PATH_LEN` steps.
+///
+/// Not inlined, so that its buffers stay out of the frame of `handle_ecall`, which every ECALL pays.
+#[inline(never)]
+fn derive_bip32_node(path: &[u32]) -> (Zeroizing<[u8; 32]>, [u8; 32]) {
+    debug_assert!(path.len() <= MAX_BIP32_PATH_LEN);
+    // The OS can write up to 64 bytes of private key, depending on the curve.
+    let mut private_key = Zeroizing::new([0u8; 64]);
+    let mut chain_code = [0u8; 32];
+    // An empty path's pointer must still be valid on the device, so it always points to a local
+    // array.
+    let mut path_local = [0u32; MAX_BIP32_PATH_LEN];
+    path_local[..path.len()].copy_from_slice(path);
+    // SAFETY: path_local holds at least `path.len()` steps; the output buffers have the lengths
+    // that the syscall requires.
+    unsafe {
+        sys::os_perso_derive_node_bip32(
+            CurveKind::Secp256k1 as u8,
+            path_local.as_ptr(),
+            path.len() as u32,
+            private_key.as_mut_ptr(),
+            chain_code.as_mut_ptr(),
+        );
+    }
+
+    let mut res = Zeroizing::new([0u8; 32]);
+    res.copy_from_slice(&private_key[..32]);
+    (res, chain_code)
+}
+
+/// The fingerprint of the secp256k1 master public key, or `None` if the OS fails to compute the
+/// public key.
+///
+/// Not inlined, so that its buffers are released before the result is written to the V-App's
+/// memory, which can page in.
+#[inline(never)]
+fn secp256k1_master_fingerprint() -> Option<u32> {
+    let (private_key, _) = derive_bip32_node(&[]);
+
+    let mut pubkey: sys::cx_ecfp_public_key_t = Default::default();
+    let mut privkey = ZeroizingPrivateKey(sys::cx_ecfp_private_key_t::default());
+    let curve = CurveKind::Secp256k1 as u8;
+    // SAFETY: the private key buffer holds 32 bytes; privkey and pubkey are valid structs.
+    let ok = unsafe {
+        sys::cx_ecfp_init_private_key_no_throw(
+            curve,
+            private_key.as_ptr(),
+            private_key.len(),
+            &mut *privkey,
+        ) == CX_OK
+            && sys::cx_ecfp_generate_pair_no_throw(curve, &mut pubkey, &mut *privkey, true)
+                == CX_OK
+    };
+    if !ok || pubkey.W_len != 65 {
+        return None;
+    }
+
+    let mut sha_hasher = ledger_device_sdk::hash::sha2::Sha2_256::new();
+    sha_hasher.update(&[02u8 + (pubkey.W[64] % 2)]).unwrap();
+    sha_hasher.update(&pubkey.W[1..33]).unwrap();
+    let mut sha256hash = [0u8; 32];
+    sha_hasher.finalize(&mut sha256hash).unwrap();
+    let mut ripemd160_hasher = ledger_device_sdk::hash::ripemd::Ripemd160::new();
+    ripemd160_hasher.update(&sha256hash).unwrap();
+    let mut rip = [0u8; 20];
+    ripemd160_hasher.finalize(&mut rip).unwrap();
+    Some(u32::from_be_bytes([rip[0], rip[1], rip[2], rip[3]]))
 }
 
 pub enum CommEcallError {
@@ -1096,6 +1169,10 @@ impl<'a, const N: usize> CommEcallHandler<'a, N> {
         Ok(1)
     }
 
+    /// Derives the BIP-32 node at `path` from the device's seed, writing its private key and chain
+    /// code to `private_key` and `chain_code` (32 bytes each).
+    ///
+    /// Returns 1 on success, 0 if the curve is not supported or `path_len > MAX_BIP32_PATH_LEN`.
     fn handle_derive_hd_node<E: fmt::Debug>(
         &self,
         cpu: &mut Cpu<OutsourcedMemory<'_, N>>,
@@ -1104,117 +1181,51 @@ impl<'a, const N: usize> CommEcallHandler<'a, N> {
         path_len: usize,
         private_key: GuestPointer,
         chain_code: GuestPointer,
-    ) -> Result<(), CommEcallError> {
-        if curve != CurveKind::Secp256k1 as u32 {
-            return Err(CommEcallError::InvalidParameters("Unsupported curve"));
-        }
-        if path_len > MAX_BIP32_PATH {
-            return Err(CommEcallError::InvalidParameters("path_len is too large"));
+    ) -> Result<u32, CommEcallError> {
+        if curve != CurveKind::Secp256k1 as u32 || path_len > MAX_BIP32_PATH_LEN {
+            return Ok(0);
         }
 
-        // copy path to local memory (if path_len == 0, the pointer is invalid,
-        // so we don't want to read from the segment)
-        let mut path_local_raw: [u8; MAX_BIP32_PATH * 4] = [0; MAX_BIP32_PATH * 4];
-        if path_len > 0 {
-            cpu.get_segment::<E>(path.0)?
-                .read_buffer(path.0, &mut path_local_raw[0..(path_len * 4)])?;
-        }
-
+        let mut path_local_raw = [0u8; MAX_BIP32_PATH_LEN * 4];
+        read_guest::<E, N>(cpu, path, &mut path_local_raw[..path_len * 4])?;
         // read bytes and combine into u32 values safely (avoid unaligned access)
-        let mut path_local: [u32; MAX_BIP32_PATH] = [0; MAX_BIP32_PATH];
-        for i in 0..path_len {
-            let idx = (i * 4) as usize;
-            let bytes = &path_local_raw[idx..idx + 4];
-            path_local[i] = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+        let mut path_local = [0u32; MAX_BIP32_PATH_LEN];
+        for (step, bytes) in path_local.iter_mut().zip(path_local_raw.chunks_exact(4)) {
+            *step = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
         }
 
-        // derive the key
-        let mut private_key_local = Zeroizing::new([0u8; 32]);
-        let mut chain_code_local: [u8; 32] = [0; 32];
-        unsafe {
-            sys::os_perso_derive_node_bip32(
-                curve as u8,
-                path_local.as_ptr(),
-                path_len as u32,
-                private_key_local.as_mut_ptr(),
-                chain_code_local.as_mut_ptr(),
-            );
-        }
+        let (private_key_local, chain_code_local) = derive_bip32_node(&path_local[..path_len]);
 
-        // copy private_key and chain_code to V-App memory
-        cpu.get_segment::<E>(private_key.0)?
-            .write_buffer(private_key.0, &private_key_local[..])?;
-        cpu.get_segment::<E>(chain_code.0)?
-            .write_buffer(chain_code.0, &chain_code_local)?;
-
-        Ok(())
+        write_guest::<E, N>(cpu, private_key, &private_key_local[..])?;
+        write_guest::<E, N>(cpu, chain_code, &chain_code_local)?;
+        Ok(1)
     }
 
+    /// Writes to `fingerprint` the fingerprint of the master public key: the first 4 bytes of
+    /// `ripemd160(sha256(pk))`, where `pk` is the compressed public key, as a `u32`.
+    ///
+    /// Returns 1 on success, 0 if the curve is not supported.
     fn handle_get_master_fingerprint<E: fmt::Debug>(
         &self,
-        _cpu: &mut Cpu<OutsourcedMemory<'_, N>>,
+        cpu: &mut Cpu<OutsourcedMemory<'_, N>>,
         curve: u32,
+        fingerprint: GuestPointer,
     ) -> Result<u32, CommEcallError> {
         if curve != CurveKind::Secp256k1 as u32 {
-            return Err(CommEcallError::InvalidParameters("Unsupported curve"));
+            return Ok(0);
         }
-
-        // derive the key
-        let mut private_key_local = Zeroizing::new([0u8; 32]);
-        let mut chain_code_local: [u8; 32] = [0; 32];
-
-        let mut pubkey: sys::cx_ecfp_public_key_t = Default::default();
-
-        // Hack: we're passing an empty path, but [].as_ptr() would return a fixed non-zero constant that is
-        // not a valid pointer, which would make os_perso_derive_node_bip32 crash on the real device (but not
-        // on speculos).
-        // Therefore, we use a local non-empty array instead, but still pass 0 for the pathLength parameter.
-        let empty_path = [0u32; 1];
-
-        unsafe {
-            sys::os_perso_derive_node_bip32(
-                CurveKind::Secp256k1 as u8,
-                empty_path.as_ptr(),
-                0,
-                private_key_local.as_mut_ptr(),
-                chain_code_local.as_mut_ptr(),
-            );
-
-            // generate the corresponding public key
-            let mut privkey: sys::cx_ecfp_private_key_t = Default::default();
-
-            let ret1 = sys::cx_ecfp_init_private_key_no_throw(
-                curve as u8,
-                private_key_local.as_ptr(),
-                private_key_local.len(),
-                &mut privkey,
-            );
-
-            let ret2 =
-                sys::cx_ecfp_generate_pair_no_throw(curve as u8, &mut pubkey, &mut privkey, true);
-
-            if ret1 != CX_OK || ret2 != CX_OK {
-                return Err(CommEcallError::GenericError("Failed to generate key pair"));
-            }
-        }
-
-        // Validate that pubkey.W has the expected 65-byte uncompressed public key format.
-        if pubkey.W_len != 65 {
-            return Err(CommEcallError::GenericError("Invalid public key length"));
-        }
-
-        let mut sha_hasher = ledger_device_sdk::hash::sha2::Sha2_256::new();
-        sha_hasher.update(&[02u8 + (pubkey.W[64] % 2)]).unwrap();
-        sha_hasher.update(&pubkey.W[1..33]).unwrap();
-        let mut sha256hash = [0u8; 32];
-        sha_hasher.finalize(&mut sha256hash).unwrap();
-        let mut ripemd160_hasher = ledger_device_sdk::hash::ripemd::Ripemd160::new();
-        ripemd160_hasher.update(&sha256hash).unwrap();
-        let mut rip = [0u8; 20];
-        ripemd160_hasher.finalize(&mut rip).unwrap();
-        Ok(u32::from_be_bytes([rip[0], rip[1], rip[2], rip[3]]))
+        let Some(value) = secp256k1_master_fingerprint() else {
+            return Ok(0);
+        };
+        write_guest::<E, N>(cpu, fingerprint, &value.to_le_bytes())?;
+        Ok(1)
     }
 
+    /// Derives the SLIP-21 node for the length-prefixed `labels`, writing its 64 bytes to `out`.
+    ///
+    /// Returns 1 on success, 0 if the labels buffer is longer than `MAX_SLIP21_LABELS_LEN`, a label
+    /// is longer than `MAX_SLIP21_LABEL_LEN`, or the last label is truncated. An empty buffer
+    /// gives the master node.
     fn handle_derive_slip21_node<E: fmt::Debug>(
         &self,
         cpu: &mut Cpu<OutsourcedMemory<'_, N>>,
@@ -1222,36 +1233,19 @@ impl<'a, const N: usize> CommEcallHandler<'a, N> {
         labels_len: usize,
         out: GuestPointer,
     ) -> Result<u32, CommEcallError> {
-        // copy label to a local buffer
-        if labels_len > 256 {
-            return Err(CommEcallError::InvalidParameters("labels_len is too large"));
+        if labels_len > MAX_SLIP21_LABELS_LEN {
+            return Ok(0);
         }
+        let mut labels_local = [0u8; MAX_SLIP21_LABELS_LEN];
+        read_guest::<E, N>(cpu, labels, &mut labels_local[..labels_len])?;
 
-        // bolos expects the first byte to be 0, and the label actually starts at index 1
-        let mut labels_local: [u8; 256] = [0; 256];
-        cpu.get_segment::<E>(labels.0)?
-            .read_buffer(labels.0, &mut labels_local[0..labels_len])?;
+        let Some(labels) = parse_slip21_labels(&labels_local[..labels_len]) else {
+            return Ok(0);
+        };
+        let slices: Vec<&[u8]> = labels.collect();
+        let out_node = Zeroizing::new(slip21::get_custom_slip21_node(&slices));
 
-        let mut slices = Vec::<&[u8]>::new();
-        let mut offset = 0;
-        while offset < labels_len {
-            let label_len = labels_local[offset] as usize;
-            offset += 1;
-
-            if offset + label_len > labels_len {
-                return Err(CommEcallError::InvalidParameters("Invalid labels format"));
-            }
-
-            slices.push(&labels_local[offset..offset + label_len]);
-            offset += label_len;
-        }
-
-        let out_node = slip21::get_custom_slip21_node(&slices);
-
-        // copy the result to the V-App memory
-        let segment = cpu.get_segment::<E>(out.0).unwrap();
-        segment.write_buffer(out.0, &out_node).unwrap();
-
+        write_guest::<E, N>(cpu, out, &out_node[..])?;
         Ok(1)
     }
 
@@ -1992,7 +1986,7 @@ impl<'a, const N: usize> EcallHandler for CommEcallHandler<'a, N> {
             }
 
             ECALL_DERIVE_HD_NODE => {
-                self.handle_derive_hd_node::<CommEcallError>(
+                reg!(A0) = self.handle_derive_hd_node::<CommEcallError>(
                     cpu,
                     reg!(A0),
                     GPreg!(A1),
@@ -2000,11 +1994,13 @@ impl<'a, const N: usize> EcallHandler for CommEcallHandler<'a, N> {
                     GPreg!(A3),
                     GPreg!(A4),
                 )?;
-
-                reg!(A0) = 1;
             }
             ECALL_GET_MASTER_FINGERPRINT => {
-                reg!(A0) = self.handle_get_master_fingerprint::<CommEcallError>(cpu, reg!(A0))?;
+                reg!(A0) = self.handle_get_master_fingerprint::<CommEcallError>(
+                    cpu,
+                    reg!(A0),
+                    GPreg!(A1),
+                )?;
             }
             ECALL_DERIVE_SLIP21_KEY => {
                 reg!(A0) = self.handle_derive_slip21_node::<CommEcallError>(

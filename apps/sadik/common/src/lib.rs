@@ -57,7 +57,7 @@ pub enum RawEcall {
     GetRandomBytes { size: u32 },
     /// `derive_hd_node(curve, path, path.len(), privkey, chain_code)`; output `privkey || chain_code`
     DeriveHdNode { curve: u32, path: Vec<u32> },
-    /// `get_master_fingerprint(curve)`; output the fingerprint, big-endian
+    /// `get_master_fingerprint(curve, fingerprint)`; output the fingerprint, big-endian
     GetMasterFingerprint { curve: u32 },
     /// `derive_slip21_node(labels, labels.len(), out)` with the raw length-prefixed labels buffer
     DeriveSlip21Node { labels: Vec<u8> },
