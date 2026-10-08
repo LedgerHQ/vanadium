@@ -12,6 +12,9 @@ use common::ecall_constants::{CurveKind, EcdsaSignMode, HashId, SchnorrSignMode}
 
 use crate::ecalls;
 
+/// The maximum number of steps of a path for [`Curve::derive_hd_node`].
+pub const MAX_BIP32_PATH_LEN: usize = common::ecall_validation::MAX_BIP32_PATH_LEN;
+
 /// A trait representing a cryptographic curve with hierarchical deterministic (HD) key derivation capabilities.
 ///
 /// # Constants
@@ -30,6 +33,8 @@ use crate::ecalls;
 ///
 /// - Returns: A `u32` value representing the fingerprint of the master key.
 pub trait Curve<const SCALAR_LENGTH: usize>: Sized {
+    /// Derives the node at `path` from the device's seed. Fails if the path has more than
+    /// [`MAX_BIP32_PATH_LEN`] steps.
     fn derive_hd_node(path: &[u32]) -> Result<HDPrivNode<Self, SCALAR_LENGTH>, &'static str>;
     fn get_master_fingerprint() -> u32;
     fn curve_kind() -> CurveKind;
@@ -796,9 +801,11 @@ impl HDPrivNode<Secp256k1, 32> {
         let mut new_chaincode = [0u8; 32];
         new_chaincode.copy_from_slice(&hmac_result[32..64]);
 
-        // Verify that the tweak is non-zero and less than the curve order (this happens with negligible probability)
-        // Note: this is not a constant-time comparison, but this is acceptable because the tweak is not secret)
-        if tweak == [0u8; 32] || tweak == Self::SECP256K1_ORDER {
+        // BIP-32 rejects a tweak that is zero or not smaller than the curve order (this happens with
+        // negligible probability)
+        if common::ecall_validation::is_zero(&tweak)
+            || !common::ecall_validation::is_reduced(&tweak, &Self::SECP256K1_ORDER)
+        {
             return Err("invalid tweak");
         }
 
