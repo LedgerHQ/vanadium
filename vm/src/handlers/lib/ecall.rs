@@ -185,6 +185,8 @@ impl GuestPointer {
 pub enum LedgerHashContextError {
     InvalidHashId,
     UnsupportedHashId,
+    /// The context handed back by the V-App is not one these ECALLs could have produced.
+    CorruptedContext,
 }
 
 impl fmt::Display for LedgerHashContextError {
@@ -192,6 +194,7 @@ impl fmt::Display for LedgerHashContextError {
         match self {
             LedgerHashContextError::InvalidHashId => write!(f, "Invalid hash id"),
             LedgerHashContextError::UnsupportedHashId => write!(f, "Unsupported hash id"),
+            LedgerHashContextError::CorruptedContext => write!(f, "Corrupted hash context"),
         }
     }
 }
@@ -215,47 +218,143 @@ union LedgerHashContext {
     sha3: cx_sha3_t,
 }
 
-impl LedgerHashContext {
-    const MAX_HASH_CONTEXT_SIZE: usize = core::mem::size_of::<LedgerHashContext>();
+/// Largest digest of any supported hash function.
+const MAX_HASH_DIGEST_SIZE: usize = 64;
 
-    // in-memory size of the hash context struct for the corresponding hash type
-    fn get_size_from_id(hash_identifier: u32) -> Result<usize, LedgerHashContextError> {
-        if hash_identifier >> 16 == 0 {
+/// A hash context that the VM can safely hand to `cx_hash_update` / `cx_hash_final`.
+///
+/// The V-App keeps the context between ECALLs, so its bytes are untrusted. They cannot be passed
+/// to `cx` as they are: `cx_hash_update` and `cx_hash_final` dispatch through the `info` function
+/// pointer in the context's header, and the compression functions index the block buffer with the
+/// `blen` field without checking it. A V-App could therefore make the VM jump to an arbitrary
+/// address or write outside its buffers.
+///
+/// Instead, every ECALL starts from a context freshly initialized by `cx_hash_init_ex` for the
+/// requested algorithm and output size, so the header and the size fields are the VM's own. Only
+/// the running state (block counter, buffered bytes and accumulator) is restored from the V-App's
+/// copy, after checking that `blen` is within the block buffer. The `info` pointer is cleared in
+/// the copy handed back to the V-App, which never needs it.
+struct VerifiedHashContext {
+    ctx: LedgerHashContext,
+    algorithm: u8,
+    digest_size: usize,
+}
+
+impl VerifiedHashContext {
+    /// Splits a hash identifier into its algorithm and output size, rejecting the algorithms that
+    /// the hash ECALLs do not support.
+    fn parse_id(hash_identifier: u32) -> Result<(u8, usize), LedgerHashContextError> {
+        if hash_identifier >> 24 != 0 {
             return Err(LedgerHashContextError::InvalidHashId);
         }
-        let res = match (hash_identifier >> 16) as u8 {
+        let algorithm = (hash_identifier >> 16) as u8;
+        match algorithm {
+            CX_RIPEMD160 | CX_SHA256 | CX_SHA384 | CX_SHA512 | CX_KECCAK | CX_SHA3 => {}
+            0 => return Err(LedgerHashContextError::InvalidHashId),
+            _ => return Err(LedgerHashContextError::UnsupportedHashId),
+        }
+        Ok((algorithm, (hash_identifier & 0xFFFF) as usize))
+    }
+
+    /// Size of the context struct that the V-App stores for `hash_identifier`.
+    fn guest_size(hash_identifier: u32) -> Result<usize, LedgerHashContextError> {
+        let (algorithm, _) = Self::parse_id(hash_identifier)?;
+        Ok(match algorithm {
             CX_RIPEMD160 => core::mem::size_of::<cx_ripemd160_t>(),
             CX_SHA256 => core::mem::size_of::<cx_sha256_t>(),
             CX_SHA384 | CX_SHA512 => core::mem::size_of::<cx_sha512_t>(),
-            CX_KECCAK | CX_SHA3 => core::mem::size_of::<cx_sha3_t>(),
-            _ => return Err(LedgerHashContextError::UnsupportedHashId),
-        };
-
-        Ok(res)
+            _ => core::mem::size_of::<cx_sha3_t>(),
+        })
     }
 
-    fn get_digest_len_from_id(hash_identifier: u32) -> Result<usize, LedgerHashContextError> {
-        if hash_identifier >> 16 == 0 {
+    /// A freshly initialized context. `cx_hash_init_ex` rejects an output size that the algorithm
+    /// does not support, so `digest_size` is valid once this succeeds.
+    fn new(hash_identifier: u32) -> Result<Self, LedgerHashContextError> {
+        let (algorithm, digest_size) = Self::parse_id(hash_identifier)?;
+        if digest_size > MAX_HASH_DIGEST_SIZE {
             return Err(LedgerHashContextError::InvalidHashId);
         }
-        // validate that the algorithm in the high 16 bits is supported
-        match (hash_identifier >> 16) as u8 {
-            CX_RIPEMD160 | CX_SHA256 | CX_SHA384 | CX_SHA512 => {}
-            CX_KECCAK | CX_SHA3 => {
-                // only the following output lengths are supported
-                let output_size = (hash_identifier & 0xFFFF) as usize;
-                match output_size {
-                    28 | 32 | 48 | 64 => {}
-                    _ => return Err(LedgerHashContextError::InvalidHashId),
-                }
-            }
-            _ => return Err(LedgerHashContextError::UnsupportedHashId),
+
+        // SAFETY: every member of the union is a plain C struct, for which all-zero bytes are a
+        // valid value; cx_hash_init_ex then initializes the member selected by `algorithm`.
+        let mut ctx: LedgerHashContext = unsafe { core::mem::zeroed() };
+        let err = unsafe {
+            sys::cx_hash_init_ex(
+                &mut ctx as *mut LedgerHashContext as *mut sys::cx_hash_t,
+                algorithm,
+                digest_size,
+            )
         };
-        // the output size is encoded in the low 16 bits by the app
-        let res = (hash_identifier & 0xFFFF) as usize;
+        if err != CX_OK {
+            return Err(LedgerHashContextError::InvalidHashId);
+        }
+
+        Ok(Self {
+            ctx,
+            algorithm,
+            digest_size,
+        })
+    }
+
+    /// A fresh context for `hash_identifier`, with the running state restored from the V-App's
+    /// copy `guest` (exactly `guest_size(hash_identifier)` bytes).
+    fn restore(hash_identifier: u32, guest: &[u8]) -> Result<Self, LedgerHashContextError> {
+        let mut res = Self::new(hash_identifier)?;
+
+        // Copies the running state out of the guest's struct of type `$ty` into the union member
+        // `$field`, after checking that the buffered length fits in the block, whose size is
+        // `$block_size` computed on our own, trusted, context `$ours`.
+        macro_rules! restore_state {
+            ($field:ident, $ty:ty, |$ours:ident| $block_size:expr) => {{
+                if guest.len() != core::mem::size_of::<$ty>() {
+                    return Err(LedgerHashContextError::CorruptedContext);
+                }
+                // SAFETY: `guest` has exactly the size of `$ty`, a plain C struct for which any
+                // bytes are a valid value; read_unaligned does not require alignment.
+                let theirs: $ty = unsafe { core::ptr::read_unaligned(guest.as_ptr() as *const $ty) };
+                // SAFETY: `new` initialized this member of the union.
+                let $ours = unsafe { &mut res.ctx.$field };
+                if theirs.blen >= $block_size {
+                    return Err(LedgerHashContextError::CorruptedContext);
+                }
+                $ours.header.counter = theirs.header.counter;
+                $ours.blen = theirs.blen;
+                $ours.block = theirs.block;
+                $ours.acc = theirs.acc;
+            }};
+        }
+
+        match res.algorithm {
+            CX_RIPEMD160 => restore_state!(ripemd160, cx_ripemd160_t, |c| c.block.len()),
+            CX_SHA256 => restore_state!(sha256, cx_sha256_t, |c| c.block.len()),
+            CX_SHA384 | CX_SHA512 => restore_state!(sha512, cx_sha512_t, |c| c.block.len()),
+            // the rate depends on the output size, and was set by cx_hash_init_ex
+            _ => restore_state!(sha3, cx_sha3_t, |c| c.block_size),
+        }
 
         Ok(res)
     }
+
+    /// Writes the context into `out` (exactly `guest_size` bytes) for the V-App to keep until the
+    /// next ECALL, without the `info` pointer.
+    fn export(&mut self, out: &mut [u8]) {
+        // the header is the first field of every member of the union
+        self.ctx.sha256.header.info = core::ptr::null();
+        // SAFETY: the union is at least `out.len()` bytes long, since `out` is sized by
+        // `guest_size` for the member that `new` initialized.
+        let bytes = unsafe {
+            core::slice::from_raw_parts(&self.ctx as *const LedgerHashContext as *const u8, out.len())
+        };
+        out.copy_from_slice(bytes);
+    }
+
+    fn as_cx_hash(&mut self) -> *mut sys::cx_hash_header_s {
+        &mut self.ctx as *mut LedgerHashContext as *mut sys::cx_hash_header_s
+    }
+}
+
+impl LedgerHashContext {
+    const MAX_HASH_CONTEXT_SIZE: usize = core::mem::size_of::<LedgerHashContext>();
 }
 
 // Wraps the cx_ecfp_private_key_t struct to make sure that it is zeroed on drop
@@ -289,7 +388,6 @@ pub enum CommEcallError {
     InvalidParameters(&'static str),
     GenericError(&'static str),
     Overflow,
-    HashError(LedgerHashContextError),
     MessageDeserializationError(MessageDeserializationError),
     InvalidResponse(&'static str),
     CpuError(String),
@@ -308,7 +406,6 @@ impl core::fmt::Display for CommEcallError {
             }
             CommEcallError::GenericError(msg) => write!(f, "Error: {}", msg),
             CommEcallError::Overflow => write!(f, "Buffer overflow"),
-            CommEcallError::HashError(e) => write!(f, "Hash error: {:?}", e),
             CommEcallError::MessageDeserializationError(e) => {
                 write!(f, "Message deserialization error: {:?}", e)
             }
@@ -332,12 +429,6 @@ impl core::fmt::Debug for CommEcallError {
 impl<E: fmt::Debug> From<CpuError<E>> for CommEcallError {
     fn from(error: CpuError<E>) -> Self {
         CommEcallError::CpuError(format!("{:?}", error))
-    }
-}
-
-impl From<LedgerHashContextError> for CommEcallError {
-    fn from(error: LedgerHashContextError) -> Self {
-        CommEcallError::HashError(error)
     }
 }
 
@@ -370,7 +461,6 @@ impl core::error::Error for CommEcallError {
         match self {
             CommEcallError::MemoryError(e) => Some(e),
             CommEcallError::MessageDeserializationError(e) => Some(e),
-            CommEcallError::HashError(e) => Some(e),
             // since we convert CpuError to a string, we don't keep the original error
             _ => None,
         }
@@ -891,43 +981,34 @@ impl<'a, const N: usize> CommEcallHandler<'a, N> {
         Ok(())
     }
 
+    /// Initializes the hash context `ctx` for `hash_identifier`.
+    ///
+    /// Returns 1 on success, 0 if `hash_identifier` is not a supported algorithm and output size.
     fn handle_hash_init<E: fmt::Debug>(
         &self,
         cpu: &mut Cpu<OutsourcedMemory<'_, N>>,
         hash_identifier: u32,
         ctx: GuestPointer,
-    ) -> Result<(), CommEcallError> {
-        // in-memory size of the hash context struct
-        let ctx_size = LedgerHashContext::get_size_from_id(hash_identifier)?;
+    ) -> Result<u32, CommEcallError> {
+        let Ok(ctx_size) = VerifiedHashContext::guest_size(hash_identifier) else {
+            return Ok(0);
+        };
+        let Ok(mut hash_ctx) = VerifiedHashContext::new(hash_identifier) else {
+            return Ok(0);
+        };
 
-        // copy context to local memory
-        let mut ctx_local: [u8; LedgerHashContext::MAX_HASH_CONTEXT_SIZE] =
-            [0; LedgerHashContext::MAX_HASH_CONTEXT_SIZE];
-
+        let mut ctx_local = [0u8; LedgerHashContext::MAX_HASH_CONTEXT_SIZE];
+        hash_ctx.export(&mut ctx_local[..ctx_size]);
         cpu.get_segment::<E>(ctx.0)?
-            .read_buffer(ctx.0, &mut ctx_local[0..ctx_size])?;
+            .write_buffer(ctx.0, &ctx_local[..ctx_size])?;
 
-        unsafe {
-            let output_size = (hash_identifier & 0xFFFF) as usize;
-            // bits 23-16 carry the algorithm identifier (always fits in u8 by construction)
-            let hash_id = (hash_identifier >> 16) as u8;
-            let err = sys::cx_hash_init_ex(
-                ctx_local.as_mut_ptr() as *mut sys::cx_hash_t,
-                hash_id,
-                output_size,
-            );
-            if err != CX_OK {
-                return Err(CommEcallError::GenericError("hash init failed"));
-            }
-        }
-
-        // copy context back to V-App memory
-        let segment = cpu.get_segment::<E>(ctx.0)?;
-        segment.write_buffer(ctx.0, &ctx_local[0..ctx_size])?;
-
-        Ok(())
+        Ok(1)
     }
 
+    /// Absorbs `data_len` bytes at `data` into the hash context `ctx`.
+    ///
+    /// Returns 1 on success, 0 if `hash_identifier` is invalid or `ctx` is not a context that the
+    /// hash ECALLs produced for it.
     fn handle_hash_update<E: fmt::Debug>(
         &self,
         cpu: &mut Cpu<OutsourcedMemory<'_, N>>,
@@ -935,22 +1016,28 @@ impl<'a, const N: usize> CommEcallHandler<'a, N> {
         ctx: GuestPointer,
         data: GuestPointer,
         data_len: usize,
-    ) -> Result<(), CommEcallError> {
-        // in-memory size of the hash context struct
-        let ctx_size = LedgerHashContext::get_size_from_id(hash_identifier)?;
+    ) -> Result<u32, CommEcallError> {
+        let Ok(ctx_size) = VerifiedHashContext::guest_size(hash_identifier) else {
+            return Ok(0);
+        };
+
+        let mut ctx_local = [0u8; LedgerHashContext::MAX_HASH_CONTEXT_SIZE];
+        cpu.get_segment::<E>(ctx.0)?
+            .read_buffer(ctx.0, &mut ctx_local[..ctx_size])?;
+        let Ok(mut hash_ctx) = VerifiedHashContext::restore(hash_identifier, &ctx_local[..ctx_size])
+        else {
+            return Ok(0);
+        };
 
         if data_len == 0 {
-            return Ok(());
+            // nothing to absorb; an empty slice's pointer is dangling, so it must not be read
+            return Ok(1);
+        }
+        if data.0.checked_add(data_len as u32).is_none() {
+            return Err(CommEcallError::Overflow);
         }
 
-        // copy context to local memory
-        let mut ctx_local: [u8; LedgerHashContext::MAX_HASH_CONTEXT_SIZE] =
-            [0; LedgerHashContext::MAX_HASH_CONTEXT_SIZE];
-
-        cpu.get_segment::<E>(ctx.0)?
-            .read_buffer(ctx.0, &mut ctx_local[0..ctx_size])?;
-
-        // copy data to local memory in chanks of at most 256 bytes
+        // copy data to local memory in chunks of at most 256 bytes
         let mut data_local: [u8; 256] = [0; 256];
         let mut data_remaining = data_len;
         let mut data_ptr = data.0;
@@ -959,65 +1046,60 @@ impl<'a, const N: usize> CommEcallHandler<'a, N> {
             let copy_size = min(data_remaining, 256);
             data_seg.read_buffer(data_ptr, &mut data_local[0..copy_size])?;
 
-            unsafe {
-                let err = sys::cx_hash_update(
-                    ctx_local.as_mut_ptr() as *mut sys::cx_hash_header_s,
-                    data_local.as_ptr(),
-                    copy_size as usize,
-                );
-                if err != CX_OK {
-                    return Err(CommEcallError::GenericError("hash update failed"));
-                }
+            // SAFETY: the context's header and sizes were set by cx_hash_init_ex, and its
+            // buffered length was checked by `restore`.
+            let err = unsafe {
+                sys::cx_hash_update(hash_ctx.as_cx_hash(), data_local.as_ptr(), copy_size)
+            };
+            if err != CX_OK {
+                return Ok(0);
             }
 
             data_remaining -= copy_size;
             data_ptr += copy_size as u32;
         }
 
-        // copy context back to V-App memory
+        hash_ctx.export(&mut ctx_local[..ctx_size]);
         cpu.get_segment::<E>(ctx.0)?
-            .write_buffer(ctx.0, &ctx_local[0..ctx_size])?;
+            .write_buffer(ctx.0, &ctx_local[..ctx_size])?;
 
-        Ok(())
+        Ok(1)
     }
 
+    /// Writes the digest of the hash context `ctx` to `digest`. The context is left unchanged.
+    ///
+    /// Returns 1 on success, 0 if `hash_identifier` is invalid or `ctx` is not a context that the
+    /// hash ECALLs produced for it.
     fn handle_hash_digest<E: fmt::Debug>(
         &self,
         cpu: &mut Cpu<OutsourcedMemory<'_, N>>,
         hash_identifier: u32,
         ctx: GuestPointer,
         digest: GuestPointer,
-    ) -> Result<(), CommEcallError> {
-        // in-memory size of the hash context struct
-        let ctx_size = LedgerHashContext::get_size_from_id(hash_identifier)?;
+    ) -> Result<u32, CommEcallError> {
+        let Ok(ctx_size) = VerifiedHashContext::guest_size(hash_identifier) else {
+            return Ok(0);
+        };
 
-        // copy context to local memory
-        let mut ctx_local: [u8; LedgerHashContext::MAX_HASH_CONTEXT_SIZE] =
-            [0; LedgerHashContext::MAX_HASH_CONTEXT_SIZE];
-
+        let mut ctx_local = [0u8; LedgerHashContext::MAX_HASH_CONTEXT_SIZE];
         cpu.get_segment::<E>(ctx.0)?
-            .read_buffer(ctx.0, &mut ctx_local[0..ctx_size])?;
+            .read_buffer(ctx.0, &mut ctx_local[..ctx_size])?;
+        let Ok(mut hash_ctx) = VerifiedHashContext::restore(hash_identifier, &ctx_local[..ctx_size])
+        else {
+            return Ok(0);
+        };
 
-        // compute the digest; no supported hash function has a digest bigger than 64 bytes
-        let mut digest_local: [u8; 64] = [0; 64];
-
-        unsafe {
-            let err = sys::cx_hash_final(
-                ctx_local.as_mut_ptr() as *mut sys::cx_hash_header_s,
-                digest_local.as_mut_ptr(),
-            );
-            if err != CX_OK {
-                return Err(CommEcallError::GenericError("hash final failed"));
-            }
+        let mut digest_local = [0u8; MAX_HASH_DIGEST_SIZE];
+        // SAFETY: as in handle_hash_update; `digest_local` holds the largest supported digest.
+        let err = unsafe { sys::cx_hash_final(hash_ctx.as_cx_hash(), digest_local.as_mut_ptr()) };
+        if err != CX_OK {
+            return Ok(0);
         }
 
-        // actual length of the digest
-        let digest_len = LedgerHashContext::get_digest_len_from_id(hash_identifier)?;
-        // copy digest to V-App memory
-        let segment = cpu.get_segment::<E>(digest.0)?;
-        segment.write_buffer(digest.0, &digest_local[0..digest_len])?;
+        cpu.get_segment::<E>(digest.0)?
+            .write_buffer(digest.0, &digest_local[..hash_ctx.digest_size])?;
 
-        Ok(())
+        Ok(1)
     }
 
     fn handle_derive_hd_node<E: fmt::Debug>(
@@ -1933,21 +2015,26 @@ impl<'a, const N: usize> EcallHandler for CommEcallHandler<'a, N> {
 
                 reg!(A0) = 1;
             }
-            ECALL_HASH_INIT => self
-                .handle_hash_init::<CommEcallError>(cpu, reg!(A0), GPreg!(A1))
-                .map_err(|_| CommEcallError::GenericError("hash_init failed"))?,
-            ECALL_HASH_UPDATE => self
-                .handle_hash_update::<CommEcallError>(
+            ECALL_HASH_INIT => {
+                reg!(A0) = self.handle_hash_init::<CommEcallError>(cpu, reg!(A0), GPreg!(A1))?;
+            }
+            ECALL_HASH_UPDATE => {
+                reg!(A0) = self.handle_hash_update::<CommEcallError>(
                     cpu,
                     reg!(A0),
                     GPreg!(A1),
                     GPreg!(A2),
                     reg!(A3) as usize,
-                )
-                .map_err(|_| CommEcallError::GenericError("hash_update failed"))?,
-            ECALL_HASH_DIGEST => self
-                .handle_hash_digest::<CommEcallError>(cpu, reg!(A0), GPreg!(A1), GPreg!(A2))
-                .map_err(|_| CommEcallError::GenericError("hash_digest failed"))?,
+                )?;
+            }
+            ECALL_HASH_DIGEST => {
+                reg!(A0) = self.handle_hash_digest::<CommEcallError>(
+                    cpu,
+                    reg!(A0),
+                    GPreg!(A1),
+                    GPreg!(A2),
+                )?;
+            }
 
             ECALL_DERIVE_HD_NODE => {
                 self.handle_derive_hd_node::<CommEcallError>(
