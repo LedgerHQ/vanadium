@@ -12,21 +12,9 @@ use bitcoin::secp256k1;
 use hashes::{sha256t_hash_newtype, Hash, HashEngine};
 use sdk::curve::{EcfpPublicKey, Secp256k1, Secp256k1Point, Secp256k1Scalar};
 use subtle::ConstantTimeEq;
-use zeroize::Zeroize;
+use zeroize::{Zeroize, Zeroizing};
 
 use alloc::vec::Vec;
-use sdk::bignum::{BigNumMod, ModulusProvider};
-
-/// secp256k1 group order `n`.
-#[derive(Debug, Clone, Copy)]
-pub struct N;
-impl ModulusProvider<32> for N {
-    const M: [u8; 32] = [
-        0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
-        0xfe, 0xba, 0xae, 0xdc, 0xe6, 0xaf, 0x48, 0xa0, 0x3b, 0xbf, 0xd2, 0x5e, 0x8c, 0xd0, 0x36,
-        0x41, 0x41,
-    ];
-}
 
 pub use types::{KeyAggContext, MusigError, PlainPk, PubNonce, SecNonce, SessionContext, XOnlyPk};
 
@@ -121,22 +109,19 @@ fn hash_keys(pubkeys: &[PlainPk]) -> [u8; 32] {
 }
 
 /// Computes the KeyAgg coefficient `a_i` for `pk_`, given precomputed `pk2`.
-fn key_agg_coeff_internal(pubkeys: &[PlainPk], pk_: &PlainPk, pk2: &PlainPk) -> [u8; 32] {
+fn key_agg_coeff_internal(pubkeys: &[PlainPk], pk_: &PlainPk, pk2: &PlainPk) -> Secp256k1Scalar {
     if pk_ == pk2 {
-        let mut one = [0u8; 32];
-        one[31] = 1;
-        return one;
+        return Secp256k1Scalar::one();
     }
     let l = hash_keys(pubkeys);
     let mut e = KeyAggCoeffHash::engine();
     e.input(&l);
     e.input(pk_);
     let out = KeyAggCoeffHash::from_engine(e).to_byte_array();
-    // Reduce mod n. BigNumMod::from_be_bytes performs reduction.
-    BigNumMod::<32, N>::from_be_bytes(out).to_be_bytes()
+    Secp256k1Scalar::from_be_bytes_reduced(&out)
 }
 
-fn key_agg_coeff(pubkeys: &[PlainPk], pk_: &PlainPk) -> [u8; 32] {
+fn key_agg_coeff(pubkeys: &[PlainPk], pk_: &PlainPk) -> Secp256k1Scalar {
     let pk2 = second_key(pubkeys);
     key_agg_coeff_internal(pubkeys, pk_, &pk2)
 }
@@ -155,7 +140,7 @@ pub fn key_agg(pubkeys: &[PlainPk]) -> Result<KeyAggContext, MusigError> {
     for pk in pubkeys {
         let p = cpoint(pk)?;
         let a_i = key_agg_coeff_internal(pubkeys, pk, &pk2);
-        let p_scaled = &p * &Secp256k1Scalar::from_be_bytes_reduced(&a_i);
+        let p_scaled = &p * &a_i;
         q = &q + &p_scaled;
     }
 
@@ -211,33 +196,40 @@ pub fn nonce_gen(
     aggpk: &XOnlyPk,
 ) -> Result<(SecNonce, PubNonce), MusigError> {
     let msg = [0u8];
-    let mut k1 = nonce_hash(rand, pk, aggpk, 0, &msg, &[]);
-    let mut k2 = nonce_hash(rand, pk, aggpk, 1, &msg, &[]);
-    k1 = BigNumMod::<32, N>::from_be_bytes(k1).to_be_bytes();
-    k2 = BigNumMod::<32, N>::from_be_bytes(k2).to_be_bytes();
-
-    if k1 == [0u8; 32] || k2 == [0u8; 32] {
+    let k1 = Secp256k1Scalar::from_be_bytes_reduced(&Zeroizing::new(nonce_hash(
+        rand,
+        pk,
+        aggpk,
+        0,
+        &msg,
+        &[],
+    )));
+    let k2 = Secp256k1Scalar::from_be_bytes_reduced(&Zeroizing::new(nonce_hash(
+        rand,
+        pk,
+        aggpk,
+        1,
+        &msg,
+        &[],
+    )));
+    if k1.is_zero() || k2.is_zero() {
         // Vanishingly unlikely; same handling as the C ref.
-        k1.zeroize();
-        k2.zeroize();
         return Err(MusigError::NonceGenFailed);
     }
 
+    // neither nonce is 0, so neither point is infinity
     let g = Secp256k1::get_generator();
-    let r_s1 = &g * &Secp256k1Scalar::from_be_bytes_reduced(&k1);
-    let r_s2 = &g * &Secp256k1Scalar::from_be_bytes_reduced(&k2);
-
-    if r_s1.is_zero() || r_s2.is_zero() {
-        k1.zeroize();
-        k2.zeroize();
-        return Err(MusigError::NonceGenFailed);
-    }
+    let r_s1 = &g * &k1;
+    let r_s2 = &g * &k2;
 
     let mut pubnonce_bytes = [0u8; 66];
     pubnonce_bytes[..33].copy_from_slice(&compress(&r_s1));
     pubnonce_bytes[33..].copy_from_slice(&compress(&r_s2));
 
-    Ok((SecNonce::new(k1, k2, *pk), PubNonce(pubnonce_bytes)))
+    Ok((
+        SecNonce::new(*k1.as_be_bytes(), *k2.as_be_bytes(), *pk),
+        PubNonce(pubnonce_bytes),
+    ))
 }
 
 /// Aggregates participants' public nonces into the round-2 aggregate nonce.
@@ -275,46 +267,27 @@ fn apply_tweak(
     tweak: &[u8; 32],
     is_xonly: bool,
 ) -> Result<(), MusigError> {
-    // Determine g = 1 or n - 1 depending on Q's parity (and the tweak kind).
-    let mut g = [0u8; 32];
-    g[31] = 1;
-    if is_xonly && !has_even_y(&ctx.q) {
-        // g = n - 1
-        let one = BigNumMod::<32, N>::from_u32(1);
-        let neg_one = -&one;
-        g = neg_one.to_be_bytes();
-    }
+    // g = n - 1 if the tweak is x-only and Q has an odd y, 1 otherwise
+    let g = if is_xonly && !has_even_y(&ctx.q) {
+        -&Secp256k1Scalar::one()
+    } else {
+        Secp256k1Scalar::one()
+    };
 
     // Reject tweak >= n (mirrors the cmp check in apply_tweak).
-    {
-        let reduced = BigNumMod::<32, N>::from_be_bytes(*tweak);
-        if reduced.to_be_bytes() != *tweak {
-            return Err(MusigError::TweakOutOfRange);
-        }
-    }
+    let t = Secp256k1Scalar::from_be_bytes(tweak).ok_or(MusigError::TweakOutOfRange)?;
 
-    // Q := g * Q + tweak * G
-    ctx.q = &ctx.q * &Secp256k1Scalar::from_be_bytes_reduced(&g);
-    let t_g = &Secp256k1::get_generator() * &Secp256k1Scalar::from_be_bytes_reduced(tweak);
-    ctx.q = &ctx.q + &t_g;
+    // Q := g * Q + t * G
+    ctx.q = &(&ctx.q * &g) + &(&Secp256k1::get_generator() * &t);
     if ctx.q.is_zero() {
         return Err(MusigError::TweakInfinity);
     }
 
-    // gacc := g * gacc % n
-    {
-        let g_mod = BigNumMod::<32, N>::from_be_bytes(g);
-        let gacc_mod = BigNumMod::<32, N>::from_be_bytes(ctx.gacc);
-        ctx.gacc = (&g_mod * &gacc_mod).to_be_bytes();
-    }
-
-    // tacc := (g * tacc + t) % n
-    {
-        let g_mod = BigNumMod::<32, N>::from_be_bytes(g);
-        let tacc_mod = BigNumMod::<32, N>::from_be_bytes(ctx.tacc);
-        let t_mod = BigNumMod::<32, N>::from_be_bytes(*tweak);
-        ctx.tacc = (&(&g_mod * &tacc_mod) + &t_mod).to_be_bytes();
-    }
+    // gacc := g * gacc, tacc := g * tacc + t
+    let gacc = Secp256k1Scalar::from_be_bytes_reduced(&ctx.gacc);
+    let tacc = Secp256k1Scalar::from_be_bytes_reduced(&ctx.tacc);
+    ctx.gacc = *(&g * &gacc).as_be_bytes();
+    ctx.tacc = *(&(&g * &tacc) + &t).as_be_bytes();
 
     Ok(())
 }
@@ -322,13 +295,11 @@ fn apply_tweak(
 /// Output of `get_session_values`.
 struct SessionValues {
     q: Secp256k1Point,
-    gacc: [u8; 32],
-    /// `tacc` is not used by `sign`; keep field for parity with the C ref.
-    #[allow(dead_code)]
-    tacc: [u8; 32],
-    b: [u8; 32],
+    gacc: Secp256k1Scalar,
+    tacc: Secp256k1Scalar,
+    b: Secp256k1Scalar,
     r: Secp256k1Point,
-    e: [u8; 32],
+    e: Secp256k1Scalar,
 }
 
 /// Derives all session values from a session context. Mirrors `musig_get_session_values`.
@@ -342,13 +313,15 @@ pub(crate) fn noncecoef(aggnonce: &PubNonce, q_x: &[u8; 32], msg: &[u8]) -> [u8;
 }
 
 /// `R = R_1 + b * R_2`, falling back to `G` if the sum is infinity.
-pub(crate) fn final_nonce(aggnonce: &PubNonce, b: &[u8; 32]) -> Result<Secp256k1Point, MusigError> {
+pub(crate) fn final_nonce(
+    aggnonce: &PubNonce,
+    b: &Secp256k1Scalar,
+) -> Result<Secp256k1Point, MusigError> {
     let r1_bytes: &[u8; 33] = aggnonce.0[..33].try_into().unwrap();
     let r2_bytes: &[u8; 33] = aggnonce.0[33..].try_into().unwrap();
     let r1 = cpoint_ext(r1_bytes)?;
     let r2 = cpoint_ext(r2_bytes)?;
-    // BIP-327 reduces b modulo n
-    let r = &r1 + &(&r2 * &Secp256k1Scalar::from_be_bytes_reduced(b));
+    let r = &r1 + &(&r2 * b);
     Ok(if r.is_zero() {
         Secp256k1::get_generator()
     } else {
@@ -362,7 +335,8 @@ fn get_session_values(ctx: &SessionContext) -> Result<SessionValues, MusigError>
         apply_tweak(&mut keyagg, tweak, *is_xonly)?;
     }
 
-    let b = noncecoef(ctx.aggnonce, keyagg.q.x(), ctx.msg);
+    // BIP-327 reduces b and e modulo n
+    let b = Secp256k1Scalar::from_be_bytes_reduced(&noncecoef(ctx.aggnonce, keyagg.q.x(), ctx.msg));
     let r = final_nonce(ctx.aggnonce, &b)?;
 
     // e = BIP-340_challenge(R.x || Q.x || msg)
@@ -370,12 +344,14 @@ fn get_session_values(ctx: &SessionContext) -> Result<SessionValues, MusigError>
     eng.input(r.x());
     eng.input(keyagg.q.x());
     eng.input(ctx.msg);
-    let e = Bip340ChallengeHash::from_engine(eng).to_byte_array();
+    let e = Secp256k1Scalar::from_be_bytes_reduced(
+        &Bip340ChallengeHash::from_engine(eng).to_byte_array(),
+    );
 
     Ok(SessionValues {
         q: keyagg.q,
-        gacc: keyagg.gacc,
-        tacc: keyagg.tacc,
+        gacc: Secp256k1Scalar::from_be_bytes_reduced(&keyagg.gacc),
+        tacc: Secp256k1Scalar::from_be_bytes_reduced(&keyagg.tacc),
         b,
         r,
         e,
@@ -387,7 +363,7 @@ fn get_session_values(ctx: &SessionContext) -> Result<SessionValues, MusigError>
 fn get_session_key_agg_coeff(
     ctx: &SessionContext,
     pubkey: &PlainPk,
-) -> Result<[u8; 32], MusigError> {
+) -> Result<Secp256k1Scalar, MusigError> {
     // Constant-time-ish search; pubkey lookups in this context are not secret.
     let mut found = false;
     for pk in ctx.pubkeys {
@@ -423,32 +399,26 @@ pub fn sign(
         let values = get_session_values(ctx)?;
 
         // Range checks on k1, k2: must be 0 < k_i < n.
-        // BigNumMod::from_be_bytes reduces; if the result differs from the input then
-        // the original was >= n.
-        let k1_reduced = BigNumMod::<32, N>::from_be_bytes(k1);
-        let k2_reduced = BigNumMod::<32, N>::from_be_bytes(k2);
-        if k1_reduced.to_be_bytes() != k1 || k1 == [0u8; 32] {
-            return Err(MusigError::NonceOutOfRange);
-        }
-        if k2_reduced.to_be_bytes() != k2 || k2 == [0u8; 32] {
-            return Err(MusigError::NonceOutOfRange);
-        }
+        let nonce = |k: &[u8; 32]| {
+            Secp256k1Scalar::from_be_bytes(k)
+                .filter(|k| !k.is_zero())
+                .ok_or(MusigError::NonceOutOfRange)
+        };
+        let (mut k1, mut k2) = (nonce(&k1)?, nonce(&k2)?);
 
         // Flip k1 / k2 to use -k if R has odd y.
         if !has_even_y(&values.r) {
-            k1 = (-&k1_reduced).to_be_bytes();
-            k2 = (-&k2_reduced).to_be_bytes();
+            k1 = -&k1;
+            k2 = -&k2;
         }
 
         // Range check on sk: 0 < sk < n.
-        let sk_reduced = BigNumMod::<32, N>::from_be_bytes(*sk);
-        if sk_reduced.to_be_bytes() != *sk || *sk == [0u8; 32] {
-            return Err(MusigError::SecretKeyOutOfRange);
-        }
+        let sk = Secp256k1Scalar::from_be_bytes(sk)
+            .filter(|sk| !sk.is_zero())
+            .ok_or(MusigError::SecretKeyOutOfRange)?;
 
         // P = sk * G
-        let pubkey_point =
-            &Secp256k1::get_generator() * &Secp256k1Scalar::from_be_bytes_reduced(sk);
+        let pubkey_point = &Secp256k1::get_generator() * &sk;
         let computed_pk = compress(&pubkey_point);
         if computed_pk.ct_eq(&expected_pk).unwrap_u8() != 1 {
             return Err(MusigError::PubkeyMismatch);
@@ -458,35 +428,18 @@ pub fn sign(
 
         // g = 1 if has_even_y(Q) else n - 1.
         let g = if has_even_y(&values.q) {
-            let mut one = [0u8; 32];
-            one[31] = 1;
-            one
+            Secp256k1Scalar::one()
         } else {
-            let one = BigNumMod::<32, N>::from_u32(1);
-            (-&one).to_be_bytes()
+            -&Secp256k1Scalar::one()
         };
 
         // d = g * gacc * sk (mod n)
-        let g_mod = BigNumMod::<32, N>::from_be_bytes(g);
-        let gacc_mod = BigNumMod::<32, N>::from_be_bytes(values.gacc);
-        let d = (&(&g_mod * &gacc_mod) * &sk_reduced).to_be_bytes();
+        let d = &(&g * &values.gacc) * &sk;
 
         // s = k1 + b * k2 + e * a * d (mod n)
-        let b_mod = BigNumMod::<32, N>::from_be_bytes(values.b);
-        let k2_mod = BigNumMod::<32, N>::from_be_bytes(k2);
-        let bk2 = (&b_mod * &k2_mod).to_be_bytes();
-        let bk2_mod = BigNumMod::<32, N>::from_be_bytes(bk2);
+        let s = &(&k1 + &(&values.b * &k2)) + &(&(&values.e * &a) * &d);
 
-        let e_mod = BigNumMod::<32, N>::from_be_bytes(values.e);
-        let a_mod = BigNumMod::<32, N>::from_be_bytes(a);
-        let d_mod = BigNumMod::<32, N>::from_be_bytes(d);
-        let ead = (&(&e_mod * &a_mod) * &d_mod).to_be_bytes();
-        let ead_mod = BigNumMod::<32, N>::from_be_bytes(ead);
-
-        let k1_mod = BigNumMod::<32, N>::from_be_bytes(k1);
-        let s = (&(&k1_mod + &bk2_mod) + &ead_mod).to_be_bytes();
-
-        Ok(s)
+        Ok(*s.as_be_bytes())
     })();
 
     // Always zeroize secrets, even on error.
@@ -513,32 +466,25 @@ pub fn partial_sig_agg(
     }
     let values = get_session_values(ctx)?;
     // s = sum(psig_i) mod n
-    let mut s = BigNumMod::<32, N>::from_u32(0);
+    let mut s = Secp256k1Scalar::zero();
     for psig in psigs {
-        let reduced = BigNumMod::<32, N>::from_be_bytes(*psig);
-        if reduced.to_be_bytes() != *psig {
-            // psig >= n: bytewise different after reduction.
-            return Err(MusigError::InvalidPartialSignature);
-        }
-        s += &reduced;
+        let psig =
+            Secp256k1Scalar::from_be_bytes(psig).ok_or(MusigError::InvalidPartialSignature)?;
+        s = &s + &psig;
     }
 
     // Adjust by the additive-tweak contribution: s += e * g * tacc, where
     // g = 1 if has_even_y(Q) else n - 1.
-    let e = BigNumMod::<32, N>::from_be_bytes(values.e);
-    let tacc = BigNumMod::<32, N>::from_be_bytes(values.tacc);
     let g = if has_even_y(&values.q) {
-        let mut one = [0u8; 32];
-        one[31] = 1;
-        BigNumMod::<32, N>::from_be_bytes(one)
+        Secp256k1Scalar::one()
     } else {
-        -&BigNumMod::<32, N>::from_u32(1)
+        -&Secp256k1Scalar::one()
     };
-    s += &(&e * &(&g * &tacc));
+    s = &s + &(&values.e * &(&g * &values.tacc));
 
     let mut out = [0u8; 64];
     out[..32].copy_from_slice(values.r.x());
-    out[32..].copy_from_slice(&s.to_be_bytes());
+    out[32..].copy_from_slice(s.as_be_bytes());
     Ok(out)
 }
 
