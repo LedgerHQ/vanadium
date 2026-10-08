@@ -8,6 +8,7 @@ pub mod client_commands;
 pub mod comm;
 pub mod constants;
 pub mod ecall_constants;
+pub mod ecall_validation;
 pub mod manifest;
 #[cfg(feature = "target_vanadium_ledger")]
 pub mod metrics;
