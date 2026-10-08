@@ -1,12 +1,12 @@
 use alloc::vec::Vec;
 use core::{
     marker::PhantomData,
-    ops::{Add, Deref, Mul},
+    ops::{Add, Deref, Mul, Neg, Sub},
 };
 
 use hex_literal::hex;
 use subtle::ConstantTimeEq;
-use zeroize::Zeroizing;
+use zeroize::{Zeroize, Zeroizing};
 
 use common::ecall_constants::{CurveKind, EcdsaSignMode, HashId, SchnorrSignMode};
 
@@ -107,6 +107,13 @@ where
 /// - **Addition**: `P + O = P` and `O + P = P` for any point `P`
 /// - **Scalar multiplication**: `k * O = O` for any scalar `k`, and `0 * P = O` for any point `P`
 ///
+/// # Invariant
+///
+/// A `Point` is always either the point at infinity or a point of the curve: it can only be built
+/// by the validating constructors ([`Point::from_bytes`], [`Point::from_coordinates`],
+/// [`Point::lift_x`], [`Point::from_compressed`]), as the generator or infinity, or as the result
+/// of the group operations. So the operations never fail.
+///
 /// # Type Parameters
 /// * `C` - The curve type implementing `Curve<SCALAR_LENGTH>`.
 /// * `SCALAR_LENGTH` - The byte length of the scalar and coordinate elements.
@@ -118,8 +125,8 @@ where
 {
     curve_marker: PhantomData<C>,
     prefix: u8,
-    pub x: [u8; SCALAR_LENGTH],
-    pub y: [u8; SCALAR_LENGTH],
+    x: [u8; SCALAR_LENGTH],
+    y: [u8; SCALAR_LENGTH],
 }
 
 impl<C, const SCALAR_LENGTH: usize> Point<C, SCALAR_LENGTH>
@@ -139,6 +146,16 @@ where
     /// `true` if this is the point at infinity, `false` otherwise.
     pub fn is_zero(&self) -> bool {
         (self.x.ct_eq(&Self::ZERO) & self.y.ct_eq(&Self::ZERO)).unwrap_u8() == 1
+    }
+
+    /// The x-coordinate; all zeros for the point at infinity.
+    pub fn x(&self) -> &[u8; SCALAR_LENGTH] {
+        &self.x
+    }
+
+    /// The y-coordinate; all zeros for the point at infinity.
+    pub fn y(&self) -> &[u8; SCALAR_LENGTH] {
+        &self.y
     }
 }
 
@@ -164,35 +181,14 @@ impl<C, const SCALAR_LENGTH: usize> Point<C, SCALAR_LENGTH>
 where
     C: Curve<SCALAR_LENGTH>,
 {
-    /// Returns a mutable pointer to the beginning of the point's data.
-    pub fn as_mut_ptr(&mut self) -> *mut u8 {
+    /// Returns a mutable pointer to the beginning of the point's data. Only the ECALLs may write
+    /// through it, since they only ever produce valid points.
+    fn as_mut_ptr(&mut self) -> *mut u8 {
         &mut self.prefix as *mut u8
     }
     /// Returns a pointer to the beginning of the point's data.
     pub fn as_ptr(&self) -> *const u8 {
         &self.prefix as *const u8
-    }
-
-    /// Creates a new Point with the given coordinates.
-    ///
-    /// This creates a regular curve point with prefix `0x04` (SEC1 uncompressed format).
-    /// To create the point at infinity, use `Point::default()` instead.
-    ///
-    /// # Arguments
-    ///
-    /// * `x` - The x-coordinate of the point.
-    /// * `y` - The y-coordinate of the point.
-    ///
-    /// # Returns
-    ///
-    /// A new `Point` instance with the specified coordinates.
-    pub fn new(x: [u8; SCALAR_LENGTH], y: [u8; SCALAR_LENGTH]) -> Self {
-        Self {
-            curve_marker: PhantomData,
-            prefix: 0x04,
-            x,
-            y,
-        }
     }
 }
 
@@ -201,27 +197,6 @@ where
     C: Curve<SCALAR_LENGTH>,
 {
     public_key: Point<C, SCALAR_LENGTH>,
-}
-
-impl<C, const SCALAR_LENGTH: usize> EcfpPublicKey<C, SCALAR_LENGTH>
-where
-    C: Curve<SCALAR_LENGTH>,
-{
-    /// Creates a new EcfpPublicKey from the given coordinates.
-    ///
-    /// # Arguments
-    ///
-    /// * `x` - The x-coordinate of the public key.
-    /// * `y` - The y-coordinate of the public key.
-    ///
-    /// # Returns
-    ///
-    /// A new `EcfpPublicKey` instance.
-    pub fn new(x: [u8; SCALAR_LENGTH], y: [u8; SCALAR_LENGTH]) -> Self {
-        Self {
-            public_key: Point::new(x, y),
-        }
-    }
 }
 
 impl<C, const SCALAR_LENGTH: usize> From<Point<C, SCALAR_LENGTH>>
@@ -310,11 +285,6 @@ where
 // We could implement this for any SCALAR_LENGTH, but this currently requires
 // the #![feature(generic_const_exprs)], as the byte size is 1 + 2*SCALAR_LENGTH.
 impl<C: Curve<32>> Point<C, 32> {
-    const SCALAR_ONE: [u8; 32] = [
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 1,
-    ];
-
     /// Converts the point to a byte array.
     ///
     /// # Returns
@@ -327,51 +297,37 @@ impl<C: Curve<32>> Point<C, 32> {
         unsafe { &*(self as *const Self as *const [u8; 65]) }
     }
 
-    /// Creates a point from a byte array, validating that it lies on the curve.
+    /// Creates a point from its 65-byte encoding: either 65 zero bytes for the point at infinity,
+    /// or the uncompressed SEC1 encoding `0x04 || x || y` of a point of the curve.
     ///
-    /// # Arguments
-    ///
-    /// * `bytes` - A byte array of length `1 + 2 * 32` representing the point.
-    ///
-    /// # Returns
-    ///
-    /// A `Result` containing the `Point` on success, or an error message if:
-    /// - The prefix byte is not `0x04` (uncompressed point format) or `0x00` (point at infinity)
-    /// - For `0x04` prefix, the point does not lie on the curve
+    /// Returns an error for any other input.
     pub fn from_bytes(bytes: &[u8; 65]) -> Result<Self, &'static str> {
-        if bytes[0] == 0x00 {
-            return Ok(Point::default());
-        }
-
-        if bytes[0] != 0x04 {
-            return Err("Invalid point prefix. Expected 0x04 or 0x00");
-        }
-
-        let point: Self = Self {
-            curve_marker: PhantomData,
-            prefix: bytes[0],
-            x: bytes[1..33].try_into().unwrap(),
-            y: bytes[33..65].try_into().unwrap(),
-        };
-
-        // Validate point is on curve by attempting scalar multiplication by 1.
-        // If the point is not on the curve, the underlying ecall will fail.
-        let mut result: Point<C, 32> = Point::default();
-        // SAFETY: result is a valid 65-byte output buffer; point is a valid uncompressed SEC1 point;
-        // SCALAR_ONE is a 32-byte scalar.
+        // The ECALLs reject any invalid encoding, so adding the point at infinity validates the
+        // input, and returns it unchanged.
+        let mut result = Self::default();
+        let infinity = Self::default();
+        // SAFETY: all buffers are 65 bytes; the ECALL writes `result` only if `bytes` is valid.
         if 1 != unsafe {
-            ecalls::ecfp_scalar_mult(
+            ecalls::ecfp_add_point(
                 C::curve_kind() as u32,
                 result.as_mut_ptr(),
-                point.as_ptr(),
-                Self::SCALAR_ONE.as_ptr(),
-                32,
+                bytes.as_ptr(),
+                infinity.as_ptr(),
             )
         } {
-            return Err("Point is not on the curve");
+            return Err("Invalid point");
         }
+        Ok(result)
+    }
 
-        Ok(point)
+    /// Creates the point with the given coordinates, or returns an error if it is not a point of
+    /// the curve.
+    pub fn from_coordinates(x: &[u8; 32], y: &[u8; 32]) -> Result<Self, &'static str> {
+        let mut bytes = [0u8; 65];
+        bytes[0] = 0x04;
+        bytes[1..33].copy_from_slice(x);
+        bytes[33..65].copy_from_slice(y);
+        Self::from_bytes(&bytes)
     }
 }
 
@@ -383,45 +339,19 @@ where
 
     fn add(self, other: Self) -> Self::Output {
         let mut result = Point::default();
-        // SAFETY: result, self, and other are valid 65-byte uncompressed SEC1 point buffers;
-        // result does not alias input pointers.
-        if 1 != unsafe {
+        // SAFETY: result, self, and other are 65-byte point buffers; result does not alias the
+        // inputs. Both inputs are valid points, so the ECALL cannot fail.
+        let status = unsafe {
             ecalls::ecfp_add_point(
                 C::curve_kind() as u32,
                 result.as_mut_ptr(),
                 self.as_ptr(),
                 other.as_ptr(),
             )
-        } {
-            panic!("Failed to add points");
+        };
+        if status != 1 {
+            panic!("adding valid points cannot fail");
         }
-
-        result
-    }
-}
-
-impl<C, const SCALAR_LENGTH: usize> Mul<&[u8; SCALAR_LENGTH]> for &Point<C, SCALAR_LENGTH>
-where
-    C: Curve<SCALAR_LENGTH>,
-{
-    type Output = Point<C, SCALAR_LENGTH>;
-
-    fn mul(self, scalar: &[u8; SCALAR_LENGTH]) -> Self::Output {
-        let mut result = Point::default();
-        // SAFETY: result is a valid 65-byte output buffer; self is a valid uncompressed SEC1 point;
-        // scalar is a valid SCALAR_LENGTH-byte array.
-        if 1 != unsafe {
-            ecalls::ecfp_scalar_mult(
-                C::curve_kind() as u32,
-                result.as_mut_ptr(),
-                self.as_ptr(),
-                scalar.as_ptr(),
-                SCALAR_LENGTH,
-            )
-        } {
-            panic!("Failed to multiply point by scalar");
-        }
-
         result
     }
 }
@@ -475,12 +405,297 @@ impl Secp256k1 {
     const SEVEN: [u8; 32] =
         hex!("0000000000000000000000000000000000000000000000000000000000000007");
 
+    /// `p - y`, for `0 < y < p`.
+    fn negate_field_element(y: &[u8; 32]) -> [u8; 32] {
+        let mut res = [0u8; 32];
+        let mut borrow: i16 = 0;
+        for i in (0..32).rev() {
+            let diff = Self::P[i] as i16 - y[i] as i16 - borrow;
+            if diff < 0 {
+                res[i] = (diff + 256) as u8;
+                borrow = 1;
+            } else {
+                res[i] = diff as u8;
+                borrow = 0;
+            }
+        }
+        res
+    }
+
     pub const fn get_generator() -> Secp256k1Point {
         Point {
             curve_marker: PhantomData,
             prefix: 0x04,
             x: hex!("79BE667EF9DCBBAC55A06295CE870B07029BFCDB2DCE28D959F2815B16F81798"),
             y: hex!("483ADA7726A3C4655DA4FBFC0E1108A8FD17B448A68554199C47D08FFB10D4B8"),
+        }
+    }
+}
+
+/// An integer modulo the order n of the secp256k1 group, always smaller than n.
+///
+/// Scalars are often secret (private keys, nonces, tweaks), so they are zeroized when dropped
+/// and compared in constant time. The arithmetic uses the big number ECALLs.
+#[derive(Clone)]
+pub struct Secp256k1Scalar([u8; 32]);
+
+impl Secp256k1Scalar {
+    /// The order n of the secp256k1 group.
+    pub const ORDER: [u8; 32] = common::ecall_validation::SECP256K1_N;
+
+    /// The scalar 0.
+    pub fn zero() -> Self {
+        Self([0u8; 32])
+    }
+
+    /// The scalar 1.
+    pub fn one() -> Self {
+        Self::from_u32(1)
+    }
+
+    /// The scalar `value`.
+    pub fn from_u32(value: u32) -> Self {
+        let mut res = Self::zero();
+        res.0[28..].copy_from_slice(&value.to_be_bytes());
+        res
+    }
+
+    /// The scalar encoded by the big-endian `bytes`, or `None` if they encode a value that is not
+    /// smaller than n.
+    pub fn from_be_bytes(bytes: &[u8; 32]) -> Option<Self> {
+        common::ecall_validation::is_reduced(bytes, &Self::ORDER)
+            .then(|| Self(*bytes))
+    }
+
+    /// The big-endian `bytes`, reduced modulo n.
+    pub fn from_be_bytes_reduced(bytes: &[u8; 32]) -> Self {
+        Self(common::ecall_validation::reduce_secp256k1_scalar(bytes))
+    }
+
+    /// The big-endian encoding of the scalar.
+    pub fn as_be_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+
+    /// Whether the scalar is 0. Runs in constant time.
+    pub fn is_zero(&self) -> bool {
+        self.0[..].ct_eq(&[0u8; 32][..]).unwrap_u8() == 1
+    }
+
+    /// The multiplicative inverse, or `None` for 0.
+    pub fn inv(&self) -> Option<Self> {
+        if self.is_zero() {
+            return None;
+        }
+        let mut res = Self::zero();
+        // SAFETY: all buffers are 32 bytes; 0 < self < n, and n is an odd prime.
+        let status = unsafe {
+            ecalls::bn_modinv_prime(res.0.as_mut_ptr(), self.0.as_ptr(), Self::ORDER.as_ptr(), 32)
+        };
+        if status != 1 {
+            panic!("inversion of a canonical non-zero scalar cannot fail");
+        }
+        Some(res)
+    }
+
+    /// Applies one of the modular ECALLs `bn_addm`, `bn_subm` and `bn_multm` to two scalars.
+    ///
+    /// Not inlined: a scalar expression would otherwise repeat the whole ECALL sequence at every
+    /// operator.
+    #[inline(never)]
+    fn binop(
+        f: unsafe fn(*mut u8, *const u8, *const u8, *const u8, usize) -> u32,
+        a: &Self,
+        b: &Self,
+    ) -> Self {
+        let mut res = Self::zero();
+        // SAFETY: all buffers are 32 bytes; both operands are smaller than n, which is odd.
+        let status = unsafe {
+            f(
+                res.0.as_mut_ptr(),
+                a.0.as_ptr(),
+                b.0.as_ptr(),
+                Self::ORDER.as_ptr(),
+                32,
+            )
+        };
+        if status != 1 {
+            panic!("arithmetic on canonical scalars cannot fail");
+        }
+        res
+    }
+}
+
+impl Add for &Secp256k1Scalar {
+    type Output = Secp256k1Scalar;
+
+    fn add(self, other: Self) -> Secp256k1Scalar {
+        Secp256k1Scalar::binop(ecalls::bn_addm, self, other)
+    }
+}
+
+impl Sub for &Secp256k1Scalar {
+    type Output = Secp256k1Scalar;
+
+    fn sub(self, other: Self) -> Secp256k1Scalar {
+        Secp256k1Scalar::binop(ecalls::bn_subm, self, other)
+    }
+}
+
+impl Mul for &Secp256k1Scalar {
+    type Output = Secp256k1Scalar;
+
+    fn mul(self, other: Self) -> Secp256k1Scalar {
+        Secp256k1Scalar::binop(ecalls::bn_multm, self, other)
+    }
+}
+
+impl Neg for &Secp256k1Scalar {
+    type Output = Secp256k1Scalar;
+
+    fn neg(self) -> Secp256k1Scalar {
+        &Secp256k1Scalar::zero() - self
+    }
+}
+
+impl Drop for Secp256k1Scalar {
+    // Not inlined: scalar expressions create many temporaries, and each would otherwise repeat
+    // the zeroization code.
+    #[inline(never)]
+    fn drop(&mut self) {
+        self.0.zeroize();
+    }
+}
+
+impl ConstantTimeEq for Secp256k1Scalar {
+    fn ct_eq(&self, other: &Self) -> subtle::Choice {
+        self.0[..].ct_eq(&other.0[..])
+    }
+}
+
+impl PartialEq for Secp256k1Scalar {
+    fn eq(&self, other: &Self) -> bool {
+        self.ct_eq(other).unwrap_u8() == 1
+    }
+}
+
+impl Eq for Secp256k1Scalar {}
+
+impl core::fmt::Debug for Secp256k1Scalar {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "Secp256k1Scalar([REDACTED])")
+    }
+}
+
+impl Secp256k1Point {
+    /// The point with x-coordinate `x` and an even y-coordinate (`lift_x` in BIP-340), or an error
+    /// if `x` is not the x-coordinate of a point of the curve.
+    pub fn lift_x(x: &[u8; 32]) -> Result<Self, &'static str> {
+        let mut x2 = [0u8; 32];
+        let mut x3 = [0u8; 32];
+        let mut rhs = [0u8; 32]; // x^3 + 7 mod p
+        let mut y = [0u8; 32];
+        let mut y2 = [0u8; 32];
+        let p = Secp256k1::P.as_ptr();
+
+        // SAFETY: all buffers are 32 bytes. The ECALLs return 0 if x is not smaller than p.
+        let ok = unsafe {
+            ecalls::bn_multm(x2.as_mut_ptr(), x.as_ptr(), x.as_ptr(), p, 32) == 1
+                && ecalls::bn_multm(x3.as_mut_ptr(), x2.as_ptr(), x.as_ptr(), p, 32) == 1
+                && ecalls::bn_addm(rhs.as_mut_ptr(), x3.as_ptr(), Secp256k1::SEVEN.as_ptr(), p, 32)
+                    == 1
+                // since p = 3 mod 4, rhs^((p + 1) / 4) is a square root of rhs, if it has one
+                && ecalls::bn_powm(
+                    y.as_mut_ptr(),
+                    rhs.as_ptr(),
+                    Secp256k1::SQUAREROOT_EXP.as_ptr(),
+                    32,
+                    p,
+                    32,
+                ) == 1
+                && ecalls::bn_multm(y2.as_mut_ptr(), y.as_ptr(), y.as_ptr(), p, 32) == 1
+        };
+        if !ok || y2 != rhs {
+            return Err("Not the x-coordinate of a point of the curve");
+        }
+        if y[31] & 1 == 1 {
+            y = Secp256k1::negate_field_element(&y);
+        }
+
+        Ok(Self {
+            curve_marker: PhantomData,
+            prefix: 0x04,
+            x: *x,
+            y,
+        })
+    }
+
+    /// Decodes a 33-byte compressed SEC1 point, or returns an error if it is not one.
+    pub fn from_compressed(compressed: &[u8; 33]) -> Result<Self, &'static str> {
+        if compressed[0] != 0x02 && compressed[0] != 0x03 {
+            return Err("Invalid compressed key prefix");
+        }
+        let point = Self::lift_x(compressed[1..33].try_into().unwrap())?;
+        Ok(if compressed[0] == 0x03 {
+            -&point
+        } else {
+            point
+        })
+    }
+
+    /// The 33-byte compressed SEC1 encoding, or `None` for the point at infinity.
+    pub fn to_compressed(&self) -> Option<[u8; 33]> {
+        if self.is_zero() {
+            return None;
+        }
+        let mut compressed = [0u8; 33];
+        compressed[0] = 0x02 + (self.y[31] & 1);
+        compressed[1..33].copy_from_slice(&self.x);
+        Some(compressed)
+    }
+
+    /// Whether the y-coordinate is even; it is, for the point at infinity.
+    pub fn has_even_y(&self) -> bool {
+        self.y[31] & 1 == 0
+    }
+}
+
+impl Mul<&Secp256k1Scalar> for &Secp256k1Point {
+    type Output = Secp256k1Point;
+
+    fn mul(self, scalar: &Secp256k1Scalar) -> Secp256k1Point {
+        let mut result = Point::default();
+        // SAFETY: result is a 65-byte output buffer; self is a valid point, and the scalar is
+        // 32 bytes and smaller than n, so the ECALL cannot fail.
+        let status = unsafe {
+            ecalls::ecfp_scalar_mult(
+                Secp256k1::curve_kind() as u32,
+                result.as_mut_ptr(),
+                self.as_ptr(),
+                scalar.as_be_bytes().as_ptr(),
+                32,
+            )
+        };
+        if status != 1 {
+            panic!("multiplying a valid point by a canonical scalar cannot fail");
+        }
+        result
+    }
+}
+
+impl Neg for &Secp256k1Point {
+    type Output = Secp256k1Point;
+
+    /// The opposite point, (x, p - y); the point at infinity is its own opposite.
+    fn neg(self) -> Secp256k1Point {
+        if self.is_zero() {
+            return *self;
+        }
+        Point {
+            curve_marker: PhantomData,
+            prefix: 0x04,
+            x: self.x,
+            y: Secp256k1::negate_field_element(&self.y),
         }
     }
 }
@@ -564,106 +779,16 @@ impl EcfpPublicKey<Secp256k1, 32> {
     ///
     /// Returns `Err` if `compressed` does not represent a valid secp256k1 point.
     pub fn from_compressed(compressed: &[u8; 33]) -> Result<Self, &'static str> {
-        if compressed[0] != 0x02 && compressed[0] != 0x03 {
-            return Err("Invalid compressed key prefix");
-        }
-
-        let mut x = [0u8; 32];
-        x.copy_from_slice(&compressed[1..33]);
-
-        let y = {
-            let mut x2 = [0u8; 32];
-            let mut x3 = [0u8; 32];
-            let mut rhs = [0u8; 32]; // x^3 + 7  mod p
-            let mut y = [0u8; 32];
-
-            // SAFETY: all buffers are 32-byte arrays; inputs are valid field elements < p.
-            let ok = unsafe {
-                ecalls::bn_multm(
-                    x2.as_mut_ptr(),
-                    x.as_ptr(),
-                    x.as_ptr(),
-                    Secp256k1::P.as_ptr(),
-                    32,
-                ) != 0
-                    && ecalls::bn_multm(
-                        x3.as_mut_ptr(),
-                        x2.as_ptr(),
-                        x.as_ptr(),
-                        Secp256k1::P.as_ptr(),
-                        32,
-                    ) != 0
-                    && ecalls::bn_addm(
-                        rhs.as_mut_ptr(),
-                        x3.as_ptr(),
-                        Secp256k1::SEVEN.as_ptr(),
-                        Secp256k1::P.as_ptr(),
-                        32,
-                    ) != 0
-                    && ecalls::bn_powm(
-                        y.as_mut_ptr(),
-                        rhs.as_ptr(),
-                        Secp256k1::SQUAREROOT_EXP.as_ptr(),
-                        32,
-                        Secp256k1::P.as_ptr(),
-                        32,
-                    ) != 0
-            };
-            if !ok {
-                return Err("Point decompression failed");
-            }
-
-            // verify that y^2 is indeed equal to rhs
-            let mut y2 = [0u8; 32];
-            let ok = unsafe {
-                ecalls::bn_multm(
-                    y2.as_mut_ptr(),
-                    y.as_ptr(),
-                    y.as_ptr(),
-                    Secp256k1::P.as_ptr(),
-                    32,
-                ) != 0
-                    && y2 == rhs
-            };
-            if !ok {
-                return Err("Point not on curve");
-            }
-
-            // y must be negated when its parity doesn't match the prefix:
-            let expected_odd = compressed[0] & 1; // 0 for 0x02, 1 for 0x03
-            if (y[31] & 1) != expected_odd {
-                // negate: y = p - y  (big-endian byte subtraction with borrow)
-                let mut neg_y = [0u8; 32];
-                let mut borrow: i16 = 0;
-                for i in (0..32).rev() {
-                    let diff = Secp256k1::P[i] as i16 - y[i] as i16 - borrow;
-                    if diff < 0 {
-                        neg_y[i] = (diff + 256) as u8;
-                        borrow = 1;
-                    } else {
-                        neg_y[i] = diff as u8;
-                        borrow = 0;
-                    }
-                }
-                neg_y
-            } else {
-                y
-            }
-        };
-
-        Ok(Self::new(x, y))
+        Secp256k1Point::from_compressed(compressed).map(Self::from)
     }
 
     /// Encodes this public key as a 33-byte compressed SEC1 point.
+    ///
+    /// Panics if the public key is the point at infinity.
     pub fn to_compressed(&self) -> [u8; 33] {
-        let bytes = self.public_key.to_bytes();
-        if bytes[0] != 0x04 {
-            panic!("Invalid public key");
-        }
-        let mut compressed = [0u8; 33];
-        compressed[0] = bytes[64] % 2 + 0x02;
-        compressed[1..33].copy_from_slice(&bytes[1..33]);
-        compressed
+        self.public_key
+            .to_compressed()
+            .expect("a public key is not the point at infinity")
     }
 
     pub fn ecdsa_verify_hash(
@@ -695,7 +820,7 @@ impl EcfpPublicKey<Secp256k1, 32> {
                 Secp256k1::curve_kind() as u32,
                 SchnorrSignMode::BIP340 as u32,
                 HashId::Sha256 as u32,
-                self.public_key.x.as_ptr(),
+                self.public_key.x().as_ptr(),
                 msg.as_ptr(),
                 msg.len(),
                 signature.as_ptr(),
@@ -723,8 +848,10 @@ impl EcfpPublicKey<Secp256k1, 32> {
 
 // TODO: can we generalize this to all curves?
 impl ToPublicKey<Secp256k1, 32> for EcfpPrivateKey<Secp256k1, 32> {
+    /// Panics if the private key is not smaller than n.
     fn to_public_key(&self) -> EcfpPublicKey<Secp256k1, 32> {
-        (&Secp256k1::get_generator() * self.private_key.deref()).into()
+        let d = Secp256k1Scalar::from_be_bytes(&self.private_key).expect("invalid private key");
+        (&Secp256k1::get_generator() * &d).into()
     }
 }
 
@@ -761,10 +888,6 @@ fn hmac_sha512(key: &[u8; 32], data1: &[u8], data2: &[u8]) -> [u8; 64] {
 }
 
 impl HDPrivNode<Secp256k1, 32> {
-    /// The secp256k1 group order n.
-    const SECP256K1_ORDER: [u8; 32] =
-        hex!("FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141");
-
     /// Performs BIP32 child key derivation (CKDpriv).
     ///
     /// `child` is a raw BIP32 child index. Values `>= 0x80000000` are hardened.
@@ -778,61 +901,42 @@ impl HDPrivNode<Secp256k1, 32> {
     /// 4. New private key = parent_key + tweak (mod secp256k1 order).
     pub fn ckd_priv(&self, child: u32) -> Result<HDPrivNode<Secp256k1, 32>, &'static str> {
         let hardened = child >= 0x80000000;
+        let parent = Secp256k1Scalar::from_be_bytes(&self.privkey).ok_or("invalid private key")?;
 
         // 1. Build the HMAC data prefix.
-        let mut data_prefix = [0u8; 33];
+        let mut data_prefix = Zeroizing::new([0u8; 33]);
         if hardened {
             data_prefix[0] = 0x00;
             data_prefix[1..33].copy_from_slice(&*self.privkey);
         } else {
-            let privkey = EcfpPrivateKey::<Secp256k1, 32>::new(*self.privkey);
-            let pubkey = privkey.to_public_key();
-            let uncompressed = pubkey.as_ref().to_bytes();
-            data_prefix[0] = 2 + uncompressed[64] % 2;
-            data_prefix[1..33].copy_from_slice(&uncompressed[1..33]);
+            let pubkey = &Secp256k1::get_generator() * &parent;
+            data_prefix.copy_from_slice(&pubkey.to_compressed().ok_or("invalid private key")?);
         }
 
         // 2. HMAC-SHA512(key = chaincode, data = data_prefix || child_index_be).
-        let hmac_result = hmac_sha512(&self.chaincode, &data_prefix, &child.to_be_bytes());
+        let hmac_result = Zeroizing::new(hmac_sha512(
+            &self.chaincode,
+            &data_prefix[..],
+            &child.to_be_bytes(),
+        ));
 
         // 3. Split: left 32 bytes = tweak, right 32 bytes = new chaincode.
-        let mut tweak = [0u8; 32];
-        tweak.copy_from_slice(&hmac_result[0..32]);
+        // BIP-32 rejects a tweak that is not smaller than the curve order (this happens with
+        // negligible probability)
+        let tweak = Secp256k1Scalar::from_be_bytes(hmac_result[0..32].try_into().unwrap())
+            .ok_or("invalid tweak")?;
         let mut new_chaincode = [0u8; 32];
         new_chaincode.copy_from_slice(&hmac_result[32..64]);
 
-        // BIP-32 rejects a tweak that is zero or not smaller than the curve order (this happens with
-        // negligible probability)
-        if common::ecall_validation::is_zero(&tweak)
-            || !common::ecall_validation::is_reduced(&tweak, &Self::SECP256K1_ORDER)
-        {
-            return Err("invalid tweak");
-        }
-
-        // 4. new_privkey = (parent_privkey + tweak) mod n.
-        let mut child_privkey = [0u8; 32];
-        let privkey_bytes: &[u8; 32] = &*self.privkey;
-        // SAFETY: child_privkey, privkey_bytes, tweak, and SECP256K1_ORDER are all
-        // valid, non-overlapping 32-byte buffers.
-        if 1 != unsafe {
-            ecalls::bn_addm(
-                child_privkey.as_mut_ptr(),
-                privkey_bytes.as_ptr(),
-                tweak.as_ptr(),
-                Self::SECP256K1_ORDER.as_ptr(),
-                32,
-            )
-        } {
-            return Err("key derivation failed");
-        }
-
-        if child_privkey == [0u8; 32] {
+        // 4. new_privkey = (parent_privkey + tweak) mod n, which BIP-32 rejects if it is 0
+        let child_privkey = &parent + &tweak;
+        if child_privkey.is_zero() {
             return Err("derived child key is the zero scalar");
         }
 
         let mut result = HDPrivNode::<Secp256k1, 32>::default();
         result.chaincode = new_chaincode;
-        *result.privkey = child_privkey;
+        *result.privkey = *child_privkey.as_be_bytes();
         Ok(result)
     }
 }
@@ -874,14 +978,16 @@ mod tests {
 
     #[test]
     fn test_secp256k1_point_addition() {
-        let point1 = Secp256k1Point::new(
-            hex!("c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5"),
-            hex!("1ae168fea63dc339a3c58419466ceaeef7f632653266d0e1236431a950cfe52a"),
-        );
-        let point2 = Secp256k1Point::new(
-            hex!("f9308a019258c31049344f85f89d5229b531c845836f99b08601f113bce036f9"),
-            hex!("388f7b0f632de8140fe337e62a37f3566500a99934c2231b6cb9fd7584b8e672"),
-        );
+        let point1 = Secp256k1Point::from_coordinates(
+            &hex!("c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5"),
+            &hex!("1ae168fea63dc339a3c58419466ceaeef7f632653266d0e1236431a950cfe52a"),
+        )
+        .unwrap();
+        let point2 = Secp256k1Point::from_coordinates(
+            &hex!("f9308a019258c31049344f85f89d5229b531c845836f99b08601f113bce036f9"),
+            &hex!("388f7b0f632de8140fe337e62a37f3566500a99934c2231b6cb9fd7584b8e672"),
+        )
+        .unwrap();
 
         let result = &point1 + &point2;
 
@@ -897,11 +1003,11 @@ mod tests {
 
     #[test]
     fn test_secp256k1_point_scalarmul() {
-        let point1 = Secp256k1Point::new(
-            hex!("79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"),
-            hex!("483ada7726a3c4655da4fbfc0e1108a8fd17b448a68554199c47d08ffb10d4b8"),
-        );
-        let scalar = hex!("22445566778899aabbccddeeff0011223344556677889900aabbccddeeff0011");
+        let point1 = Secp256k1::get_generator();
+        let scalar = Secp256k1Scalar::from_be_bytes(&hex!(
+            "22445566778899aabbccddeeff0011223344556677889900aabbccddeeff0011"
+        ))
+        .unwrap();
 
         let result = &point1 * &scalar;
 
@@ -913,6 +1019,95 @@ mod tests {
             result.y,
             hex!("747206115143153c85f3e8bb94d392bd955d36f1f0204921e6dd7684e81bdaab")
         );
+    }
+
+    fn n_minus(d: u32) -> [u8; 32] {
+        let n = Secp256k1Scalar::from_be_bytes_reduced(&Secp256k1Scalar::ORDER);
+        *(&n - &Secp256k1Scalar::from_u32(d)).as_be_bytes()
+    }
+
+    #[test]
+    fn test_scalar_construction() {
+        assert!(Secp256k1Scalar::from_be_bytes(&Secp256k1Scalar::ORDER).is_none());
+        assert!(Secp256k1Scalar::from_be_bytes(&[0xff; 32]).is_none());
+        assert!(Secp256k1Scalar::from_be_bytes(&n_minus(1)).is_some());
+        assert!(Secp256k1Scalar::zero().is_zero());
+        assert!(!Secp256k1Scalar::one().is_zero());
+
+        let mut n_plus_5 = Secp256k1Scalar::ORDER;
+        n_plus_5[31] += 5;
+        assert_eq!(
+            Secp256k1Scalar::from_be_bytes_reduced(&n_plus_5),
+            Secp256k1Scalar::from_u32(5)
+        );
+        assert!(Secp256k1Scalar::from_be_bytes_reduced(&Secp256k1Scalar::ORDER).is_zero());
+    }
+
+    #[test]
+    fn test_scalar_arithmetic() {
+        let one = Secp256k1Scalar::one();
+        let two = Secp256k1Scalar::from_u32(2);
+        let three = Secp256k1Scalar::from_u32(3);
+        let n_minus_1 = Secp256k1Scalar::from_be_bytes(&n_minus(1)).unwrap();
+
+        assert_eq!(&n_minus_1 + &two, one);
+        assert_eq!(&one - &two, n_minus_1);
+        assert_eq!(-&one, n_minus_1);
+        assert!((-&Secp256k1Scalar::zero()).is_zero());
+        assert_eq!(&two * &three, Secp256k1Scalar::from_u32(6));
+        assert_eq!(&n_minus_1 * &n_minus_1, one);
+
+        assert_eq!(&three.inv().unwrap() * &three, one);
+        assert_eq!(n_minus_1.inv().unwrap(), n_minus_1);
+        assert!(Secp256k1Scalar::zero().inv().is_none());
+    }
+
+    #[test]
+    fn test_point_negation() {
+        let g = Secp256k1::get_generator();
+        let neg_g = -&g;
+        assert_eq!(neg_g.x(), g.x());
+        assert!(!neg_g.has_even_y());
+        assert!((&g + &neg_g).is_zero());
+        assert_eq!(-&neg_g, g);
+        assert!((-&Secp256k1Point::default()).is_zero());
+
+        // (n - 1) * G = -G
+        let n_minus_1 = Secp256k1Scalar::from_be_bytes(&n_minus(1)).unwrap();
+        assert_eq!(&g * &n_minus_1, neg_g);
+        assert!((&g * &Secp256k1Scalar::zero()).is_zero());
+    }
+
+    #[test]
+    fn test_lift_x_and_compressed() {
+        let g = Secp256k1::get_generator();
+        assert!(g.has_even_y());
+        assert_eq!(Secp256k1Point::lift_x(g.x()).unwrap(), g);
+
+        let mut compressed = g.to_compressed().unwrap();
+        assert_eq!(compressed[0], 0x02);
+        assert_eq!(Secp256k1Point::from_compressed(&compressed).unwrap(), g);
+        compressed[0] = 0x03;
+        assert_eq!(Secp256k1Point::from_compressed(&compressed).unwrap(), -&g);
+        assert_eq!((-&g).to_compressed().unwrap(), compressed);
+        assert!(Secp256k1Point::default().to_compressed().is_none());
+
+        // x = p is not a field element, and x = 5 is not the x-coordinate of a point of the curve
+        assert!(Secp256k1Point::lift_x(&Secp256k1::P).is_err());
+        let mut five = [0u8; 32];
+        five[31] = 5;
+        assert!(Secp256k1Point::lift_x(&five).is_err());
+    }
+
+    #[test]
+    fn test_from_coordinates_rejects_points_off_the_curve() {
+        let g = Secp256k1::get_generator();
+        let mut y = *g.y();
+        y[31] ^= 1;
+        assert!(Secp256k1Point::from_coordinates(g.x(), &y).is_err());
+        assert_eq!(Secp256k1Point::from_coordinates(g.x(), g.y()).unwrap(), g);
+        // a coordinate that is not smaller than p
+        assert!(Secp256k1Point::from_coordinates(&Secp256k1::P, g.y()).is_err());
     }
 
     #[test]
@@ -1032,7 +1227,6 @@ mod tests {
 
         let result = Secp256k1Point::from_bytes(&invalid_point);
         assert!(result.is_err());
-        assert_eq!(result.unwrap_err(), "Point is not on the curve");
     }
 
     #[test]
@@ -1046,10 +1240,6 @@ mod tests {
 
         let result = Secp256k1Point::from_bytes(&invalid_prefix);
         assert!(result.is_err());
-        assert_eq!(
-            result.unwrap_err(),
-            "Invalid point prefix. Expected 0x04 or 0x00"
-        );
     }
 
     #[test]

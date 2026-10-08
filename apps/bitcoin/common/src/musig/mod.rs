@@ -10,7 +10,7 @@ mod types;
 use bitcoin::bip32::{ChainCode, ChildNumber, Xpub};
 use bitcoin::secp256k1;
 use hashes::{sha256t_hash_newtype, Hash, HashEngine};
-use sdk::curve::{EcfpPublicKey, Secp256k1, Secp256k1Point};
+use sdk::curve::{EcfpPublicKey, Secp256k1, Secp256k1Point, Secp256k1Scalar};
 use subtle::ConstantTimeEq;
 use zeroize::Zeroize;
 
@@ -86,7 +86,7 @@ fn cpoint_ext(pk: &[u8; 33]) -> Result<Secp256k1Point, MusigError> {
 /// the point at infinity.
 fn has_even_y(p: &Secp256k1Point) -> bool {
     debug_assert!(!p.is_zero(), "has_even_y called with point at infinity");
-    p.y[31] & 1 == 0
+    p.has_even_y()
 }
 
 /// SEC1 compressed encoding of a non-infinity point. Thin wrapper that goes
@@ -155,7 +155,7 @@ pub fn key_agg(pubkeys: &[PlainPk]) -> Result<KeyAggContext, MusigError> {
     for pk in pubkeys {
         let p = cpoint(pk)?;
         let a_i = key_agg_coeff_internal(pubkeys, pk, &pk2);
-        let p_scaled = &p * &a_i;
+        let p_scaled = &p * &Secp256k1Scalar::from_be_bytes_reduced(&a_i);
         q = &q + &p_scaled;
     }
 
@@ -224,8 +224,8 @@ pub fn nonce_gen(
     }
 
     let g = Secp256k1::get_generator();
-    let r_s1 = &g * &k1;
-    let r_s2 = &g * &k2;
+    let r_s1 = &g * &Secp256k1Scalar::from_be_bytes_reduced(&k1);
+    let r_s2 = &g * &Secp256k1Scalar::from_be_bytes_reduced(&k2);
 
     if r_s1.is_zero() || r_s2.is_zero() {
         k1.zeroize();
@@ -294,8 +294,8 @@ fn apply_tweak(
     }
 
     // Q := g * Q + tweak * G
-    ctx.q = &ctx.q * &g;
-    let t_g = &Secp256k1::get_generator() * tweak;
+    ctx.q = &ctx.q * &Secp256k1Scalar::from_be_bytes_reduced(&g);
+    let t_g = &Secp256k1::get_generator() * &Secp256k1Scalar::from_be_bytes_reduced(tweak);
     ctx.q = &ctx.q + &t_g;
     if ctx.q.is_zero() {
         return Err(MusigError::TweakInfinity);
@@ -347,7 +347,8 @@ pub(crate) fn final_nonce(aggnonce: &PubNonce, b: &[u8; 32]) -> Result<Secp256k1
     let r2_bytes: &[u8; 33] = aggnonce.0[33..].try_into().unwrap();
     let r1 = cpoint_ext(r1_bytes)?;
     let r2 = cpoint_ext(r2_bytes)?;
-    let r = &r1 + &(&r2 * b);
+    // BIP-327 reduces b modulo n
+    let r = &r1 + &(&r2 * &Secp256k1Scalar::from_be_bytes_reduced(b));
     Ok(if r.is_zero() {
         Secp256k1::get_generator()
     } else {
@@ -361,13 +362,13 @@ fn get_session_values(ctx: &SessionContext) -> Result<SessionValues, MusigError>
         apply_tweak(&mut keyagg, tweak, *is_xonly)?;
     }
 
-    let b = noncecoef(ctx.aggnonce, &keyagg.q.x, ctx.msg);
+    let b = noncecoef(ctx.aggnonce, keyagg.q.x(), ctx.msg);
     let r = final_nonce(ctx.aggnonce, &b)?;
 
     // e = BIP-340_challenge(R.x || Q.x || msg)
     let mut eng = Bip340ChallengeHash::engine();
-    eng.input(&r.x);
-    eng.input(&keyagg.q.x);
+    eng.input(r.x());
+    eng.input(keyagg.q.x());
     eng.input(ctx.msg);
     let e = Bip340ChallengeHash::from_engine(eng).to_byte_array();
 
@@ -446,7 +447,8 @@ pub fn sign(
         }
 
         // P = sk * G
-        let pubkey_point = &Secp256k1::get_generator() * sk;
+        let pubkey_point =
+            &Secp256k1::get_generator() * &Secp256k1Scalar::from_be_bytes_reduced(sk);
         let computed_pk = compress(&pubkey_point);
         if computed_pk.ct_eq(&expected_pk).unwrap_u8() != 1 {
             return Err(MusigError::PubkeyMismatch);
@@ -535,7 +537,7 @@ pub fn partial_sig_agg(
     s += &(&e * &(&g * &tacc));
 
     let mut out = [0u8; 64];
-    out[..32].copy_from_slice(&values.r.x);
+    out[..32].copy_from_slice(values.r.x());
     out[32..].copy_from_slice(&s.to_be_bytes());
     Ok(out)
 }
@@ -570,7 +572,7 @@ pub fn aggregate_xpub(participant_xpubs: &[Xpub]) -> Result<Xpub, MusigError> {
     // every downstream sighash — drifts.
     let mut compressed = [0u8; 33];
     compressed[0] = if has_even_y(&ctx.q) { 0x02 } else { 0x03 };
-    compressed[1..].copy_from_slice(&ctx.q.x);
+    compressed[1..].copy_from_slice(ctx.q.x());
     let public_key =
         secp256k1::PublicKey::from_slice(&compressed).map_err(|_| MusigError::InvalidPoint)?;
 

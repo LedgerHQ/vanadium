@@ -13,7 +13,6 @@ use serde::ser::SerializeTuple;
 use subtle::{Choice, ConstantTimeEq};
 
 use crate::constants::{self, G, N, P};
-use crate::sdk_helpers::{secp256k1_compute_y, secp256k1_compute_y_with_parity};
 use crate::Error::{self, InvalidPublicKey, InvalidSecretKey, InvalidTweak};
 #[cfg(feature = "hashes")]
 #[allow(deprecated)]
@@ -344,7 +343,7 @@ impl PublicKey {
     /// ```
     #[inline]
     pub fn from_secret_key<C: Signing>(_secp: &Secp256k1<C>, sk: &SecretKey) -> PublicKey {
-        PublicKey(&G * &sk.secret_bytes())
+        PublicKey(&G * &sdk_scalar(&sk.secret_bytes()))
     }
 
     /// Creates a public key directly from a slice.
@@ -357,49 +356,16 @@ impl PublicKey {
         let header = data[0];
         match header {
             0x02 | 0x03 => {
-                if data.len() != 33 {
-                    return Err(Error::InvalidPublicKey);
-                }
-                let x: &[u8; 32] = data[1..33].try_into().unwrap();
-
-                // check if x is a valid coordinate
-                if x == &crate::constants::ZERO || x >= &crate::constants::CURVE_ORDER {
-                    return Err(Error::InvalidPublicKey);
-                }
-
-                // compute the y coordinate
-                let x_bn = unsafe { sdk::bignum::as_big_num_mod_ref::<32, P>(x) };
-                let y_bn = secp256k1_compute_y_with_parity(x_bn, header & 1)?;
-                let y = y_bn.to_be_bytes();
-                Ok(PublicKey(Secp256k1Point::new(*x, y)))
+                let compressed: &[u8; 33] = data.try_into().map_err(|_| Error::InvalidPublicKey)?;
+                Secp256k1Point::from_compressed(compressed)
+                    .map(PublicKey)
+                    .map_err(|_| Error::InvalidPublicKey)
             }
             0x04 => {
-                if data.len() != 65 {
-                    return Err(Error::InvalidPublicKey);
-                }
-                let x: &[u8; 32] = data[1..33].try_into().unwrap();
-                let y: &[u8; 32] = data[33..65].try_into().unwrap();
-
-                // check if x is a valid coordinate
-                if x == &crate::constants::ZERO || x >= &crate::constants::CURVE_ORDER {
-                    return Err(Error::InvalidPublicKey);
-                }
-                // check if y is a valid coordinate
-                if y == &crate::constants::ZERO || y >= &crate::constants::CURVE_ORDER {
-                    return Err(Error::InvalidPublicKey);
-                }
-
-                let point = sdk::curve::Secp256k1Point::new(*x, *y);
-
-                let x_bn = unsafe { sdk::bignum::as_big_num_mod_ref::<32, P>(x) };
-                let y_bn = unsafe { sdk::bignum::as_big_num_mod_ref::<32, P>(y) };
-                let lhs = y_bn * y_bn;
-                let rhs = x_bn * x_bn * x_bn + crate::sdk_helpers::SEVEN;
-                if !lhs.unsafe_eq(&rhs) {
-                    return Err(Error::InvalidPublicKey);
-                }
-
-                Ok(PublicKey(point))
+                let uncompressed: &[u8; 65] = data.try_into().map_err(|_| Error::InvalidPublicKey)?;
+                Secp256k1Point::from_bytes(uncompressed)
+                    .map(PublicKey)
+                    .map_err(|_| Error::InvalidPublicKey)
             }
             0x06 | 0x07 => panic!("Hybrid keys are not implemented"),
             _ => Err(Error::InvalidPublicKey),
@@ -444,8 +410,8 @@ impl PublicKey {
     /// represented by only a single bit, as x determines it up to one bit.
     pub fn serialize(&self) -> [u8; constants::PUBLIC_KEY_SIZE] {
         let mut res = [0u8; constants::PUBLIC_KEY_SIZE];
-        res[0] = 0x02 + (self.0.y[31] & 0x01);
-        res[1..33].copy_from_slice(&self.0.x);
+        res[0] = 0x02 + (self.0.y()[31] & 0x01);
+        res[1..33].copy_from_slice(self.0.x());
         res
     }
 
@@ -454,8 +420,8 @@ impl PublicKey {
     pub fn serialize_uncompressed(&self) -> [u8; constants::UNCOMPRESSED_PUBLIC_KEY_SIZE] {
         let mut res = [0u8; constants::UNCOMPRESSED_PUBLIC_KEY_SIZE];
         res[0] = 0x04;
-        res[1..33].copy_from_slice(&self.0.x);
-        res[33..65].copy_from_slice(&self.0.y);
+        res[1..33].copy_from_slice(self.0.x());
+        res[33..65].copy_from_slice(self.0.y());
         res
     }
 
@@ -475,9 +441,7 @@ impl PublicKey {
         _secp: &Secp256k1<C>,
         tweak: &Scalar,
     ) -> Result<PublicKey, Error> {
-        let g = sdk::curve::Secp256k1::get_generator();
-
-        let tweaked = &g * &tweak.as_be_bytes();
+        let tweaked = &G * &sdk_scalar(tweak.as_be_bytes());
         let result = &self.0 + &tweaked;
 
         if result.is_zero() {
@@ -553,11 +517,8 @@ impl PublicKey {
     /// Returns the [`XOnlyPublicKey`] (and it's [`Parity`]) for this [`PublicKey`].
     #[inline]
     pub fn x_only_public_key(&self) -> (XOnlyPublicKey, Parity) {
-        let x = self.0.x;
-        let y = self.0.y;
-        let parity = Parity::from_u8(y[31] & 1).expect("This can never fail");
-        let x_only = XOnlyPublicKey::from_slice(&x).expect("We know the public key is valid");
-        (x_only, parity)
+        let parity = Parity::from_u8(self.0.y()[31] & 1).expect("This can never fail");
+        (XOnlyPublicKey(*self.0.x()), parity)
     }
 
     /// Checks that `sig` is a valid ECDSA signature for `msg` using this public key.
@@ -569,6 +530,12 @@ impl PublicKey {
     ) -> Result<(), Error> {
         secp.verify_ecdsa(msg, sig, self)
     }
+}
+
+/// The SDK scalar for a value that is known to be smaller than the curve order: a secret key, or
+/// a [`Scalar`].
+fn sdk_scalar(bytes: &[u8; 32]) -> sdk::curve::Secp256k1Scalar {
+    sdk::curve::Secp256k1Scalar::from_be_bytes(bytes).expect("the value is smaller than n")
 }
 
 impl From<Secp256k1Point> for PublicKey {
@@ -735,8 +702,7 @@ impl Keypair {
         secp: &Secp256k1<C>,
         tweak: &Scalar,
     ) -> Result<Keypair, Error> {
-        let y = self.0 .1 .0.y;
-        let is_y_odd = y[31] & 1 == 1;
+        let is_y_odd = !self.0 .1 .0.has_even_y();
 
         self.0 .1 = self.0 .1.add_exp_tweak(secp, tweak)?;
 
@@ -916,19 +882,11 @@ impl XOnlyPublicKey {
         }
 
         match <[u8; constants::SCHNORR_PUBLIC_KEY_SIZE]>::try_from(data) {
-            Ok(data) => {
-                // check if the key is valid, like in the original implementation
-                // a key is valid if it is in the range [1, n - 1] where n is the order of the curve
-                if data == crate::constants::ZERO || !data.lt(&crate::constants::CURVE_ORDER) {
-                    return Err(InvalidPublicKey);
-                }
-
-                // check if the x coordinate is on the curve
-                let x_bn = BigNumMod::<32, P>::from_be_bytes_noreduce(data);
-                let _ = secp256k1_compute_y(&x_bn)?;
-
-                Ok(XOnlyPublicKey(data))
-            }
+            // a valid x-only key is the x-coordinate of a point of the curve
+            Ok(data) => match Secp256k1Point::lift_x(&data) {
+                Ok(_) => Ok(XOnlyPublicKey(data)),
+                Err(_) => Err(InvalidPublicKey),
+            },
             Err(_) => Err(InvalidPublicKey),
         }
     }
@@ -970,14 +928,13 @@ impl XOnlyPublicKey {
         _secp: &Secp256k1<V>,
         tweak: &Scalar,
     ) -> Result<(XOnlyPublicKey, Parity), Error> {
-        let tweak_point: sdk::curve::Point<sdk::curve::Secp256k1, 32> = &G * &tweak.as_be_bytes();
+        let tweak_point = &G * &sdk_scalar(tweak.as_be_bytes());
 
-        let x_bn = BigNumMod::<32, P>::from_be_bytes_noreduce(self.0);
-        let y = secp256k1_compute_y_with_parity(&x_bn, 0)?;
-        let tweaked = &Secp256k1Point::new(x_bn.to_be_bytes(), y.to_be_bytes()) + &tweak_point;
-        let parity = Parity::from_u8(tweaked.y[31] & 1).unwrap();
+        let point = Secp256k1Point::lift_x(&self.0).map_err(|_| InvalidPublicKey)?;
+        let tweaked = &point + &tweak_point;
+        let parity = Parity::from_u8(tweaked.y()[31] & 1).unwrap();
 
-        self.0 = tweaked.x;
+        self.0 = *tweaked.x();
 
         Ok((self, parity))
     }
@@ -1180,7 +1137,7 @@ impl<'de> serde::Deserialize<'de> for Parity {
 
 impl From<PublicKey> for XOnlyPublicKey {
     fn from(src: PublicKey) -> XOnlyPublicKey {
-        XOnlyPublicKey::from_slice(&src.0.x).expect("This should never fail")
+        XOnlyPublicKey::from_slice(src.0.x()).expect("This should never fail")
     }
 }
 
