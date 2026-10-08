@@ -80,8 +80,8 @@ impl Eq for Slip21Key {}
 /// This function will panic if either:
 /// - The total length of the encoded labels exceeds 256 bytes.
 /// - Any individual label exceeds 252 bytes.
-/// - (Ledger-specific) `labels` has length 0 (no master key derivation)
-/// - (Ledger-specific) Any label contains a '/' character.
+///
+/// With no labels, it returns the key of the master node.
 ///
 /// # Security
 ///
@@ -115,7 +115,7 @@ pub fn derive_slip21_key(labels: &[&[u8]]) -> Slip21Key {
             encoded_labels.len(),
             node.as_mut_ptr(),
         )
-    } == 0
+    } != 1
     {
         panic!("Failed to derive SLIP-21 node");
     }

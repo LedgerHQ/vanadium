@@ -323,3 +323,132 @@ async fn test_get_random_bytes() {
     check(c, rng(257), 0, vec![0; 257]).await;
     check(c, rng(4096), 0, vec![0; 4096]).await;
 }
+
+const SECP256K1: u32 = 0x21;
+
+/// The seed of Speculos' default mnemonic, which the native target uses too.
+const DEFAULT_SEED: [u8; 64] = hex_literal::hex!("b11997faff420a331bb4a4ffdc8bdc8ba7c01732a99a30d83dbbebd469666c84b47d09d3f5f472b3b9384ac634beba2a440ba36ec7661144132f35e206873564");
+
+fn hmac_sha512(key: &[u8], parts: &[&[u8]]) -> [u8; 64] {
+    use hmac::{Hmac, Mac};
+    let mut mac = Hmac::<sha2::Sha512>::new_from_slice(key).unwrap();
+    for part in parts {
+        mac.update(part);
+    }
+    mac.finalize().into_bytes().into()
+}
+
+/// BIP-32 derivation from `DEFAULT_SEED`, computed on the host: `privkey || chain_code`.
+fn host_bip32(path: &[u32]) -> Vec<u8> {
+    use k256::elliptic_curve::{ops::Reduce, sec1::ToEncodedPoint};
+    let node = hmac_sha512(b"Bitcoin seed", &[&DEFAULT_SEED]);
+    let (mut key, mut chain_code) = (
+        k256::Scalar::reduce(k256::U256::from_be_slice(&node[..32])),
+        node[32..].to_vec(),
+    );
+    for &step in path {
+        let data = if step >= 0x8000_0000 {
+            let mut d = vec![0u8];
+            d.extend_from_slice(&key.to_bytes());
+            d
+        } else {
+            let point = (k256::ProjectivePoint::GENERATOR * key).to_affine();
+            point.to_encoded_point(true).as_bytes().to_vec()
+        };
+        let i = hmac_sha512(&chain_code, &[&data, &step.to_be_bytes()]);
+        key += k256::Scalar::reduce(k256::U256::from_be_slice(&i[..32]));
+        chain_code = i[32..].to_vec();
+    }
+    let mut res = key.to_bytes().to_vec();
+    res.extend_from_slice(&chain_code);
+    res
+}
+
+/// Vanadium's SLIP-21 node for `labels`, computed on the host. Its master node is derived from
+/// the standard SLIP-21 key at m/"VANADIUM".
+fn host_slip21(labels: &[&[u8]]) -> Vec<u8> {
+    let child = |node: &[u8; 64], label: &[u8]| hmac_sha512(&node[..32], &[&[0u8], label]);
+    let standard_master = hmac_sha512(b"Symmetric key seed", &[&DEFAULT_SEED]);
+    let vanadium_seed = child(&standard_master, b"VANADIUM");
+    let mut node = hmac_sha512(b"Symmetric key seed", &[&vanadium_seed[32..]]);
+    for label in labels {
+        node = child(&node, label);
+    }
+    node.to_vec()
+}
+
+/// Encodes SLIP-21 labels, each prefixed by its length.
+fn encode_labels(labels: &[&[u8]]) -> Vec<u8> {
+    let mut res = Vec::new();
+    for label in labels {
+        res.push(label.len() as u8);
+        res.extend_from_slice(label);
+    }
+    res
+}
+
+#[tokio::test]
+async fn test_derive_hd_node() {
+    let mut setup = setup().await;
+    let c = &mut setup.client;
+    let derive = |curve: u32, path: Vec<u32>| RawEcall::DeriveHdNode { curve, path };
+    let h = 0x8000_0000u32;
+
+    for path in [
+        vec![],
+        vec![h + 84, h + 1, h],
+        vec![h + 86, h + 1, h, 0, 5],
+        (0..16u32).map(|i| if i % 2 == 0 { h + i } else { i }).collect(),
+    ] {
+        let expected = host_bip32(&path);
+        check(c, derive(SECP256K1, path), 1, expected).await;
+    }
+
+    // too long
+    check(c, derive(SECP256K1, vec![h; 17]), 0, vec![0; 64]).await;
+    check(c, derive(SECP256K1, vec![0; 256]), 0, vec![0; 64]).await;
+    // unsupported curve
+    check(c, derive(0x22, vec![h]), 0, vec![0; 64]).await;
+}
+
+#[tokio::test]
+async fn test_get_master_fingerprint() {
+    use k256::elliptic_curve::sec1::ToEncodedPoint;
+    use sha2::Digest;
+
+    let mut setup = setup().await;
+    let c = &mut setup.client;
+
+    let master = host_bip32(&[]);
+    let key = k256::SecretKey::from_slice(&master[..32]).unwrap();
+    let pk = key.public_key().to_encoded_point(true);
+    let hash160 = ripemd::Ripemd160::digest(sha2::Sha256::digest(pk.as_bytes()));
+
+    check(c, RawEcall::GetMasterFingerprint { curve: SECP256K1 }, 1, hash160[..4].to_vec()).await;
+    check(c, RawEcall::GetMasterFingerprint { curve: 0x22 }, 0, vec![0; 4]).await;
+}
+
+#[tokio::test]
+async fn test_derive_slip21_node() {
+    let mut setup = setup().await;
+    let c = &mut setup.client;
+    let slip21 = |labels: Vec<u8>| RawEcall::DeriveSlip21Node { labels };
+
+    let longest = [b'x'; 252];
+    for labels in [
+        vec![],
+        vec![&b""[..]],
+        vec![&b"SLIP-0021"[..]],
+        vec![&b"SLIP-0021"[..], &b"Master encryption key"[..]],
+        vec![&longest[..]],
+    ] {
+        check(c, slip21(encode_labels(&labels)), 1, host_slip21(&labels)).await;
+    }
+
+    // a label longer than 252 bytes
+    check(c, slip21(encode_labels(&[&[b'x'; 253]])), 0, vec![0; 64]).await;
+    // a truncated label
+    check(c, slip21(vec![3, b'a', b'b']), 0, vec![0; 64]).await;
+    // a buffer longer than 256 bytes
+    check(c, slip21(vec![0; 257]), 0, vec![0; 64]).await;
+}

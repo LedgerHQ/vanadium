@@ -23,7 +23,8 @@ use common::{
         CTX_SHA512_SIZE,
     },
     ecall_validation::{
-        is_bignum_len, is_modulus, is_reduced, is_zero, parse_hash_identifier, MAX_RANDOM_BYTES,
+        is_bignum_len, is_modulus, is_reduced, is_zero, parse_hash_identifier, parse_slip21_labels,
+        MAX_BIP32_PATH_LEN, MAX_RANDOM_BYTES, MAX_SLIP21_LABELS_LEN,
     },
     ux::{Deserializable, EventCode, EventData},
     BufferType,
@@ -553,12 +554,16 @@ pub fn derive_hd_node(
     privkey: *mut u8,
     chain_code: *mut u8,
 ) -> u32 {
-    if curve != CurveKind::Secp256k1 as u32 {
-        panic!("Unsupported curve");
+    if curve != CurveKind::Secp256k1 as u32 || path_len > MAX_BIP32_PATH_LEN {
+        return 0;
     }
     let mut key = get_master_bip32_key();
 
-    let path_slice = unsafe { std::slice::from_raw_parts(path, path_len) };
+    let path_slice = if path_len == 0 {
+        &[]
+    } else {
+        unsafe { std::slice::from_raw_parts(path, path_len) }
+    };
     for path_step in path_slice {
         let child = ChildNumber::from(*path_step);
         key = match key.derive_child(child) {
@@ -583,55 +588,34 @@ pub fn derive_hd_node(
     1
 }
 
-pub fn get_master_fingerprint(curve: u32) -> u32 {
+pub fn get_master_fingerprint(curve: u32, fingerprint: *mut u32) -> u32 {
     if curve != CurveKind::Secp256k1 as u32 {
-        panic!("Unsupported curve");
+        return 0;
     }
 
-    u32::from_be_bytes(get_master_bip32_key().public_key().fingerprint())
+    let value = u32::from_be_bytes(get_master_bip32_key().public_key().fingerprint());
+    unsafe { std::ptr::write_unaligned(fingerprint, value) };
+    1
 }
 
 pub fn derive_slip21_node(labels: *const u8, labels_len: usize, out: *mut u8) -> u32 {
-    if out.is_null() {
+    if labels_len > MAX_SLIP21_LABELS_LEN {
         return 0;
     }
+    let labels: &[u8] = if labels_len == 0 {
+        &[]
+    } else {
+        unsafe { std::slice::from_raw_parts(labels, labels_len) }
+    };
+    let Some(labels) = parse_slip21_labels(labels) else {
+        return 0;
+    };
 
     // Vanadium uses a custom seed for its SLIP-21 hierarchy, for compatibility with Bolos
     // The seed is derived from a master secret using the standard SLIP-21 derivation.
     let custom_slip21_seed = slip21_custom_get_seed();
-
     let mut current_node = slip21_get_master_node(&custom_slip21_seed);
-
-    if labels_len > 256 {
-        return 0;
-    }
-
-    let labels: &[u8] = unsafe { std::slice::from_raw_parts(labels, labels_len) };
-
-    // parse the `labels` buffer as the concatenation of a list of labels, each prefixed by its length
-    // The length of each label is between 0 and 252 bytes, and the total length of the labels buffer must be
-    // at most 256 bytes.
-
-    let mut offset = 0;
-    while offset < labels_len {
-        if offset >= labels_len {
-            return 0; // Buffer underrun
-        }
-
-        let label_len = labels[offset] as usize;
-        offset += 1;
-
-        if label_len > 252 {
-            return 0; // Label too long
-        }
-
-        if offset + label_len > labels_len {
-            return 0; // Buffer overrun
-        }
-
-        let label = &labels[offset..offset + label_len];
-        offset += label_len;
-
+    for label in labels {
         current_node = slip21_derive_child_node(&current_node, label);
     }
 
