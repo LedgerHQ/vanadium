@@ -302,3 +302,24 @@ async fn test_hash_tampered_context() {
     let call = RawEcall::Hash { hash_id: sha3_256, chunks: vec![msg.clone()], tamper: Some((17, 1)) };
     check(c, call, 0, vec![]).await;
 }
+
+#[tokio::test]
+async fn test_get_random_bytes() {
+    let mut setup = setup().await;
+    let c = &mut setup.client;
+    let rng = |size: u32| RawEcall::GetRandomBytes { size };
+
+    check(c, rng(0), 1, vec![]).await;
+    for size in [1, 32, 256] {
+        let first = ecall(c, rng(size)).await;
+        let second = ecall(c, rng(size)).await;
+        assert_eq!((first.status, first.output.len()), (1, size as usize));
+        assert_eq!((second.status, second.output.len()), (1, size as usize));
+        if size >= 32 {
+            assert_ne!(first.output, second.output);
+        }
+    }
+
+    check(c, rng(257), 0, vec![0; 257]).await;
+    check(c, rng(4096), 0, vec![0; 4096]).await;
+}
