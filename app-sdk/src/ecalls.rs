@@ -352,6 +352,10 @@ forward_to_ecall! {
 
     /// Adds two elliptic curve points `p` and `q`, storing the result in `r`.
     ///
+    /// Points are 65 bytes: either the point at infinity, encoded as 65 zero bytes, or an
+    /// uncompressed SEC1 point `0x04 || x || y` with coordinates smaller than the field prime, on
+    /// the curve. Any other input is rejected.
+    ///
     /// # Parameters
     /// - `curve`: The elliptic curve identifier. Currently only `Secp256k1` is supported.
     /// - `r`: Pointer to the result buffer.
@@ -359,7 +363,8 @@ forward_to_ecall! {
     /// - `q`: Pointer to the second point buffer.
     ///
     /// # Returns
-    /// 1 on success, 0 on error.
+    /// 1 on success, 0 if the curve is not supported or a point is invalid; `r` is then left
+    /// untouched. The result can be the point at infinity.
     ///
     /// # Safety
     /// - `r` must be a valid pointer to at least 65 bytes of writable memory.
@@ -371,12 +376,13 @@ forward_to_ecall! {
     /// # Parameters
     /// - `curve`: The elliptic curve identifier. Currently only `Secp256k1` is supported.
     /// - `r`: Pointer to the result buffer.
-    /// - `p`: Pointer to the point buffer.
-    /// - `k`: Pointer to the scalar buffer.
-    /// - `k_len`: Length of the scalar buffer.
+    /// - `p`: Pointer to the point buffer, encoded as for [`ecfp_add_point`].
+    /// - `k`: Pointer to the scalar buffer, a big-endian integer smaller than the curve order.
+    /// - `k_len`: Length of the scalar buffer, at most 32; it can be 0, for the scalar 0.
     ///
     /// # Returns
-    /// 1 on success, 0 on error.
+    /// 1 on success, 0 if the curve is not supported, the point is invalid, `k_len > 32`, or `k`
+    /// is not smaller than the curve order; `r` is then left untouched.
     ///
     /// # Safety
     /// - `r` must be a valid pointer to at least 65 bytes of writable memory.
