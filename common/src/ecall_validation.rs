@@ -330,9 +330,15 @@ mod tests {
     fn test_reduce_secp256k1_scalar() {
         let one = plus(&[0u8; 32], 1);
         assert_eq!(reduce_secp256k1_scalar(&one), one);
-        assert_eq!(reduce_secp256k1_scalar(&plus(&SECP256K1_N, -1)), plus(&SECP256K1_N, -1));
+        assert_eq!(
+            reduce_secp256k1_scalar(&plus(&SECP256K1_N, -1)),
+            plus(&SECP256K1_N, -1)
+        );
         assert_eq!(reduce_secp256k1_scalar(&SECP256K1_N), [0u8; 32]);
-        assert_eq!(reduce_secp256k1_scalar(&plus(&SECP256K1_N, 3)), plus(&[0u8; 32], 3));
+        assert_eq!(
+            reduce_secp256k1_scalar(&plus(&SECP256K1_N, 3)),
+            plus(&[0u8; 32], 3)
+        );
         // 2^256 - 1 - n
         let mut expected = [0u8; 32];
         expected[15] = 0x01;

@@ -163,7 +163,8 @@ async fn test_bn_modinv_prime() {
         c,
         modinv(be(2, 32), SECP256K1_N.to_vec()),
         1,
-        hex_literal::hex!("7fffffffffffffffffffffffffffffff5d576e7357a4501ddfe92f46681b20a1").to_vec(),
+        hex_literal::hex!("7fffffffffffffffffffffffffffffff5d576e7357a4501ddfe92f46681b20a1")
+            .to_vec(),
     )
     .await;
 
@@ -239,28 +240,44 @@ async fn test_hash() {
 
     for hash_id in HASH_IDS {
         // the empty message
-        let call = RawEcall::Hash { hash_id, chunks: vec![], tamper: None };
+        let call = RawEcall::Hash {
+            hash_id,
+            chunks: vec![],
+            tamper: None,
+        };
         check(c, call, 1, hash_result(hash_id, &[])).await;
 
         // the message in one update, and split in many
-        let call = RawEcall::Hash { hash_id, chunks: vec![msg.clone()], tamper: None };
+        let call = RawEcall::Hash {
+            hash_id,
+            chunks: vec![msg.clone()],
+            tamper: None,
+        };
         check(c, call, 1, hash_result(hash_id, &msg)).await;
-        let call = RawEcall::Hash { hash_id, chunks: chunks.clone(), tamper: None };
+        let call = RawEcall::Hash {
+            hash_id,
+            chunks: chunks.clone(),
+            tamper: None,
+        };
         check(c, call, 1, hash_result(hash_id, &msg)).await;
     }
 
     // unsupported identifiers fail at initialization
     for hash_id in [
         0,
-        2 << 16 | 32,       // not an algorithm
-        8 << 16 | 32,       // not an algorithm
-        3 << 16 | 64,       // SHA-256 with the wrong size
-        5 << 16 | 65,       // SHA-512 with a size above the largest digest
-        6 << 16 | 20,       // Keccak with an unsupported size
-        7 << 16,            // SHA-3 with an empty output
+        2 << 16 | 32,           // not an algorithm
+        8 << 16 | 32,           // not an algorithm
+        3 << 16 | 64,           // SHA-256 with the wrong size
+        5 << 16 | 65,           // SHA-512 with a size above the largest digest
+        6 << 16 | 20,           // Keccak with an unsupported size
+        7 << 16,                // SHA-3 with an empty output
         1 << 24 | 3 << 16 | 32, // reserved bits set
     ] {
-        let call = RawEcall::Hash { hash_id, chunks: vec![msg.clone()], tamper: None };
+        let call = RawEcall::Hash {
+            hash_id,
+            chunks: vec![msg.clone()],
+            tamper: None,
+        };
         check(c, call, 0, vec![]).await;
     }
 }
@@ -297,9 +314,17 @@ async fn test_hash_tampered_context() {
 
     // A buffered length (`blen`, at offset 8 for SHA-256 and 16 for SHA-3) beyond the block is
     // rejected rather than used to index the block.
-    let call = RawEcall::Hash { hash_id: sha256, chunks: vec![msg.clone()], tamper: Some((8, 64)) };
+    let call = RawEcall::Hash {
+        hash_id: sha256,
+        chunks: vec![msg.clone()],
+        tamper: Some((8, 64)),
+    };
     check(c, call, 0, vec![]).await;
-    let call = RawEcall::Hash { hash_id: sha3_256, chunks: vec![msg.clone()], tamper: Some((17, 1)) };
+    let call = RawEcall::Hash {
+        hash_id: sha3_256,
+        chunks: vec![msg.clone()],
+        tamper: Some((17, 1)),
+    };
     check(c, call, 0, vec![]).await;
 }
 
@@ -398,7 +423,9 @@ async fn test_derive_hd_node() {
         vec![],
         vec![h + 84, h + 1, h],
         vec![h + 86, h + 1, h, 0, 5],
-        (0..16u32).map(|i| if i % 2 == 0 { h + i } else { i }).collect(),
+        (0..16u32)
+            .map(|i| if i % 2 == 0 { h + i } else { i })
+            .collect(),
     ] {
         let expected = host_bip32(&path);
         check(c, derive(SECP256K1, path), 1, expected).await;
@@ -424,8 +451,20 @@ async fn test_get_master_fingerprint() {
     let pk = key.public_key().to_encoded_point(true);
     let hash160 = ripemd::Ripemd160::digest(sha2::Sha256::digest(pk.as_bytes()));
 
-    check(c, RawEcall::GetMasterFingerprint { curve: SECP256K1 }, 1, hash160[..4].to_vec()).await;
-    check(c, RawEcall::GetMasterFingerprint { curve: 0x22 }, 0, vec![0; 4]).await;
+    check(
+        c,
+        RawEcall::GetMasterFingerprint { curve: SECP256K1 },
+        1,
+        hash160[..4].to_vec(),
+    )
+    .await;
+    check(
+        c,
+        RawEcall::GetMasterFingerprint { curve: 0x22 },
+        0,
+        vec![0; 4],
+    )
+    .await;
 }
 
 #[tokio::test]
@@ -480,7 +519,11 @@ fn off_curve_point() -> Vec<u8> {
 async fn test_ecfp_add_point() {
     let mut setup = setup().await;
     let c = &mut setup.client;
-    let add = |p: Vec<u8>, q: Vec<u8>| RawEcall::EcfpAddPoint { curve: SECP256K1, p, q };
+    let add = |p: Vec<u8>, q: Vec<u8>| RawEcall::EcfpAddPoint {
+        curve: SECP256K1,
+        p,
+        q,
+    };
     let neg_g = point_to_bytes(&-k256::ProjectivePoint::GENERATOR);
 
     check(c, add(point_kg(1), point_kg(2)), 1, point_kg(3)).await;
@@ -491,7 +534,13 @@ async fn test_ecfp_add_point() {
     // infinity is the identity
     check(c, add(INFINITY.to_vec(), point_kg(7)), 1, point_kg(7)).await;
     check(c, add(point_kg(7), INFINITY.to_vec()), 1, point_kg(7)).await;
-    check(c, add(INFINITY.to_vec(), INFINITY.to_vec()), 1, INFINITY.to_vec()).await;
+    check(
+        c,
+        add(INFINITY.to_vec(), INFINITY.to_vec()),
+        1,
+        INFINITY.to_vec(),
+    )
+    .await;
 
     // invalid encodings, also next to infinity
     let mut compressed_prefix = point_kg(1);
@@ -502,15 +551,30 @@ async fn test_ecfp_add_point() {
     x_too_large[1..33].copy_from_slice(&hex_literal::hex!(
         "fffffffffffffffffffffffffffffffffffffffffffffffffffffffefffffc2f"
     ));
-    for invalid in [compressed_prefix, bad_infinity, x_too_large, off_curve_point()] {
+    for invalid in [
+        compressed_prefix,
+        bad_infinity,
+        x_too_large,
+        off_curve_point(),
+    ] {
         check(c, add(invalid.clone(), point_kg(2)), 0, INFINITY.to_vec()).await;
         check(c, add(point_kg(2), invalid.clone()), 0, INFINITY.to_vec()).await;
-        check(c, add(INFINITY.to_vec(), invalid.clone()), 0, INFINITY.to_vec()).await;
+        check(
+            c,
+            add(INFINITY.to_vec(), invalid.clone()),
+            0,
+            INFINITY.to_vec(),
+        )
+        .await;
         check(c, add(invalid, INFINITY.to_vec()), 0, INFINITY.to_vec()).await;
     }
 
     // unsupported curve
-    let call = RawEcall::EcfpAddPoint { curve: 0x22, p: point_kg(1), q: point_kg(2) };
+    let call = RawEcall::EcfpAddPoint {
+        curve: 0x22,
+        p: point_kg(1),
+        q: point_kg(2),
+    };
     check(c, call, 0, INFINITY.to_vec()).await;
 }
 
@@ -518,7 +582,11 @@ async fn test_ecfp_add_point() {
 async fn test_ecfp_scalar_mult() {
     let mut setup = setup().await;
     let c = &mut setup.client;
-    let mul = |p: Vec<u8>, k: Vec<u8>| RawEcall::EcfpScalarMult { curve: SECP256K1, p, k };
+    let mul = |p: Vec<u8>, k: Vec<u8>| RawEcall::EcfpScalarMult {
+        curve: SECP256K1,
+        p,
+        k,
+    };
     let n_minus = |d: u8| {
         let mut k = SECP256K1_N.to_vec();
         k[31] -= d;
@@ -545,7 +613,13 @@ async fn test_ecfp_scalar_mult() {
     check(c, mul(INFINITY.to_vec(), be(5, 32)), 1, INFINITY.to_vec()).await;
 
     // scalars that are not smaller than n, or too long
-    check(c, mul(point_kg(1), SECP256K1_N.to_vec()), 0, INFINITY.to_vec()).await;
+    check(
+        c,
+        mul(point_kg(1), SECP256K1_N.to_vec()),
+        0,
+        INFINITY.to_vec(),
+    )
+    .await;
     let mut n_plus_1 = SECP256K1_N.to_vec();
     n_plus_1[31] += 1;
     check(c, mul(point_kg(1), n_plus_1), 0, INFINITY.to_vec()).await;
@@ -561,7 +635,11 @@ async fn test_ecfp_scalar_mult() {
     check(c, mul(compressed_prefix, be(1, 32)), 0, INFINITY.to_vec()).await;
 
     // unsupported curve
-    let call = RawEcall::EcfpScalarMult { curve: 0x22, p: point_kg(1), k: be(1, 32) };
+    let call = RawEcall::EcfpScalarMult {
+        curve: 0x22,
+        p: point_kg(1),
+        k: be(1, 32),
+    };
     check(c, call, 0, INFINITY.to_vec()).await;
 }
 
@@ -662,13 +740,25 @@ async fn test_ecdsa_verify() {
     // high-S signatures are valid
     check(c, verify(pubkey.clone(), hash, high_s(&sig)), 1, vec![]).await;
     // wrong message or key
-    check(c, verify(pubkey.clone(), [0x43; 32], sig.clone()), 0, vec![]).await;
+    check(
+        c,
+        verify(pubkey.clone(), [0x43; 32], sig.clone()),
+        0,
+        vec![],
+    )
+    .await;
     check(c, verify(point_kg(0x1235), hash, sig.clone()), 0, vec![]).await;
 
     // a hash that is not smaller than n verifies like its reduction
     let big_hash = [0xffu8; 32];
     let big_sig = host_ecdsa_sign(&key, &big_hash);
-    check(c, verify(pubkey.clone(), big_hash, big_sig.clone()), 1, vec![]).await;
+    check(
+        c,
+        verify(pubkey.clone(), big_hash, big_sig.clone()),
+        1,
+        vec![],
+    )
+    .await;
     let mut reduced = [0u8; 32];
     reduced[15] = 1;
     reduced[16..].copy_from_slice(&hex_literal::hex!("4551231950b75fc4402da1732fc9bebe"));
@@ -680,7 +770,13 @@ async fn test_ecdsa_verify() {
     padded.push(0);
     let mut wrong_tag = sig.clone();
     wrong_tag[0] = 0x31;
-    for bad in [vec![], sig[..sig.len() - 1].to_vec(), padded, wrong_tag, vec![0x30; 73]] {
+    for bad in [
+        vec![],
+        sig[..sig.len() - 1].to_vec(),
+        padded,
+        wrong_tag,
+        vec![0x30; 73],
+    ] {
         check(c, verify(pubkey.clone(), hash, bad), 0, vec![]).await;
     }
 
@@ -775,8 +871,16 @@ async fn test_schnorr_sign() {
     let second = ecall(c, schnorr_sign_call(odd, msg(32), None)).await;
     assert_eq!((first.status, second.status), (64, 64));
     assert_ne!(first.output, second.output);
-    assert!(host_schnorr_verify(&host_xonly(&odd), &msg(32), &first.output));
-    assert!(host_schnorr_verify(&host_xonly(&odd), &msg(32), &second.output));
+    assert!(host_schnorr_verify(
+        &host_xonly(&odd),
+        &msg(32),
+        &first.output
+    ));
+    assert!(host_schnorr_verify(
+        &host_xonly(&odd),
+        &msg(32),
+        &second.output
+    ));
 
     // a message longer than the cap
     check(c, schnorr_sign_call(odd, msg(513), Some(aux)), 0, vec![]).await;
@@ -785,7 +889,11 @@ async fn test_schnorr_sign() {
         check(c, schnorr_sign_call(key, msg(32), Some(aux)), 0, vec![]).await;
     }
     // unsupported curve, mode and hash
-    for (curve, mode, hash_id) in [(0x22, BIP340, SHA256_ID), (SECP256K1, 1, SHA256_ID), (SECP256K1, BIP340, 5)] {
+    for (curve, mode, hash_id) in [
+        (0x22, BIP340, SHA256_ID),
+        (SECP256K1, 1, SHA256_ID),
+        (SECP256K1, BIP340, 5),
+    ] {
         let call = RawEcall::SchnorrSign {
             curve,
             mode,
@@ -809,15 +917,45 @@ async fn test_schnorr_verify() {
     let sig = host_schnorr_sign(&key, &msg, &[1; 32]);
     let long_sig = host_schnorr_sign(&key, &long_msg, &[1; 32]);
 
-    check(c, schnorr_verify_call(xonly.clone(), msg.clone(), sig.clone()), 1, vec![]).await;
-    check(c, schnorr_verify_call(xonly.clone(), long_msg.clone(), long_sig), 1, vec![]).await;
+    check(
+        c,
+        schnorr_verify_call(xonly.clone(), msg.clone(), sig.clone()),
+        1,
+        vec![],
+    )
+    .await;
+    check(
+        c,
+        schnorr_verify_call(xonly.clone(), long_msg.clone(), long_sig),
+        1,
+        vec![],
+    )
+    .await;
     // wrong message or key
-    check(c, schnorr_verify_call(xonly.clone(), b"another".to_vec(), sig.clone()), 0, vec![]).await;
-    check(c, schnorr_verify_call(host_xonly(&privkey(5)), msg.clone(), sig.clone()), 0, vec![]).await;
+    check(
+        c,
+        schnorr_verify_call(xonly.clone(), b"another".to_vec(), sig.clone()),
+        0,
+        vec![],
+    )
+    .await;
+    check(
+        c,
+        schnorr_verify_call(host_xonly(&privkey(5)), msg.clone(), sig.clone()),
+        0,
+        vec![],
+    )
+    .await;
     // a message longer than the cap
     let mut too_long = long_msg.clone();
     too_long.push(0);
-    check(c, schnorr_verify_call(xonly.clone(), too_long, sig.clone()), 0, vec![]).await;
+    check(
+        c,
+        schnorr_verify_call(xonly.clone(), too_long, sig.clone()),
+        0,
+        vec![],
+    )
+    .await;
 
     // r and s out of range, and wrong lengths
     let p = hex_literal::hex!("fffffffffffffffffffffffffffffffffffffffffffffffffffffffefffffc2f");
@@ -832,7 +970,13 @@ async fn test_schnorr_verify() {
     sig65.push(0);
     bad.push(sig65);
     for s in bad {
-        check(c, schnorr_verify_call(xonly.clone(), msg.clone(), s), 0, vec![]).await;
+        check(
+            c,
+            schnorr_verify_call(xonly.clone(), msg.clone(), s),
+            0,
+            vec![],
+        )
+        .await;
     }
 
     // public keys that are not the x-coordinate of a point of the curve
@@ -841,11 +985,21 @@ async fn test_schnorr_verify() {
         .find(|x| !has_point_with_x(x))
         .unwrap();
     for x in [x_not_on_curve.to_vec(), p.to_vec(), vec![0xff; 32]] {
-        check(c, schnorr_verify_call(x, msg.clone(), sig.clone()), 0, vec![]).await;
+        check(
+            c,
+            schnorr_verify_call(x, msg.clone(), sig.clone()),
+            0,
+            vec![],
+        )
+        .await;
     }
 
     // unsupported curve, mode and hash
-    for (curve, mode, hash_id) in [(0x22, BIP340, SHA256_ID), (SECP256K1, 1, SHA256_ID), (SECP256K1, BIP340, 5)] {
+    for (curve, mode, hash_id) in [
+        (0x22, BIP340, SHA256_ID),
+        (SECP256K1, 1, SHA256_ID),
+        (SECP256K1, BIP340, 5),
+    ] {
         let call = RawEcall::SchnorrVerify {
             curve,
             mode,
