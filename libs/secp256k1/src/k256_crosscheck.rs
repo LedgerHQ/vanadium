@@ -1,6 +1,7 @@
 //! Cross-checks the key operations, which use the Vanadium SDK, against k256, an independent
 //! implementation of secp256k1.
 
+use k256::elliptic_curve::point::DecompressPoint;
 use k256::elliptic_curve::sec1::{FromEncodedPoint, ToEncodedPoint};
 use k256::elliptic_curve::PrimeField;
 use k256::{ProjectivePoint, Scalar as KScalar};
@@ -122,4 +123,84 @@ fn ecdh_shared_secret_point() {
         assert_eq!(shared.to_vec(), uncompressed(&expected)[1..].to_vec());
         assert_eq!(shared, ecdh::shared_secret_point(&p1, &d2));
     }
+}
+
+fn has_even_y(pk: &PublicKey) -> bool {
+    pk.serialize()[0] == 0x02
+}
+
+#[test]
+fn keypair_add_xonly_tweak() {
+    let secp = Secp256k1::new();
+    let s = scalars(12);
+    let mut odd_seen = false;
+    for pair in s.chunks(2) {
+        let keypair = crate::Keypair::from_seckey_slice(&secp, &pair[0]).unwrap();
+        odd_seen |= !has_even_y(&keypair.public_key());
+        let tweak = Scalar::from_be_bytes(pair[1]).unwrap();
+
+        let tweaked = keypair.add_xonly_tweak(&secp, &tweak).unwrap();
+        // the two halves of the keypair still match
+        assert_eq!(tweaked.public_key(), PublicKey::from_secret_key(&secp, &tweaked.secret_key()));
+        // and the public key is lift_x(P) + t * G
+        let mut p = k_point(&keypair.public_key());
+        if !has_even_y(&keypair.public_key()) {
+            p = -p;
+        }
+        let expected = p + ProjectivePoint::GENERATOR * k_scalar(&pair[1]);
+        assert_eq!(tweaked.public_key().serialize_uncompressed().to_vec(), uncompressed(&expected));
+    }
+    assert!(odd_seen, "the test keys must include one with an odd y");
+}
+
+#[test]
+fn xonly_add_tweak_to_infinity() {
+    let secp = Secp256k1::new();
+    // the x-only key of d, with an even y, is d * G or -d * G; adding the opposite tweak gives
+    // the point at infinity
+    let d = scalars(1)[0];
+    let key = pk(&d);
+    let (xonly, _) = key.x_only_public_key();
+    let even_secret =
+        if has_even_y(&key) { d } else { <[u8; 32]>::from((-k_scalar(&d)).to_repr()) };
+    let minus =
+        Scalar::from_be_bytes(<[u8; 32]>::from((-k_scalar(&even_secret)).to_repr())).unwrap();
+    assert_eq!(xonly.add_tweak(&secp, &minus), Err(Error::InvalidTweak));
+}
+
+#[test]
+fn public_key_hybrid_encoding() {
+    for d in scalars(4) {
+        let key = pk(&d);
+        let mut hybrid = key.serialize_uncompressed();
+        hybrid[0] = if has_even_y(&key) { 0x06 } else { 0x07 };
+        assert_eq!(PublicKey::from_slice(&hybrid), Ok(key));
+        // the wrong parity in the prefix
+        hybrid[0] ^= 0x01;
+        assert_eq!(PublicKey::from_slice(&hybrid), Err(Error::InvalidPublicKey));
+        // a point that is not on the curve
+        hybrid[0] ^= 0x01;
+        hybrid[64] ^= 0x01;
+        assert_eq!(PublicKey::from_slice(&hybrid), Err(Error::InvalidPublicKey));
+    }
+    assert_eq!(PublicKey::from_slice(&[0x06; 33]), Err(Error::InvalidPublicKey));
+}
+
+#[test]
+fn coordinates_between_n_and_p() {
+    // The shim used to reject coordinates not smaller than n, but those in [n, p) are valid field
+    // elements, and about half of them are the x-coordinate of a point of the curve.
+    let mut x = crate::constants::CURVE_ORDER;
+    loop {
+        let lifted: Option<k256::AffinePoint> =
+            k256::AffinePoint::decompress(&k256::FieldBytes::from(x), 0u8.into()).into();
+        if lifted.is_some() {
+            break;
+        }
+        x[31] += 1;
+    }
+    assert!(crate::XOnlyPublicKey::from_slice(&x).is_ok());
+    let mut compressed = [0x02u8; 33];
+    compressed[1..].copy_from_slice(&x);
+    assert!(PublicKey::from_slice(&compressed).is_ok());
 }
