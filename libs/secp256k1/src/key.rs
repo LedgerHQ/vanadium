@@ -369,7 +369,18 @@ impl PublicKey {
                     .map(PublicKey)
                     .map_err(|_| Error::InvalidPublicKey)
             }
-            0x06 | 0x07 => panic!("Hybrid keys are not implemented"),
+            // hybrid encoding: the uncompressed point, with the parity of y in the prefix
+            0x06 | 0x07 => {
+                let hybrid: &[u8; 65] = data.try_into().map_err(|_| Error::InvalidPublicKey)?;
+                let mut uncompressed = *hybrid;
+                uncompressed[0] = 0x04;
+                let point = Secp256k1Point::from_bytes(&uncompressed)
+                    .map_err(|_| Error::InvalidPublicKey)?;
+                if point.has_even_y() != (header == 0x06) {
+                    return Err(Error::InvalidPublicKey);
+                }
+                Ok(PublicKey(point))
+            }
             _ => Err(Error::InvalidPublicKey),
         }
     }
@@ -722,13 +733,13 @@ impl Keypair {
         secp: &Secp256k1<C>,
         tweak: &Scalar,
     ) -> Result<Keypair, Error> {
-        let is_y_odd = !self.0 .1 .0.has_even_y();
-
-        self.0 .1 = self.0 .1.add_exp_tweak(secp, tweak)?;
-
-        if is_y_odd {
+        // The tweak applies to the x-only key, that is to the point with an even y: if y is odd,
+        // both the secret and the public key are negated first, so that they keep matching.
+        if !self.0 .1 .0.has_even_y() {
             self.0 .0 = self.0 .0.negate();
+            self.0 .1 = self.0 .1.negate(secp);
         }
+        self.0 .1 = self.0 .1.add_exp_tweak(secp, tweak)?;
         self.0 .0 = self.0 .0.add_tweak(tweak)?;
         Ok(self)
     }
@@ -941,8 +952,6 @@ impl XOnlyPublicKey {
     /// let tweaked = xonly.add_tweak(&secp, &tweak).expect("Improbable to fail with a randomly generated tweak");
     /// # }
     /// ```
-    // NOTE: due to a limitation of Vanadium SDK, this currently panics instead of returning an error if the
-    //       tweak equals the negation of the secret key.
     pub fn add_tweak<V: Verification>(
         mut self,
         _secp: &Secp256k1<V>,
@@ -952,6 +961,9 @@ impl XOnlyPublicKey {
 
         let point = Secp256k1Point::lift_x(&self.0).map_err(|_| InvalidPublicKey)?;
         let tweaked = &point + &tweak_point;
+        if tweaked.is_zero() {
+            return Err(InvalidTweak);
+        }
         let parity = Parity::from_u8(tweaked.y()[31] & 1).unwrap();
 
         self.0 = *tweaked.x();
