@@ -188,6 +188,10 @@ impl<const N: usize> SubAssign<&Self> for BigNum<N> {
     }
 }
 
+/// Provides the modulus of a [`BigNumMod`].
+///
+/// The modulus must not be zero. Multiplication and exponentiation also require it to be odd, as
+/// do the `bn_multm` and `bn_powm` ECALLs they use; with an even modulus they panic.
 pub trait ModulusProvider<const N: usize>: Sized {
     const M: [u8; N];
 

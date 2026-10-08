@@ -186,15 +186,19 @@ forward_to_ecall! {
 
     /// Computes the remainder of dividing `n` by `m`, storing the result in `r`.
     ///
+    /// All the big number ECALLs take unsigned big-endian integers of at most
+    /// [`MAX_BIGNUMBER_SIZE`](common::ecall_constants::MAX_BIGNUMBER_SIZE) bytes, and leave `r`
+    /// untouched when they return 0. An empty operand has the value 0, and its pointer is not read.
+    ///
     /// # Parameters
     /// - `r`: Pointer to the result buffer.
     /// - `n`: Pointer to the dividend buffer.
     /// - `len`: Length of `r` and `n`.
     /// - `m`: Pointer to the divisor buffer.
-    /// - `len_m`: Length of `m`; it must not exceed `len`.
+    /// - `len_m`: Length of `m`.
     ///
     /// # Returns
-    /// 1 on success, 0 on error.
+    /// 1 on success, 0 if `len` exceeds the maximum size, `len_m > len`, or `m` is zero.
     ///
     /// # Safety
     /// - `r` must be a valid pointer to at least `len` bytes of writable memory.
@@ -212,7 +216,8 @@ forward_to_ecall! {
     /// - `len`: Length of `r`, `a`, `b`, and `m`.
     ///
     /// # Returns
-    /// 1 on success, 0 on error.
+    /// 1 on success, 0 if `len` exceeds the maximum size, `m` is zero, or `a` or `b` is not
+    /// smaller than `m`.
     ///
     /// # Safety
     /// - `r` must be a valid pointer to at least `len` bytes of writable memory.
@@ -229,7 +234,8 @@ forward_to_ecall! {
     /// - `len`: Length of `r`, `a`, `b`, and `m`.
     ///
     /// # Returns
-    /// 1 on success, 0 on error.
+    /// 1 on success, 0 if `len` exceeds the maximum size, `m` is zero, or `a` or `b` is not
+    /// smaller than `m`.
     ///
     /// # Safety
     /// - `r` must be a valid pointer to at least `len` bytes of writable memory.
@@ -246,7 +252,8 @@ forward_to_ecall! {
     /// - `len`: Length of `r`, `a`, `b`, and `m`.
     ///
     /// # Returns
-    /// 1 on success, 0 on error.
+    /// 1 on success, 0 if `len` exceeds the maximum size, `m` is zero or even, or `a` or `b` is not
+    /// smaller than `m`.
     ///
     /// # Safety
     /// - `r` must be a valid pointer to at least `len` bytes of writable memory.
@@ -259,12 +266,13 @@ forward_to_ecall! {
     /// - `r`: Pointer to the result buffer.
     /// - `a`: Pointer to the base buffer.
     /// - `e`: Pointer to the exponent buffer.
-    /// - `len_e`: Length of `e`.
+    /// - `len_e`: Length of `e`; it can be 0, for the exponent 0.
     /// - `m`: Pointer to the modulus buffer.
     /// - `len`: Length of `r`, `a`, and `m`.
     ///
     /// # Returns
-    /// 1 on success, 0 on error.
+    /// 1 on success, 0 if `len` or `len_e` exceeds the maximum size, `m` is zero or even, or `a` is
+    /// not smaller than `m`.
     ///
     /// # Safety
     /// - `r` must be a valid pointer to at least `len` bytes of writable memory.
@@ -281,7 +289,7 @@ forward_to_ecall! {
     ) -> u32;
 
     /// Computes the modular inverse of `a` modulo `p`, storing the result in `r`.
-    /// The modulus `p` must be a prime number. The result is undefined if `p` is not prime.
+    /// The modulus `p` must be an odd prime; the result is unspecified if it is not prime.
     ///
     /// # Parameters
     /// - `r`: Pointer to the result buffer.
@@ -290,7 +298,8 @@ forward_to_ecall! {
     /// - `len`: Length of `r`, `a`, and `p`.
     ///
     /// # Returns
-    /// 1 on success, 0 on error.
+    /// 1 on success, 0 if `len` exceeds the maximum size, `p` is zero or even, or `a` is zero or
+    /// not smaller than `p`.
     ///
     /// # Safety
     /// - `r` must be a valid pointer to at least `len` bytes of writable memory.

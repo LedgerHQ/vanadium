@@ -12,6 +12,7 @@ use common::{
     },
     constants::{MAX_STORAGE_SLOTS, STORAGE_SLOT_SIZE},
     ecall_constants::{self, *},
+    ecall_validation::{is_bignum_len, is_modulus, is_reduced, is_zero},
     ux::Deserializable,
     vm::{Cpu, CpuError, EcallHandler, MemoryError},
     BufferType,
@@ -382,6 +383,52 @@ impl core::ops::DerefMut for ZeroizingPrivateKey {
     }
 }
 
+/// The modular operations of `bn_addm`, `bn_subm` and `bn_multm`.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum BnBinop {
+    Add,
+    Sub,
+    Mul,
+}
+
+/// The cx big number functions require lengths that are a multiple of 16 bytes (`cx_bn_lock`), so
+/// operands are left-padded with zeros to this length. `MAX_BIGNUMBER_SIZE` is a multiple of 16.
+const fn bn_padded_len(len: usize) -> usize {
+    len.div_ceil(16) * 16
+}
+
+/// Whether the big-endian integer `a` is 1.
+fn is_one(a: &[u8]) -> bool {
+    a.last() == Some(&1) && is_zero(&a[..a.len() - 1])
+}
+
+/// Copies `buf.len()` bytes of the V-App's memory at `ptr` into `buf`. An empty read does not
+/// touch memory, since the pointer of an empty slice is dangling.
+fn read_guest<E: fmt::Debug, const N: usize>(
+    cpu: &mut Cpu<OutsourcedMemory<'_, N>>,
+    ptr: GuestPointer,
+    buf: &mut [u8],
+) -> Result<(), CommEcallError> {
+    if buf.is_empty() {
+        return Ok(());
+    }
+    cpu.get_segment::<E>(ptr.0)?.read_buffer(ptr.0, buf)?;
+    Ok(())
+}
+
+/// Copies `buf` into the V-App's memory at `ptr`. An empty write does not touch memory.
+fn write_guest<E: fmt::Debug, const N: usize>(
+    cpu: &mut Cpu<OutsourcedMemory<'_, N>>,
+    ptr: GuestPointer,
+    buf: &[u8],
+) -> Result<(), CommEcallError> {
+    if buf.is_empty() {
+        return Ok(());
+    }
+    cpu.get_segment::<E>(ptr.0)?.write_buffer(ptr.0, buf)?;
+    Ok(())
+}
+
 pub enum CommEcallError {
     Exit(i32),
     Panic,
@@ -717,6 +764,9 @@ impl<'a, const N: usize> CommEcallHandler<'a, N> {
         Ok(1) // Success
     }
 
+    /// Computes `n mod m` into `r` (`len` bytes).
+    ///
+    /// Returns 1 on success, 0 if `len > MAX_BIGNUMBER_SIZE`, `len_m > len`, or `m` is zero.
     fn handle_bn_modm<E: fmt::Debug>(
         &self,
         cpu: &mut Cpu<OutsourcedMemory<'_, N>>,
@@ -724,175 +774,110 @@ impl<'a, const N: usize> CommEcallHandler<'a, N> {
         n: GuestPointer,
         len: usize,
         m: GuestPointer,
-        m_len: usize,
-    ) -> Result<(), CommEcallError> {
-        if len > MAX_BIGNUMBER_SIZE || m_len > MAX_BIGNUMBER_SIZE {
-            return Err(CommEcallError::InvalidParameters(
-                "len or m_len is too large",
-            ));
+        len_m: usize,
+    ) -> Result<u32, CommEcallError> {
+        if !is_bignum_len(len) || len_m > len {
+            return Ok(0);
         }
-        if m_len > len {
-            return Err(CommEcallError::InvalidParameters(
-                "m_len is larger than len",
-            ));
-        }
+        let (padded_len, padded_len_m) = (bn_padded_len(len), bn_padded_len(len_m));
 
-        // copy inputs to local memory
-        // we use r_local both for the input and for the result
-        let mut r_local = [0u8; MAX_BIGNUMBER_SIZE];
-        cpu.get_segment::<E>(n.0)?
-            .read_buffer(n.0, &mut r_local[..len])?;
+        // n is reduced in place, so v_local holds the result too
+        let mut v_local = [0u8; MAX_BIGNUMBER_SIZE];
         let mut m_local = [0u8; MAX_BIGNUMBER_SIZE];
-        cpu.get_segment::<E>(m.0)?
-            .read_buffer(m.0, &mut m_local[..m_len])?;
-
-        unsafe {
-            let res =
-                sys::cx_math_modm_no_throw(r_local.as_mut_ptr(), len, m_local.as_ptr(), m_len);
-            if res != CX_OK {
-                return Err(CommEcallError::GenericError("modm failed"));
-            }
+        read_guest::<E, N>(cpu, n, &mut v_local[padded_len - len..padded_len])?;
+        read_guest::<E, N>(cpu, m, &mut m_local[padded_len_m - len_m..padded_len_m])?;
+        if !is_modulus(&m_local[..padded_len_m], false) {
+            return Ok(0);
         }
 
-        // copy r_local to r
-        let segment = cpu.get_segment::<E>(r.0)?;
-        segment.write_buffer(r.0, &r_local[..len])?;
-        Ok(())
+        // SAFETY: both buffers hold their padded lengths, as cx_bn_lock requires.
+        let res = unsafe {
+            sys::cx_math_modm_no_throw(
+                v_local.as_mut_ptr(),
+                padded_len,
+                m_local.as_ptr(),
+                padded_len_m,
+            )
+        };
+        if res != CX_OK {
+            return Ok(0);
+        }
+
+        write_guest::<E, N>(cpu, r, &v_local[padded_len - len..padded_len])?;
+        Ok(1)
     }
 
-    fn handle_bn_addm<E: fmt::Debug>(
+    /// Computes `a op b mod m` into `r`, for `op` one of `bn_addm`, `bn_subm` or `bn_multm`. All
+    /// the operands are `len` bytes long.
+    ///
+    /// Returns 1 on success, 0 if `len > MAX_BIGNUMBER_SIZE`, `m` is zero (or even for `bn_multm`),
+    /// or `a` or `b` is not smaller than `m`.
+    fn handle_bn_binop<E: fmt::Debug>(
         &self,
         cpu: &mut Cpu<OutsourcedMemory<'_, N>>,
+        op: BnBinop,
         r: GuestPointer,
         a: GuestPointer,
         b: GuestPointer,
         m: GuestPointer,
         len: usize,
-    ) -> Result<(), CommEcallError> {
-        if len > MAX_BIGNUMBER_SIZE {
-            return Err(CommEcallError::InvalidParameters("len is too large"));
+    ) -> Result<u32, CommEcallError> {
+        if !is_bignum_len(len) {
+            return Ok(0);
+        }
+        let padded_len = bn_padded_len(len);
+        let range = padded_len - len..padded_len;
+
+        let mut a_local = [0u8; MAX_BIGNUMBER_SIZE];
+        let mut b_local = [0u8; MAX_BIGNUMBER_SIZE];
+        let mut m_local = [0u8; MAX_BIGNUMBER_SIZE];
+        read_guest::<E, N>(cpu, a, &mut a_local[range.clone()])?;
+        read_guest::<E, N>(cpu, b, &mut b_local[range.clone()])?;
+        read_guest::<E, N>(cpu, m, &mut m_local[range.clone()])?;
+        let (a_local, b_local, m_local) = (
+            &a_local[..padded_len],
+            &b_local[..padded_len],
+            &m_local[..padded_len],
+        );
+        if !is_modulus(m_local, op == BnBinop::Mul)
+            || !is_reduced(a_local, m_local)
+            || !is_reduced(b_local, m_local)
+        {
+            return Ok(0);
         }
 
-        // copy inputs to local memory
-        let mut a_local = [0u8; MAX_BIGNUMBER_SIZE];
-        cpu.get_segment::<E>(a.0)?
-            .read_buffer(a.0, &mut a_local[..len])?;
-        let mut b_local = [0u8; MAX_BIGNUMBER_SIZE];
-        cpu.get_segment::<E>(b.0)?
-            .read_buffer(b.0, &mut b_local[..len])?;
-        let mut m_local = [0u8; MAX_BIGNUMBER_SIZE];
-        cpu.get_segment::<E>(m.0)?
-            .read_buffer(m.0, &mut m_local[..len])?;
-
         let mut r_local = [0u8; MAX_BIGNUMBER_SIZE];
-        unsafe {
-            let res = sys::cx_math_addm_no_throw(
-                r_local.as_mut_ptr(),
-                a_local.as_ptr(),
-                b_local.as_ptr(),
-                m_local.as_ptr(),
-                len,
-            );
+        // a, b < m = 1 means that a = b = 0; the result is 0, whatever cx would do with m = 1
+        if !is_one(m_local) {
+            let f = match op {
+                BnBinop::Add => sys::cx_math_addm_no_throw,
+                BnBinop::Sub => sys::cx_math_subm_no_throw,
+                BnBinop::Mul => sys::cx_math_multm_no_throw,
+            };
+            // SAFETY: all buffers hold `padded_len` bytes, as cx_bn_lock requires; the operands
+            // are smaller than the modulus, which is odd for the multiplication.
+            let res = unsafe {
+                f(
+                    r_local.as_mut_ptr(),
+                    a_local.as_ptr(),
+                    b_local.as_ptr(),
+                    m_local.as_ptr(),
+                    padded_len,
+                )
+            };
             if res != CX_OK {
-                return Err(CommEcallError::GenericError("addm failed"));
+                return Ok(0);
             }
         }
 
-        // copy r_local to r
-        let segment = cpu.get_segment::<E>(r.0)?;
-        segment.write_buffer(r.0, &r_local[..len])?;
-        Ok(())
+        write_guest::<E, N>(cpu, r, &r_local[range])?;
+        Ok(1)
     }
 
-    fn handle_bn_subm<E: fmt::Debug>(
-        &self,
-        cpu: &mut Cpu<OutsourcedMemory<'_, N>>,
-        r: GuestPointer,
-        a: GuestPointer,
-        b: GuestPointer,
-        m: GuestPointer,
-        len: usize,
-    ) -> Result<(), CommEcallError> {
-        if len > MAX_BIGNUMBER_SIZE {
-            return Err(CommEcallError::InvalidParameters("len is too large"));
-        }
-
-        // copy inputs to local memory
-        let mut a_local = [0u8; MAX_BIGNUMBER_SIZE];
-        cpu.get_segment::<E>(a.0)?
-            .read_buffer(a.0, &mut a_local[..len])?;
-        let mut b_local = [0u8; MAX_BIGNUMBER_SIZE];
-        cpu.get_segment::<E>(b.0)?
-            .read_buffer(b.0, &mut b_local[..len])?;
-        let mut m_local = [0u8; MAX_BIGNUMBER_SIZE];
-        cpu.get_segment::<E>(m.0)?
-            .read_buffer(m.0, &mut m_local[..len])?;
-
-        let mut r_local = [0u8; MAX_BIGNUMBER_SIZE];
-        unsafe {
-            let res = sys::cx_math_subm_no_throw(
-                r_local.as_mut_ptr(),
-                a_local.as_ptr(),
-                b_local.as_ptr(),
-                m_local.as_ptr(),
-                len,
-            );
-            if res != CX_OK {
-                return Err(CommEcallError::GenericError("subm failed"));
-            }
-        }
-
-        // copy r_local to r
-        let segment = cpu.get_segment::<E>(r.0)?;
-        segment.write_buffer(r.0, &r_local[..len])?;
-        Ok(())
-    }
-
-    fn handle_bn_multm<E: fmt::Debug>(
-        &self,
-        cpu: &mut Cpu<OutsourcedMemory<'_, N>>,
-        r: GuestPointer,
-        a: GuestPointer,
-        b: GuestPointer,
-        m: GuestPointer,
-        len: usize,
-    ) -> Result<(), CommEcallError> {
-        if len > MAX_BIGNUMBER_SIZE {
-            return Err(CommEcallError::InvalidParameters("len is too large"));
-        }
-
-        // copy inputs to local memory
-        let mut a_local = [0u8; MAX_BIGNUMBER_SIZE];
-        cpu.get_segment::<E>(a.0)?
-            .read_buffer(a.0, &mut a_local[..len])?;
-        let mut b_local = [0u8; MAX_BIGNUMBER_SIZE];
-        cpu.get_segment::<E>(b.0)?
-            .read_buffer(b.0, &mut b_local[..len])?;
-        let mut m_local = [0u8; MAX_BIGNUMBER_SIZE];
-        cpu.get_segment::<E>(m.0)?
-            .read_buffer(m.0, &mut m_local[..len])?;
-
-        let mut r_local = [0u8; MAX_BIGNUMBER_SIZE];
-        unsafe {
-            let res = sys::cx_math_multm_no_throw(
-                r_local.as_mut_ptr(),
-                a_local.as_ptr(),
-                b_local.as_ptr(),
-                m_local.as_ptr(),
-                len,
-            );
-            if res != CX_OK {
-                return Err(CommEcallError::GenericError("multm failed"));
-            }
-        }
-
-        // copy r_local to r
-        let segment = cpu.get_segment::<E>(r.0)?;
-        segment.write_buffer(r.0, &r_local[..len])?;
-        Ok(())
-    }
-
-    /// Computes the modular inverse of `a` modulo `p` (a prime), storing the result in `r`.
+    /// Computes the inverse of `a` modulo the odd prime `p` into `r`; all are `len` bytes long.
+    ///
+    /// Returns 1 on success, 0 if `len > MAX_BIGNUMBER_SIZE`, `p` is zero or even, or `a` is zero
+    /// or not smaller than `p`. The result is unspecified if `p` is not prime.
     fn handle_bn_modinv_prime<E: fmt::Debug>(
         &self,
         cpu: &mut Cpu<OutsourcedMemory<'_, N>>,
@@ -900,38 +885,44 @@ impl<'a, const N: usize> CommEcallHandler<'a, N> {
         a: GuestPointer,
         p: GuestPointer,
         len: usize,
-    ) -> Result<(), CommEcallError> {
-        if len > MAX_BIGNUMBER_SIZE {
-            return Err(CommEcallError::InvalidParameters("len is too large"));
+    ) -> Result<u32, CommEcallError> {
+        if !is_bignum_len(len) {
+            return Ok(0);
+        }
+        let padded_len = bn_padded_len(len);
+        let range = padded_len - len..padded_len;
+
+        let mut a_local = [0u8; MAX_BIGNUMBER_SIZE];
+        let mut p_local = [0u8; MAX_BIGNUMBER_SIZE];
+        read_guest::<E, N>(cpu, a, &mut a_local[range.clone()])?;
+        read_guest::<E, N>(cpu, p, &mut p_local[range.clone()])?;
+        let (a_local, p_local) = (&a_local[..padded_len], &p_local[..padded_len]);
+        if !is_modulus(p_local, true) || is_zero(a_local) || !is_reduced(a_local, p_local) {
+            return Ok(0);
         }
 
-        // copy inputs to local memory
-        let mut a_local = [0u8; MAX_BIGNUMBER_SIZE];
-        cpu.get_segment::<E>(a.0)?
-            .read_buffer(a.0, &mut a_local[..len])?;
-        let mut p_local = [0u8; MAX_BIGNUMBER_SIZE];
-        cpu.get_segment::<E>(p.0)?
-            .read_buffer(p.0, &mut p_local[..len])?;
-
         let mut r_local = [0u8; MAX_BIGNUMBER_SIZE];
-        unsafe {
-            let res = sys::cx_math_invprimem_no_throw(
+        // SAFETY: all buffers hold `padded_len` bytes; 0 < a < p, with p odd.
+        let res = unsafe {
+            sys::cx_math_invprimem_no_throw(
                 r_local.as_mut_ptr(),
                 a_local.as_ptr(),
                 p_local.as_ptr(),
-                len,
-            );
-            if res != CX_OK {
-                return Err(CommEcallError::GenericError("modinv failed"));
-            }
+                padded_len,
+            )
+        };
+        if res != CX_OK {
+            return Ok(0);
         }
 
-        // copy r_local to r
-        let segment = cpu.get_segment::<E>(r.0)?;
-        segment.write_buffer(r.0, &r_local[..len])?;
-        Ok(())
+        write_guest::<E, N>(cpu, r, &r_local[range])?;
+        Ok(1)
     }
 
+    /// Computes `a^e mod m` into `r`; `a`, `m` and `r` are `len` bytes long, `e` is `len_e`.
+    ///
+    /// Returns 1 on success, 0 if `len` or `len_e` exceeds `MAX_BIGNUMBER_SIZE`, `m` is zero or
+    /// even, or `a` is not smaller than `m`.
     fn handle_bn_powm<E: fmt::Debug>(
         &self,
         cpu: &mut Cpu<OutsourcedMemory<'_, N>>,
@@ -941,44 +932,54 @@ impl<'a, const N: usize> CommEcallHandler<'a, N> {
         len_e: usize,
         m: GuestPointer,
         len: usize,
-    ) -> Result<(), CommEcallError> {
-        if len_e > MAX_BIGNUMBER_SIZE {
-            return Err(CommEcallError::InvalidParameters("len_e is too large"));
+    ) -> Result<u32, CommEcallError> {
+        if !is_bignum_len(len) || !is_bignum_len(len_e) {
+            return Ok(0);
         }
-        if len > MAX_BIGNUMBER_SIZE {
-            return Err(CommEcallError::InvalidParameters("len is too large"));
-        }
+        let padded_len = bn_padded_len(len);
+        let range = padded_len - len..padded_len;
 
-        // copy inputs to local memory
         let mut a_local = [0u8; MAX_BIGNUMBER_SIZE];
-        cpu.get_segment::<E>(a.0)?
-            .read_buffer(a.0, &mut a_local[..len])?;
         let mut e_local = [0u8; MAX_BIGNUMBER_SIZE];
-        cpu.get_segment::<E>(e.0)?
-            .read_buffer(e.0, &mut e_local[..len_e])?;
         let mut m_local = [0u8; MAX_BIGNUMBER_SIZE];
-        cpu.get_segment::<E>(m.0)?
-            .read_buffer(m.0, &mut m_local[..len])?;
+        read_guest::<E, N>(cpu, a, &mut a_local[range.clone()])?;
+        read_guest::<E, N>(cpu, e, &mut e_local[..len_e])?;
+        read_guest::<E, N>(cpu, m, &mut m_local[range.clone()])?;
+        let (a_local, e_local, m_local) = (
+            &a_local[..padded_len],
+            &e_local[..len_e],
+            &m_local[..padded_len],
+        );
+        if !is_modulus(m_local, true) || !is_reduced(a_local, m_local) {
+            return Ok(0);
+        }
 
         let mut r_local = [0u8; MAX_BIGNUMBER_SIZE];
-        unsafe {
-            let res = sys::cx_math_powm_no_throw(
-                r_local.as_mut_ptr(),
-                a_local.as_ptr(),
-                e_local.as_ptr(),
-                len_e,
-                m_local.as_ptr(),
-                len,
-            );
+        if is_one(m_local) {
+            // everything is 0 modulo 1
+        } else if is_zero(e_local) {
+            // a^0 = 1, whatever cx would do with an empty or zero exponent
+            r_local[padded_len - 1] = 1;
+        } else {
+            // SAFETY: a, m and r hold `padded_len` bytes, as cx_bn_lock requires; e is passed as
+            // a byte string; a < m, with m odd.
+            let res = unsafe {
+                sys::cx_math_powm_no_throw(
+                    r_local.as_mut_ptr(),
+                    a_local.as_ptr(),
+                    e_local.as_ptr(),
+                    len_e,
+                    m_local.as_ptr(),
+                    padded_len,
+                )
+            };
             if res != CX_OK {
-                return Err(CommEcallError::GenericError("powm failed"));
+                return Ok(0);
             }
         }
 
-        // copy r_local to r
-        let segment = cpu.get_segment::<E>(r.0)?;
-        segment.write_buffer(r.0, &r_local[..len])?;
-        Ok(())
+        write_guest::<E, N>(cpu, r, &r_local[range])?;
+        Ok(1)
     }
 
     /// Initializes the hash context `ctx` for `hash_identifier`.
@@ -1943,7 +1944,7 @@ impl<'a, const N: usize> EcallHandler for CommEcallHandler<'a, N> {
                     .map_err(|_| CommEcallError::GenericError("get_device_property failed"))?;
             }
             ECALL_MODM => {
-                self.handle_bn_modm::<CommEcallError>(
+                reg!(A0) = self.handle_bn_modm::<CommEcallError>(
                     cpu,
                     GPreg!(A0),
                     GPreg!(A1),
@@ -1951,59 +1952,34 @@ impl<'a, const N: usize> EcallHandler for CommEcallHandler<'a, N> {
                     GPreg!(A3),
                     reg!(A4) as usize,
                 )?;
-
-                reg!(A0) = 1;
             }
-            ECALL_ADDM => {
-                self.handle_bn_addm::<CommEcallError>(
+            ECALL_ADDM | ECALL_SUBM | ECALL_MULTM => {
+                let op = match ecall_code {
+                    ECALL_ADDM => BnBinop::Add,
+                    ECALL_SUBM => BnBinop::Sub,
+                    _ => BnBinop::Mul,
+                };
+                reg!(A0) = self.handle_bn_binop::<CommEcallError>(
                     cpu,
+                    op,
                     GPreg!(A0),
                     GPreg!(A1),
                     GPreg!(A2),
                     GPreg!(A3),
                     reg!(A4) as usize,
                 )?;
-
-                reg!(A0) = 1;
-            }
-            ECALL_SUBM => {
-                self.handle_bn_subm::<CommEcallError>(
-                    cpu,
-                    GPreg!(A0),
-                    GPreg!(A1),
-                    GPreg!(A2),
-                    GPreg!(A3),
-                    reg!(A4) as usize,
-                )
-                .map_err(|_| CommEcallError::GenericError("bn_subm failed"))?;
-
-                reg!(A0) = 1;
-            }
-            ECALL_MULTM => {
-                self.handle_bn_multm::<CommEcallError>(
-                    cpu,
-                    GPreg!(A0),
-                    GPreg!(A1),
-                    GPreg!(A2),
-                    GPreg!(A3),
-                    reg!(A4) as usize,
-                )?;
-
-                reg!(A0) = 1;
             }
             ECALL_MODINV_PRIME => {
-                self.handle_bn_modinv_prime::<CommEcallError>(
+                reg!(A0) = self.handle_bn_modinv_prime::<CommEcallError>(
                     cpu,
                     GPreg!(A0),
                     GPreg!(A1),
                     GPreg!(A2),
                     reg!(A3) as usize,
                 )?;
-
-                reg!(A0) = 1;
             }
             ECALL_POWM => {
-                self.handle_bn_powm::<CommEcallError>(
+                reg!(A0) = self.handle_bn_powm::<CommEcallError>(
                     cpu,
                     GPreg!(A0),
                     GPreg!(A1),
@@ -2012,8 +1988,6 @@ impl<'a, const N: usize> EcallHandler for CommEcallHandler<'a, N> {
                     GPreg!(A4),
                     reg!(A5) as usize,
                 )?;
-
-                reg!(A0) = 1;
             }
             ECALL_HASH_INIT => {
                 reg!(A0) = self.handle_hash_init::<CommEcallError>(cpu, reg!(A0), GPreg!(A1))?;
