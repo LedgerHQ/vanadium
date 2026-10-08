@@ -545,7 +545,8 @@ pub fn bn_powm(
         return 0;
     }
 
-    let result = BigUint::from_bytes_be(a).modpow(&BigUint::from_bytes_be(e), &BigUint::from_bytes_be(m));
+    let result =
+        BigUint::from_bytes_be(a).modpow(&BigUint::from_bytes_be(e), &BigUint::from_bytes_be(m));
     unsafe { copy_result(r, &result.to_bytes_be(), len) };
     1
 }

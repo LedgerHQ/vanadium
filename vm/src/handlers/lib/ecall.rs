@@ -307,7 +307,8 @@ impl VerifiedHashContext {
                 }
                 // SAFETY: `guest` has exactly the size of `$ty`, a plain C struct for which any
                 // bytes are a valid value; read_unaligned does not require alignment.
-                let theirs: $ty = unsafe { core::ptr::read_unaligned(guest.as_ptr() as *const $ty) };
+                let theirs: $ty =
+                    unsafe { core::ptr::read_unaligned(guest.as_ptr() as *const $ty) };
                 // SAFETY: `new` initialized this member of the union.
                 let $ours = unsafe { &mut res.ctx.$field };
                 if theirs.blen >= $block_size {
@@ -339,7 +340,10 @@ impl VerifiedHashContext {
         // SAFETY: the union is at least `out.len()` bytes long, since `out` is sized by
         // `guest_size` for the member that `new` initialized.
         let bytes = unsafe {
-            core::slice::from_raw_parts(&self.ctx as *const LedgerHashContext as *const u8, out.len())
+            core::slice::from_raw_parts(
+                &self.ctx as *const LedgerHashContext as *const u8,
+                out.len(),
+            )
         };
         out.copy_from_slice(bytes);
     }
@@ -480,8 +484,7 @@ fn secp256k1_master_fingerprint() -> Option<u32> {
             private_key.len(),
             &mut *privkey,
         ) == CX_OK
-            && sys::cx_ecfp_generate_pair_no_throw(curve, &mut pubkey, &mut *privkey, true)
-                == CX_OK
+            && sys::cx_ecfp_generate_pair_no_throw(curve, &mut pubkey, &mut *privkey, true) == CX_OK
     };
     if !ok || pubkey.W_len != 65 {
         return None;
@@ -539,8 +542,13 @@ fn is_on_secp256k1(x: &[u8], y: &[u8]) -> bool {
     let mut y2 = [0u8; 32];
     // SAFETY: y is 32 bytes, smaller than the odd modulus p.
     let ok = unsafe {
-        sys::cx_math_multm_no_throw(y2.as_mut_ptr(), y.as_ptr(), y.as_ptr(), SECP256K1_P.as_ptr(), 32)
-            == CX_OK
+        sys::cx_math_multm_no_throw(
+            y2.as_mut_ptr(),
+            y.as_ptr(),
+            y.as_ptr(),
+            SECP256K1_P.as_ptr(),
+            32,
+        ) == CX_OK
     };
     ok && secp256k1_curve_rhs(x) == Some(y2)
 }
@@ -562,8 +570,9 @@ fn secp256k1_lift_x(x: &[u8; 32]) -> Option<[u8; 65]> {
     let mut y = [0u8; 32];
     let p = SECP256K1_P.as_ptr();
     // SAFETY: all operands are 32 bytes; c < p, with p odd.
-    if unsafe { sys::cx_math_powm_no_throw(y.as_mut_ptr(), c.as_ptr(), SQRT_EXP.as_ptr(), 32, p, 32) }
-        != CX_OK
+    if unsafe {
+        sys::cx_math_powm_no_throw(y.as_mut_ptr(), c.as_ptr(), SQRT_EXP.as_ptr(), 32, p, 32)
+    } != CX_OK
     {
         return None;
     }
@@ -571,8 +580,9 @@ fn secp256k1_lift_x(x: &[u8; 32]) -> Option<[u8; 65]> {
         let zero = [0u8; 32];
         let odd_y = y;
         // SAFETY: as above; 0 and y are smaller than p.
-        if unsafe { sys::cx_math_subm_no_throw(y.as_mut_ptr(), zero.as_ptr(), odd_y.as_ptr(), p, 32) }
-            != CX_OK
+        if unsafe {
+            sys::cx_math_subm_no_throw(y.as_mut_ptr(), zero.as_ptr(), odd_y.as_ptr(), p, 32)
+        } != CX_OK
         {
             return None;
         }
@@ -1252,7 +1262,8 @@ impl<'a, const N: usize> CommEcallHandler<'a, N> {
         let mut ctx_local = [0u8; LedgerHashContext::MAX_HASH_CONTEXT_SIZE];
         cpu.get_segment::<E>(ctx.0)?
             .read_buffer(ctx.0, &mut ctx_local[..ctx_size])?;
-        let Ok(mut hash_ctx) = VerifiedHashContext::restore(hash_identifier, &ctx_local[..ctx_size])
+        let Ok(mut hash_ctx) =
+            VerifiedHashContext::restore(hash_identifier, &ctx_local[..ctx_size])
         else {
             return Ok(0);
         };
@@ -1313,7 +1324,8 @@ impl<'a, const N: usize> CommEcallHandler<'a, N> {
         let mut ctx_local = [0u8; LedgerHashContext::MAX_HASH_CONTEXT_SIZE];
         cpu.get_segment::<E>(ctx.0)?
             .read_buffer(ctx.0, &mut ctx_local[..ctx_size])?;
-        let Ok(mut hash_ctx) = VerifiedHashContext::restore(hash_identifier, &ctx_local[..ctx_size])
+        let Ok(mut hash_ctx) =
+            VerifiedHashContext::restore(hash_identifier, &ctx_local[..ctx_size])
         else {
             return Ok(0);
         };
@@ -1533,8 +1545,8 @@ impl<'a, const N: usize> CommEcallHandler<'a, N> {
         let mut signature_local = [0u8; MAX_ECDSA_SIGNATURE_LEN];
         let mut signature_len: usize = signature_local.len();
         let mut info: u32 = 0; // will get the parity bit
-        // SAFETY: the key is valid, the hash is reduced, and the output buffer holds the longest
-        // signature.
+                               // SAFETY: the key is valid, the hash is reduced, and the output buffer holds the longest
+                               // signature.
         let res = unsafe {
             sys::cx_ecdsa_sign_no_throw(
                 &mut *privkey_local,
