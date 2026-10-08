@@ -23,9 +23,10 @@ use common::{
         CTX_SHA512_SIZE,
     },
     ecall_validation::{
-        classify_secp256k1_point, is_bignum_len, is_modulus, is_reduced, is_secp256k1_scalar,
-        is_zero, parse_hash_identifier, parse_slip21_labels, PointEncoding, MAX_BIP32_PATH_LEN,
-        MAX_RANDOM_BYTES, MAX_SLIP21_LABELS_LEN,
+        classify_secp256k1_point, is_bignum_len, is_modulus, is_reduced, is_secp256k1_private_key,
+        is_secp256k1_scalar, is_zero, parse_der_ecdsa_signature, parse_hash_identifier,
+        parse_slip21_labels, reduce_secp256k1_scalar, PointEncoding, MAX_BIP32_PATH_LEN,
+        MAX_ECDSA_SIGNATURE_LEN, MAX_RANDOM_BYTES, MAX_SLIP21_LABELS_LEN,
     },
     ux::{Deserializable, EventCode, EventData},
     BufferType,
@@ -711,37 +712,31 @@ pub fn ecdsa_sign(
     msg_hash: *const u8,
     signature: *mut u8,
 ) -> usize {
-    if curve != CurveKind::Secp256k1 as u32 {
-        panic!("Unsupported curve");
+    if curve != CurveKind::Secp256k1 as u32
+        || mode != common::ecall_constants::EcdsaSignMode::RFC6979 as u32
+        || hash_id != common::ecall_constants::HashId::Sha256 as u32
+    {
+        return 0;
     }
 
-    if mode != common::ecall_constants::EcdsaSignMode::RFC6979 as u32 {
-        panic!("Invalid or unsupported ecdsa signing mode");
+    let privkey = unsafe { &*(privkey as *const [u8; 32]) };
+    if !is_secp256k1_private_key(privkey) {
+        return 0;
     }
+    // Like the VM, sign the hash reduced modulo n. This changes neither the RFC 6979 nonce nor the
+    // signature, but k256 would derive the nonce from the unreduced hash.
+    let msg_hash = reduce_secp256k1_scalar(unsafe { &*(msg_hash as *const [u8; 32]) });
 
-    if hash_id != common::ecall_constants::HashId::Sha256 as u32 {
-        panic!("Invalid or unsupported hash id");
-    }
-
-    let privkey_slice = unsafe { std::slice::from_raw_parts(privkey, 32) };
-    let msg_hash_slice = unsafe { std::slice::from_raw_parts(msg_hash, 32) };
-
-    let mut privkey_bytes = [0u8; 32];
-    privkey_bytes[..].copy_from_slice(privkey_slice);
     let signing_key =
-        ecdsa::SigningKey::from_bytes(&privkey_bytes.into()).expect("Invalid private key");
+        ecdsa::SigningKey::from_bytes(&(*privkey).into()).expect("the private key is valid");
     let (signature_local, _) = signing_key
-        .sign_prehash_recoverable(msg_hash_slice)
-        .expect("Signing failed");
-
-    let signature_der = ecdsa::DerSignature::from(signature_local);
-
-    let signature_bytes = signature_der.to_bytes();
+        .sign_prehash_recoverable(&msg_hash)
+        .expect("signing with a valid key cannot fail");
+    let signature_bytes = ecdsa::DerSignature::from(signature_local).to_bytes();
 
     unsafe {
         std::ptr::copy_nonoverlapping(signature_bytes.as_ptr(), signature, signature_bytes.len());
     }
-
     signature_bytes.len()
 }
 
@@ -752,26 +747,33 @@ pub fn ecdsa_verify(
     signature: *const u8,
     signature_len: usize,
 ) -> u32 {
-    if curve != CurveKind::Secp256k1 as u32 {
-        panic!("Unsupported curve");
+    if curve != CurveKind::Secp256k1 as u32 || signature_len > MAX_ECDSA_SIGNATURE_LEN {
+        return 0;
     }
 
-    if signature_len > 72 {
-        panic!("signature_len is too large");
-    }
+    let pubkey = unsafe { &*(pubkey as *const [u8; 65]) };
+    let msg_hash = reduce_secp256k1_scalar(unsafe { &*(msg_hash as *const [u8; 32]) });
+    let signature = if signature_len == 0 {
+        &[]
+    } else {
+        unsafe { std::slice::from_raw_parts(signature, signature_len) }
+    };
 
-    let pubkey_slice = unsafe { std::slice::from_raw_parts(pubkey, 65) };
-    let msg_hash_slice = unsafe { std::slice::from_raw_parts(msg_hash, 32) };
-    let signature_slice = unsafe { std::slice::from_raw_parts(signature, signature_len) };
+    let Some(point) = decode_secp256k1_point(pubkey) else {
+        return 0;
+    };
+    let Ok(verifying_key) = ecdsa::VerifyingKey::from_affine(point.to_affine()) else {
+        // the point at infinity
+        return 0;
+    };
+    let Some((r, s)) = parse_der_ecdsa_signature(signature) else {
+        return 0;
+    };
+    let signature = ecdsa::Signature::from_scalars(r, s).expect("r and s are in range");
+    // high-S signatures are valid ECDSA signatures, which k256 rejects unless normalized
+    let signature = signature.normalize_s().unwrap_or(signature);
 
-    let pubkey_point = EncodedPoint::from_bytes(pubkey_slice).expect("Invalid public key");
-    let verifying_key = ecdsa::VerifyingKey::from_encoded_point(&pubkey_point)
-        .expect("Failed to create verifying key");
-
-    let signature =
-        ecdsa::DerSignature::from_bytes(signature_slice.into()).expect("Invalid signature");
-
-    match verifying_key.verify_prehash(msg_hash_slice, &signature) {
+    match verifying_key.verify_prehash(&msg_hash, &signature) {
         Ok(_) => 1,
         Err(_) => 0,
     }

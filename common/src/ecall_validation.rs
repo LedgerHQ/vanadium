@@ -111,6 +111,26 @@ pub fn is_secp256k1_private_key(d: &[u8]) -> bool {
     d.len() == 32 && !is_zero(d) && is_reduced(d, &SECP256K1_N)
 }
 
+/// Reduces a 32-byte big-endian integer modulo n. Every 256-bit value is smaller than 2n, so one
+/// conditional subtraction is enough. Both ECDSA ECALLs reduce the message hash this way, which
+/// leaves signatures unchanged, so that every implementation sees the same canonical value.
+pub fn reduce_secp256k1_scalar(x: &[u8; 32]) -> [u8; 32] {
+    let mut diff = [0u8; 32];
+    let mut borrow = 0u16;
+    for i in (0..32).rev() {
+        let d = (x[i] as u16).wrapping_sub(SECP256K1_N[i] as u16 + borrow);
+        diff[i] = d as u8;
+        borrow = (d >> 15) & 1;
+    }
+    // select x if x < n, x - n otherwise
+    let keep = ((is_reduced(x, &SECP256K1_N)) as u8).wrapping_neg();
+    let mut res = [0u8; 32];
+    for i in 0..32 {
+        res[i] = (x[i] & keep) | (diff[i] & !keep);
+    }
+    res
+}
+
 /// Whether `x` is a canonical secp256k1 field element, that is `x < p`.
 pub fn is_secp256k1_field_element(x: &[u8]) -> bool {
     x.len() <= 32 && is_reduced(x, &SECP256K1_P)
@@ -304,6 +324,23 @@ mod tests {
             }
         }
         r
+    }
+
+    #[test]
+    fn test_reduce_secp256k1_scalar() {
+        let one = plus(&[0u8; 32], 1);
+        assert_eq!(reduce_secp256k1_scalar(&one), one);
+        assert_eq!(reduce_secp256k1_scalar(&plus(&SECP256K1_N, -1)), plus(&SECP256K1_N, -1));
+        assert_eq!(reduce_secp256k1_scalar(&SECP256K1_N), [0u8; 32]);
+        assert_eq!(reduce_secp256k1_scalar(&plus(&SECP256K1_N, 3)), plus(&[0u8; 32], 3));
+        // 2^256 - 1 - n
+        let mut expected = [0u8; 32];
+        expected[15] = 0x01;
+        expected[16..].copy_from_slice(&[
+            0x45, 0x51, 0x23, 0x19, 0x50, 0xb7, 0x5f, 0xc4, 0x40, 0x2d, 0xa1, 0x73, 0x2f, 0xc9,
+            0xbe, 0xbe,
+        ]);
+        assert_eq!(reduce_secp256k1_scalar(&[0xff; 32]), expected);
     }
 
     #[test]

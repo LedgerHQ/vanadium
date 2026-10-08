@@ -405,7 +405,10 @@ forward_to_ecall! {
     /// - `buffer` must be a valid pointer to at least `size` bytes of writable memory.
     pub unsafe fn get_random_bytes(buffer: *mut u8, size: usize) -> u32;
 
-    /// Signs a message hash using ECDSA.
+    /// Signs a message hash using ECDSA, with a deterministic nonce (RFC 6979).
+    ///
+    /// The hash is reduced modulo the curve order before signing, as ECDSA and RFC 6979 do; the
+    /// signature is DER-encoded, with a low S.
     ///
     /// # Warning
     /// **This ecall is unstable and subject to change in future versions.**
@@ -414,12 +417,13 @@ forward_to_ecall! {
     /// - `curve`: The elliptic curve identifier. Currently only `Secp256k1` is supported.
     /// - `mode`: The signing mode. Only `RFC6979` is supported.
     /// - `hash_id`: The hash identifier. Only `Sha256` is supported.
-    /// - `privkey`: Pointer to the private key buffer.
-    /// - `msg_hash`: Pointer to the message hash buffer.
+    /// - `privkey`: Pointer to the 32-byte private key, in `[1, n - 1]`.
+    /// - `msg_hash`: Pointer to the 32-byte message hash.
     /// - `signature`: Pointer to the buffer to store the signature.
     ///
     /// # Returns
-    /// The length of the signature on success, 0 on error.
+    /// The length of the signature on success, 0 if the curve, mode or hash identifier is not
+    /// supported, or the private key is invalid.
     ///
     /// # Safety
     /// - `privkey` must be a valid pointer to at least 32 bytes of readable memory.
@@ -437,18 +441,22 @@ forward_to_ecall! {
 
     /// Verifies an ECDSA signature for a message hash.
     ///
+    /// The signature must be strictly DER-encoded (BIP-66), with both integers in `[1, n - 1]`.
+    /// High-S signatures are valid; enforcing a low S is up to the caller.
+    ///
     /// # Warning
     /// **This ecall is unstable and subject to change in future versions.**
     ///
     /// # Parameters
     /// - `curve`: The elliptic curve identifier. Currently only `Secp256k1` is supported.
-    /// - `pubkey`: Pointer to the public key buffer.
-    /// - `msg_hash`: Pointer to the message hash buffer.
+    /// - `pubkey`: Pointer to the 65-byte uncompressed public key.
+    /// - `msg_hash`: Pointer to the 32-byte message hash.
     /// - `signature`: Pointer to the signature buffer.
-    /// - `signature_len`: Length of the signature buffer.
+    /// - `signature_len`: Length of the signature buffer, at most 72.
     ///
     /// # Returns
-    /// 1 on success, 0 on error.
+    /// 1 if the signature is valid, 0 if it is not, or if the curve is not supported, the public
+    /// key is not a point of the curve, or the signature is not a strictly encoded one.
     ///
     /// # Safety
     /// - `pubkey` must be a valid pointer to at least 65 bytes of readable memory.

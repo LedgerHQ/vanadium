@@ -13,9 +13,10 @@ use common::{
     constants::{MAX_STORAGE_SLOTS, STORAGE_SLOT_SIZE},
     ecall_constants::{self, *},
     ecall_validation::{
-        classify_secp256k1_point, is_bignum_len, is_modulus, is_reduced, is_secp256k1_scalar,
-        is_zero, parse_hash_identifier, parse_slip21_labels, PointEncoding, MAX_BIP32_PATH_LEN,
-        MAX_RANDOM_BYTES, MAX_SLIP21_LABELS_LEN, SECP256K1_P,
+        classify_secp256k1_point, is_bignum_len, is_modulus, is_reduced, is_secp256k1_private_key,
+        is_secp256k1_scalar, is_zero, parse_der_ecdsa_signature, parse_hash_identifier,
+        parse_slip21_labels, reduce_secp256k1_scalar, PointEncoding, MAX_BIP32_PATH_LEN,
+        MAX_ECDSA_SIGNATURE_LEN, MAX_RANDOM_BYTES, MAX_SLIP21_LABELS_LEN, SECP256K1_P,
     },
     ux::Deserializable,
     vm::{Cpu, CpuError, EcallHandler, MemoryError},
@@ -1426,6 +1427,12 @@ impl<'a, const N: usize> CommEcallHandler<'a, N> {
         Ok(1)
     }
 
+    /// Signs the 32-byte `msg_hash` with ECDSA and the private key `privkey`, deterministically
+    /// (RFC 6979), writing the DER-encoded low-S signature to `signature`.
+    ///
+    /// Returns the length of the signature on success, 0 if the curve, mode or hash identifier is
+    /// not supported, or the private key is not in `[1, n - 1]`.
+    #[inline(never)]
     fn handle_ecdsa_sign<E: fmt::Debug>(
         &self,
         cpu: &mut Cpu<OutsourcedMemory<'_, N>>,
@@ -1436,40 +1443,34 @@ impl<'a, const N: usize> CommEcallHandler<'a, N> {
         msg_hash: GuestPointer,
         signature: GuestPointer,
     ) -> Result<usize, CommEcallError> {
-        if curve != CurveKind::Secp256k1 as u32 {
-            return Err(CommEcallError::InvalidParameters("Unsupported curve"));
+        if curve != CurveKind::Secp256k1 as u32
+            || mode != ecall_constants::EcdsaSignMode::RFC6979 as u32
+            || hash_id != ecall_constants::HashId::Sha256 as u32
+        {
+            return Ok(0);
         }
 
-        if mode != ecall_constants::EcdsaSignMode::RFC6979 as u32 {
-            return Err(CommEcallError::InvalidParameters(
-                "Invalid or unsupported ecdsa signing mode",
-            ));
-        }
-
-        if hash_id != ecall_constants::HashId::Sha256 as u32 {
-            return Err(CommEcallError::InvalidParameters(
-                "Invalid or unsupported hash id",
-            ));
-        }
-
-        // copy inputs to local memory
         let mut privkey_local = ZeroizingPrivateKey(sys::cx_ecfp_private_key_t::default());
         privkey_local.curve = curve as u8;
         privkey_local.d_len = 32;
-        cpu.get_segment::<E>(privkey.0)?
-            .read_buffer(privkey.0, &mut privkey_local.d)?;
+        read_guest::<E, N>(cpu, privkey, &mut privkey_local.d)?;
+        if !is_secp256k1_private_key(&privkey_local.d) {
+            return Ok(0);
+        }
 
-        let mut msg_hash_local: [u8; 32] = [0; 32];
-        cpu.get_segment::<E>(msg_hash.0)?
-            .read_buffer(msg_hash.0, &mut msg_hash_local)?;
+        let mut msg_hash_local = [0u8; 32];
+        read_guest::<E, N>(cpu, msg_hash, &mut msg_hash_local)?;
+        // cx requires a hash smaller than n; reducing it changes neither the RFC 6979 nonce nor
+        // the signature
+        let msg_hash_local = reduce_secp256k1_scalar(&msg_hash_local);
 
-        // ECDSA signatures are at most 72 bytes long.
-        let mut signature_local: [u8; 72] = [0; 72];
+        let mut signature_local = [0u8; MAX_ECDSA_SIGNATURE_LEN];
         let mut signature_len: usize = signature_local.len();
         let mut info: u32 = 0; // will get the parity bit
-
-        unsafe {
-            let res = sys::cx_ecdsa_sign_no_throw(
+        // SAFETY: the key is valid, the hash is reduced, and the output buffer holds the longest
+        // signature.
+        let res = unsafe {
+            sys::cx_ecdsa_sign_no_throw(
                 &mut *privkey_local,
                 ecall_constants::EcdsaSignMode::RFC6979 as u32,
                 ecall_constants::HashId::Sha256 as u8,
@@ -1478,28 +1479,23 @@ impl<'a, const N: usize> CommEcallHandler<'a, N> {
                 signature_local.as_mut_ptr(),
                 &mut signature_len,
                 &mut info,
-            );
-            if res != CX_OK {
-                return Err(CommEcallError::GenericError(
-                    "cx_ecdsa_sign_no_throw failed",
-                ));
-            }
+            )
+        };
+        if res != CX_OK || signature_len > signature_local.len() {
+            return Ok(0);
         }
 
-        // validate signature length before writing
-        if signature_len as usize > signature_local.len() {
-            return Err(CommEcallError::GenericError(
-                "Signature length exceeds buffer size",
-            ));
-        }
-
-        // copy signature to V-App memory
-        cpu.get_segment::<E>(signature.0)?
-            .write_buffer(signature.0, &signature_local[0..signature_len as usize])?;
-
+        write_guest::<E, N>(cpu, signature, &signature_local[..signature_len])?;
         Ok(signature_len)
     }
 
+    /// Verifies the strictly DER-encoded ECDSA `signature` of the 32-byte `msg_hash` for the
+    /// uncompressed public key `pubkey`. High-S signatures are accepted.
+    ///
+    /// Returns 1 if the signature is valid, 0 if it is not, or if the curve is not supported, the
+    /// public key is not a point of the curve, or the signature is not strict DER with
+    /// `0 < r, s < n`.
+    #[inline(never)]
     fn handle_ecdsa_verify<E: fmt::Debug>(
         &self,
         cpu: &mut Cpu<OutsourcedMemory<'_, N>>,
@@ -1509,33 +1505,31 @@ impl<'a, const N: usize> CommEcallHandler<'a, N> {
         signature: GuestPointer,
         signature_len: usize,
     ) -> Result<u32, CommEcallError> {
-        if curve != CurveKind::Secp256k1 as u32 {
-            return Err(CommEcallError::InvalidParameters("Unsupported curve"));
+        if curve != CurveKind::Secp256k1 as u32 || signature_len > MAX_ECDSA_SIGNATURE_LEN {
+            return Ok(0);
         }
 
-        if signature_len > 72 {
-            return Err(CommEcallError::InvalidParameters(
-                "signature_len is too large",
-            ));
-        }
-
-        // copy inputs to local memory
         let mut pubkey_local: sys::cx_ecfp_public_key_t = Default::default();
         pubkey_local.curve = curve as u8;
         pubkey_local.W_len = 65;
-        cpu.get_segment::<E>(pubkey.0)?
-            .read_buffer(pubkey.0, &mut pubkey_local.W)?;
+        read_guest::<E, N>(cpu, pubkey, &mut pubkey_local.W)?;
+        let mut msg_hash_local = [0u8; 32];
+        read_guest::<E, N>(cpu, msg_hash, &mut msg_hash_local)?;
+        let mut signature_local = [0u8; MAX_ECDSA_SIGNATURE_LEN];
+        read_guest::<E, N>(cpu, signature, &mut signature_local[..signature_len])?;
 
-        let mut msg_hash_local: [u8; 32] = [0; 32];
-        cpu.get_segment::<E>(msg_hash.0)?
-            .read_buffer(msg_hash.0, &mut msg_hash_local)?;
+        if is_zero(&pubkey_local.W)
+            || !is_valid_secp256k1_point(&pubkey_local.W)
+            || parse_der_ecdsa_signature(&signature_local[..signature_len]).is_none()
+        {
+            return Ok(0);
+        }
+        // as for signing, cx requires a hash smaller than n
+        let msg_hash_local = reduce_secp256k1_scalar(&msg_hash_local);
 
-        let mut signature_local: [u8; 72] = [0; 72];
-        cpu.get_segment::<E>(signature.0)?
-            .read_buffer(signature.0, &mut signature_local[0..signature_len])?;
-
-        // verify the signature
-        let res = unsafe {
+        // SAFETY: the public key is a point of the curve, the hash is reduced, and the signature
+        // is strict DER with both integers in range.
+        let valid = unsafe {
             sys::cx_ecdsa_verify_no_throw(
                 &pubkey_local,
                 msg_hash_local.as_ptr(),
@@ -1544,8 +1538,7 @@ impl<'a, const N: usize> CommEcallHandler<'a, N> {
                 signature_len,
             )
         };
-
-        Ok(res as u32)
+        Ok(valid as u32)
     }
 
     fn handle_schnorr_sign<E: fmt::Debug>(
