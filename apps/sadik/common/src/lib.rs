@@ -92,7 +92,8 @@ pub enum RawEcall {
         msg: Vec<u8>,
         entropy: Option<[u8; 32]>,
     },
-    /// `schnorr_verify(curve, mode, hash_id, pubkey, msg, msg.len(), signature, signature.len())`
+    /// `schnorr_verify(curve, mode, hash_id, pubkey, msg, msg.len(), signature, signature.len())`;
+    /// `pubkey` must be 32 bytes
     SchnorrVerify {
         curve: u32,
         mode: u32,
