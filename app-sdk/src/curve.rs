@@ -548,7 +548,7 @@ impl EcfpPrivateKey<Secp256k1, 32> {
             )
         };
         if sig_size != 64 {
-            panic!("Schnorr signatures per BIP-340 must be exactly 64 bytes");
+            return Err("Failed to produce a schnorr signature");
         }
         Ok(result.to_vec())
     }
@@ -683,13 +683,14 @@ impl EcfpPublicKey<Secp256k1, 32> {
     }
 
     pub fn schnorr_verify(&self, msg: &[u8], signature: &[u8]) -> Result<(), &'static str> {
-        // SAFETY: pubkey is a 32-byte x-only BIP-340 key; msg and signature are valid slices.
+        // SAFETY: the x-coordinate is the 32-byte x-only BIP-340 key; msg and signature are valid
+        // slices.
         if 1 != unsafe {
             ecalls::schnorr_verify(
                 Secp256k1::curve_kind() as u32,
                 SchnorrSignMode::BIP340 as u32,
                 HashId::Sha256 as u32,
-                self.public_key.as_ptr(),
+                self.public_key.x.as_ptr(),
                 msg.as_ptr(),
                 msg.len(),
                 signature.as_ptr(),

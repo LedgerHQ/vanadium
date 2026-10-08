@@ -205,7 +205,7 @@ pub fn raw_ecall(call: RawEcall) -> RawEcallResult {
                 msg,
                 signature,
             } => {
-                assert!(pubkey.len() == 65);
+                assert!(pubkey.len() == 32);
                 let status = ecalls::schnorr_verify(
                     curve,
                     mode,

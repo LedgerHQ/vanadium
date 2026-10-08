@@ -700,3 +700,160 @@ async fn test_ecdsa_verify() {
     };
     check(c, call, 0, vec![]).await;
 }
+
+const BIP340: u32 = 0;
+
+fn host_schnorr_sign(privkey: &[u8; 32], msg: &[u8], aux: &[u8; 32]) -> Vec<u8> {
+    let key = k256::schnorr::SigningKey::from_bytes(privkey).unwrap();
+    key.sign_raw(msg, aux).unwrap().to_bytes().to_vec()
+}
+
+fn host_xonly(privkey: &[u8; 32]) -> Vec<u8> {
+    let key = k256::schnorr::SigningKey::from_bytes(privkey).unwrap();
+    key.verifying_key().to_bytes().to_vec()
+}
+
+fn host_schnorr_verify(xonly: &[u8], msg: &[u8], sig: &[u8]) -> bool {
+    let key = k256::schnorr::VerifyingKey::from_bytes(xonly).unwrap();
+    let sig = k256::schnorr::Signature::try_from(sig).unwrap();
+    key.verify_raw(msg, &sig).is_ok()
+}
+
+/// Whether some point of the curve has x-coordinate `x`.
+fn has_point_with_x(x: &[u8; 32]) -> bool {
+    k256::schnorr::VerifyingKey::from_bytes(x).is_ok()
+}
+
+fn schnorr_sign_call(privkey: [u8; 32], msg: Vec<u8>, entropy: Option<[u8; 32]>) -> RawEcall {
+    RawEcall::SchnorrSign {
+        curve: SECP256K1,
+        mode: BIP340,
+        hash_id: SHA256_ID,
+        privkey: privkey.to_vec(),
+        msg,
+        entropy,
+    }
+}
+
+fn schnorr_verify_call(pubkey: Vec<u8>, msg: Vec<u8>, signature: Vec<u8>) -> RawEcall {
+    RawEcall::SchnorrVerify {
+        curve: SECP256K1,
+        mode: BIP340,
+        hash_id: SHA256_ID,
+        pubkey,
+        msg,
+        signature,
+    }
+}
+
+#[tokio::test]
+async fn test_schnorr_sign() {
+    let mut setup = setup().await;
+    let c = &mut setup.client;
+    let aux = [0x5au8; 32];
+    let msg = |len: usize| (0..len).map(|i| i as u8).collect::<Vec<u8>>();
+
+    // keys whose public key has an even and an odd y-coordinate
+    let keys: Vec<[u8; 32]> = (1..20u64).map(privkey).collect();
+    let parity = |k: &[u8; 32]| {
+        use k256::elliptic_curve::sec1::ToEncodedPoint;
+        let pk = k256::SecretKey::from_slice(k).unwrap().public_key();
+        pk.to_encoded_point(true).as_bytes()[0]
+    };
+    let even = *keys.iter().find(|k| parity(k) == 0x02).unwrap();
+    let odd = *keys.iter().find(|k| parity(k) == 0x03).unwrap();
+
+    for key in [even, odd] {
+        for len in [0, 32, 128, 129, 512] {
+            let expected = host_schnorr_sign(&key, &msg(len), &aux);
+            check(c, schnorr_sign_call(key, msg(len), Some(aux)), 64, expected).await;
+        }
+    }
+
+    // without auxiliary randomness, signatures are valid and randomized
+    let first = ecall(c, schnorr_sign_call(odd, msg(32), None)).await;
+    let second = ecall(c, schnorr_sign_call(odd, msg(32), None)).await;
+    assert_eq!((first.status, second.status), (64, 64));
+    assert_ne!(first.output, second.output);
+    assert!(host_schnorr_verify(&host_xonly(&odd), &msg(32), &first.output));
+    assert!(host_schnorr_verify(&host_xonly(&odd), &msg(32), &second.output));
+
+    // a message longer than the cap
+    check(c, schnorr_sign_call(odd, msg(513), Some(aux)), 0, vec![]).await;
+    // invalid private keys
+    for key in [privkey(0), SECP256K1_N, [0xff; 32]] {
+        check(c, schnorr_sign_call(key, msg(32), Some(aux)), 0, vec![]).await;
+    }
+    // unsupported curve, mode and hash
+    for (curve, mode, hash_id) in [(0x22, BIP340, SHA256_ID), (SECP256K1, 1, SHA256_ID), (SECP256K1, BIP340, 5)] {
+        let call = RawEcall::SchnorrSign {
+            curve,
+            mode,
+            hash_id,
+            privkey: odd.to_vec(),
+            msg: msg(32),
+            entropy: Some(aux),
+        };
+        check(c, call, 0, vec![]).await;
+    }
+}
+
+#[tokio::test]
+async fn test_schnorr_verify() {
+    let mut setup = setup().await;
+    let c = &mut setup.client;
+    let key = privkey(0x4321);
+    let xonly = host_xonly(&key);
+    let msg = b"a message".to_vec();
+    let long_msg = vec![0x77u8; 512];
+    let sig = host_schnorr_sign(&key, &msg, &[1; 32]);
+    let long_sig = host_schnorr_sign(&key, &long_msg, &[1; 32]);
+
+    check(c, schnorr_verify_call(xonly.clone(), msg.clone(), sig.clone()), 1, vec![]).await;
+    check(c, schnorr_verify_call(xonly.clone(), long_msg.clone(), long_sig), 1, vec![]).await;
+    // wrong message or key
+    check(c, schnorr_verify_call(xonly.clone(), b"another".to_vec(), sig.clone()), 0, vec![]).await;
+    check(c, schnorr_verify_call(host_xonly(&privkey(5)), msg.clone(), sig.clone()), 0, vec![]).await;
+    // a message longer than the cap
+    let mut too_long = long_msg.clone();
+    too_long.push(0);
+    check(c, schnorr_verify_call(xonly.clone(), too_long, sig.clone()), 0, vec![]).await;
+
+    // r and s out of range, and wrong lengths
+    let p = hex_literal::hex!("fffffffffffffffffffffffffffffffffffffffffffffffffffffffefffffc2f");
+    let mut bad = Vec::new();
+    for (start, value) in [(0, p), (0, [0u8; 32]), (32, SECP256K1_N), (32, [0u8; 32])] {
+        let mut s = sig.clone();
+        s[start..start + 32].copy_from_slice(&value);
+        bad.push(s);
+    }
+    bad.push(sig[..63].to_vec());
+    let mut sig65 = sig.clone();
+    sig65.push(0);
+    bad.push(sig65);
+    for s in bad {
+        check(c, schnorr_verify_call(xonly.clone(), msg.clone(), s), 0, vec![]).await;
+    }
+
+    // public keys that are not the x-coordinate of a point of the curve
+    let x_not_on_curve: [u8; 32] = (1..100u64)
+        .map(|x| -> [u8; 32] { be(x, 32).try_into().unwrap() })
+        .find(|x| !has_point_with_x(x))
+        .unwrap();
+    for x in [x_not_on_curve.to_vec(), p.to_vec(), vec![0xff; 32]] {
+        check(c, schnorr_verify_call(x, msg.clone(), sig.clone()), 0, vec![]).await;
+    }
+
+    // unsupported curve, mode and hash
+    for (curve, mode, hash_id) in [(0x22, BIP340, SHA256_ID), (SECP256K1, 1, SHA256_ID), (SECP256K1, BIP340, 5)] {
+        let call = RawEcall::SchnorrVerify {
+            curve,
+            mode,
+            hash_id,
+            pubkey: xonly.clone(),
+            msg: msg.clone(),
+            signature: sig.clone(),
+        };
+        check(c, call, 0, vec![]).await;
+    }
+}

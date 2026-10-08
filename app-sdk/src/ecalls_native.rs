@@ -23,10 +23,11 @@ use common::{
         CTX_SHA512_SIZE,
     },
     ecall_validation::{
-        classify_secp256k1_point, is_bignum_len, is_modulus, is_reduced, is_secp256k1_private_key,
-        is_secp256k1_scalar, is_zero, parse_der_ecdsa_signature, parse_hash_identifier,
-        parse_slip21_labels, reduce_secp256k1_scalar, PointEncoding, MAX_BIP32_PATH_LEN,
-        MAX_ECDSA_SIGNATURE_LEN, MAX_RANDOM_BYTES, MAX_SLIP21_LABELS_LEN,
+        classify_secp256k1_point, is_bignum_len, is_modulus, is_reduced,
+        is_schnorr_signature_in_range, is_secp256k1_private_key, is_secp256k1_scalar, is_zero,
+        parse_der_ecdsa_signature, parse_hash_identifier, parse_slip21_labels,
+        reduce_secp256k1_scalar, PointEncoding, MAX_BIP32_PATH_LEN, MAX_ECDSA_SIGNATURE_LEN,
+        MAX_RANDOM_BYTES, MAX_SCHNORR_MSG_LEN, MAX_SLIP21_LABELS_LEN,
     },
     ux::{Deserializable, EventCode, EventData},
     BufferType,
@@ -789,31 +790,26 @@ pub fn schnorr_sign(
     signature: *mut u8,
     entropy: *const [u8; 32],
 ) -> usize {
-    if curve != CurveKind::Secp256k1 as u32 {
-        panic!("Unsupported curve");
+    if curve != CurveKind::Secp256k1 as u32
+        || mode != common::ecall_constants::SchnorrSignMode::BIP340 as u32
+        || hash_id != common::ecall_constants::HashId::Sha256 as u32
+        || msg_len > MAX_SCHNORR_MSG_LEN
+    {
+        return 0;
     }
 
-    if mode != common::ecall_constants::SchnorrSignMode::BIP340 as u32 {
-        panic!("Invalid or unsupported schnorr signing mode");
+    let privkey = unsafe { &*(privkey as *const [u8; 32]) };
+    if !is_secp256k1_private_key(privkey) {
+        return 0;
     }
+    let msg = if msg_len == 0 {
+        &[]
+    } else {
+        unsafe { std::slice::from_raw_parts(msg, msg_len) }
+    };
 
-    if msg_len > 128 {
-        panic!("msg_len is too large");
-    }
-
-    if hash_id != common::ecall_constants::HashId::Sha256 as u32 {
-        panic!("Invalid or unsupported hash id");
-    }
-
-    let privkey_slice = unsafe { std::slice::from_raw_parts(privkey, 32) };
-    let msg_slice = unsafe { std::slice::from_raw_parts(msg, msg_len) };
-
-    let mut privkey_bytes = [0u8; 32];
-    privkey_bytes[..].copy_from_slice(privkey_slice);
-    let signing_key = schnorr::SigningKey::from_bytes(&privkey_bytes).expect("Invalid private key");
-
+    // Like the VM, use fresh auxiliary randomness if none is given.
     let aux_rand = if entropy.is_null() {
-        // generate 32 random bytes
         let mut aux_rand = [0u8; 32];
         rand::rngs::OsRng::default()
             .try_fill_bytes(&mut aux_rand)
@@ -823,15 +819,16 @@ pub fn schnorr_sign(
         unsafe { *entropy }
     };
 
-    let signature_bytes = signing_key
-        .sign_raw(msg_slice, &aux_rand)
-        .unwrap()
-        .to_bytes();
+    let signing_key = schnorr::SigningKey::from_bytes(privkey).expect("the private key is valid");
+    let Ok(signature_local) = signing_key.sign_raw(msg, &aux_rand) else {
+        // only if the nonce is 0, or larger than n, which has negligible probability
+        return 0;
+    };
+    let signature_bytes = signature_local.to_bytes();
 
     unsafe {
         std::ptr::copy_nonoverlapping(signature_bytes.as_ptr(), signature, signature_bytes.len());
     }
-
     signature_bytes.len()
 }
 
@@ -845,36 +842,34 @@ pub fn schnorr_verify(
     signature: *const u8,
     signature_len: usize,
 ) -> u32 {
-    if curve != CurveKind::Secp256k1 as u32 {
-        panic!("Unsupported curve");
+    if curve != CurveKind::Secp256k1 as u32
+        || mode != common::ecall_constants::SchnorrSignMode::BIP340 as u32
+        || hash_id != common::ecall_constants::HashId::Sha256 as u32
+        || msg_len > MAX_SCHNORR_MSG_LEN
+        || signature_len != 64
+    {
+        return 0;
     }
 
-    if mode != common::ecall_constants::SchnorrSignMode::BIP340 as u32 {
-        panic!("Invalid or unsupported schnorr signing mode");
+    let x = unsafe { std::slice::from_raw_parts(pubkey, 32) };
+    let msg = if msg_len == 0 {
+        &[]
+    } else {
+        unsafe { std::slice::from_raw_parts(msg, msg_len) }
+    };
+    let signature = unsafe { &*(signature as *const [u8; 64]) };
+
+    if !is_schnorr_signature_in_range(signature) {
+        return 0;
     }
+    let Ok(verifying_key) = schnorr::VerifyingKey::from_bytes(x) else {
+        return 0;
+    };
+    let Ok(signature) = schnorr::Signature::try_from(&signature[..]) else {
+        return 0;
+    };
 
-    if msg_len > 128 {
-        panic!("msg_len is too large");
-    }
-
-    if hash_id != common::ecall_constants::HashId::Sha256 as u32 {
-        panic!("Invalid or unsupported hash id");
-    }
-
-    if signature_len != 64 {
-        panic!("Invalid signature length");
-    }
-
-    let pubkey_slice = unsafe { std::slice::from_raw_parts(pubkey, 65) };
-    let xonly_pubkey_slice = &pubkey_slice[1..33];
-    let msg_slice = unsafe { std::slice::from_raw_parts(msg, msg_len) };
-    let signature_slice = unsafe { std::slice::from_raw_parts(signature, signature_len) };
-
-    let verifying_key =
-        schnorr::VerifyingKey::from_bytes(xonly_pubkey_slice).expect("Invalid public key");
-    let signature = schnorr::Signature::try_from(signature_slice).expect("Invalid signature");
-
-    match verifying_key.verify_raw(msg_slice, &signature) {
+    match verifying_key.verify_raw(msg, &signature) {
         Ok(_) => 1,
         Err(_) => 0,
     }

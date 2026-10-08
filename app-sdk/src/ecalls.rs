@@ -470,7 +470,7 @@ forward_to_ecall! {
         signature_len: usize,
     ) -> u32;
 
-    /// Signs a message using Schnorr signature.
+    /// Signs a message with a BIP-340 Schnorr signature.
     ///
     /// # Warning
     /// **This ecall is unstable and subject to change in future versions.**
@@ -478,15 +478,18 @@ forward_to_ecall! {
     /// # Parameters
     /// - `curve`: The elliptic curve identifier. Currently only `Secp256k1` is supported.
     /// - `mode`: The signing mode. Only `BIP340` is supported.
-    /// - `hash_id`: The hash identifier.
-    /// - `privkey`: Pointer to the private key buffer.
+    /// - `hash_id`: The hash identifier. Only `Sha256` is supported.
+    /// - `privkey`: Pointer to the 32-byte private key, in `[1, n - 1]`.
     /// - `msg`: Pointer to the message buffer.
-    /// - `msg_len`: Length of the message buffer.
+    /// - `msg_len`: Length of the message, at most
+    ///   [`MAX_SCHNORR_MSG_LEN`](common::ecall_validation::MAX_SCHNORR_MSG_LEN).
     /// - `signature`: Pointer to the buffer to store the signature.
-    /// - `entropy`: Additional entropy to use during signing or null if not needed
+    /// - `entropy`: The 32 bytes of BIP-340 auxiliary randomness, or null to use fresh random
+    ///   bytes.
     ///
     /// # Returns
-    /// The length of the signature (always 64) on success, 0 on error.
+    /// The length of the signature (always 64) on success, 0 if the curve, mode or hash
+    /// identifier is not supported, the private key is invalid, or the message is too long.
     ///
     /// # Safety
     /// - `privkey` must be a valid pointer to at least 32 bytes of readable memory.
@@ -504,27 +507,29 @@ forward_to_ecall! {
         entropy: *const [u8; 32],
     ) -> usize;
 
-    /// Verifies a Schnorr signature for a message.
+    /// Verifies a BIP-340 Schnorr signature for a message.
     ///
     /// # Warning
     /// **This ecall is unstable and subject to change in future versions.**
     ///
     /// # Parameters
     /// - `curve`: The elliptic curve identifier. Currently only `Secp256k1` is supported.
-    /// - `mode`: The verification mode. It must match the mode used for signing.
+    /// - `mode`: The verification mode. Only `BIP340` is supported.
     /// - `hash_id`: The hash identifier. Only `Sha256` is supported.
-    /// - `pubkey`: Pointer to the public key buffer.
+    /// - `pubkey`: Pointer to the 32-byte x-only public key.
     /// - `msg`: Pointer to the message buffer.
-    /// - `msg_len`: Length of the message buffer.
+    /// - `msg_len`: Length of the message, at most
+    ///   [`MAX_SCHNORR_MSG_LEN`](common::ecall_validation::MAX_SCHNORR_MSG_LEN).
     /// - `signature`: Pointer to the signature buffer.
-    /// - `signature_len`: Length of the signature buffer.
+    /// - `signature_len`: Length of the signature buffer; it must be 64.
     ///
     /// # Returns
-    /// 1 on success, 0 on error.
+    /// 1 if the signature is valid, 0 if it is not, or if the curve, mode or hash identifier is
+    /// not supported, the message is too long, the public key is not the x-coordinate of a point
+    /// of the curve, or the signature is not 64 bytes with `0 < r < p` and `0 < s < n`.
     ///
     /// # Safety
-    /// - `pubkey` must be a valid pointer to at least 32 bytes of readable memory
-    ///   (x-only BIP-340 public key).
+    /// - `pubkey` must be a valid pointer to at least 32 bytes of readable memory.
     /// - `msg` must be a valid pointer to at least `msg_len` bytes of readable memory.
     /// - `signature` must be a valid pointer to at least `signature_len` bytes of readable memory.
     pub unsafe fn schnorr_verify(

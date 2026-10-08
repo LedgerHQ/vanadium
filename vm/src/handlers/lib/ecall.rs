@@ -4,7 +4,7 @@ use core::{
     fmt,
 };
 
-use alloc::{format, rc::Rc, string::String, vec, vec::Vec};
+use alloc::{format, rc::Rc, string::String, vec::Vec};
 use common::{
     client_commands::{
         Message, MessageDeserializationError, ReceiveBufferMessage, ReceiveBufferResponse,
@@ -13,10 +13,12 @@ use common::{
     constants::{MAX_STORAGE_SLOTS, STORAGE_SLOT_SIZE},
     ecall_constants::{self, *},
     ecall_validation::{
-        classify_secp256k1_point, is_bignum_len, is_modulus, is_reduced, is_secp256k1_private_key,
+        classify_secp256k1_point, is_bignum_len, is_modulus, is_odd, is_reduced,
+        is_schnorr_signature_in_range, is_secp256k1_field_element, is_secp256k1_private_key,
         is_secp256k1_scalar, is_zero, parse_der_ecdsa_signature, parse_hash_identifier,
         parse_slip21_labels, reduce_secp256k1_scalar, PointEncoding, MAX_BIP32_PATH_LEN,
-        MAX_ECDSA_SIGNATURE_LEN, MAX_RANDOM_BYTES, MAX_SLIP21_LABELS_LEN, SECP256K1_P,
+        MAX_ECDSA_SIGNATURE_LEN, MAX_RANDOM_BYTES, MAX_SCHNORR_MSG_LEN, MAX_SLIP21_LABELS_LEN,
+        SECP256K1_P,
     },
     ux::Deserializable,
     vm::{Cpu, CpuError, EcallHandler, MemoryError},
@@ -513,24 +515,75 @@ fn secp256k1_scalar_mult(p: &[u8; 65], k: &[u8; 32]) -> Option<[u8; 65]> {
     (err == CX_OK).then_some(res)
 }
 
+/// `x^3 + 7 mod p`, the right-hand side of the secp256k1 equation, for a canonical `x < p`.
+fn secp256k1_curve_rhs(x: &[u8]) -> Option<[u8; 32]> {
+    let mut seven = [0u8; 32];
+    seven[31] = 7;
+    let (mut x2, mut x3, mut rhs) = ([0u8; 32], [0u8; 32], [0u8; 32]);
+    let p = SECP256K1_P.as_ptr();
+    // SAFETY: all operands are 32 bytes (a multiple of 16) and smaller than the odd modulus p.
+    let ok = unsafe {
+        sys::cx_math_multm_no_throw(x2.as_mut_ptr(), x.as_ptr(), x.as_ptr(), p, 32) == CX_OK
+            && sys::cx_math_multm_no_throw(x3.as_mut_ptr(), x2.as_ptr(), x.as_ptr(), p, 32) == CX_OK
+            && sys::cx_math_addm_no_throw(rhs.as_mut_ptr(), x3.as_ptr(), seven.as_ptr(), p, 32)
+                == CX_OK
+    };
+    ok.then_some(rhs)
+}
+
 /// Whether the canonical coordinates `x, y < p` satisfy the secp256k1 equation y^2 = x^3 + 7.
 ///
 /// The check is done here, rather than left to cx, because cx's behaviour on points that are not
 /// on the curve is not documented.
 fn is_on_secp256k1(x: &[u8], y: &[u8]) -> bool {
-    let mut seven = [0u8; 32];
-    seven[31] = 7;
-    let (mut y2, mut x2, mut x3, mut rhs) = ([0u8; 32], [0u8; 32], [0u8; 32], [0u8; 32]);
-    let p = SECP256K1_P.as_ptr();
-    // SAFETY: all operands are 32 bytes (a multiple of 16) and smaller than the odd modulus p.
+    let mut y2 = [0u8; 32];
+    // SAFETY: y is 32 bytes, smaller than the odd modulus p.
     let ok = unsafe {
-        sys::cx_math_multm_no_throw(y2.as_mut_ptr(), y.as_ptr(), y.as_ptr(), p, 32) == CX_OK
-            && sys::cx_math_multm_no_throw(x2.as_mut_ptr(), x.as_ptr(), x.as_ptr(), p, 32) == CX_OK
-            && sys::cx_math_multm_no_throw(x3.as_mut_ptr(), x2.as_ptr(), x.as_ptr(), p, 32) == CX_OK
-            && sys::cx_math_addm_no_throw(rhs.as_mut_ptr(), x3.as_ptr(), seven.as_ptr(), p, 32)
-                == CX_OK
+        sys::cx_math_multm_no_throw(y2.as_mut_ptr(), y.as_ptr(), y.as_ptr(), SECP256K1_P.as_ptr(), 32)
+            == CX_OK
     };
-    ok && y2 == rhs
+    ok && secp256k1_curve_rhs(x) == Some(y2)
+}
+
+/// The uncompressed point with x-coordinate `x` and an even y-coordinate (`lift_x` in BIP-340),
+/// or `None` if `x >= p` or no point of the curve has that x-coordinate.
+#[inline(never)]
+fn secp256k1_lift_x(x: &[u8; 32]) -> Option<[u8; 65]> {
+    // (p + 1) / 4: since p = 3 mod 4, c^((p + 1) / 4) is a square root of c, if c has one
+    const SQRT_EXP: [u8; 32] = [
+        0x3f, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+        0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xbf, 0xff,
+        0xff, 0x0c,
+    ];
+    if !is_secp256k1_field_element(x) {
+        return None;
+    }
+    let c = secp256k1_curve_rhs(x)?;
+    let mut y = [0u8; 32];
+    let p = SECP256K1_P.as_ptr();
+    // SAFETY: all operands are 32 bytes; c < p, with p odd.
+    if unsafe { sys::cx_math_powm_no_throw(y.as_mut_ptr(), c.as_ptr(), SQRT_EXP.as_ptr(), 32, p, 32) }
+        != CX_OK
+    {
+        return None;
+    }
+    if is_odd(&y) {
+        let zero = [0u8; 32];
+        let odd_y = y;
+        // SAFETY: as above; 0 and y are smaller than p.
+        if unsafe { sys::cx_math_subm_no_throw(y.as_mut_ptr(), zero.as_ptr(), odd_y.as_ptr(), p, 32) }
+            != CX_OK
+        {
+            return None;
+        }
+    }
+
+    let mut point = [0u8; 65];
+    point[0] = 0x04;
+    point[1..33].copy_from_slice(x);
+    point[33..].copy_from_slice(&y);
+    // c has no square root if y^2 != c
+    is_on_secp256k1(x, &y).then_some(point)
 }
 
 /// Whether a 65-byte point is valid: either infinity, encoded as 65 zero bytes, or
@@ -1554,6 +1607,13 @@ impl<'a, const N: usize> CommEcallHandler<'a, N> {
         Ok(valid as u32)
     }
 
+    /// Signs `msg` (at most `MAX_SCHNORR_MSG_LEN` bytes) with BIP-340 and the private key
+    /// `privkey`, writing the 64-byte signature to `signature`. The auxiliary randomness is the 32
+    /// bytes at `entropy`, or fresh random bytes if `entropy` is null.
+    ///
+    /// Returns 64 on success, 0 if the curve, mode or hash identifier is not supported, the
+    /// private key is not in `[1, n - 1]`, or the message is too long.
+    #[inline(never)]
     fn handle_schnorr_sign<E: fmt::Debug>(
         &self,
         cpu: &mut Cpu<OutsourcedMemory<'_, N>>,
@@ -1566,93 +1626,70 @@ impl<'a, const N: usize> CommEcallHandler<'a, N> {
         signature: GuestPointer,
         entropy: GuestPointer,
     ) -> Result<usize, CommEcallError> {
-        if curve != CurveKind::Secp256k1 as u32 {
-            return Err(CommEcallError::InvalidParameters("Unsupported curve"));
+        if curve != CurveKind::Secp256k1 as u32
+            || mode != ecall_constants::SchnorrSignMode::BIP340 as u32
+            || hash_id != ecall_constants::HashId::Sha256 as u32
+            || msg_len > MAX_SCHNORR_MSG_LEN
+        {
+            return Ok(0);
         }
 
-        if mode != ecall_constants::SchnorrSignMode::BIP340 as u32 {
-            return Err(CommEcallError::InvalidParameters(
-                "Invalid or unsupported schnorr signing mode",
-            ));
-        }
-
-        if msg_len > 128 {
-            return Err(CommEcallError::InvalidParameters("msg_len is too large"));
-        }
-
-        if hash_id != ecall_constants::HashId::Sha256 as u32 {
-            return Err(CommEcallError::InvalidParameters(
-                "Invalid or unsupported hash id",
-            ));
-        }
-
-        // copy inputs to local memory
         let mut privkey_local = ZeroizingPrivateKey(sys::cx_ecfp_private_key_t::default());
         privkey_local.curve = curve as u8;
         privkey_local.d_len = 32;
-        cpu.get_segment::<E>(privkey.0)?
-            .read_buffer(privkey.0, &mut privkey_local.d)?;
+        read_guest::<E, N>(cpu, privkey, &mut privkey_local.d)?;
+        if !is_secp256k1_private_key(&privkey_local.d) {
+            return Ok(0);
+        }
 
-        let mut msg_local = vec![0; 128];
-        cpu.get_segment::<E>(msg.0)?
-            .read_buffer(msg.0, &mut msg_local[..msg_len])?;
+        let mut msg_local = [0u8; MAX_SCHNORR_MSG_LEN];
+        read_guest::<E, N>(cpu, msg, &mut msg_local[..msg_len])?;
 
-        // Schnorr signatures are at most 64 bytes long.
-        let mut signature_local: [u8; 64] = [0; 64];
+        // cx reads the BIP-340 auxiliary randomness from the start of the signature buffer.
+        // Without it, cx would replace the BIP-340 nonce with one drawn from the TRNG, losing the
+        // protection that the nonce's dependency on the key and message gives against a weak
+        // random number generator; so the VM always provides it.
+        let mut signature_local = [0u8; 64];
+        if entropy.is_null() {
+            // SAFETY: the buffer holds 32 bytes.
+            unsafe { sys::cx_rng_no_throw(signature_local.as_mut_ptr(), 32) };
+        } else {
+            read_guest::<E, N>(cpu, entropy, &mut signature_local[..32])?;
+        }
+
+        // We don't expose this, but cx_ecschnorr_sign_no_throw needs to be told where the
+        // auxiliary randomness comes from.
+        const CX_RND_PROVIDED: u32 = 4 << 9;
         let mut signature_len: usize = signature_local.len();
-
-        unsafe {
-            // We don't expose this, but cx_ecschnorr_sign_no_throw requires one of
-            // CX_RND_TRNG or CX_RND_PROVIDED to be provided. We use `entropy` if it's provided,
-            // CX_RND_TRNG  otherwise.
-            const CX_RND_TRNG: u32 = 2 << 9;
-            const CX_RND_PROVIDED: u32 = 4 << 9;
-
-            let mode = if entropy.is_null() {
-                mode | CX_RND_TRNG
-            } else {
-                cpu.get_segment::<E>(entropy.0)?
-                    .read_buffer(entropy.0, &mut signature_local[..32])?;
-                mode | CX_RND_PROVIDED
-            };
-
-            let res = sys::cx_ecschnorr_sign_no_throw(
+        // SAFETY: the key is valid, the message buffer holds `msg_len` bytes, and the signature
+        // buffer holds 64 bytes, starting with the auxiliary randomness.
+        let res = unsafe {
+            sys::cx_ecschnorr_sign_no_throw(
                 &mut *privkey_local,
-                mode,
+                mode | CX_RND_PROVIDED,
                 ecall_constants::HashId::Sha256 as u8,
                 msg_local.as_ptr(),
                 msg_len,
                 signature_local.as_mut_ptr(),
                 &mut signature_len,
-            );
-            if res != CX_OK {
-                return Err(CommEcallError::GenericError(
-                    "cx_schnorr_sign_no_throw failed",
-                ));
-            }
+            )
+        };
+        if res != CX_OK || signature_len != 64 {
+            return Ok(0);
         }
 
-        // signatures returned per BIP340 are always exactly 64 bytes
-        if signature_len != 64 {
-            return Err(CommEcallError::GenericError(
-                "cx_schnorr_sign_no_throw returned a signature of unexpected length",
-            ));
-        }
-
-        // validate signature length before writing
-        if signature_len as usize > signature_local.len() {
-            return Err(CommEcallError::GenericError(
-                "Signature length exceeds buffer size",
-            ));
-        }
-
-        // copy signature to V-App memory
-        cpu.get_segment::<E>(signature.0)?
-            .write_buffer(signature.0, &signature_local[0..signature_len as usize])?;
-
-        Ok(signature_len)
+        write_guest::<E, N>(cpu, signature, &signature_local)?;
+        Ok(64)
     }
 
+    /// Verifies the BIP-340 `signature` of `msg` (at most `MAX_SCHNORR_MSG_LEN` bytes) for the
+    /// 32-byte x-only public key `pubkey`.
+    ///
+    /// Returns 1 if the signature is valid, 0 if it is not, or if the curve, mode or hash
+    /// identifier is not supported, the message is too long, the public key is not the
+    /// x-coordinate of a point of the curve, or the signature is not 64 bytes with `0 < r < p`
+    /// and `0 < s < n`.
+    #[inline(never)]
     fn handle_schnorr_verify<E: fmt::Debug>(
         &self,
         cpu: &mut Cpu<OutsourcedMemory<'_, N>>,
@@ -1665,49 +1702,36 @@ impl<'a, const N: usize> CommEcallHandler<'a, N> {
         signature: GuestPointer,
         signature_len: usize,
     ) -> Result<u32, CommEcallError> {
-        if curve != CurveKind::Secp256k1 as u32 {
-            return Err(CommEcallError::InvalidParameters("Unsupported curve"));
+        if curve != CurveKind::Secp256k1 as u32
+            || mode != ecall_constants::SchnorrSignMode::BIP340 as u32
+            || hash_id != ecall_constants::HashId::Sha256 as u32
+            || msg_len > MAX_SCHNORR_MSG_LEN
+            || signature_len != 64
+        {
+            return Ok(0);
         }
 
-        if mode != ecall_constants::SchnorrSignMode::BIP340 as u32 {
-            return Err(CommEcallError::InvalidParameters(
-                "Invalid or unsupported schnorr signing mode",
-            ));
-        }
+        let mut x_local = [0u8; 32];
+        read_guest::<E, N>(cpu, pubkey, &mut x_local)?;
+        let mut msg_local = [0u8; MAX_SCHNORR_MSG_LEN];
+        read_guest::<E, N>(cpu, msg, &mut msg_local[..msg_len])?;
+        let mut signature_local = [0u8; 64];
+        read_guest::<E, N>(cpu, signature, &mut signature_local)?;
 
-        if msg_len > 128 {
-            return Err(CommEcallError::InvalidParameters("msg_len is too large"));
+        if !is_schnorr_signature_in_range(&signature_local) {
+            return Ok(0);
         }
-
-        if hash_id != ecall_constants::HashId::Sha256 as u32 {
-            return Err(CommEcallError::InvalidParameters(
-                "Invalid or unsupported hash id",
-            ));
-        }
-
-        if signature_len != 64 {
-            return Err(CommEcallError::InvalidParameters(
-                "Invalid signature length",
-            ));
-        }
-
-        // copy inputs to local memory
+        let Some(point) = secp256k1_lift_x(&x_local) else {
+            return Ok(0);
+        };
         let mut pubkey_local: sys::cx_ecfp_public_key_t = Default::default();
         pubkey_local.curve = curve as u8;
         pubkey_local.W_len = 65;
-        cpu.get_segment::<E>(pubkey.0)?
-            .read_buffer(pubkey.0, &mut pubkey_local.W)?;
+        pubkey_local.W = point;
 
-        let mut msg_local = vec![0; msg_len];
-        cpu.get_segment::<E>(msg.0)?
-            .read_buffer(msg.0, &mut msg_local)?;
-
-        let mut signature_local: [u8; 64] = [0; 64];
-        cpu.get_segment::<E>(signature.0)?
-            .read_buffer(signature.0, &mut signature_local)?;
-
-        // verify the signature
-        let res = unsafe {
+        // SAFETY: the public key is a point of the curve, the message buffer holds `msg_len`
+        // bytes, and the signature 64 bytes with both halves in range.
+        let valid = unsafe {
             sys::cx_ecschnorr_verify(
                 &pubkey_local,
                 mode,
@@ -1718,8 +1742,7 @@ impl<'a, const N: usize> CommEcallHandler<'a, N> {
                 signature_len,
             )
         };
-
-        Ok(res as u32)
+        Ok(valid as u32)
     }
 
     fn handle_get_event<E: fmt::Debug>(
