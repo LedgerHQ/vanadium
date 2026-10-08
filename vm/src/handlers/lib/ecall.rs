@@ -12,14 +12,14 @@ use common::{
     },
     constants::{MAX_STORAGE_SLOTS, STORAGE_SLOT_SIZE},
     ecall_constants::{self, *},
-    ecall_validation::{is_bignum_len, is_modulus, is_reduced, is_zero},
+    ecall_validation::{is_bignum_len, is_modulus, is_reduced, is_zero, parse_hash_identifier},
     ux::Deserializable,
     vm::{Cpu, CpuError, EcallHandler, MemoryError},
     BufferType,
 };
 use ledger_device_sdk::sys::{
-    self, cx_ripemd160_t, cx_sha256_t, cx_sha3_t, cx_sha512_t, CX_KECCAK, CX_OK, CX_RIPEMD160,
-    CX_SHA256, CX_SHA3, CX_SHA384, CX_SHA512,
+    self, cx_ripemd160_t, cx_sha256_t, cx_sha3_t, cx_sha512_t, CX_OK, CX_RIPEMD160, CX_SHA256,
+    CX_SHA384, CX_SHA512,
 };
 use ledger_device_sdk::{hash::HashInit, io::DecodedEventType};
 
@@ -185,7 +185,6 @@ impl GuestPointer {
 #[derive(Debug, Clone, Copy)]
 pub enum LedgerHashContextError {
     InvalidHashId,
-    UnsupportedHashId,
     /// The context handed back by the V-App is not one these ECALLs could have produced.
     CorruptedContext,
 }
@@ -194,7 +193,6 @@ impl fmt::Display for LedgerHashContextError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             LedgerHashContextError::InvalidHashId => write!(f, "Invalid hash id"),
-            LedgerHashContextError::UnsupportedHashId => write!(f, "Unsupported hash id"),
             LedgerHashContextError::CorruptedContext => write!(f, "Corrupted hash context"),
         }
     }
@@ -242,19 +240,12 @@ struct VerifiedHashContext {
 }
 
 impl VerifiedHashContext {
-    /// Splits a hash identifier into its algorithm and output size, rejecting the algorithms that
-    /// the hash ECALLs do not support.
+    /// Splits a hash identifier into its algorithm and output size, rejecting the identifiers that
+    /// the hash ECALLs do not support. The algorithm identifiers match the cx ones.
     fn parse_id(hash_identifier: u32) -> Result<(u8, usize), LedgerHashContextError> {
-        if hash_identifier >> 24 != 0 {
-            return Err(LedgerHashContextError::InvalidHashId);
-        }
-        let algorithm = (hash_identifier >> 16) as u8;
-        match algorithm {
-            CX_RIPEMD160 | CX_SHA256 | CX_SHA384 | CX_SHA512 | CX_KECCAK | CX_SHA3 => {}
-            0 => return Err(LedgerHashContextError::InvalidHashId),
-            _ => return Err(LedgerHashContextError::UnsupportedHashId),
-        }
-        Ok((algorithm, (hash_identifier & 0xFFFF) as usize))
+        parse_hash_identifier(hash_identifier)
+            .map(|(algorithm, output_size)| (algorithm as u8, output_size))
+            .ok_or(LedgerHashContextError::InvalidHashId)
     }
 
     /// Size of the context struct that the V-App stores for `hash_identifier`.

@@ -72,7 +72,10 @@ pub fn raw_ecall(call: RawEcall) -> RawEcallResult {
                 tamper,
             } => {
                 let mut ctx = [0u8; MAX_HASH_CTX_SIZE];
-                ecalls::hash_init(hash_id, ctx.as_mut_ptr());
+                let status = ecalls::hash_init(hash_id, ctx.as_mut_ptr());
+                if status != 1 {
+                    return result(status, Vec::new());
+                }
                 if let Some((offset, value)) = tamper {
                     ctx[offset as usize] = value;
                 }

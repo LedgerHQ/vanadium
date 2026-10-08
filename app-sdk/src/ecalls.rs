@@ -531,60 +531,62 @@ forward_to_ecall! {
 
     /// Initializes a hash context for the specified hash algorithm.
     ///
+    /// The context is opaque, and its content differs between targets: it must only be modified
+    /// by the hash ECALLs, always with the same `hash_id`. On the device, the VM validates the
+    /// context it gets back, so that a V-App breaking this rule cannot compromise the VM, and the
+    /// ECALL returns 0 if it detects it; but the V-App itself gets no such guarantee (natively,
+    /// the context is a hasher struct of the host, and breaking the rule is undefined behaviour).
+    ///
     /// # Parameters
-    /// - `hash_id`: The hash algorithm identifier (see [`common::ecall_constants::HashId`]).
+    /// - `hash_id`: The composite hash identifier (see
+    ///   [`HashId::ecall_id`](common::ecall_constants::HashId::ecall_id)): RIPEMD-160 (20 bytes),
+    ///   SHA-256 (32), SHA-384 (48), SHA-512 (64), or Keccak or SHA-3 with an output of 28, 32,
+    ///   48 or 64 bytes.
     /// - `ctx`: Pointer to the opaque context buffer to initialize. The buffer must be at
     ///   least as large as the corresponding `CTX_*_SIZE` constant defined in
     ///   [`common::ecall_constants`] for the given `hash_id`.
     ///
+    /// # Returns
+    /// 1 on success, 0 if `hash_id` is not supported.
+    ///
     /// # Safety
     /// - `ctx` must be a valid pointer to a writable buffer of at least the required size for
     ///   the given `hash_id` (see `CTX_*_SIZE` constants in [`common::ecall_constants`]).
-    /// - `hash_id` must be a supported hash algorithm identifier; passing an unsupported value
-    ///   results in undefined behaviour.
-    pub unsafe fn hash_init(hash_id: u32, ctx: *mut u8);
+    pub unsafe fn hash_init(hash_id: u32, ctx: *mut u8) -> u32;
 
     /// Updates a hash context with additional input data.
     ///
     /// # Parameters
-    /// - `hash_id`: The hash algorithm identifier (see [`common::ecall_constants::HashId`]).
+    /// - `hash_id`: The hash identifier used to initialize `ctx`.
     /// - `ctx`: Pointer to the opaque context buffer previously initialized by [`hash_init`].
-    ///   The buffer must be at least as large as the corresponding `CTX_*_SIZE` constant
-    ///   defined in [`common::ecall_constants`] for the given `hash_id`.
     /// - `data`: Pointer to the input data buffer.
-    /// - `len`: Length of the input data.
+    /// - `len`: Length of the input data; it can be 0.
     ///
     /// # Returns
-    /// 1 on success, 0 on error.
+    /// 1 on success, 0 if `hash_id` is not supported or `ctx` is not a valid context for it.
     ///
     /// # Safety
-    /// - `ctx` must be a valid pointer to a writable buffer that was previously initialized via
-    ///   [`hash_init`] with the same `hash_id`. Passing an uninitialized context or a
-    ///   `hash_id` that differs from the one used during initialization is undefined behaviour.
+    /// - `ctx` must be a valid pointer to a context initialized by [`hash_init`] with the same
+    ///   `hash_id`, and since modified only by the hash ECALLs (see [`hash_init`]).
     /// - `data` must be a valid pointer to at least `len` bytes of readable memory.
     pub unsafe fn hash_update(hash_id: u32, ctx: *mut u8, data: *const u8, len: usize) -> u32;
 
-    /// Finalizes a hash computation and writes the digest to the output buffer.
+    /// Writes the digest of the data absorbed so far to the output buffer.
     ///
-    /// After calling this function the context is consumed and must not be reused
-    /// without a new call to [`hash_init`].
+    /// The context is not modified, so more data can be absorbed afterwards.
     ///
     /// # Parameters
-    /// - `hash_id`: The hash algorithm identifier (see [`common::ecall_constants::HashId`]).
+    /// - `hash_id`: The hash identifier used to initialize `ctx`.
     /// - `ctx`: Pointer to the opaque context buffer previously initialized by [`hash_init`].
-    ///   The buffer must be at least as large as the corresponding `CTX_*_SIZE` constant
-    ///   defined in [`common::ecall_constants`] for the given `hash_id`.
-    /// - `digest`: Pointer to the output buffer where the digest will be written. The buffer
-    ///   must be large enough to hold the digest for the given `hash_id` (e.g. 32 bytes for
-    ///   SHA-256, 64 bytes for SHA-512, 20 bytes for RIPEMD-160).
+    /// - `digest`: Pointer to the output buffer where the digest will be written, as long as the
+    ///   output size in `hash_id`.
     ///
     /// # Returns
-    /// 1 on success, 0 on error.
+    /// 1 on success, 0 if `hash_id` is not supported or `ctx` is not a valid context for it.
     ///
     /// # Safety
-    /// - `ctx` must be a valid pointer to a writable buffer that was previously initialized via
-    ///   [`hash_init`] with the same `hash_id`. Passing an uninitialized context or a
-    ///   `hash_id` that differs from the one used during initialization is undefined behaviour.
+    /// - `ctx` must be a valid pointer to a context initialized by [`hash_init`] with the same
+    ///   `hash_id`, and since modified only by the hash ECALLs (see [`hash_init`]).
     /// - `digest` must be a valid pointer to a writable buffer large enough to hold the digest
     ///   for the given `hash_id`.
     pub unsafe fn hash_final(hash_id: u32, ctx: *mut u8, digest: *mut u8) -> u32;

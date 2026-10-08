@@ -14,7 +14,7 @@ use std::io::Read;
 use hmac::{Hmac, Mac};
 use sha2::Sha512;
 
-use sha2::Digest as _;
+use sha2::Digest;
 
 use common::{
     constants::STORAGE_SLOT_SIZE,
@@ -22,7 +22,7 @@ use common::{
         CurveKind, HashId, CTX_RIPEMD160_SIZE, CTX_SHA256_SIZE, CTX_SHA384_SIZE, CTX_SHA3_SIZE,
         CTX_SHA512_SIZE,
     },
-    ecall_validation::{is_bignum_len, is_modulus, is_reduced, is_zero},
+    ecall_validation::{is_bignum_len, is_modulus, is_reduced, is_zero, parse_hash_identifier},
     ux::{Deserializable, EventCode, EventData},
     BufferType,
 };
@@ -1190,247 +1190,65 @@ const _: () = assert!(
     "sha3::Sha3_256 does not fit in CTX_SHA3_SIZE",
 );
 
-pub fn hash_init(hash_identifier: u32, ctx: *mut u8) {
-    let output_size = (hash_identifier & 0xFFFF) as usize; // requested output size from low 16 bits
-    let hash_id = hash_identifier >> 16; // extract algorithm part from composite ecall_id
-    match hash_id {
-        id if id == HashId::Sha256 as u32 => {
-            if output_size != 32 {
-                panic!("hash_init: invalid output size {} for SHA-256", output_size);
-            }
-            let hasher = sha2::Sha256::new();
-            unsafe { std::ptr::write_unaligned(ctx as *mut sha2::Sha256, hasher) };
+fn hash_init_as<H: Digest>(ctx: *mut u8) {
+    unsafe { std::ptr::write_unaligned(ctx as *mut H, H::new()) };
+}
+
+// SAFETY (for hash_update_as and hash_final_as): the callers of the hash ECALLs guarantee that
+// `ctx` holds an `H` written by hash_init_as or hash_update_as. That is not merely a matter of
+// getting the right digest: a hasher can rely on invariants of its state for soundness.
+fn hash_update_as<H: Digest>(ctx: *mut u8, data: &[u8]) {
+    let mut hasher = unsafe { std::ptr::read_unaligned(ctx as *const H) };
+    hasher.update(data);
+    unsafe { std::ptr::write_unaligned(ctx as *mut H, hasher) };
+}
+
+/// Finalizes a copy of the context, leaving the context itself unchanged, as the VM does.
+fn hash_final_as<H: Digest>(ctx: *mut u8, digest: *mut u8) {
+    let hasher = unsafe { std::ptr::read_unaligned(ctx as *const H) };
+    let result = hasher.finalize();
+    unsafe { std::ptr::copy_nonoverlapping(result.as_ptr(), digest, result.len()) };
+}
+
+/// Calls `$f::<H>($args)` with the hasher `H` that implements `hash_identifier`, or returns 0 if
+/// the identifier is not supported.
+macro_rules! with_hasher {
+    ($hash_identifier:expr, $f:ident($($arg:expr),*)) => {
+        match parse_hash_identifier($hash_identifier) {
+            Some((HashId::Ripemd160, _)) => $f::<ripemd::Ripemd160>($($arg),*),
+            Some((HashId::Sha256, _)) => $f::<sha2::Sha256>($($arg),*),
+            Some((HashId::Sha384, _)) => $f::<sha2::Sha384>($($arg),*),
+            Some((HashId::Sha512, _)) => $f::<sha2::Sha512>($($arg),*),
+            Some((HashId::Keccak, 28)) => $f::<sha3::Keccak224>($($arg),*),
+            Some((HashId::Keccak, 32)) => $f::<sha3::Keccak256>($($arg),*),
+            Some((HashId::Keccak, 48)) => $f::<sha3::Keccak384>($($arg),*),
+            Some((HashId::Keccak, 64)) => $f::<sha3::Keccak512>($($arg),*),
+            Some((HashId::Sha3, 28)) => $f::<sha3::Sha3_224>($($arg),*),
+            Some((HashId::Sha3, 32)) => $f::<sha3::Sha3_256>($($arg),*),
+            Some((HashId::Sha3, 48)) => $f::<sha3::Sha3_384>($($arg),*),
+            Some((HashId::Sha3, 64)) => $f::<sha3::Sha3_512>($($arg),*),
+            _ => return 0,
         }
-        id if id == HashId::Sha384 as u32 => {
-            if output_size != 48 {
-                panic!("hash_init: invalid output size {} for SHA-384", output_size);
-            }
-            let hasher = sha2::Sha384::new();
-            unsafe { std::ptr::write_unaligned(ctx as *mut sha2::Sha384, hasher) };
-        }
-        id if id == HashId::Sha512 as u32 => {
-            if output_size != 64 {
-                panic!("hash_init: invalid output size {} for SHA-512", output_size);
-            }
-            let hasher = sha2::Sha512::new();
-            unsafe { std::ptr::write_unaligned(ctx as *mut sha2::Sha512, hasher) };
-        }
-        id if id == HashId::Ripemd160 as u32 => {
-            if output_size != 20 {
-                panic!(
-                    "hash_init: invalid output size {} for RIPEMD-160",
-                    output_size
-                );
-            }
-            let hasher = ripemd::Ripemd160::new();
-            unsafe { std::ptr::write_unaligned(ctx as *mut ripemd::Ripemd160, hasher) };
-        }
-        id if id == HashId::Keccak as u32 => match output_size {
-            28 => unsafe {
-                std::ptr::write_unaligned(ctx as *mut sha3::Keccak224, sha3::Keccak224::new())
-            },
-            32 => unsafe {
-                std::ptr::write_unaligned(ctx as *mut sha3::Keccak256, sha3::Keccak256::new())
-            },
-            48 => unsafe {
-                std::ptr::write_unaligned(ctx as *mut sha3::Keccak384, sha3::Keccak384::new())
-            },
-            64 => unsafe {
-                std::ptr::write_unaligned(ctx as *mut sha3::Keccak512, sha3::Keccak512::new())
-            },
-            _ => panic!(
-                "hash_init: invalid output size {} for Keccak (must be 28, 32, 48 or 64)",
-                output_size
-            ),
-        },
-        id if id == HashId::Sha3 as u32 => match output_size {
-            28 => unsafe {
-                std::ptr::write_unaligned(ctx as *mut sha3::Sha3_224, sha3::Sha3_224::new())
-            },
-            32 => unsafe {
-                std::ptr::write_unaligned(ctx as *mut sha3::Sha3_256, sha3::Sha3_256::new())
-            },
-            48 => unsafe {
-                std::ptr::write_unaligned(ctx as *mut sha3::Sha3_384, sha3::Sha3_384::new())
-            },
-            64 => unsafe {
-                std::ptr::write_unaligned(ctx as *mut sha3::Sha3_512, sha3::Sha3_512::new())
-            },
-            _ => panic!(
-                "hash_init: invalid output size {} for SHA-3 (must be 28, 32, 48 or 64)",
-                output_size
-            ),
-        },
-        _ => panic!("hash_init: unsupported hash_id {}", hash_id),
-    }
+    };
+}
+
+pub fn hash_init(hash_identifier: u32, ctx: *mut u8) -> u32 {
+    with_hasher!(hash_identifier, hash_init_as(ctx));
+    1
 }
 
 pub fn hash_update(hash_identifier: u32, ctx: *mut u8, data: *const u8, len: usize) -> u32 {
-    let output_size = (hash_identifier & 0xFFFF) as usize; // requested output size from low 16 bits
-    let hash_id = hash_identifier >> 16; // extract algorithm part from composite ecall_id
-    let data_slice = unsafe { std::slice::from_raw_parts(data, len) };
-    match hash_id {
-        id if id == HashId::Sha256 as u32 => {
-            if output_size != 32 {
-                return 0;
-            }
-            let mut hasher = unsafe { std::ptr::read_unaligned(ctx as *const sha2::Sha256) };
-            hasher.update(data_slice);
-            unsafe { std::ptr::write_unaligned(ctx as *mut sha2::Sha256, hasher) };
-        }
-        id if id == HashId::Sha384 as u32 => {
-            if output_size != 48 {
-                return 0;
-            }
-            let mut hasher = unsafe { std::ptr::read_unaligned(ctx as *const sha2::Sha384) };
-            hasher.update(data_slice);
-            unsafe { std::ptr::write_unaligned(ctx as *mut sha2::Sha384, hasher) };
-        }
-        id if id == HashId::Sha512 as u32 => {
-            if output_size != 64 {
-                return 0;
-            }
-            let mut hasher = unsafe { std::ptr::read_unaligned(ctx as *const sha2::Sha512) };
-            hasher.update(data_slice);
-            unsafe { std::ptr::write_unaligned(ctx as *mut sha2::Sha512, hasher) };
-        }
-        id if id == HashId::Ripemd160 as u32 => {
-            if output_size != 20 {
-                return 0;
-            }
-            let mut hasher = unsafe { std::ptr::read_unaligned(ctx as *const ripemd::Ripemd160) };
-            hasher.update(data_slice);
-            unsafe { std::ptr::write_unaligned(ctx as *mut ripemd::Ripemd160, hasher) };
-        }
-        id if id == HashId::Keccak as u32 => match output_size {
-            28 => {
-                let mut h = unsafe { std::ptr::read_unaligned(ctx as *const sha3::Keccak224) };
-                h.update(data_slice);
-                unsafe { std::ptr::write_unaligned(ctx as *mut sha3::Keccak224, h) };
-            }
-            32 => {
-                let mut h = unsafe { std::ptr::read_unaligned(ctx as *const sha3::Keccak256) };
-                h.update(data_slice);
-                unsafe { std::ptr::write_unaligned(ctx as *mut sha3::Keccak256, h) };
-            }
-            48 => {
-                let mut h = unsafe { std::ptr::read_unaligned(ctx as *const sha3::Keccak384) };
-                h.update(data_slice);
-                unsafe { std::ptr::write_unaligned(ctx as *mut sha3::Keccak384, h) };
-            }
-            64 => {
-                let mut h = unsafe { std::ptr::read_unaligned(ctx as *const sha3::Keccak512) };
-                h.update(data_slice);
-                unsafe { std::ptr::write_unaligned(ctx as *mut sha3::Keccak512, h) };
-            }
-            _ => return 0,
-        },
-        id if id == HashId::Sha3 as u32 => match output_size {
-            28 => {
-                let mut h = unsafe { std::ptr::read_unaligned(ctx as *const sha3::Sha3_224) };
-                h.update(data_slice);
-                unsafe { std::ptr::write_unaligned(ctx as *mut sha3::Sha3_224, h) };
-            }
-            32 => {
-                let mut h = unsafe { std::ptr::read_unaligned(ctx as *const sha3::Sha3_256) };
-                h.update(data_slice);
-                unsafe { std::ptr::write_unaligned(ctx as *mut sha3::Sha3_256, h) };
-            }
-            48 => {
-                let mut h = unsafe { std::ptr::read_unaligned(ctx as *const sha3::Sha3_384) };
-                h.update(data_slice);
-                unsafe { std::ptr::write_unaligned(ctx as *mut sha3::Sha3_384, h) };
-            }
-            64 => {
-                let mut h = unsafe { std::ptr::read_unaligned(ctx as *const sha3::Sha3_512) };
-                h.update(data_slice);
-                unsafe { std::ptr::write_unaligned(ctx as *mut sha3::Sha3_512, h) };
-            }
-            _ => return 0,
-        },
-        _ => return 0, // Unsupported hash_id
-    }
+    let data = if len == 0 {
+        &[]
+    } else {
+        unsafe { std::slice::from_raw_parts(data, len) }
+    };
+    with_hasher!(hash_identifier, hash_update_as(ctx, data));
     1
 }
 
 pub fn hash_final(hash_identifier: u32, ctx: *mut u8, digest: *mut u8) -> u32 {
-    let output_size = (hash_identifier & 0xFFFF) as usize; // requested output size from low 16 bits
-    let hash_id = hash_identifier >> 16; // extract algorithm part from composite ecall_id
-    match hash_id {
-        id if id == HashId::Sha256 as u32 => {
-            if output_size != 32 {
-                return 0;
-            }
-            let hasher = unsafe { std::ptr::read_unaligned(ctx as *const sha2::Sha256) };
-            let result = hasher.finalize();
-            unsafe {
-                std::ptr::copy_nonoverlapping(result.as_ptr(), digest as *mut u8, 32);
-            }
-        }
-        id if id == HashId::Sha384 as u32 => {
-            if output_size != 48 {
-                return 0;
-            }
-            let hasher = unsafe { std::ptr::read_unaligned(ctx as *const sha2::Sha384) };
-            let result = hasher.finalize();
-            unsafe {
-                std::ptr::copy_nonoverlapping(result.as_ptr(), digest, 48);
-            }
-        }
-        id if id == HashId::Sha512 as u32 => {
-            if output_size != 64 {
-                return 0;
-            }
-            let hasher = unsafe { std::ptr::read_unaligned(ctx as *const sha2::Sha512) };
-            let result = hasher.finalize();
-            unsafe {
-                std::ptr::copy_nonoverlapping(result.as_ptr(), digest as *mut u8, 64);
-            }
-        }
-        id if id == HashId::Ripemd160 as u32 => {
-            if output_size != 20 {
-                return 0;
-            }
-            let hasher = unsafe { std::ptr::read_unaligned(ctx as *const ripemd::Ripemd160) };
-            let result = hasher.finalize();
-            unsafe {
-                std::ptr::copy_nonoverlapping(result.as_ptr(), digest as *mut u8, 20);
-            }
-        }
-        id if id == HashId::Keccak as u32 => {
-            macro_rules! keccak_final {
-                ($ty:ty, $len:expr) => {{
-                    let h = unsafe { std::ptr::read_unaligned(ctx as *const $ty) };
-                    let result = h.finalize();
-                    unsafe { std::ptr::copy_nonoverlapping(result.as_ptr(), digest, $len) };
-                }};
-            }
-            match output_size {
-                28 => keccak_final!(sha3::Keccak224, 28),
-                32 => keccak_final!(sha3::Keccak256, 32),
-                48 => keccak_final!(sha3::Keccak384, 48),
-                64 => keccak_final!(sha3::Keccak512, 64),
-                _ => return 0,
-            }
-        }
-        id if id == HashId::Sha3 as u32 => {
-            macro_rules! sha3_final {
-                ($ty:ty, $len:expr) => {{
-                    let h = unsafe { std::ptr::read_unaligned(ctx as *const $ty) };
-                    let result = h.finalize();
-                    unsafe { std::ptr::copy_nonoverlapping(result.as_ptr(), digest, $len) };
-                }};
-            }
-            match output_size {
-                28 => sha3_final!(sha3::Sha3_224, 28),
-                32 => sha3_final!(sha3::Sha3_256, 32),
-                48 => sha3_final!(sha3::Sha3_384, 48),
-                64 => sha3_final!(sha3::Sha3_512, 64),
-                _ => return 0,
-            }
-        }
-        _ => return 0, // Unsupported hash_id
-    }
+    with_hasher!(hash_identifier, hash_final_as(ctx, digest));
     1
 }
 

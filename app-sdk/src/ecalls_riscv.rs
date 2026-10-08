@@ -52,6 +52,6 @@ delegate_ecall!(schnorr_sign, usize, (curve: u32), (mode: u32), (hash_id: u32), 
 delegate_ecall!(schnorr_verify, u32, (curve: u32), (mode: u32), (hash_id: u32), (pubkey: *const u8), (msg: *const u8), (msg_len: usize), (signature: *const u8), (signature_len: usize));
 
 // The following ecalls are specific to this target
-delegate_ecall!(hash_init, (hash_id: u32), (ctx: *mut u8));
+delegate_ecall!(hash_init, u32, (hash_id: u32), (ctx: *mut u8));
 delegate_ecall!(hash_update, u32, (hash_id: u32), (ctx: *mut u8), (data: *const u8), (len: usize));
 delegate_ecall!(hash_final, u32, (hash_id: u32), (ctx: *mut u8), (digest: *mut u8));
