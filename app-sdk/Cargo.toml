@@ -53,6 +53,10 @@ target_vanadium_ledger = [
 # Enable this in V-App's dev-dependencies
 test-mode = [] 
 
+# Makes the raw ECALLs (the `ecalls` module) public. Only meant for V-Apps that test the ECALLs
+# themselves; everything else should use the SDK's safe wrappers.
+raw_ecalls = []
+
 [dev-dependencies]
 serde_json = "1"
 
