@@ -5,8 +5,8 @@ use crate::ecalls;
 /// Generates cryptographically secure random bytes.
 pub fn random_bytes(len: usize) -> Vec<u8> {
     let mut bytes = vec![0u8; len];
-    // generate randomness in chunks of at most 256 bytes
-    let max_chunk_size = 256;
+    // generate randomness in chunks of at most MAX_RANDOM_BYTES bytes
+    let max_chunk_size = common::ecall_validation::MAX_RANDOM_BYTES;
     let mut offset = 0;
     while offset < len {
         let size = usize::min(max_chunk_size, len - offset);

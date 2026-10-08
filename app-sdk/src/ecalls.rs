@@ -395,10 +395,11 @@ forward_to_ecall! {
     ///
     /// # Parameters
     /// - `buffer`: Pointer to the buffer where the random bytes will be written.
-    /// - `size`: The number of random bytes to generate.
+    /// - `size`: The number of random bytes to generate, at most
+    ///   [`MAX_RANDOM_BYTES`](common::ecall_validation::MAX_RANDOM_BYTES).
     ///
     /// # Returns
-    /// 1 on success, 0 on error.
+    /// 1 on success, 0 if `size` is too large.
     ///
     /// # Safety
     /// - `buffer` must be a valid pointer to at least `size` bytes of writable memory.

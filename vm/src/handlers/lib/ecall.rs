@@ -12,7 +12,9 @@ use common::{
     },
     constants::{MAX_STORAGE_SLOTS, STORAGE_SLOT_SIZE},
     ecall_constants::{self, *},
-    ecall_validation::{is_bignum_len, is_modulus, is_reduced, is_zero, parse_hash_identifier},
+    ecall_validation::{
+        is_bignum_len, is_modulus, is_reduced, is_zero, parse_hash_identifier, MAX_RANDOM_BYTES,
+    },
     ux::Deserializable,
     vm::{Cpu, CpuError, EcallHandler, MemoryError},
     BufferType,
@@ -1387,36 +1389,24 @@ impl<'a, const N: usize> CommEcallHandler<'a, N> {
         Ok(1)
     }
 
+    /// Fills `size` bytes at `buffer` with random bytes.
+    ///
+    /// Returns 1 on success, 0 if `size > MAX_RANDOM_BYTES`.
     fn handle_get_random_bytes<E: fmt::Debug>(
         &self,
         cpu: &mut Cpu<OutsourcedMemory<'_, N>>,
         buffer: GuestPointer,
         size: usize,
     ) -> Result<u32, CommEcallError> {
-        if size == 0 {
-            return Ok(1); // nothing to do
-        }
-        if size > 256 {
-            return Err(CommEcallError::InvalidParameters(
-                "size is too large, must be <= 256",
-            ));
+        if size > MAX_RANDOM_BYTES {
+            return Ok(0);
         }
 
-        if buffer.0.checked_add(size as u32).is_none() {
-            return Err(CommEcallError::Overflow);
-        }
+        let mut random_bytes = [0u8; MAX_RANDOM_BYTES];
+        // SAFETY: random_bytes holds at least `size` bytes.
+        unsafe { sys::cx_rng_no_throw(random_bytes.as_mut_ptr(), size) };
 
-        let segment = cpu.get_segment::<E>(buffer.0)?;
-
-        // generate random bytes
-        let mut random_bytes = vec![0u8; size];
-        unsafe {
-            sys::cx_rng_no_throw(random_bytes.as_mut_ptr(), size);
-        }
-
-        // copy random bytes to V-App memory
-        segment.write_buffer(buffer.0, &random_bytes)?;
-
+        write_guest::<E, N>(cpu, buffer, &random_bytes[..size])?;
         Ok(1)
     }
 

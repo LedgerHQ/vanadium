@@ -22,7 +22,9 @@ use common::{
         CurveKind, HashId, CTX_RIPEMD160_SIZE, CTX_SHA256_SIZE, CTX_SHA384_SIZE, CTX_SHA3_SIZE,
         CTX_SHA512_SIZE,
     },
-    ecall_validation::{is_bignum_len, is_modulus, is_reduced, is_zero, parse_hash_identifier},
+    ecall_validation::{
+        is_bignum_len, is_modulus, is_reduced, is_zero, parse_hash_identifier, MAX_RANDOM_BYTES,
+    },
     ux::{Deserializable, EventCode, EventData},
     BufferType,
 };
@@ -783,15 +785,15 @@ pub fn ecfp_scalar_mult(curve: u32, r: *mut u8, p: *const u8, k: *const u8, k_le
 }
 
 pub fn get_random_bytes(buffer: *mut u8, size: usize) -> u32 {
+    if size > MAX_RANDOM_BYTES {
+        return 0;
+    }
     if size == 0 {
         return 1;
     }
-    if size > 256 {
-        panic!("size is too large");
-    }
 
     let mut rng = rand::rngs::OsRng::default();
-    let mut random_bytes = [0u8; 256];
+    let mut random_bytes = [0u8; MAX_RANDOM_BYTES];
     rng.try_fill_bytes(&mut random_bytes[..size])
         .expect("Failed to generate random bytes");
 
