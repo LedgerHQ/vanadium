@@ -18,7 +18,7 @@ const X3: PlainPk = hex!("023590A94E768F8E1815C2F24B4D80A8E3149316C3518CE7B7AD33
 
 fn assert_aggregate_xonly(pubkeys: &[PlainPk], expected_xonly: [u8; 32]) {
     let ctx = key_agg(pubkeys).expect("key_agg succeeds");
-    assert_eq!(ctx.q.x, expected_xonly, "aggregate x-only mismatch");
+    assert_eq!(*ctx.q.x(), expected_xonly, "aggregate x-only mismatch");
 }
 
 #[test]
@@ -91,7 +91,7 @@ fn round_trip_two_party_keypath_no_tweaks() {
     sorted.sort();
 
     let ctx = key_agg(&sorted).unwrap();
-    let aggpk_xonly: XOnlyPk = ctx.q.x;
+    let aggpk_xonly: XOnlyPk = *ctx.q.x();
     // BIP-340 verification needs an even-y aggregate. The bare aggregate may
     // be odd-y; for this no-tweaks test, just inject an x-only tweak of 0 to
     // normalize parity.
@@ -129,7 +129,7 @@ fn round_trip_two_party_keypath_no_tweaks() {
     let verifier_xonly = {
         let mut keyagg = key_agg(&sorted).unwrap();
         super::apply_tweak(&mut keyagg, &[0u8; 32], true).unwrap();
-        keyagg.q.x
+        *keyagg.q.x()
     };
     let pk_for_verify = EcfpPublicKey::<Secp256k1, 32>::from_compressed(&{
         let mut p = [0u8; 33];
@@ -177,7 +177,7 @@ fn round_trip_two_party_keypath_with_bip32_and_taptweak() {
     for (tweak, is_x) in tweaks.iter().zip(is_xonly.iter()) {
         super::apply_tweak(&mut keyagg, tweak, *is_x).unwrap();
     }
-    let final_xonly: [u8; 32] = keyagg.q.x;
+    let final_xonly: [u8; 32] = *keyagg.q.x();
     // The aggpk passed to `nonce_gen` is the FINAL aggregate xonly.
 
     let rand1 = hex!("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA");
@@ -283,12 +283,12 @@ fn aggregate_xpub_matches_key_agg() {
     let mut sorted = vec![X1, X2, X3];
     sorted.sort();
     let expected = key_agg(&sorted).unwrap();
-    assert_eq!(&agg.public_key.serialize()[1..], &expected.q.x);
+    assert_eq!(&agg.public_key.serialize()[1..], expected.q.x());
 
     // BIP-388 / BIP-328 chaincode.
     assert_eq!(agg.chain_code.as_bytes(), &BIP_328_CHAINCODE);
     // The synthetic prefix preserves the natural parity of `Q`.
-    let expected_prefix = if expected.q.y[31] & 1 == 0 { 0x02 } else { 0x03 };
+    let expected_prefix = if expected.q.has_even_y() { 0x02 } else { 0x03 };
     assert_eq!(agg.public_key.serialize()[0], expected_prefix);
 }
 

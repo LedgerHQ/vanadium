@@ -168,8 +168,6 @@ mod secret;
 mod context;
 mod key;
 
-mod sdk_helpers;
-
 pub mod constants;
 pub mod ecdsa;
 pub mod scalar;
@@ -425,7 +423,7 @@ mod tests {
     #[cfg(feature = "alloc")]
     fn test_panic_raw_ctx_should_terminate_abnormally() {
         // Trying to use an all-zeros public key should cause an ARG_CHECK to trigger.
-        let pk = PublicKey::from(sdk::curve::Secp256k1Point::new([0u8; 32], [0u8; 32]));
+        let pk = PublicKey::from(sdk::curve::Secp256k1Point::default());
         pk.serialize();
     }
 

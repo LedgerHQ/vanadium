@@ -2,7 +2,7 @@
 
 use sdk::{
     bignum::{BigNum, BigNumMod, ModulusProvider, PrimeModulusProvider},
-    curve::{Curve as _, EcfpPrivateKey, EcfpPublicKey, Secp256k1Point},
+    curve::{Curve as _, EcfpPrivateKey, EcfpPublicKey, Secp256k1Point, Secp256k1Scalar},
     hash::Hasher,
     App, AppBuilder,
 };
@@ -36,10 +36,9 @@ fn parse_pubkey(pubkey: &[u8]) -> EcfpPublicKey<sdk::curve::Secp256k1, 32> {
     if pubkey_raw[0] != 0x04 {
         panic!("invalid pubkey: it must start with 0x04");
     }
-    EcfpPublicKey::new(
-        pubkey_raw[1..33].try_into().unwrap(),
-        pubkey_raw[33..65].try_into().unwrap(),
-    )
+    Secp256k1Point::from_bytes(&pubkey_raw)
+        .expect("invalid pubkey: it must be a point of the curve")
+        .into()
 }
 
 #[sdk::handler]
@@ -201,6 +200,7 @@ async fn process_message(_app: &mut App, msg: &[u8]) -> Vec<u8> {
                     let p_bytes: [u8; 65] = p.as_slice().try_into().unwrap();
                     let p = Secp256k1Point::from_bytes(&p_bytes).unwrap();
                     let k: [u8; 32] = k.as_slice().try_into().unwrap();
+                    let k = Secp256k1Scalar::from_be_bytes(&k).expect("k must be smaller than n");
                     (&p * &k).to_bytes().to_vec()
                 }
             },

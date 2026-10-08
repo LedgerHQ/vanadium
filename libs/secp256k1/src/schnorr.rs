@@ -129,14 +129,11 @@ impl<C: Verification> Secp256k1<C> {
         msg: &Message,
         pubkey: &XOnlyPublicKey,
     ) -> Result<(), Error> {
-        let pubkey_serialized = pubkey.public_key(crate::Parity::Even).serialize_uncompressed();
-        let mut x_bytes = [0u8; 32];
-        let mut y_bytes = [0u8; 32];
-        x_bytes.copy_from_slice(&pubkey_serialized[1..33]);
-        y_bytes.copy_from_slice(&pubkey_serialized[33..65]);
-
-        let pubkey = sdk::curve::EcfpPublicKey::<sdk::curve::Secp256k1, 32>::new(x_bytes, y_bytes);
-        pubkey.schnorr_verify(&msg.0, &sig.0).map_err(|_| Error::IncorrectSignature)
+        let point = sdk::curve::Secp256k1Point::lift_x(&pubkey.serialize())
+            .map_err(|_| Error::InvalidPublicKey)?;
+        sdk::curve::EcfpPublicKey::from(point)
+            .schnorr_verify(&msg.0, &sig.0)
+            .map_err(|_| Error::IncorrectSignature)
     }
 }
 
