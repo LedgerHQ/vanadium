@@ -20,8 +20,9 @@ use common::{
     constants::STORAGE_SLOT_SIZE,
     ecall_constants::{
         CurveKind, HashId, CTX_RIPEMD160_SIZE, CTX_SHA256_SIZE, CTX_SHA384_SIZE, CTX_SHA3_SIZE,
-        CTX_SHA512_SIZE, MAX_BIGNUMBER_SIZE,
+        CTX_SHA512_SIZE,
     },
+    ecall_validation::{is_bignum_len, is_modulus, is_reduced, is_zero},
     ux::{Deserializable, EventCode, EventData},
     BufferType,
 };
@@ -38,7 +39,6 @@ use k256::{
 };
 
 use num_bigint::BigUint;
-use num_traits::Zero;
 
 // default seed used in Speculos, corresponding to the mnemonic "glory promote mansion idle axis finger extra february uncover one trip resource lawn turtle enact monster seven myth punch hobby comfort wild raise skin"
 const DEFAULT_SEED: [u8; 64] = hex!("b11997faff420a331bb4a4ffdc8bdc8ba7c01732a99a30d83dbbebd469666c84b47d09d3f5f472b3b9384ac634beba2a440ba36ec7661144132f35e206873564");
@@ -46,11 +46,6 @@ const DEFAULT_SEED: [u8; 64] = hex!("b11997faff420a331bb4a4ffdc8bdc8ba7c01732a99
 const SLIP21_MAGIC: &'static str = "Symmetric key seed";
 
 const TICKER_MS: u64 = 100;
-
-unsafe fn to_bigint(bytes: *const u8, len: usize) -> BigUint {
-    let bytes = unsafe {std::slice::from_raw_parts(bytes, len)};
-    BigUint::from_bytes_be(bytes)
-}
 
 unsafe fn copy_result(r: *mut u8, result_bytes: &[u8], len: usize) -> () {
     unsafe {
@@ -435,162 +430,96 @@ pub fn get_device_property(property: u32) -> u32 {
     }
 }
 
+/// The bytes of a big number operand, or an empty slice for an empty operand (whose pointer may
+/// be dangling).
+unsafe fn bn_bytes<'a>(ptr: *const u8, len: usize) -> &'a [u8] {
+    if len == 0 {
+        &[]
+    } else {
+        unsafe { std::slice::from_raw_parts(ptr, len) }
+    }
+}
+
 pub fn bn_modm(r: *mut u8, n: *const u8, len: usize, m: *const u8, len_m: usize) -> u32 {
-    if len > MAX_BIGNUMBER_SIZE || len_m > MAX_BIGNUMBER_SIZE {
+    if !is_bignum_len(len) || len_m > len {
+        return 0;
+    }
+    let (n, m) = unsafe { (bn_bytes(n, len), bn_bytes(m, len_m)) };
+    if !is_modulus(m, false) {
         return 0;
     }
 
-    if len_m > len {
-        return 0;
-    }
-
-    let n = unsafe { to_bigint(n, len) };
-    let m = unsafe { to_bigint(m, len_m) };
-
-    if m.is_zero() {
-        return 0;
-    }
-
-    let result = n % &m;
-    let result_bytes = result.to_bytes_be();
-
-    if result_bytes.len() > len {
-        return 0;
-    }
-
-    unsafe {
-        copy_result(r, &result_bytes, len);
-    }
-
+    let result = BigUint::from_bytes_be(n) % BigUint::from_bytes_be(m);
+    unsafe { copy_result(r, &result.to_bytes_be(), len) };
     1
 }
 
+/// The checks shared by `bn_addm`, `bn_subm` and `bn_multm`; returns the operands as integers.
+unsafe fn bn_binop_operands(
+    a: *const u8,
+    b: *const u8,
+    m: *const u8,
+    len: usize,
+    require_odd: bool,
+) -> Option<(BigUint, BigUint, BigUint)> {
+    if !is_bignum_len(len) {
+        return None;
+    }
+    let (a, b, m) = unsafe { (bn_bytes(a, len), bn_bytes(b, len), bn_bytes(m, len)) };
+    if !is_modulus(m, require_odd) || !is_reduced(a, m) || !is_reduced(b, m) {
+        return None;
+    }
+    Some((
+        BigUint::from_bytes_be(a),
+        BigUint::from_bytes_be(b),
+        BigUint::from_bytes_be(m),
+    ))
+}
+
 pub fn bn_addm(r: *mut u8, a: *const u8, b: *const u8, m: *const u8, len: usize) -> u32 {
-    if len > MAX_BIGNUMBER_SIZE {
+    let Some((a, b, m)) = (unsafe { bn_binop_operands(a, b, m, len, false) }) else {
         return 0;
-    }
-
-    let a = unsafe { to_bigint(a, len) };
-    let b = unsafe { to_bigint(b, len) };
-    let m = unsafe { to_bigint(m, len) };
-
-    if a >= m || b >= m {
-        return 0;
-    }
-
-    if m.is_zero() {
-        return 0;
-    }
-
+    };
     let result = (a + b) % &m;
-    let result_bytes = result.to_bytes_be();
-
-    if result_bytes.len() > len {
-        return 0;
-    }
-
-    unsafe {
-        copy_result(r, &result_bytes, len);
-    }
-
+    unsafe { copy_result(r, &result.to_bytes_be(), len) };
     1
 }
 
 pub fn bn_subm(r: *mut u8, a: *const u8, b: *const u8, m: *const u8, len: usize) -> u32 {
-    if len > MAX_BIGNUMBER_SIZE {
+    let Some((a, b, m)) = (unsafe { bn_binop_operands(a, b, m, len, false) }) else {
         return 0;
-    }
-
-    let a = unsafe { to_bigint(a, len) };
-    let b = unsafe { to_bigint(b, len) };
-    let m = unsafe { to_bigint(m, len) };
-
-    if a >= m || b >= m {
-        return 0;
-    }
-
-    if m.is_zero() {
-        return 0;
-    }
-
+    };
     // the `+ &m` is to avoid negative numbers, since BigUints must be non-negative
     let result = ((a + &m) - b) % &m;
-    let result_bytes = result.to_bytes_be();
-
-    if result_bytes.len() > len {
-        return 0;
-    }
-
-    unsafe {
-        copy_result(r, &result_bytes, len);
-    }
-
+    unsafe { copy_result(r, &result.to_bytes_be(), len) };
     1
 }
 
 pub fn bn_multm(r: *mut u8, a: *const u8, b: *const u8, m: *const u8, len: usize) -> u32 {
-    if len > MAX_BIGNUMBER_SIZE {
+    let Some((a, b, m)) = (unsafe { bn_binop_operands(a, b, m, len, true) }) else {
         return 0;
-    }
-
-    let a = unsafe { to_bigint(a, len) };
-    let b = unsafe { to_bigint(b, len) };
-    let m = unsafe { to_bigint(m, len) };
-
-    if a >= m || b >= m {
-        return 0;
-    }
-
-    if m.is_zero() {
-        return 0;
-    }
-
+    };
     let result = (a * b) % &m;
-    let result_bytes = result.to_bytes_be();
-
-    if result_bytes.len() > len {
-        return 0;
-    }
-
-    unsafe {
-        copy_result(r, &result_bytes, len);
-    }
-
+    unsafe { copy_result(r, &result.to_bytes_be(), len) };
     1
 }
 
 /// Computes the modular inverse of `a` modulo `p`, storing the result in `r`.
-/// The modulus `p` must be a prime number.
+/// The modulus `p` must be an odd prime; the result is unspecified otherwise.
 /// Uses Fermat's little theorem: a^{-1} = a^{p-2} mod p.
 pub fn bn_modinv_prime(r: *mut u8, a: *const u8, p: *const u8, len: usize) -> u32 {
-    if len > MAX_BIGNUMBER_SIZE {
+    if !is_bignum_len(len) {
+        return 0;
+    }
+    let (a, p) = unsafe { (bn_bytes(a, len), bn_bytes(p, len)) };
+    if !is_modulus(p, true) || is_zero(a) || !is_reduced(a, p) {
         return 0;
     }
 
-    let a = unsafe { to_bigint(a, len) };
-    let p = unsafe { to_bigint(p, len) };
-
-    if a.is_zero() || p.is_zero() {
-        return 0;
-    }
-
-    if a >= p {
-        return 0;
-    }
-
-    // Fermat's little theorem: a^{-1} = a^{p-2} mod p (valid when p is prime)
-    let exp = &p - BigUint::from(2u32);
-    let result = a.modpow(&exp, &p);
-    let result_bytes = result.to_bytes_be();
-
-    if result_bytes.len() > len {
-        return 0;
-    }
-
-    unsafe {
-        copy_result(r, &result_bytes, len);
-    }
-
+    let (a, p) = (BigUint::from_bytes_be(a), BigUint::from_bytes_be(p));
+    // p is odd and larger than a > 0, so p >= 3
+    let result = a.modpow(&(&p - BigUint::from(2u32)), &p);
+    unsafe { copy_result(r, &result.to_bytes_be(), len) };
     1
 }
 
@@ -602,33 +531,16 @@ pub fn bn_powm(
     m: *const u8,
     len: usize,
 ) -> u32 {
-    if len > MAX_BIGNUMBER_SIZE || len_e > MAX_BIGNUMBER_SIZE {
+    if !is_bignum_len(len) || !is_bignum_len(len_e) {
+        return 0;
+    }
+    let (a, e, m) = unsafe { (bn_bytes(a, len), bn_bytes(e, len_e), bn_bytes(m, len)) };
+    if !is_modulus(m, true) || !is_reduced(a, m) {
         return 0;
     }
 
-    let a = unsafe { to_bigint(a, len) };
-    let e = unsafe { to_bigint(e, len_e) };
-    let m = unsafe { to_bigint(m, len) };
-
-    if a >= m {
-        return 0;
-    }
-
-    if m.is_zero() {
-        return 0;
-    }
-
-    let result = a.modpow(&e, &m);
-    let result_bytes = result.to_bytes_be();
-
-    if result_bytes.len() > len {
-        return 0;
-    }
-
-    unsafe {
-        copy_result(r, &result_bytes, len);
-    }
-
+    let result = BigUint::from_bytes_be(a).modpow(&BigUint::from_bytes_be(e), &BigUint::from_bytes_be(m));
+    unsafe { copy_result(r, &result.to_bytes_be(), len) };
     1
 }
 
