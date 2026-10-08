@@ -28,6 +28,8 @@ k256 = { version = "0.13.4", features = ["schnorr"] }
 hex-literal = "0.4.1"
 sdk = { package = "vanadium-client-sdk", path = "../../../client-sdk", features = ["test-utils"] }
 sha2 = "0.10.8"
+sha3 = "0.10"
+ripemd = "0.1.3"
 
 [lib]
 name = "vnd_sadik_client"

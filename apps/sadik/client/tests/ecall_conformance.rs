@@ -179,3 +179,126 @@ async fn test_bn_modinv_prime() {
     // too long
     check(c, modinv(be(1, 513), be(7, 513)), 0, be(0, 513)).await;
 }
+
+/// The digest of `msg` for the composite hash identifier, computed on the host.
+fn host_digest(hash_id: u32, msg: &[u8]) -> Vec<u8> {
+    use sha2::Digest;
+    fn d<H: Digest>(msg: &[u8]) -> Vec<u8> {
+        H::digest(msg).to_vec()
+    }
+    match (hash_id >> 16, hash_id & 0xffff) {
+        (1, 20) => d::<ripemd::Ripemd160>(msg),
+        (3, 32) => d::<sha2::Sha256>(msg),
+        (4, 48) => d::<sha2::Sha384>(msg),
+        (5, 64) => d::<sha2::Sha512>(msg),
+        (6, 28) => d::<sha3::Keccak224>(msg),
+        (6, 32) => d::<sha3::Keccak256>(msg),
+        (6, 48) => d::<sha3::Keccak384>(msg),
+        (6, 64) => d::<sha3::Keccak512>(msg),
+        (7, 28) => d::<sha3::Sha3_224>(msg),
+        (7, 32) => d::<sha3::Sha3_256>(msg),
+        (7, 48) => d::<sha3::Sha3_384>(msg),
+        (7, 64) => d::<sha3::Sha3_512>(msg),
+        _ => unreachable!(),
+    }
+}
+
+/// Every supported (algorithm, output size) pair, as composite hash identifiers.
+const HASH_IDS: [u32; 12] = [
+    1 << 16 | 20,
+    3 << 16 | 32,
+    4 << 16 | 48,
+    5 << 16 | 64,
+    6 << 16 | 28,
+    6 << 16 | 32,
+    6 << 16 | 48,
+    6 << 16 | 64,
+    7 << 16 | 28,
+    7 << 16 | 32,
+    7 << 16 | 48,
+    7 << 16 | 64,
+];
+
+/// What a successful `RawEcall::Hash` returns: the digest, in a zero-padded 64-byte buffer.
+fn hash_result(hash_id: u32, msg: &[u8]) -> Vec<u8> {
+    let mut out = host_digest(hash_id, msg);
+    out.resize(64, 0);
+    out
+}
+
+#[tokio::test]
+async fn test_hash() {
+    let mut setup = setup().await;
+    let c = &mut setup.client;
+
+    let msg: Vec<u8> = (0..300u32).map(|i| (i * 7 + 3) as u8).collect();
+    // Cuts the message so that the updates end before, at and after the block boundaries of every
+    // algorithm (64 and 128 bytes, and the SHA-3 rates 72, 104, 136 and 144), with an empty update.
+    let cuts = [0, 1, 64, 64, 71, 72, 105, 136, 137, 144, 200, 256, 300];
+    let chunks: Vec<Vec<u8>> = cuts.windows(2).map(|w| msg[w[0]..w[1]].to_vec()).collect();
+
+    for hash_id in HASH_IDS {
+        // the empty message
+        let call = RawEcall::Hash { hash_id, chunks: vec![], tamper: None };
+        check(c, call, 1, hash_result(hash_id, &[])).await;
+
+        // the message in one update, and split in many
+        let call = RawEcall::Hash { hash_id, chunks: vec![msg.clone()], tamper: None };
+        check(c, call, 1, hash_result(hash_id, &msg)).await;
+        let call = RawEcall::Hash { hash_id, chunks: chunks.clone(), tamper: None };
+        check(c, call, 1, hash_result(hash_id, &msg)).await;
+    }
+
+    // unsupported identifiers fail at initialization
+    for hash_id in [
+        0,
+        2 << 16 | 32,       // not an algorithm
+        8 << 16 | 32,       // not an algorithm
+        3 << 16 | 64,       // SHA-256 with the wrong size
+        5 << 16 | 65,       // SHA-512 with a size above the largest digest
+        6 << 16 | 20,       // Keccak with an unsupported size
+        7 << 16,            // SHA-3 with an empty output
+        1 << 24 | 3 << 16 | 32, // reserved bits set
+    ] {
+        let call = RawEcall::Hash { hash_id, chunks: vec![msg.clone()], tamper: None };
+        check(c, call, 0, vec![]).await;
+    }
+}
+
+/// The VM must never trust the hash context that the V-App holds between ECALLs. Only the VM's
+/// context layout is known, so this runs on Speculos only.
+#[cfg(feature = "speculos-tests")]
+#[tokio::test]
+async fn test_hash_tampered_context() {
+    let mut setup = setup().await;
+    let c = &mut setup.client;
+    let msg = b"The quick brown fox jumps over the lazy dog".to_vec();
+    let sha256 = 3 << 16 | 32;
+    let sha3_256 = 7 << 16 | 32;
+
+    // The `info` function pointer, at offset 0, is ignored: the digest is still right.
+    for offset in 0..4 {
+        let call = RawEcall::Hash {
+            hash_id: sha256,
+            chunks: vec![msg.clone()],
+            tamper: Some((offset, 0x41)),
+        };
+        check(c, call, 1, hash_result(sha256, &msg)).await;
+    }
+    // SHA-3's output size and block size (offsets 8 and 12) are not taken from the context either.
+    for offset in [8, 12] {
+        let call = RawEcall::Hash {
+            hash_id: sha3_256,
+            chunks: vec![msg.clone()],
+            tamper: Some((offset, 0xff)),
+        };
+        check(c, call, 1, hash_result(sha3_256, &msg)).await;
+    }
+
+    // A buffered length (`blen`, at offset 8 for SHA-256 and 16 for SHA-3) beyond the block is
+    // rejected rather than used to index the block.
+    let call = RawEcall::Hash { hash_id: sha256, chunks: vec![msg.clone()], tamper: Some((8, 64)) };
+    check(c, call, 0, vec![]).await;
+    let call = RawEcall::Hash { hash_id: sha3_256, chunks: vec![msg.clone()], tamper: Some((17, 1)) };
+    check(c, call, 0, vec![]).await;
+}

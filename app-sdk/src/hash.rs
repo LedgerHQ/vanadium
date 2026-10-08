@@ -27,11 +27,15 @@ mod hashers {
                 fn new() -> Self {
                     let mut res = core::mem::MaybeUninit::<Self>::zeroed();
 
+                    // SAFETY: res is a zeroed buffer of the context size for this HashId, and an
+                    // all-zero byte array is a valid value of Self.
                     unsafe {
-                        ecalls::hash_init(
+                        if 1 != ecalls::hash_init(
                             HashId::$hash_id.ecall_id($digest_size as u16),
                             res.as_mut_ptr() as *mut u8,
-                        );
+                        ) {
+                            panic!("Failed to initialize hash");
+                        }
                         res.assume_init()
                     }
                 }
@@ -39,7 +43,7 @@ mod hashers {
                 fn update(&mut self, data: &[u8]) -> &mut Self {
                     // SAFETY: ctx was initialized by hash_init in new() with the same HashId;
                     // data is a valid slice provided by the caller.
-                    if 0 == unsafe {
+                    if 1 != unsafe {
                         ecalls::hash_update(
                             HashId::$hash_id.ecall_id($digest_size as u16),
                             self.ctx.as_mut_ptr(),
@@ -56,7 +60,7 @@ mod hashers {
                 fn digest(mut self, digest: &mut [u8; $digest_size]) {
                     // SAFETY: ctx was initialized by hash_init in new() with the same HashId;
                     // digest is a valid mutable reference of the correct size.
-                    if 0 == unsafe {
+                    if 1 != unsafe {
                         ecalls::hash_final(
                             HashId::$hash_id.ecall_id($digest_size as u16),
                             self.ctx.as_mut_ptr(),
