@@ -1,14 +1,17 @@
-//! BIP-352 silent payments.
+//! BIP-352 silent payments, and the BIP-374 DLEQ proofs that BIP-375 uses to prove the ECDH
+//! shares of a transaction's inputs.
 //!
 //! Everything works on the SDK's points and scalars, so it runs both on the device and on the
 //! host. Scalars that hold secrets (input keys, the scan and spend keys) are zeroized on drop.
 
 mod address;
+mod dleq;
 mod receiver;
 mod sender;
 mod tags;
 
 pub use address::{decode_spscan, encode_spscan, SilentPaymentCode};
+pub use dleq::{generate_proof, verify_proof};
 pub use receiver::{label_tweak, labeled_spend_key, scan, spending_key, FoundOutput, Labels};
 pub use sender::{
     assign_k, create_outputs, ecdh_share, input_hash, input_private_key, outpoint_bytes,
@@ -34,6 +37,8 @@ pub enum Error {
     TooManyRecipients,
     /// A derived key is 0 or the point at infinity.
     InvalidKey,
+    /// The inputs of a DLEQ proof are invalid: the secret is 0, or a point is infinity.
+    InvalidProofInput,
 }
 
 /// The 33-byte compressed encoding of a point that is known not to be the point at infinity.

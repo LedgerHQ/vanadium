@@ -1,4 +1,4 @@
-//! The tagged hashes of BIP-352.
+//! The tagged hashes of BIP-352 and BIP-374.
 
 use hashes::sha256t_hash_newtype;
 use sdk::curve::Secp256k1Scalar;
@@ -14,6 +14,15 @@ sha256t_hash_newtype! {
 
     pub struct LabelTag = hash_str("BIP0352/Label");
     pub struct LabelHash(_);
+
+    pub struct DleqAuxTag = hash_str("BIP0374/aux");
+    pub struct DleqAuxHash(_);
+
+    pub struct DleqNonceTag = hash_str("BIP0374/nonce");
+    pub struct DleqNonceHash(_);
+
+    pub struct DleqChallengeTag = hash_str("BIP0374/challenge");
+    pub struct DleqChallengeHash(_);
 }
 
 /// A tagged hash as a scalar: BIP-352 fails if it is 0 or not smaller than the curve order.
