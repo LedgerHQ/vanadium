@@ -12,4 +12,5 @@ pub mod musig;
 pub mod por;
 pub mod psbt;
 pub mod script;
+pub mod silent_payments;
 pub mod taproot;
