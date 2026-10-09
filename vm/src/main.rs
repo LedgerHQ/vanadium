@@ -39,7 +39,7 @@ use handlers::{
     register_vapp::handler_register_vapp, start_vapp::handler_start_vapp,
 };
 use ledger_device_sdk::{
-    io::{ApduHeader, Comm, Command, Reply, StatusWords},
+    io::{ApduHeader, Command, Reply, StatusWords},
     nbgl::init_comm,
 };
 
@@ -127,10 +127,9 @@ fn handle_panic(info: &core::panic::PanicInfo) -> ! {
     };
     println!("{}", message);
 
-    let mut comm = Comm::<COMM_BUFFER_SIZE>::new();
-    let _ = comm.send(&[], ledger_device_sdk::io::StatusWords::Panic);
-
-    ledger_device_sdk::exit_app(0x01)
+    // Replies with the Panic status word through the Comm created by init_comm, if any, and
+    // exits; a second Comm can't be created, as the SDK panics if one already exists.
+    ledger_device_sdk::exiting_panic(info)
 }
 
 ledger_device_sdk::set_panic!(handle_panic);
@@ -194,8 +193,9 @@ impl TryFrom<ApduHeader> for Instruction {
     ///
     /// This design allows a clear separation of the APDU parsing logic and commands handling.
     ///
-    /// Note that CLA is not checked here. Instead the method [`Comm::set_expected_cla`] is used in
-    /// [`sample_main`] to have this verification automatically performed by the SDK.
+    /// Note that CLA is not checked here. Instead the method
+    /// [`ledger_device_sdk::io::Comm::set_expected_cla`] is used in [`sample_main`] to have this
+    /// verification automatically performed by the SDK.
     fn try_from(value: ApduHeader) -> Result<Self, Self::Error> {
         match (value.ins, value.p1, value.p2) {
             (0, 0, 0) => Ok(Instruction::GetAppInfo),
