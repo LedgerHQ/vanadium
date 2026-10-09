@@ -28,6 +28,7 @@ bip388 = { version = "0.1.0", default-features = false }
 
 [dev-dependencies]
 hex-literal = "0.4.1"
+serde_json = "1"
 sdk = { package = "vanadium-app-sdk", path = "../../../app-sdk", default-features = false, features = ["target_native"] }
 
 [profile.release]
