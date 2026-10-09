@@ -28,7 +28,10 @@ use ledger_device_sdk::sys::{
     self, cx_ripemd160_t, cx_sha256_t, cx_sha3_t, cx_sha512_t, CX_OK, CX_RIPEMD160, CX_SHA256,
     CX_SHA384, CX_SHA512,
 };
-use ledger_device_sdk::{hash::HashInit, io::DecodedEventType};
+use ledger_device_sdk::{
+    hash::HashInit,
+    io::{Event, StatusWords},
+};
 
 use crate::io::{interrupt, InterruptError, SerializeToComm};
 
@@ -1852,9 +1855,15 @@ impl<'a, const N: usize> CommEcallHandler<'a, N> {
 // Processes all events until a ticker is received, then returns
 fn wait_for_ticker<const N: usize>(comm: &mut RefMut<'_, &mut ledger_device_sdk::io::Comm<N>>) {
     loop {
-        let ety = comm.try_next_event().into_type();
-        if matches!(ety, DecodedEventType::Ticker) {
-            return;
+        match comm.next_event() {
+            Event::Ticker => return,
+            // The command that started the V-App is in flight until it exits, so the SDK
+            // already rejects any other APDU. Should one get through, it must still be replied
+            // to, or every later APDU would be rejected as a double APDU.
+            Event::Command(command) => {
+                let _ = command.reply(&[], StatusWords::CmdNotAccepted);
+            }
+            _ => {}
         }
     }
 }
