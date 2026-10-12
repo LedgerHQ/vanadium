@@ -106,10 +106,8 @@ pub fn output_key(
 /// share a counter, and take its values in the order in which they are given.
 ///
 /// BIP-352 leaves this order free, since receivers find their outputs whatever it is. The parties
-/// computing the outputs of the same transaction must agree on it, though, and BIP-375's reference
-/// validator and test vectors assign `k` in the order of the outputs: callers following BIP-375
-/// pass the recipients in output order. (The text of BIP-375 v0.1.2 asks instead to sort them by
-/// code, which contradicts its own test vectors.)
+/// computing the outputs of the same transaction must agree on it, though: for a PSBT, BIP-375
+/// fixes it, and [`recipients`](super::recipients) applies its rule.
 pub fn assign_k(recipients: &[SilentPaymentCode]) -> Result<Vec<u32>, Error> {
     // the next k of each scan key seen so far
     let mut counters: Vec<(Secp256k1Point, u32)> = Vec::new();

@@ -9,3 +9,8 @@ BIPs, under BSD-2-Clause.
 | `bip352/send_and_receive_test_vectors.json` | `bip-0352/send_and_receive_test_vectors.json` (BIP-352 v1.1.1) |
 | `bip374/test_vectors_generate_proof.csv` | `bip-0374/test_vectors_generate_proof.csv` (BIP-374 v0.3.0) |
 | `bip374/test_vectors_verify_proof.csv` | `bip-0374/test_vectors_verify_proof.csv` (BIP-374 v0.3.0) |
+| `bip375/bip375_test_vectors.json` | `bip-0375/bip375_test_vectors.json` (BIP-375 v0.1.2, vectors v1.1) |
+
+BIP-375's reference validator and test vectors assign `k` to the outputs to each scan key in
+output order, while its text sorts their codes; we follow the vectors (see
+`silent_payments::recipients`).
