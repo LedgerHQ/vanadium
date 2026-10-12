@@ -7,3 +7,4 @@
 mod basic;
 mod identity;
 mod musig;
+mod silent_payments;
