@@ -105,3 +105,139 @@ async fn test_e2e_sign_transaction() {
     // more detailed tests are in the unit tests of the handlers
     assert!(result.signatures.len() == 1);
 }
+
+#[tokio::test]
+async fn test_e2e_send_to_silent_payment_address() {
+    // this test registers a segwit account, and pays from it to a silent payment address
+    use bitcoin::{
+        bip32::{ChildNumber, Xpub},
+        hashes::Hash,
+        secp256k1::{ecdsa::Signature, Message, Secp256k1},
+        sighash::SighashCache,
+        Amount, EcdsaSighashType, OutPoint, ScriptBuf, Transaction, TxIn, TxOut, Txid,
+    };
+    use common::{
+        fastpsbt::{PSBT_OUT_SCRIPT, PSBT_OUT_SP_V0_INFO},
+        script::ToScript,
+        silent_payments::{self as sp, Secp256k1 as Curve, Secp256k1Point, SilentPaymentCode},
+    };
+
+    let mut setup = setup().await;
+    let client = &mut setup.client;
+
+    let xpub = "tpubDCtKfsNyRhULjZ9XMS4VKKtVcPdVDi8MKUbcSD9MJDyjRu1A2ND5MiipozyyspBT9bg8upEp7a8EAgFxNxXn1d7QkdbL52Ty5jiSLcxPt1P";
+    let wallet_policy =
+        parse_wallet_policy("wpkh(@0/**)", &[&format!("[f5acc2fd/84'/1'/0']{xpub}")]).unwrap();
+    let account_name = "My segwit account #0";
+    let (_, por) = client
+        .register_account(
+            account_name,
+            &Account::WalletPolicy(wallet_policy.clone()),
+            None,
+            None,
+            false,
+        )
+        .await
+        .unwrap();
+
+    // the first address of the BIP-352 test vectors
+    let (_, code) = SilentPaymentCode::from_address("sp1qqgste7k9hx0qftg6qmwlkqtwuy6cycyavzmzj85c6qdfhjdpdjtdgqjuexzk6murw56suy3e0rd2cgqvycxttddwsvgxe2usfpxumr70xc9pkqwv").unwrap();
+
+    let secp = Secp256k1::new();
+    let key = xpub
+        .parse::<Xpub>()
+        .unwrap()
+        .derive_pub(&secp, &[ChildNumber::from(0), ChildNumber::from(2)])
+        .unwrap()
+        .public_key;
+    let prevout = TxOut {
+        value: Amount::from_sat(100_000),
+        script_pubkey: wallet_policy.to_script(false, 2).unwrap(),
+    };
+    let mut tx = Transaction {
+        version: bitcoin::transaction::Version::TWO,
+        lock_time: bitcoin::absolute::LockTime::ZERO,
+        input: vec![TxIn {
+            previous_output: OutPoint {
+                txid: Txid::from_byte_array([1; 32]),
+                vout: 0,
+            },
+            ..Default::default()
+        }],
+        // the script of the output to the code is a placeholder, removed below
+        output: vec![TxOut {
+            value: Amount::from_sat(99_000),
+            script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
+        }],
+    };
+    let mut psbt_v0 = bitcoin::psbt::Psbt::from_unsigned_tx(tx.clone()).unwrap();
+    psbt_v0.inputs[0].witness_utxo = Some(prevout.clone());
+    psbt_v0.inputs[0].bip32_derivation.insert(
+        key,
+        (
+            "f5acc2fd".parse().unwrap(),
+            "m/84'/1'/0'/0/2".parse().unwrap(),
+        ),
+    );
+    let mut psbt = PsbtV2::from_v0(&psbt_v0.serialize()).unwrap();
+    psbt.outputs[0].remove(PSBT_OUT_SCRIPT, &[]);
+    psbt.outputs[0].insert(PSBT_OUT_SP_V0_INFO, &[], code.to_bytes().to_vec());
+    prepare_psbt(
+        &mut psbt,
+        &[(&wallet_policy, &account_name, &por.dangerous_as_bytes())],
+    )
+    .unwrap();
+
+    let result = client.sign_psbt(&psbt.serialize()).await.unwrap();
+    assert_eq!(result.signatures.len(), 1);
+    assert_eq!(result.sp_shares.len(), 1);
+    assert_eq!(result.sp_output_scripts.len(), 1);
+    result.merge_into(&mut psbt).unwrap();
+    assert_eq!(
+        psbt.global
+            .get(common::fastpsbt::PSBT_GLOBAL_TX_MODIFIABLE, &[]),
+        Some(&[0][..])
+    );
+
+    // the share is proven for the input's key, and gives the script of the output
+    let share = &result.sp_shares[0];
+    assert_eq!(share.scan_key[..], code.to_bytes()[..33]);
+    let a = Secp256k1Point::from_compressed(&key.serialize()).unwrap();
+    let c = Secp256k1Point::from_compressed(&share.share).unwrap();
+    let g = Curve::get_generator();
+    assert!(sp::verify_proof(
+        &a,
+        code.scan(),
+        &c,
+        &share.dleq_proof,
+        &g,
+        None
+    ));
+    let input_hash = sp::input_hash(&[tx.input[0].previous_output], &a).unwrap();
+    let secret = sp::shared_secret(&input_hash, &c).unwrap();
+    let output_key = sp::output_key(&secret, code.spend(), 0).unwrap();
+    let script = psbt.outputs[0].script().unwrap();
+    assert_eq!(
+        script.as_bytes(),
+        [&[0x51, 0x20][..], output_key.x()].concat()
+    );
+
+    // the signature is valid for the transaction with that script
+    tx.output[0].script_pubkey = script;
+    let sighash = SighashCache::new(&tx)
+        .p2wpkh_signature_hash(
+            0,
+            &prevout.script_pubkey,
+            prevout.value,
+            EcdsaSighashType::All,
+        )
+        .unwrap();
+    let signature = &result.signatures[0].signature;
+    let (_, der) = signature.split_last().unwrap();
+    secp.verify_ecdsa(
+        &Message::from_digest(sighash.to_byte_array()),
+        &Signature::from_der(der).unwrap(),
+        &key,
+    )
+    .unwrap();
+}

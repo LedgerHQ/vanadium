@@ -11,6 +11,9 @@ mod receiver;
 mod sender;
 mod tags;
 
+// the curve types of this module's API, for the users that don't depend on the SDK, like the host
+pub use sdk::curve::{Secp256k1, Secp256k1Point, Secp256k1Scalar};
+
 pub use address::{decode_spscan, encode_spscan, SilentPaymentCode};
 pub use dleq::{generate_proof, verify_proof};
 pub use psbt::{recipients, Recipient};

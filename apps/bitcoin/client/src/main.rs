@@ -469,6 +469,33 @@ async fn handle_cli_command(
                     }
                 }
             }
+
+            if !signed.sp_shares.is_empty() {
+                println!(
+                    "\n{} silent payment ECDH share(s) returned",
+                    signed.sp_shares.len()
+                );
+                for share in &signed.sp_shares {
+                    println!("Scan key: {}", hex::encode(share.scan_key));
+                    println!("ECDH share: {}", hex::encode(share.share));
+                    println!("DLEQ proof: {}", hex::encode(share.dleq_proof));
+                }
+                for script in &signed.sp_output_scripts {
+                    println!(
+                        "Output {} script: {}",
+                        script.output_index,
+                        hex::encode(&script.script)
+                    );
+                }
+            }
+
+            let mut merged = common::psbt::PsbtV2::parse(&psbt)
+                .map_err(|_| "Failed to parse the PSBT to merge the response into")?;
+            signed.merge_into(&mut merged)?;
+            println!(
+                "\nPSBT with the response merged: {}",
+                base64::engine::general_purpose::STANDARD.encode(merged.serialize())
+            );
         }
     }
     Ok(())

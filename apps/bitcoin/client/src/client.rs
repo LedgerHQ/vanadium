@@ -1,11 +1,17 @@
 use std::str::FromStr;
 
 use bitcoin::bip32::DerivationPath;
+use common::fastpsbt::{
+    PSBT_GLOBAL_SP_DLEQ, PSBT_GLOBAL_SP_ECDH_SHARE, PSBT_GLOBAL_TX_MODIFIABLE,
+    PSBT_IN_MUSIG2_PARTIAL_SIG, PSBT_IN_MUSIG2_PUB_NONCE, PSBT_IN_PARTIAL_SIG, PSBT_IN_TAP_KEY_SIG,
+    PSBT_IN_TAP_SCRIPT_SIG, PSBT_OUT_SCRIPT,
+};
 use common::message::{
     self, IdentitySignature, MuSig2PartialSignature, MuSig2Pubnonce, PartialSignature, Request,
     Response, SilentPaymentOutputScript, SilentPaymentShare,
 };
 use common::por::{ProofOfRegistration, RegistrationId};
+use common::psbt::PsbtV2;
 use sdk::vanadium_client::{VAppExecutionError, VAppTransport};
 
 use sdk::comm::SendMessageError;
@@ -386,4 +392,280 @@ pub struct SignedPsbtResponse {
     pub musig_partial_sigs: Vec<MuSig2PartialSignature>,
     pub sp_shares: Vec<SilentPaymentShare>,
     pub sp_output_scripts: Vec<SilentPaymentOutputScript>,
+}
+
+impl SignedPsbtResponse {
+    /// Adds this response to `psbt`, the PSBT that the device signed:
+    ///
+    /// - each partial signature as `PSBT_IN_PARTIAL_SIG`, `PSBT_IN_TAP_KEY_SIG` or
+    ///   `PSBT_IN_TAP_SCRIPT_SIG`;
+    /// - the MuSig2 pubnonces and partial signatures as `PSBT_IN_MUSIG2_PUB_NONCE` and
+    ///   `PSBT_IN_MUSIG2_PARTIAL_SIG` (BIP-373);
+    /// - the ECDH shares as `PSBT_GLOBAL_SP_ECDH_SHARE` and `PSBT_GLOBAL_SP_DLEQ`, and the scripts
+    ///   of the outputs to silent payment codes as `PSBT_OUT_SCRIPT` (BIP-375).
+    ///
+    /// It also updates `PSBT_GLOBAL_TX_MODIFIABLE`, as BIP-370 asks of a signer: the device signs
+    /// with `SIGHASH_ALL` or `SIGHASH_DEFAULT`, so once the response has a signature, neither the
+    /// inputs nor the outputs can be modified. With scripts of outputs to silent payment codes, the
+    /// field becomes 0 as BIP-375 asks: those scripts depend on all the inputs.
+    pub fn merge_into(&self, psbt: &mut PsbtV2) -> Result<(), BitcoinClientError> {
+        let invalid = |what: &str| BitcoinClientError::InvalidResponse(format!("Invalid {}", what));
+
+        for sig in &self.signatures {
+            let input = psbt
+                .inputs
+                .get_mut(sig.input_index as usize)
+                .ok_or_else(|| invalid("input index"))?;
+            match (sig.pubkey.len(), &sig.leaf_hash) {
+                (33, None) => input.insert(PSBT_IN_PARTIAL_SIG, &sig.pubkey, sig.signature.clone()),
+                (32, None) => input.insert(PSBT_IN_TAP_KEY_SIG, &[], sig.signature.clone()),
+                (32, Some(leaf_hash)) if leaf_hash.len() == 32 => input.insert(
+                    PSBT_IN_TAP_SCRIPT_SIG,
+                    &[&sig.pubkey[..], leaf_hash].concat(),
+                    sig.signature.clone(),
+                ),
+                _ => return Err(invalid("partial signature")),
+            };
+        }
+
+        // BIP-373 keys: the participant's key, the aggregate key, then the leaf hash, if any
+        let musig_key = |participant: &[u8; 33], aggregate: &[u8; 33], leaf: &Option<[u8; 32]>| {
+            let mut key = [&participant[..], &aggregate[..]].concat();
+            key.extend(leaf.iter().flatten());
+            key
+        };
+        for pn in &self.musig_pubnonces {
+            psbt.inputs
+                .get_mut(pn.input_index as usize)
+                .ok_or_else(|| invalid("input index"))?
+                .insert(
+                    PSBT_IN_MUSIG2_PUB_NONCE,
+                    &musig_key(&pn.participant_pk, &pn.aggregate_pubkey, &pn.leaf_hash),
+                    pn.pubnonce.to_vec(),
+                );
+        }
+        for ps in &self.musig_partial_sigs {
+            psbt.inputs
+                .get_mut(ps.input_index as usize)
+                .ok_or_else(|| invalid("input index"))?
+                .insert(
+                    PSBT_IN_MUSIG2_PARTIAL_SIG,
+                    &musig_key(&ps.participant_pk, &ps.aggregate_pubkey, &ps.leaf_hash),
+                    ps.signature.to_vec(),
+                );
+        }
+
+        for share in &self.sp_shares {
+            psbt.global.insert(
+                PSBT_GLOBAL_SP_ECDH_SHARE,
+                &share.scan_key,
+                share.share.to_vec(),
+            );
+            psbt.global.insert(
+                PSBT_GLOBAL_SP_DLEQ,
+                &share.scan_key,
+                share.dleq_proof.to_vec(),
+            );
+        }
+        for script in &self.sp_output_scripts {
+            psbt.outputs
+                .get_mut(script.output_index as usize)
+                .ok_or_else(|| invalid("output index"))?
+                .insert(PSBT_OUT_SCRIPT, &[], script.script.clone());
+        }
+        if !self.sp_output_scripts.is_empty() {
+            // Inputs and outputs can't be modified anymore, and the third flag, which tells that
+            // an input has SIGHASH_SINGLE, can't be set with silent payment outputs. A missing
+            // field would mean the same, but BIP-375's reference validator wants it present.
+            psbt.global.insert(PSBT_GLOBAL_TX_MODIFIABLE, &[], vec![0]);
+        } else if !self.signatures.is_empty() || !self.musig_partial_sigs.is_empty() {
+            // A missing field already means that nothing can be modified, and a pubnonce doesn't
+            // commit to the transaction. The third flag tells about the other signers' signatures.
+            if let Some(flags) = psbt.global.get(PSBT_GLOBAL_TX_MODIFIABLE, &[]) {
+                let &[flags] = flags else {
+                    return Err(BitcoinClientError::GenericError(
+                        "Invalid PSBT_GLOBAL_TX_MODIFIABLE".into(),
+                    ));
+                };
+                psbt.global
+                    .insert(PSBT_GLOBAL_TX_MODIFIABLE, &[], vec![flags & !0b11]);
+            }
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use common::fastpsbt::{self, PSBT_OUT_SP_V0_INFO};
+
+    fn psbt() -> PsbtV2 {
+        let tx = bitcoin::Transaction {
+            version: bitcoin::transaction::Version::TWO,
+            lock_time: bitcoin::absolute::LockTime::ZERO,
+            input: vec![bitcoin::TxIn::default(); 2],
+            output: vec![
+                bitcoin::TxOut {
+                    value: bitcoin::Amount::from_sat(1000),
+                    script_pubkey: bitcoin::ScriptBuf::from_bytes(vec![0x51]),
+                };
+                2
+            ],
+        };
+        let psbt = bitcoin::psbt::Psbt::from_unsigned_tx(tx).unwrap();
+        PsbtV2::from_v0(&psbt.serialize()).unwrap()
+    }
+
+    fn response() -> SignedPsbtResponse {
+        SignedPsbtResponse {
+            signatures: vec![
+                PartialSignature {
+                    input_index: 0,
+                    signature: vec![0x30, 1, 2, 0x01],
+                    pubkey: vec![0x02; 33],
+                    leaf_hash: None,
+                },
+                PartialSignature {
+                    input_index: 1,
+                    signature: vec![7; 64],
+                    pubkey: vec![8; 32],
+                    leaf_hash: Some(vec![9; 32]),
+                },
+            ],
+            musig_pubnonces: vec![MuSig2Pubnonce {
+                input_index: 1,
+                pubnonce: [4; 66],
+                participant_pk: [0x02; 33],
+                aggregate_pubkey: [0x03; 33],
+                leaf_hash: None,
+            }],
+            musig_partial_sigs: vec![],
+            sp_shares: vec![SilentPaymentShare {
+                scan_key: [0x02; 33],
+                share: [0x03; 33],
+                dleq_proof: [5; 64],
+            }],
+            sp_output_scripts: vec![SilentPaymentOutputScript {
+                output_index: 1,
+                script: [&[0x51, 0x20][..], &[6; 32]].concat(),
+            }],
+        }
+    }
+
+    #[test]
+    fn merge_into() {
+        let mut psbt = psbt();
+        psbt.global
+            .insert(PSBT_GLOBAL_TX_MODIFIABLE, &[], vec![0b111]);
+        // an output to a silent payment code, which gets its script from the response
+        let output = &mut psbt.outputs[1];
+        output.remove(PSBT_OUT_SCRIPT, &[]);
+        output.insert(PSBT_OUT_SP_V0_INFO, &[], vec![0x02; 66]);
+
+        response().merge_into(&mut psbt).unwrap();
+
+        assert_eq!(
+            psbt.inputs[0].get(PSBT_IN_PARTIAL_SIG, &[0x02; 33]),
+            Some(&[0x30, 1, 2, 0x01][..])
+        );
+        let script_sig_key = [[8; 32], [9; 32]].concat();
+        assert_eq!(
+            psbt.inputs[1].get(PSBT_IN_TAP_SCRIPT_SIG, &script_sig_key),
+            Some(&[7; 64][..])
+        );
+        let nonce_key = [[0x02; 33], [0x03; 33]].concat();
+        assert_eq!(
+            psbt.inputs[1].get(PSBT_IN_MUSIG2_PUB_NONCE, &nonce_key),
+            Some(&[4; 66][..])
+        );
+        assert_eq!(
+            psbt.global.get(PSBT_GLOBAL_TX_MODIFIABLE, &[]),
+            Some(&[0][..])
+        );
+
+        // fastpsbt reads the shares, and an output with both a script and a code
+        let raw = psbt.serialize();
+        let parsed = fastpsbt::Psbt::parse(&raw).unwrap();
+        assert_eq!(parsed.get_sp_ecdh_share(&[0x02; 33]), Some(&[0x03; 33]));
+        assert_eq!(parsed.get_sp_dleq_proof(&[0x02; 33]), Some(&[5; 64]));
+        assert_eq!(
+            parsed.output_script(1),
+            Some(&[&[0x51, 0x20][..], &[6; 32]].concat()[..])
+        );
+
+        // the field is written when the PSBT doesn't have it
+        let mut psbt = self::psbt();
+        response().merge_into(&mut psbt).unwrap();
+        assert_eq!(
+            psbt.global.get(PSBT_GLOBAL_TX_MODIFIABLE, &[]),
+            Some(&[0][..])
+        );
+
+        let mut bad = response();
+        bad.signatures[0].input_index = 2;
+        assert!(bad.merge_into(&mut self::psbt()).is_err());
+        let mut bad = response();
+        bad.signatures[0].pubkey = vec![2; 31];
+        assert!(bad.merge_into(&mut self::psbt()).is_err());
+        let mut bad = response();
+        bad.sp_output_scripts[0].output_index = 2;
+        assert!(bad.merge_into(&mut self::psbt()).is_err());
+    }
+
+    /// Without outputs to silent payment codes, a signature clears the flags that let the inputs
+    /// and the outputs be modified, and keeps the flag of SIGHASH_SINGLE; a pubnonce doesn't.
+    #[test]
+    fn merge_into_clears_modifiable_flags() {
+        let merged = |response: &SignedPsbtResponse, flags: Option<u8>| {
+            let mut psbt = psbt();
+            if let Some(flags) = flags {
+                psbt.global
+                    .insert(PSBT_GLOBAL_TX_MODIFIABLE, &[], vec![flags]);
+            }
+            response.merge_into(&mut psbt).unwrap();
+            psbt.global
+                .get(PSBT_GLOBAL_TX_MODIFIABLE, &[])
+                .map(|flags| flags.to_vec())
+        };
+        let no_sp = SignedPsbtResponse {
+            sp_shares: vec![],
+            sp_output_scripts: vec![],
+            ..response()
+        };
+
+        let signatures = SignedPsbtResponse {
+            musig_pubnonces: vec![],
+            ..no_sp.clone()
+        };
+        assert_eq!(merged(&signatures, Some(0b111)), Some(vec![0b100]));
+        assert_eq!(merged(&signatures, Some(0b011)), Some(vec![0]));
+        assert_eq!(merged(&signatures, None), None);
+
+        let musig_partial_sig = SignedPsbtResponse {
+            signatures: vec![],
+            musig_pubnonces: vec![],
+            musig_partial_sigs: vec![MuSig2PartialSignature {
+                input_index: 1,
+                signature: [4; 32],
+                participant_pk: [0x02; 33],
+                aggregate_pubkey: [0x03; 33],
+                leaf_hash: None,
+            }],
+            ..no_sp.clone()
+        };
+        assert_eq!(merged(&musig_partial_sig, Some(0b011)), Some(vec![0]));
+
+        let pubnonce = SignedPsbtResponse {
+            signatures: vec![],
+            ..no_sp
+        };
+        assert_eq!(merged(&pubnonce, Some(0b011)), Some(vec![0b011]));
+
+        let mut psbt = psbt();
+        psbt.global
+            .insert(PSBT_GLOBAL_TX_MODIFIABLE, &[], vec![0, 0]);
+        assert!(signatures.merge_into(&mut psbt).is_err());
+    }
 }
