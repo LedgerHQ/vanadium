@@ -24,6 +24,36 @@ pub(super) struct SignedInputs {
     pub(super) musig_partial_sigs: Vec<MuSig2PartialSignature>,
 }
 
+/// The merkle root of the tap tree of each input's account at the input's coordinates, computed
+/// on first use: `None` for an input whose account is a `tr()` with no script tree.
+///
+/// The handler owns it, so that every stage that needs an input's root shares one computation:
+/// the walk behind it is by far the most expensive thing in the signing pass.
+pub(super) struct TaptreeHashes(Vec<OnceCell<Option<[u8; 32]>>>);
+
+impl TaptreeHashes {
+    pub(super) fn new(n_inputs: usize) -> Self {
+        Self((0..n_inputs).map(|_| OnceCell::new()).collect())
+    }
+
+    /// The root for input `input_index`, whose account is `wallet_policy` and whose coordinates
+    /// are `coords`.
+    pub(super) fn get(
+        &self,
+        input_index: usize,
+        wallet_policy: &WalletPolicy,
+        coords: &WalletPolicyCoordinates,
+    ) -> Result<Option<[u8; 32]>, Error> {
+        let memo = &self.0[input_index];
+        if let Some(cached) = memo.get() {
+            return Ok(*cached);
+        }
+        let computed = taptree_hash_for(wallet_policy, coords)?;
+        let _ = memo.set(computed);
+        Ok(computed)
+    }
+}
+
 /// State shared by every input of one signing pass: the PSBT, the caches that all
 /// sighashes draw on, the local master fingerprints, and the accumulating output.
 ///
@@ -53,9 +83,8 @@ pub(super) struct PlaceholderCtx<'a> {
     pub(super) tapleaf_desc: Option<&'a DescriptorTemplate>,
     /// Binds MuSig2 session state to this (wallet policy, transaction) pair.
     pub(super) session_id: [u8; 32],
-    /// Backs [`Self::taptree_hash`]. Owned by the input, so all of its placeholders
-    /// share one answer.
-    pub(super) taptree_hash_memo: &'a OnceCell<Option<[u8; 32]>>,
+    /// Backs [`Self::taptree_hash`].
+    pub(super) taptree_hashes: &'a TaptreeHashes,
 }
 
 impl PlaceholderCtx<'_> {
@@ -63,15 +92,10 @@ impl PlaceholderCtx<'_> {
     /// `tr()` with no script tree.
     ///
     /// Only key-path spends need this — a script-path spend signs with the untweaked
-    /// leaf key — so ask for it only on that branch: the walk behind it is by far the
-    /// most expensive thing in the signing pass. The first placeholder of an input to
-    /// ask pays for it; the rest read the memo.
+    /// leaf key — so ask for it only on that branch. The first to ask for an input's root
+    /// pays for it; the rest read the memo.
     pub(super) fn taptree_hash(&self) -> Result<Option<[u8; 32]>, Error> {
-        if let Some(cached) = self.taptree_hash_memo.get() {
-            return Ok(*cached);
-        }
-        let computed = taptree_hash_for(self.wallet_policy, self.coords)?;
-        let _ = self.taptree_hash_memo.set(computed);
-        Ok(computed)
+        self.taptree_hashes
+            .get(self.input_index, self.wallet_policy, self.coords)
     }
 }

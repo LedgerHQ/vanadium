@@ -63,8 +63,16 @@ pub async fn handle_sign_psbt(app: &mut sdk::App, psbt: &[u8]) -> Result<Respons
 
     // All checks passed — sign
     app.show_spinner("Signing transaction...");
+    let local_keys = key_resolution::LocalKeys::new()?;
+    let taptree_hashes = context::TaptreeHashes::new(psbt.inputs.len());
     let mut musig_state = MusigSigningState::default();
-    let signed = signing::sign_all_inputs(&psbt, &summary, &mut musig_state)?;
+    let signed = signing::sign_all_inputs(
+        &psbt,
+        &summary,
+        local_keys,
+        &taptree_hashes,
+        &mut musig_state,
+    )?;
 
     // Persist the round-1 session, if any, only after the signing pass has
     // completed successfully — partial failures must leave no stale session.
