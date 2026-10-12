@@ -1,12 +1,13 @@
 use crate::{
     account::{AccountCoordinates, WalletPolicy, WalletPolicyCoordinates},
-    bip388::KeyExpression,
+    script::ToScript,
 };
 
 use alloc::{string::String, vec::Vec};
 use bitcoin::{
     bip32::{DerivationPath, Fingerprint},
     consensus::Encodable,
+    Script,
 };
 
 use super::{
@@ -36,6 +37,8 @@ pub enum PsbtAccountError {
     TooManyAccounts,
     DeserializeError,
     Unsupported,
+    /// An input or output belongs to more than one account.
+    AmbiguousAccount,
 }
 
 fn is_valid_account_name(value: &[u8]) -> bool {
@@ -355,184 +358,176 @@ impl PsbtAccountOutputWrite for v2::Output {
     }
 }
 
-// Helper function to get wallet policy coordinates from the key origins of a PSBT input or output
-fn get_wallet_policy_coordinates(
-    key_origins: &[(Fingerprint, DerivationPath)],
-    fingerprint: Fingerprint,
-    origin_path_len: usize,
-    key_placeholder: &KeyExpression,
-) -> Option<WalletPolicyCoordinates> {
-    // iterate over all derivations; if it's a key derived from the internal key,
-    // deduce the coordinates and insert them
-    for (fpr, der) in key_origins {
-        if *fpr != fingerprint {
-            continue;
-        }
-        if origin_path_len + 2 != der.len() {
-            continue;
-        }
-        let change_step: u32 = der[der.len() - 2].into();
-        let is_change = match change_step {
-            n if n == key_placeholder.num1 => false,
-            n if n == key_placeholder.num2 => true,
-            _ => continue, // this could only happen in case of a fingerprint collision
-        };
-        let address_index: u32 = der[der.len() - 1].into();
-        return Some(WalletPolicyCoordinates {
-            is_change,
-            address_index,
-        });
-    }
-
-    None
-}
-
-// Given a PSBT and a wallet policy, and one of the placeholders, fills the psbt with the following fields:
-// - Global: account descriptor, account name (if given), proof of registration (if given)
-// - Input: account coordinates
-// - Output: account coordinates
-// Coordinates are deduced from the bip32 derivations in the PSBT, only using keys with
-// full key origin information in the wallet policy.
-pub fn fill_psbt_with_bip388_coordinates(
-    psbt: &mut PsbtV2,
+// The coordinates in `wallet_policy` that the key origins of an input or output point to, for each
+// key placeholder: a key of the placeholder, followed by the change and address index steps. They
+// are only candidates, as the key origins don't prove that the input or output is in the account.
+fn candidate_coordinates(
     wallet_policy: &WalletPolicy,
-    name: Option<&str>,
-    proof_of_registrations: Option<&[u8]>,
-    key_placeholder: &KeyExpression,
-    account_id: u32,
-) -> Result<(), PsbtAccountError> {
-    psbt.set_account(account_id, PsbtAccount::WalletPolicy(wallet_policy.clone()))?;
-    if let Some(name) = name {
-        psbt.set_account_name(account_id, name)?;
-    }
-    if let Some(por) = proof_of_registrations {
-        psbt.set_account_proof_of_registration(account_id, por)?;
-    }
+    key_origins: &[(Fingerprint, DerivationPath)],
+) -> Result<Vec<WalletPolicyCoordinates>, PsbtAccountError> {
+    let mut res = Vec::new();
+    for (key_placeholder, _) in wallet_policy.descriptor_template().placeholders() {
+        // For a plain key, look up the single referenced KeyInformation.
+        // For a musig key, every participant is a candidate; the input matches if
+        // any one of them has a derivation in the PSBT under the placeholder.
+        let key_indices: Vec<u32> = match (
+            key_placeholder.plain_key_index(),
+            key_placeholder.musig_key_indices(),
+        ) {
+            (Some(idx), _) => alloc::vec![idx],
+            (None, Some(indices)) => indices.clone(),
+            _ => return Err(PsbtAccountError::Unsupported),
+        };
 
-    // For a plain key, look up the single referenced KeyInformation.
-    // For a musig key, every participant is a candidate; the input matches if
-    // any one of them has a derivation in the PSBT under the placeholder.
-    let key_indices: Vec<u32> = match (
-        key_placeholder.plain_key_index(),
-        key_placeholder.musig_key_indices(),
-    ) {
-        (Some(idx), _) => alloc::vec![idx],
-        (None, Some(indices)) => indices.clone(),
-        _ => return Err(PsbtAccountError::Unsupported),
-    };
-
-    // For each candidate participant, build the (fingerprint, origin_path_len)
-    // pair used to identify its derivations inside the PSBT.
-    let mut lookups: Vec<(Fingerprint, usize)> = key_indices
-        .iter()
-        .map(|&idx| {
-            let key_expr = wallet_policy
-                .key_information()
-                .get(idx as usize)
-                .ok_or(PsbtAccountError::InvalidValue)?;
-            Ok(match &key_expr.origin_info {
-                Some(orig) => (
-                    orig.fingerprint.to_be_bytes().into(),
-                    orig.derivation_path.len(),
-                ),
-                None => (key_expr.pubkey.fingerprint(), 0),
-            })
-        })
-        .collect::<Result<_, _>>()?;
-
-    // For a musig placeholder, the BIP-373 `tap_bip32_derivation` entry is
-    // keyed by the BIP-32-derived *aggregate* xonly key — with the aggregate
-    // BIP-388 synthetic xpub's fingerprint, not any single participant's.
-    // Add that as an extra lookup candidate so we don't miss the entry.
-    if key_placeholder.is_musig() {
-        let participant_xpubs: alloc::vec::Vec<_> = key_indices
+        // For each candidate participant, build the (fingerprint, origin_path_len)
+        // pair used to identify its derivations inside the PSBT.
+        let mut lookups: Vec<(Fingerprint, usize)> = key_indices
             .iter()
             .map(|&idx| {
-                wallet_policy
+                let key_expr = wallet_policy
                     .key_information()
                     .get(idx as usize)
-                    .ok_or(PsbtAccountError::InvalidValue)
-                    .map(|ki| ki.pubkey)
+                    .ok_or(PsbtAccountError::InvalidValue)?;
+                Ok(match &key_expr.origin_info {
+                    Some(orig) => (
+                        orig.fingerprint.to_be_bytes().into(),
+                        orig.derivation_path.len(),
+                    ),
+                    None => (key_expr.pubkey.fingerprint(), 0),
+                })
             })
             .collect::<Result<_, _>>()?;
-        if let Ok(agg) = crate::musig::aggregate_xpub(&participant_xpubs) {
-            lookups.push((agg.fingerprint(), 0));
-        }
-    }
 
-    let find_coords = |key_origins: &[_]| -> Option<WalletPolicyCoordinates> {
-        for (fingerprint, origin_path_len) in &lookups {
-            if let Some(c) = get_wallet_policy_coordinates(
-                key_origins,
-                *fingerprint,
-                *origin_path_len,
-                key_placeholder,
-            ) {
-                return Some(c);
+        // For a musig placeholder, the BIP-373 `tap_bip32_derivation` entry is
+        // keyed by the BIP-32-derived *aggregate* xonly key — with the aggregate
+        // BIP-388 synthetic xpub's fingerprint, not any single participant's.
+        // Add that as an extra lookup candidate so we don't miss the entry.
+        if key_placeholder.is_musig() {
+            let participant_xpubs: alloc::vec::Vec<_> = key_indices
+                .iter()
+                .map(|&idx| {
+                    wallet_policy
+                        .key_information()
+                        .get(idx as usize)
+                        .ok_or(PsbtAccountError::InvalidValue)
+                        .map(|ki| ki.pubkey)
+                })
+                .collect::<Result<_, _>>()?;
+            if let Ok(agg) = crate::musig::aggregate_xpub(&participant_xpubs) {
+                lookups.push((agg.fingerprint(), 0));
             }
         }
-        None
-    };
+
+        for (fingerprint, origin_path_len) in &lookups {
+            for (fpr, der) in key_origins {
+                if fpr != fingerprint || der.len() != origin_path_len + 2 {
+                    continue;
+                }
+                let change_step: u32 = der[der.len() - 2].into();
+                let is_change = match change_step {
+                    n if n == key_placeholder.num1 => false,
+                    n if n == key_placeholder.num2 => true,
+                    _ => continue, // this could only happen in case of a fingerprint collision
+                };
+                let coords = WalletPolicyCoordinates {
+                    is_change,
+                    address_index: der[der.len() - 1].into(),
+                };
+                if !res.contains(&coords) {
+                    res.push(coords);
+                }
+            }
+        }
+    }
+    Ok(res)
+}
+
+// The account of `accounts` that an input or output with script `script` and key origins
+// `key_origins` belongs to, if any, with its id and the coordinates of the input or output in it.
+fn find_account(
+    accounts: &[(&WalletPolicy, &str, &[u8; 32])],
+    script: &Script,
+    key_origins: &[(Fingerprint, DerivationPath)],
+) -> Result<Option<(u32, WalletPolicyCoordinates)>, PsbtAccountError> {
+    let mut found = None;
+    for (id, (wallet_policy, _, _)) in accounts.iter().enumerate() {
+        for coords in candidate_coordinates(wallet_policy, key_origins)? {
+            let account_script = wallet_policy
+                .to_script(coords.is_change, coords.address_index)
+                .map_err(|_| PsbtAccountError::InvalidValue)?;
+            if account_script.as_script() == script {
+                if found.is_some() {
+                    return Err(PsbtAccountError::AmbiguousAccount);
+                }
+                found = Some((id as u32, coords));
+                break;
+            }
+        }
+    }
+    Ok(found)
+}
+
+/// Fills `psbt` with `accounts`, each with its name and proof of registration, and with the
+/// coordinates of the inputs and outputs that belong to them.
+///
+/// The accounts get ids in the order given. An input or output belongs to an account if the
+/// account's script, at the coordinates that one of its key origins points to, is the script that
+/// the input spends, or the script of the output. It is an error if it belongs to more than one
+/// account. The inputs and outputs without a script don't belong to any.
+pub fn prepare_psbt(
+    psbt: &mut PsbtV2,
+    accounts: &[(&WalletPolicy, &str, &[u8; 32])],
+) -> Result<(), PsbtAccountError> {
+    // the account ids of the coordinates are a single byte
+    if accounts.len() > MAX_SINGLE_BYTE_COMPACTSIZE as usize + 1 {
+        return Err(PsbtAccountError::TooManyAccounts);
+    }
+    for (id, (wallet_policy, name, por)) in accounts.iter().enumerate() {
+        let id = id as u32;
+        psbt.set_account(id, PsbtAccount::WalletPolicy((*wallet_policy).clone()))?;
+        psbt.set_account_name(id, name)?;
+        psbt.set_account_proof_of_registration(id, *por)?;
+    }
 
     for input in psbt.inputs.iter_mut() {
+        let Some(script) = input
+            .spent_script()
+            .map_err(|_| PsbtAccountError::InvalidValue)?
+        else {
+            continue;
+        };
         let key_origins = input
             .key_origins()
             .map_err(|_| PsbtAccountError::InvalidValue)?;
-        if let Some(coords) = find_coords(&key_origins) {
-            input.set_account_coordinates(
-                account_id,
-                PsbtAccountCoordinates::WalletPolicy(coords),
-            )?;
+        if let Some((id, coords)) = find_account(accounts, &script, &key_origins)? {
+            input.set_account_coordinates(id, PsbtAccountCoordinates::WalletPolicy(coords))?;
         }
     }
 
     for output in psbt.outputs.iter_mut() {
+        let Some(script) = output.script() else {
+            continue;
+        };
         let key_origins = output
             .key_origins()
             .map_err(|_| PsbtAccountError::InvalidValue)?;
-        if let Some(coords) = find_coords(&key_origins) {
-            output.set_account_coordinates(
-                account_id,
-                PsbtAccountCoordinates::WalletPolicy(coords),
-            )?;
+        if let Some((id, coords)) = find_account(accounts, &script, &key_origins)? {
+            output.set_account_coordinates(id, PsbtAccountCoordinates::WalletPolicy(coords))?;
         }
     }
 
-    Ok(())
-}
-
-// Fills the PSBT with accounts and coordinates.
-pub fn prepare_psbt(
-    psbt: &mut PsbtV2,
-    named_accounts: &[(&WalletPolicy, &str, &[u8; 32])],
-) -> Result<(), PsbtAccountError> {
-    // TODO: generalize this function to support transactions involving multiple accounts, and accounts of different types.
-    assert!(named_accounts.len() == 1);
-    for (wallet_policy, account_name, por) in named_accounts {
-        let placeholders: Vec<KeyExpression> = wallet_policy
-            .descriptor_template()
-            .placeholders()
-            .map(|(k, _)| k.clone())
-            .collect();
-
-        for key_placeholder in &placeholders {
-            fill_psbt_with_bip388_coordinates(
-                psbt,
-                wallet_policy,
-                Some(&account_name),
-                Some(*por),
-                key_placeholder,
-                0,
-            )?;
-        }
-    }
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use base64::{engine::general_purpose::STANDARD, Engine as _};
-    use bitcoin::psbt::Psbt;
+    use bitcoin::{
+        bip32::{ChildNumber, KeySource, Xpub},
+        psbt::Psbt,
+        secp256k1::PublicKey,
+        Amount, ScriptBuf, Transaction, TxIn, TxOut,
+    };
 
     use super::*;
 
@@ -653,34 +648,22 @@ mod tests {
     }
 
     #[test]
-    fn test_fill_psbt_with_bip388_coordinates() {
+    fn test_prepare_psbt() {
         let wallet_policy = WalletPolicy::new("wpkh(@0/**)", [
             "[f5acc2fd/84'/1'/0']tpubDCtKfsNyRhULjZ9XMS4VKKtVcPdVDi8MKUbcSD9MJDyjRu1A2ND5MiipozyyspBT9bg8upEp7a8EAgFxNxXn1d7QkdbL52Ty5jiSLcxPt1P".try_into().unwrap()
         ].to_vec()).unwrap();
         let psbt_str = "cHNidP8BAKYCAAAAAp4s/ifwrYe3iiN9XXQF1KMGZso2HVhaRnsN/kImK020AQAAAAD9////r7+uBlkPdB/xr1m2rEYRJjNqTEqC21U99v76tzesM/MAAAAAAP3///8CqDoGAAAAAAAWABTrOPqbgSj4HybpXtsMX/rqg2kP5OCTBAAAAAAAIgAgP6lmyd3Nwv2W5KXhvHZbn69s6LPrTxEEqta993Mk5b4AAAAAAAEAcQIAAAABk2qy4BBy95PP5Ml3VN4bYf4D59tlNsiy8h3QtXQsSEUBAAAAAP7///8C3uHHAAAAAAAWABTreNfEC/EGOw4/zinDVltonIVZqxAnAAAAAAAAFgAUIxjWb4T+9cSHX5M7A43GODH42hP5lx4AAQEfECcAAAAAAAAWABQjGNZvhP71xIdfkzsDjcY4MfjaEyIGA0Ve587cl7C6Q1uABm/JLJY6NMYAMXmB0TUzDE7kOsejGPWswv1UAACAAQAAgAAAAIAAAAAAAQAAAAABAHEBAAAAAQ5HHvTpLBrLUe/IZg+NP2mTbqnJsr/3L/m8gcUe/PRkAQAAAAAAAAAAAmCuCgAAAAAAFgAUNcbg3W08hLFrqIXcpzrIY9C1k+yvBjIAAAAAABYAFNwobgzS5r03zr6ew0n7XwiQVnL8AAAAAAEBH2CuCgAAAAAAFgAUNcbg3W08hLFrqIXcpzrIY9C1k+wiBgJxtbd5rYcIOFh3l7z28MeuxavnanCdck9I0uJs+HTwoBj1rML9VAAAgAEAAIAAAACAAQAAAAAAAAAAIgICKexHcnEx7SWIogxG7amrt9qm9J/VC6/nC5xappYcTswY9azC/VQAAIABAACAAAAAgAEAAAAKAAAAAAA=";
         let mut psbt = psbt_from_str(psbt_str).unwrap();
 
-        let placeholders: Vec<KeyExpression> = wallet_policy
-            .descriptor_template()
-            .placeholders()
-            .map(|(k, _)| k.clone())
-            .collect();
-        assert!(placeholders.len() == 1);
-        let key_placeholder = &placeholders[0];
-
-        let result = fill_psbt_with_bip388_coordinates(
-            &mut psbt,
-            &wallet_policy,
-            None,
-            None,
-            &key_placeholder,
-            0,
-        );
-
-        assert!(result.is_ok());
+        prepare_psbt(&mut psbt, &[(&wallet_policy, "Segwit", &[1; 32])]).unwrap();
 
         let accounts = psbt.get_accounts().unwrap();
         assert_eq!(accounts.len(), 1);
+        assert_eq!(psbt.get_account_name(0).unwrap().as_deref(), Some("Segwit"));
+        assert_eq!(
+            psbt.get_account_proof_of_registration(0).unwrap(),
+            Some(vec![1; 32])
+        );
 
         assert_eq!(
             psbt.inputs[0].get_account_coordinates().unwrap(),
@@ -706,63 +689,150 @@ mod tests {
         assert_eq!(psbt.outputs[1].get_account_coordinates().unwrap(), None);
     }
 
+    const XPUB0: &str = "tpubDCwYjpDhUdPGP5rS3wgNg13mTrrjBuG8V9VpWbyptX6TRPbNoZVXsoVUSkCjmQ8jJycjuDKBb9eataSymXakTTaGifxR6kmVsfFehH1ZgJT";
+    const XPUB1: &str = "tpubDCwYjpDhUdPGQWG6wG6hkBJuWFZEtrn7j3xwG3i8XcQabcGC53xWZm1hSXrUPFS5UvZ3QhdPSjXWNfWmFGTioARHuG5J7XguEjgg7p8PxAm";
+
+    /// The key of `xpub` at `/change/index`, and its key origin: `xpub` has none.
+    fn child(xpub: &str, change: u32, index: u32) -> (PublicKey, KeySource) {
+        let xpub: Xpub = xpub.parse().unwrap();
+        let path = DerivationPath::from(vec![
+            ChildNumber::Normal { index: change },
+            ChildNumber::Normal { index },
+        ]);
+        let secp = bitcoin::secp256k1::Secp256k1::new();
+        let key = xpub.derive_pub(&secp, &path).unwrap().public_key;
+        (key, (xpub.fingerprint(), path))
+    }
+
+    /// A PSBT that spends outputs with scripts `spent`, to outputs with scripts `scripts`.
+    fn psbt_v0(spent: &[ScriptBuf], scripts: &[ScriptBuf]) -> Psbt {
+        let txout = |script_pubkey: &ScriptBuf| TxOut {
+            value: Amount::from_sat(1000),
+            script_pubkey: script_pubkey.clone(),
+        };
+        let tx = Transaction {
+            version: bitcoin::transaction::Version::TWO,
+            lock_time: bitcoin::absolute::LockTime::ZERO,
+            input: vec![TxIn::default(); spent.len()],
+            output: scripts.iter().map(txout).collect(),
+        };
+        let mut psbt = Psbt::from_unsigned_tx(tx).unwrap();
+        for (input, script) in psbt.inputs.iter_mut().zip(spent) {
+            input.witness_utxo = Some(txout(script));
+        }
+        psbt
+    }
+
+    fn coordinates(
+        id: u32,
+        is_change: bool,
+        address_index: u32,
+    ) -> Option<(u32, PsbtAccountCoordinates)> {
+        Some((
+            id,
+            PsbtAccountCoordinates::WalletPolicy(WalletPolicyCoordinates::new(
+                is_change,
+                address_index,
+            )),
+        ))
+    }
+
     /// Coordinate filling for a `tr(musig(@0,@1)/**)` wallet policy: a
     /// derivation entry under *any* participant's fingerprint must yield
     /// matching coordinates.
     #[test]
-    fn test_fill_psbt_with_bip388_coordinates_musig() {
-        use bitcoin::bip32::{ChildNumber, DerivationPath, Xpub};
-
-        let xpub0_str = "tpubDCwYjpDhUdPGP5rS3wgNg13mTrrjBuG8V9VpWbyptX6TRPbNoZVXsoVUSkCjmQ8jJycjuDKBb9eataSymXakTTaGifxR6kmVsfFehH1ZgJT";
-        let xpub1_str = "tpubDCwYjpDhUdPGQWG6wG6hkBJuWFZEtrn7j3xwG3i8XcQabcGC53xWZm1hSXrUPFS5UvZ3QhdPSjXWNfWmFGTioARHuG5J7XguEjgg7p8PxAm";
-
+    fn test_prepare_psbt_musig() {
         let wallet_policy = WalletPolicy::new(
             "tr(musig(@0,@1)/**)",
-            vec![xpub0_str.try_into().unwrap(), xpub1_str.try_into().unwrap()],
+            vec![XPUB0.try_into().unwrap(), XPUB1.try_into().unwrap()],
         )
         .unwrap();
 
-        // Derive cosigner #1's child at /0/7 (is_change = false, address_index = 7).
-        let secp = bitcoin::secp256k1::Secp256k1::new();
-        let xpub1: Xpub = xpub1_str.parse().unwrap();
-        let path = DerivationPath::from(vec![
-            ChildNumber::Normal { index: 0 },
-            ChildNumber::Normal { index: 7 },
-        ]);
-        let child = xpub1.derive_pub(&secp, &path).unwrap();
-        let xonly = child.public_key.x_only_public_key().0;
-
-        // Build a minimal one-input PSBT and inject a tap_key_origins entry
-        // for cosigner 1's child key.
-        let unsigned_tx = bitcoin::Transaction {
-            version: bitcoin::transaction::Version::TWO,
-            lock_time: bitcoin::absolute::LockTime::ZERO,
-            input: vec![bitcoin::TxIn::default()],
-            output: vec![],
-        };
-        let mut psbt = Psbt::from_unsigned_tx(unsigned_tx).unwrap();
+        // a one-input PSBT, with a tap_key_origins entry for cosigner 1's child key at /0/7
+        let mut psbt = psbt_v0(&[wallet_policy.to_script(false, 7).unwrap()], &[]);
+        let (key, origin) = child(XPUB1, 0, 7);
         psbt.inputs[0]
             .tap_key_origins
-            .insert(xonly, (vec![], (xpub1.fingerprint(), path)));
+            .insert(key.x_only_public_key().0, (vec![], origin));
         let mut psbt = PsbtV2::from_v0(&psbt.serialize()).unwrap();
 
-        let key_placeholder = wallet_policy
-            .descriptor_template()
-            .placeholders()
-            .next()
-            .unwrap()
-            .0
-            .clone();
-
-        fill_psbt_with_bip388_coordinates(&mut psbt, &wallet_policy, None, None, &key_placeholder, 0)
-            .unwrap();
+        prepare_psbt(&mut psbt, &[(&wallet_policy, "Musig", &[0; 32])]).unwrap();
 
         assert_eq!(
             psbt.inputs[0].get_account_coordinates().unwrap(),
-            Some((
-                0,
-                PsbtAccountCoordinates::WalletPolicy(WalletPolicyCoordinates::new(false, 7))
-            )),
+            coordinates(0, false, 7)
+        );
+    }
+
+    /// Accounts that share a key: the key origins of an input or output point to coordinates in
+    /// both, but only one has its script there.
+    #[test]
+    fn test_prepare_psbt_several_accounts() {
+        let singlesig = WalletPolicy::new("wpkh(@0/**)", vec![XPUB0.try_into().unwrap()]).unwrap();
+        let multisig = WalletPolicy::new(
+            "wsh(multi(1,@0/**,@1/**))",
+            vec![XPUB0.try_into().unwrap(), XPUB1.try_into().unwrap()],
+        )
+        .unwrap();
+        let external = ScriptBuf::new_op_return([]);
+
+        let mut psbt = psbt_v0(
+            &[
+                singlesig.to_script(false, 0).unwrap(),
+                multisig.to_script(false, 3).unwrap(),
+            ],
+            &[multisig.to_script(true, 1).unwrap(), external],
+        );
+        let derivations = |change, index, xpubs: &[&str]| {
+            xpubs
+                .iter()
+                .map(|xpub| child(xpub, change, index))
+                .collect()
+        };
+        psbt.inputs[0].bip32_derivation = derivations(0, 0, &[XPUB0]);
+        psbt.inputs[1].bip32_derivation = derivations(0, 3, &[XPUB0, XPUB1]);
+        psbt.outputs[0].bip32_derivation = derivations(1, 1, &[XPUB0, XPUB1]);
+        let psbt = PsbtV2::from_v0(&psbt.serialize()).unwrap();
+
+        let mut prepared = psbt.clone();
+        prepare_psbt(
+            &mut prepared,
+            &[
+                (&singlesig, "Singlesig", &[0; 32]),
+                (&multisig, "Multisig", &[1; 32]),
+            ],
+        )
+        .unwrap();
+        assert_eq!(prepared.get_accounts().unwrap().len(), 2);
+        assert_eq!(
+            prepared.get_account_name(1).unwrap().as_deref(),
+            Some("Multisig")
+        );
+        assert_eq!(
+            prepared.inputs[0].get_account_coordinates().unwrap(),
+            coordinates(0, false, 0)
+        );
+        assert_eq!(
+            prepared.inputs[1].get_account_coordinates().unwrap(),
+            coordinates(1, false, 3)
+        );
+        assert_eq!(
+            prepared.outputs[0].get_account_coordinates().unwrap(),
+            coordinates(1, true, 1)
+        );
+        assert_eq!(prepared.outputs[1].get_account_coordinates().unwrap(), None);
+
+        // the same account twice: its inputs and outputs would belong to both
+        let mut prepared = psbt.clone();
+        assert_eq!(
+            prepare_psbt(
+                &mut prepared,
+                &[
+                    (&singlesig, "Singlesig", &[0; 32]),
+                    (&singlesig, "Again", &[1; 32])
+                ],
+            ),
+            Err(PsbtAccountError::AmbiguousAccount)
         );
     }
 }
