@@ -6,12 +6,14 @@
 
 mod address;
 mod dleq;
+mod psbt;
 mod receiver;
 mod sender;
 mod tags;
 
 pub use address::{decode_spscan, encode_spscan, SilentPaymentCode};
 pub use dleq::{generate_proof, verify_proof};
+pub use psbt::{recipients, Recipient};
 pub use receiver::{label_tweak, labeled_spend_key, scan, spending_key, FoundOutput, Labels};
 pub use sender::{
     assign_k, create_outputs, ecdh_share, input_hash, input_private_key, outpoint_bytes,
