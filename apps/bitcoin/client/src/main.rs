@@ -421,8 +421,9 @@ async fn handle_cli_command(
             // To be rewritten once rust-bitcoin supports PSBTv2.
             if let Ok(parsed_psbt) = Psbt::deserialize(&psbt) {
                 assert!(parsed_psbt.version == 0);
-                psbt = common::psbt::psbt_v0_to_v2(&psbt)
-                    .map_err(|_| "Failed to convert PSBTv0 to PSBTv2")?;
+                psbt = common::psbt::PsbtV2::from_v0(&psbt)
+                    .map_err(|_| "Failed to convert PSBTv0 to PSBTv2")?
+                    .serialize();
             }
 
             let signed = bitcoin_client.sign_psbt(&psbt).await?;

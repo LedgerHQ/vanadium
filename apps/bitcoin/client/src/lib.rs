@@ -13,5 +13,5 @@ pub use common::{
     identity::{self, IdentityKey},
     message::{self, IdentitySignature, RegisteredIdentityEntry},
     por::{ProofOfRegistration, RegistrationId},
-    psbt::psbt_v0_to_v2,
+    psbt::PsbtV2,
 };
