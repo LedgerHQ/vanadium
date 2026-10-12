@@ -50,7 +50,9 @@ pub fn parse_wallet_policy(
 }
 
 fn serialize_as_psbtv2(psbt: &Psbt) -> Vec<u8> {
-    common::psbt::psbt_v0_to_v2(&psbt.serialize()).expect("Failed to convert PSBTv0 to PSBTv2")
+    common::psbt::PsbtV2::from_v0(&psbt.serialize())
+        .expect("Failed to convert PSBTv0 to PSBTv2")
+        .serialize()
 }
 
 #[tokio::test]
