@@ -414,6 +414,11 @@ pub(super) fn analyze_transaction(
         .collect::<Result<Vec<_>, Error>>()?;
 
     for (output_index, output) in psbt.outputs.iter().enumerate() {
+        // Paying to a silent payment code isn't supported yet. Even when the PSBT has the script
+        // of the code, the device must compute it before the user approves the script.
+        if output.sp_v0_info.is_some() {
+            return Err(Error::UnsupportedSilentPayment);
+        }
         let amount = output.amount.ok_or(Error::OutputAmountMissing)?;
 
         match analyze_output(

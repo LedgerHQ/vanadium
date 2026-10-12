@@ -34,6 +34,8 @@ const PSBT_GLOBAL_FALLBACK_LOCKTIME: u8 = 0x03;
 const PSBT_GLOBAL_INPUT_COUNT: u8 = 0x04;
 const PSBT_GLOBAL_OUTPUT_COUNT: u8 = 0x05;
 const PSBT_GLOBAL_TX_MODIFIABLE: u8 = 0x06;
+const PSBT_GLOBAL_SP_ECDH_SHARE: u8 = 0x07;
+const PSBT_GLOBAL_SP_DLEQ: u8 = 0x08;
 const PSBT_GLOBAL_VERSION: u8 = 0xFB;
 const PSBT_GLOBAL_PROPRIETARY: u8 = 0xFC;
 
@@ -67,6 +69,8 @@ const PSBT_IN_MUSIG2_PUB_NONCE: u8 = 0x1B;
 const PSBT_IN_MUSIG2_PARTIAL_SIG: u8 = 0x1C;
 const PSBT_IN_SP_ECDH_SHARE: u8 = 0x1D;
 const PSBT_IN_SP_DLEQ: u8 = 0x1E;
+const PSBT_IN_SP_SPEND_BIP32_DERIVATION: u8 = 0x1F;
+const PSBT_IN_SP_TWEAK: u8 = 0x20;
 const PSBT_IN_PROPRIETARY: u8 = 0xFC;
 
 const PSBT_OUT_REDEEM_SCRIPT: u8 = 0x00;
@@ -124,6 +128,14 @@ pub enum PsbtError {
     OutOfRange,
     UnknownOutputType,
     Unsupported,
+    /// An output has neither `PSBT_OUT_SCRIPT` nor `PSBT_OUT_SP_V0_INFO`.
+    MissingOutputScript,
+    /// The silent payment fields break a rule of BIP-375: a label without `PSBT_OUT_SP_V0_INFO`,
+    /// or a computed silent payment output script while inputs or outputs can still be modified.
+    InvalidSilentPayment,
+    /// The scripts of the silent payment outputs can't be set: they don't match the outputs
+    /// without `PSBT_OUT_SCRIPT`, or the unsigned transaction was already built.
+    InvalidOutputScripts,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -147,6 +159,9 @@ pub struct Psbt<'a> {
     pub fallback_locktime: Option<u32>,
     pub tx_modifiable: Option<u8>,
 
+    /// The scripts computed for the silent payment outputs without `PSBT_OUT_SCRIPT`, by output.
+    sp_output_scripts: Vec<Option<ScriptBuf>>,
+
     cached_unsigned_tx: OnceCell<Transaction>,
 }
 
@@ -166,6 +181,8 @@ pub struct Input<'a> {
     pub sequence: Option<u32>,
     pub required_time_locktime: Option<u32>,
     pub required_height_locktime: Option<u32>,
+    /// BIP-376 `PSBT_IN_SP_TWEAK`: the tweak of the silent payment output that the input spends.
+    pub sp_tweak: Option<&'a [u8; 32]>,
 
     cached_witness_utxo: OnceCell<bitcoin::TxOut>,
     cached_non_witness_utxo: OnceCell<bitcoin::Transaction>,
@@ -179,6 +196,11 @@ pub struct Output<'a> {
     pub witness_script: Option<&'a [u8]>,
     pub amount: Option<u64>,
     pub script: Option<&'a [u8]>,
+    /// BIP-375 `PSBT_OUT_SP_V0_INFO`: the silent payment code of the recipient,
+    /// `ser_P(B_scan) || ser_P(B_m)`. The points are not validated.
+    pub sp_v0_info: Option<&'a [u8; 66]>,
+    /// BIP-375 `PSBT_OUT_SP_V0_LABEL`: the label of `sp_v0_info`, for change.
+    pub sp_v0_label: Option<u32>,
 }
 
 #[derive(Clone, Copy)]
@@ -309,6 +331,57 @@ impl<'a> ParsedMap<'a> {
         let end = start + self.pairs[start..].partition_point(|p| p.key_type == key_type);
         self.pairs[start..end].iter()
     }
+
+    /// Like [`ParsedMap::iter_keys`], for a key type whose key data and value sizes were checked
+    /// while parsing.
+    fn iter_sized<const K: usize, const V: usize>(
+        &self,
+        key_type: u8,
+    ) -> impl Iterator<Item = (&'a [u8; K], &'a [u8; V])> + '_ {
+        self.iter_keys(key_type).map(|p| {
+            (
+                p.key_data.try_into().expect("checked while parsing"),
+                p.value.try_into().expect("checked while parsing"),
+            )
+        })
+    }
+
+    /// Like [`ParsedMap::get`], for a key type whose value size was checked while parsing.
+    fn get_sized<const V: usize>(&self, key_type: u8, key_data: &[u8]) -> Option<&'a [u8; V]> {
+        self.get(key_type, key_data)
+            .map(|v| v.try_into().expect("checked while parsing"))
+    }
+}
+
+/// Checks the sizes of the key data and of the value of a pair.
+fn check_sizes(pair: &MapPair, key_data_len: usize, value_len: usize) -> Result<(), PsbtError> {
+    if pair.key_data.len() != key_data_len || pair.value.len() != value_len {
+        return Err(PsbtError::BadValue);
+    }
+    Ok(())
+}
+
+/// Checks the rules of BIP-375 on the outputs: each one has a script, a silent payment code, or
+/// both once the script of the code is computed; a label comes with a code; and once a script is
+/// computed, inputs and outputs can't be added or removed anymore.
+fn validate_silent_payment_outputs(
+    outputs: &[Output],
+    tx_modifiable: Option<u8>,
+) -> Result<(), PsbtError> {
+    // The Inputs Modifiable and Outputs Modifiable flags. As in BIP-370, a missing field means
+    // that nothing is modifiable (BIP-375's reference validator also wants the field present).
+    let modifiable = tx_modifiable.unwrap_or(0) & 0b11 != 0;
+    for output in outputs {
+        match (output.script, output.sp_v0_info) {
+            (None, None) => return Err(PsbtError::MissingOutputScript),
+            (Some(_), Some(_)) if modifiable => return Err(PsbtError::InvalidSilentPayment),
+            _ => {}
+        }
+        if output.sp_v0_label.is_some() && output.sp_v0_info.is_none() {
+            return Err(PsbtError::InvalidSilentPayment);
+        }
+    }
+    Ok(())
 }
 
 impl<'a> Psbt<'a> {
@@ -327,6 +400,11 @@ impl<'a> Psbt<'a> {
         let mut tx_modifiable = None::<u8>;
 
         let global_map = ParsedMap::from_cursor(&mut cur, |pair: &MapPair| {
+            match pair.key_type {
+                PSBT_GLOBAL_SP_ECDH_SHARE => return check_sizes(pair, 33, 33),
+                PSBT_GLOBAL_SP_DLEQ => return check_sizes(pair, 33, 64),
+                _ => {}
+            }
             if !pair.key_data.is_empty() {
                 return Ok(());
             }
@@ -411,6 +489,8 @@ impl<'a> Psbt<'a> {
             return Err(PsbtError::UnexpectedEof);
         }
 
+        validate_silent_payment_outputs(&outputs, tx_modifiable)?;
+
         Ok(Self {
             raw_psbt: raw,
             global_map,
@@ -420,6 +500,7 @@ impl<'a> Psbt<'a> {
             tx_version,
             fallback_locktime,
             tx_modifiable,
+            sp_output_scripts: Vec::new(),
             cached_unsigned_tx: OnceCell::new(),
         })
     }
@@ -433,6 +514,76 @@ impl<'a> Psbt<'a> {
         self.global_map
             .iter_keys(key_type)
             .map(|p| (p.key_data, p.value))
+    }
+
+    /// BIP-375 `PSBT_GLOBAL_SP_ECDH_SHARE`: the ECDH shares of all the eligible inputs, as
+    /// `(scan key, share)`.
+    pub fn sp_ecdh_shares(&self) -> impl Iterator<Item = (&'a [u8; 33], &'a [u8; 33])> + '_ {
+        self.global_map.iter_sized(PSBT_GLOBAL_SP_ECDH_SHARE)
+    }
+
+    /// BIP-375 `PSBT_GLOBAL_SP_DLEQ`: the DLEQ proofs of the global ECDH shares, as
+    /// `(scan key, proof)`.
+    pub fn sp_dleq_proofs(&self) -> impl Iterator<Item = (&'a [u8; 33], &'a [u8; 64])> + '_ {
+        self.global_map.iter_sized(PSBT_GLOBAL_SP_DLEQ)
+    }
+
+    /// The global ECDH share for `scan_key` (BIP-375 `PSBT_GLOBAL_SP_ECDH_SHARE`).
+    pub fn get_sp_ecdh_share(&self, scan_key: &[u8; 33]) -> Option<&'a [u8; 33]> {
+        self.global_map
+            .get_sized(PSBT_GLOBAL_SP_ECDH_SHARE, scan_key)
+    }
+
+    /// The DLEQ proof of the global ECDH share for `scan_key` (BIP-375 `PSBT_GLOBAL_SP_DLEQ`).
+    pub fn get_sp_dleq_proof(&self, scan_key: &[u8; 33]) -> Option<&'a [u8; 64]> {
+        self.global_map.get_sized(PSBT_GLOBAL_SP_DLEQ, scan_key)
+    }
+
+    /// The script of output `index`: its `PSBT_OUT_SCRIPT`, or, for a silent payment output
+    /// without one, the script set with [`Psbt::set_sp_output_scripts`].
+    pub fn output_script(&self, index: usize) -> Option<&[u8]> {
+        let output = self.outputs.get(index)?;
+        output.script.or_else(|| {
+            self.sp_output_scripts
+                .get(index)?
+                .as_ref()
+                .map(|s| s.as_bytes())
+        })
+    }
+
+    /// Sets the scripts that the signer computed for the silent payment outputs without
+    /// `PSBT_OUT_SCRIPT` (BIP-375), as `(output index, script)`, so that the unsigned transaction
+    /// can be built. Each of these outputs needs a script, and it must be a taproot output.
+    ///
+    /// The scripts can only be set once, and before the unsigned transaction is first built.
+    pub fn set_sp_output_scripts(
+        &mut self,
+        scripts: Vec<(usize, ScriptBuf)>,
+    ) -> Result<(), PsbtError> {
+        if self.cached_unsigned_tx.get().is_some() || !self.sp_output_scripts.is_empty() {
+            return Err(PsbtError::InvalidOutputScripts);
+        }
+        let mut res: Vec<Option<ScriptBuf>> = alloc::vec![None; self.outputs.len()];
+        for (index, script) in scripts {
+            let output = self
+                .outputs
+                .get(index)
+                .ok_or(PsbtError::InvalidOutputScripts)?;
+            if output.script.is_some() || res[index].is_some() || !script.is_p2tr() {
+                return Err(PsbtError::InvalidOutputScripts);
+            }
+            res[index] = Some(script);
+        }
+        if self
+            .outputs
+            .iter()
+            .zip(&res)
+            .any(|(output, script)| output.script.is_none() && script.is_none())
+        {
+            return Err(PsbtError::InvalidOutputScripts);
+        }
+        self.sp_output_scripts = res;
+        Ok(())
     }
 
     pub fn unsigned_tx(&self) -> Result<&bitcoin::Transaction, PsbtError> {
@@ -497,9 +648,11 @@ impl<'a> Psbt<'a> {
 
         // Build outputs
         let mut outs = Vec::with_capacity(self.outputs.len());
-        for out in &self.outputs {
+        for (index, out) in self.outputs.iter().enumerate() {
             let amt = Amount::from_sat(out.amount.ok_or(PsbtError::BadValue)?);
-            let spk_bytes = out.script.ok_or(PsbtError::BadValue)?;
+            let spk_bytes = self
+                .output_script(index)
+                .ok_or(PsbtError::MissingOutputScript)?;
             outs.push(TxOut {
                 value: amt,
                 script_pubkey: ScriptBuf::from_bytes(spk_bytes.to_vec()),
@@ -646,8 +799,27 @@ impl<'a> Input<'a> {
         let mut sequence = None;
         let mut required_time_locktime = None;
         let mut required_height_locktime = None;
+        let mut sp_tweak = None;
 
         let map = ParsedMap::from_cursor(cur, |pair: &MapPair| {
+            match pair.key_type {
+                PSBT_IN_SP_ECDH_SHARE => return check_sizes(pair, 33, 33),
+                PSBT_IN_SP_DLEQ => return check_sizes(pair, 33, 64),
+                PSBT_IN_SP_SPEND_BIP32_DERIVATION => {
+                    // the key origin: a fingerprint, then the steps of the path
+                    let value_len = pair.value.len();
+                    if pair.key_data.len() != 33 || value_len < 4 || value_len % 4 != 0 {
+                        return Err(PsbtError::BadValue);
+                    }
+                    return Ok(());
+                }
+                PSBT_IN_SP_TWEAK => {
+                    check_sizes(pair, 0, 32)?;
+                    sp_tweak = pair.value.try_into().ok();
+                    return Ok(());
+                }
+                _ => {}
+            }
             if !pair.key_data.is_empty() {
                 return Ok(());
             }
@@ -747,6 +919,7 @@ impl<'a> Input<'a> {
             sequence,
             required_time_locktime,
             required_height_locktime,
+            sp_tweak,
             cached_witness_utxo: OnceCell::new(),
             cached_non_witness_utxo: OnceCell::new(),
         })
@@ -763,6 +936,42 @@ impl<'a> Input<'a> {
 
     pub fn bip32_derivations(&self) -> impl Iterator<Item = (&'a [u8], &'a [u8])> + '_ {
         self.iter_keys(PSBT_IN_BIP32_DERIVATION)
+    }
+
+    /// BIP-375 `PSBT_IN_SP_ECDH_SHARE`: the ECDH shares of this input, as `(scan key, share)`.
+    pub fn sp_ecdh_shares(&self) -> impl Iterator<Item = (&'a [u8; 33], &'a [u8; 33])> + '_ {
+        self.map.iter_sized(PSBT_IN_SP_ECDH_SHARE)
+    }
+
+    /// BIP-375 `PSBT_IN_SP_DLEQ`: the DLEQ proofs of this input's ECDH shares, as
+    /// `(scan key, proof)`.
+    pub fn sp_dleq_proofs(&self) -> impl Iterator<Item = (&'a [u8; 33], &'a [u8; 64])> + '_ {
+        self.map.iter_sized(PSBT_IN_SP_DLEQ)
+    }
+
+    /// This input's ECDH share for `scan_key` (BIP-375 `PSBT_IN_SP_ECDH_SHARE`).
+    pub fn get_sp_ecdh_share(&self, scan_key: &[u8; 33]) -> Option<&'a [u8; 33]> {
+        self.map.get_sized(PSBT_IN_SP_ECDH_SHARE, scan_key)
+    }
+
+    /// The DLEQ proof of this input's ECDH share for `scan_key` (BIP-375 `PSBT_IN_SP_DLEQ`).
+    pub fn get_sp_dleq_proof(&self, scan_key: &[u8; 33]) -> Option<&'a [u8; 64]> {
+        self.map.get_sized(PSBT_IN_SP_DLEQ, scan_key)
+    }
+
+    /// BIP-376 `PSBT_IN_SP_SPEND_BIP32_DERIVATION`: the spend keys of the silent payment output
+    /// that this input spends, with their key origin (a fingerprint, then the steps of the path).
+    pub fn sp_spend_bip32_derivations(
+        &self,
+    ) -> impl Iterator<Item = (&'a [u8; 33], &'a [u8])> + '_ {
+        self.map
+            .iter_keys(PSBT_IN_SP_SPEND_BIP32_DERIVATION)
+            .map(|p| {
+                (
+                    p.key_data.try_into().expect("checked while parsing"),
+                    p.value,
+                )
+            })
     }
 
     /// Key data: `agg_pk(33) || [leaf_hash(32)]`. Value: a concatenation of
@@ -871,8 +1080,23 @@ impl<'a> Output<'a> {
         let mut witness_script = None;
         let mut amount = None;
         let mut script = None;
+        let mut sp_v0_info = None;
+        let mut sp_v0_label = None;
 
         let map = ParsedMap::from_cursor(cur, |pair: &MapPair| {
+            match pair.key_type {
+                PSBT_OUT_SP_V0_INFO => {
+                    check_sizes(pair, 0, 66)?;
+                    sp_v0_info = pair.value.try_into().ok();
+                    return Ok(());
+                }
+                PSBT_OUT_SP_V0_LABEL => {
+                    check_sizes(pair, 0, 4)?;
+                    sp_v0_label = pair.value.try_into().ok().map(u32::from_le_bytes);
+                    return Ok(());
+                }
+                _ => {}
+            }
             if !pair.key_data.is_empty() {
                 return Ok(());
             }
@@ -912,6 +1136,8 @@ impl<'a> Output<'a> {
             witness_script,
             amount,
             script,
+            sp_v0_info,
+            sp_v0_label,
         })
     }
 
@@ -1357,5 +1583,342 @@ mod test {
             .unwrap()
             .unwrap();
         assert_eq!(pks, vec![PARTICIPANT_1, PARTICIPANT_2]);
+    }
+
+    // -------------------------------------------------------------------------
+    // BIP-375 / BIP-376 (silent payments)
+    // -------------------------------------------------------------------------
+
+    type Entry<'a> = (u8, &'a [u8], &'a [u8]);
+
+    /// Serializes a map from its entries, sorted as the parser requires.
+    fn map(entries: &[Entry]) -> Vec<u8> {
+        let mut entries = entries.to_vec();
+        entries.sort();
+        let mut v = Vec::new();
+        for (key_type, key_data, value) in entries {
+            v.push(1 + key_data.len() as u8);
+            v.push(key_type);
+            v.extend_from_slice(key_data);
+            v.push(value.len() as u8);
+            v.extend_from_slice(value);
+        }
+        v.push(0);
+        v
+    }
+
+    /// A PSBTv2 with the given extra global entries, and inputs and outputs with the given
+    /// entries besides their outpoint and amount.
+    fn sp_psbt(global: &[Entry], inputs: &[&[Entry]], outputs: &[&[Entry]]) -> Vec<u8> {
+        let (n_inputs, n_outputs) = ([inputs.len() as u8], [outputs.len() as u8]);
+        let mut global = global.to_vec();
+        global.extend_from_slice(&[
+            (PSBT_GLOBAL_TX_VERSION, &[], &[2, 0, 0, 0]),
+            (PSBT_GLOBAL_INPUT_COUNT, &[], &n_inputs),
+            (PSBT_GLOBAL_OUTPUT_COUNT, &[], &n_outputs),
+            (PSBT_GLOBAL_VERSION, &[], &[2, 0, 0, 0]),
+        ]);
+        let mut v = b"psbt\xff".to_vec();
+        v.extend(map(&global));
+        for input in inputs {
+            let mut input = input.to_vec();
+            input.push((PSBT_IN_PREVIOUS_TXID, &[], &[7u8; 32]));
+            input.push((PSBT_IN_OUTPUT_INDEX, &[], &[0, 0, 0, 0]));
+            v.extend(map(&input));
+        }
+        for output in outputs {
+            let mut output = output.to_vec();
+            output.push((PSBT_OUT_AMOUNT, &[], &[0xe8, 0x03, 0, 0, 0, 0, 0, 0]));
+            v.extend(map(&output));
+        }
+        v
+    }
+
+    const SCAN_KEY: [u8; 33] =
+        hex!("0220bcfac5b99e04ad1a06ddfb016ee13582609d60b6291e98d01a9bc9a16c96d4");
+    const SPEND_KEY: [u8; 33] =
+        hex!("025cc9856d6f8375350e123978daac200c260cb5b5ae83106cab90484dcd8fcf36");
+    const P2WPKH: [u8; 22] = hex!("0014d85c2b71d0060b09c9886aeb815e50991dda124d");
+
+    fn sp_info() -> [u8; 66] {
+        let mut info = [0u8; 66];
+        info[..33].copy_from_slice(&SCAN_KEY);
+        info[33..].copy_from_slice(&SPEND_KEY);
+        info
+    }
+
+    fn p2tr(key: u8) -> ScriptBuf {
+        let mut script = alloc::vec![0x51, 0x20];
+        script.extend_from_slice(&[key; 32]);
+        ScriptBuf::from_bytes(script)
+    }
+
+    #[test]
+    fn sp_fields() {
+        let (share, proof, tweak) = ([2u8; 33], [3u8; 64], [4u8; 32]);
+        let origin = hex!("f5acc2fd60010080");
+        let info = sp_info();
+        let raw = sp_psbt(
+            &[
+                (PSBT_GLOBAL_SP_ECDH_SHARE, &SCAN_KEY, &share),
+                (PSBT_GLOBAL_SP_DLEQ, &SCAN_KEY, &proof),
+            ],
+            &[&[
+                (PSBT_IN_SP_ECDH_SHARE, &SCAN_KEY, &share),
+                (PSBT_IN_SP_DLEQ, &SCAN_KEY, &proof),
+                (PSBT_IN_SP_SPEND_BIP32_DERIVATION, &SPEND_KEY, &origin),
+                (PSBT_IN_SP_TWEAK, &[], &tweak),
+            ]],
+            &[
+                &[
+                    (PSBT_OUT_SP_V0_INFO, &[], &info),
+                    (PSBT_OUT_SP_V0_LABEL, &[], &[3, 0, 0, 0]),
+                ],
+                &[(PSBT_OUT_SCRIPT, &[], &P2WPKH)],
+            ],
+        );
+        let psbt = Psbt::parse(&raw).unwrap();
+
+        assert_eq!(
+            psbt.sp_ecdh_shares().collect::<Vec<_>>(),
+            [(&SCAN_KEY, &share)]
+        );
+        assert_eq!(
+            psbt.sp_dleq_proofs().collect::<Vec<_>>(),
+            [(&SCAN_KEY, &proof)]
+        );
+        assert_eq!(psbt.get_sp_ecdh_share(&SCAN_KEY), Some(&share));
+        assert_eq!(psbt.get_sp_dleq_proof(&SCAN_KEY), Some(&proof));
+        assert_eq!(psbt.get_sp_ecdh_share(&SPEND_KEY), None);
+
+        let input = &psbt.inputs[0];
+        assert_eq!(
+            input.sp_ecdh_shares().collect::<Vec<_>>(),
+            [(&SCAN_KEY, &share)]
+        );
+        assert_eq!(
+            input.sp_dleq_proofs().collect::<Vec<_>>(),
+            [(&SCAN_KEY, &proof)]
+        );
+        assert_eq!(input.get_sp_ecdh_share(&SCAN_KEY), Some(&share));
+        assert_eq!(input.get_sp_dleq_proof(&SCAN_KEY), Some(&proof));
+        assert_eq!(
+            input.sp_spend_bip32_derivations().collect::<Vec<_>>(),
+            [(&SPEND_KEY, &origin[..])]
+        );
+        assert_eq!(input.sp_tweak, Some(&tweak));
+
+        assert_eq!(psbt.outputs[0].sp_v0_info, Some(&info));
+        assert_eq!(psbt.outputs[0].sp_v0_label, Some(3));
+        assert_eq!(psbt.outputs[0].script, None);
+        assert_eq!(psbt.outputs[1].sp_v0_info, None);
+        assert_eq!(psbt.output_script(1), Some(&P2WPKH[..]));
+    }
+
+    #[test]
+    fn sp_field_sizes() {
+        let info = sp_info();
+        let script: Entry = (PSBT_OUT_SCRIPT, &[], &P2WPKH);
+        let parse = |global: &[Entry], input: &[Entry], output: &[Entry]| {
+            Psbt::parse(&sp_psbt(global, &[input], &[output])).map(|_| ())
+        };
+        let bad = Err(PsbtError::BadValue);
+
+        // global and per-input shares and proofs: a 33-byte scan key, a 33-byte share and a
+        // 64-byte proof
+        for (key_type, value_len) in [(PSBT_GLOBAL_SP_ECDH_SHARE, 33), (PSBT_GLOBAL_SP_DLEQ, 64)] {
+            let value = [2u8; 65];
+            assert_eq!(
+                parse(
+                    &[(key_type, &SCAN_KEY, &value[..value_len])],
+                    &[],
+                    &[script]
+                ),
+                Ok(())
+            );
+            assert_eq!(
+                parse(
+                    &[(key_type, &SCAN_KEY, &value[..value_len - 1])],
+                    &[],
+                    &[script]
+                ),
+                bad
+            );
+            assert_eq!(
+                parse(
+                    &[(key_type, &SCAN_KEY[..32], &value[..value_len])],
+                    &[],
+                    &[script]
+                ),
+                bad
+            );
+        }
+        for (key_type, value_len) in [(PSBT_IN_SP_ECDH_SHARE, 33), (PSBT_IN_SP_DLEQ, 64)] {
+            let value = [2u8; 65];
+            assert_eq!(
+                parse(
+                    &[],
+                    &[(key_type, &SCAN_KEY, &value[..value_len])],
+                    &[script]
+                ),
+                Ok(())
+            );
+            assert_eq!(
+                parse(
+                    &[],
+                    &[(key_type, &SCAN_KEY, &value[..value_len + 1])],
+                    &[script]
+                ),
+                bad
+            );
+            assert_eq!(
+                parse(&[], &[(key_type, &[], &value[..value_len])], &[script]),
+                bad
+            );
+        }
+
+        // the spend key's origin: a 33-byte key, then a fingerprint and whole steps
+        let origin = [0u8; 9];
+        let spend = |key: &'static [u8], value| [(PSBT_IN_SP_SPEND_BIP32_DERIVATION, key, value)];
+        assert_eq!(
+            parse(&[], &spend(&SPEND_KEY, &origin[..4]), &[script]),
+            Ok(())
+        );
+        assert_eq!(
+            parse(&[], &spend(&SPEND_KEY, &origin[..8]), &[script]),
+            Ok(())
+        );
+        assert_eq!(parse(&[], &spend(&SPEND_KEY, &origin[..3]), &[script]), bad);
+        assert_eq!(parse(&[], &spend(&SPEND_KEY, &origin[..9]), &[script]), bad);
+        assert_eq!(
+            parse(&[], &spend(&SPEND_KEY[..32], &origin[..4]), &[script]),
+            bad
+        );
+
+        // the tweak, the code and the label, which have no key data
+        let tweak = |key, value: &'static [u8]| -> [Entry; 1] { [(PSBT_IN_SP_TWEAK, key, value)] };
+        assert_eq!(parse(&[], &tweak(&[], &[0u8; 32]), &[script]), Ok(()));
+        assert_eq!(parse(&[], &tweak(&[], &[0u8; 31]), &[script]), bad);
+        assert_eq!(parse(&[], &tweak(&[0], &[0u8; 32]), &[script]), bad);
+        assert_eq!(
+            parse(&[], &[], &[(PSBT_OUT_SP_V0_INFO, &[], &info[..65])]),
+            bad
+        );
+        assert_eq!(
+            parse(&[], &[], &[script, (PSBT_OUT_SP_V0_INFO, &[0], &info)]),
+            bad
+        );
+        let label = |key, value| -> [Entry; 2] {
+            [
+                (PSBT_OUT_SP_V0_INFO, &[][..], &info[..]),
+                (PSBT_OUT_SP_V0_LABEL, key, value),
+            ]
+        };
+        assert_eq!(parse(&[], &[], &label(&[], &[0u8; 4])), Ok(()));
+        assert_eq!(parse(&[], &[], &label(&[], &[0u8; 3])), bad);
+        assert_eq!(parse(&[], &[], &label(&[], &[0u8; 5])), bad);
+        assert_eq!(parse(&[], &[], &label(&[0], &[0u8; 4])), bad);
+    }
+
+    #[test]
+    fn sp_output_rules() {
+        let info = sp_info();
+        let parse = |global: &[Entry], output: &[Entry]| {
+            Psbt::parse(&sp_psbt(global, &[&[]], &[output])).map(|_| ())
+        };
+
+        // a script, a code, or both
+        assert_eq!(parse(&[], &[]), Err(PsbtError::MissingOutputScript));
+        assert_eq!(parse(&[], &[(PSBT_OUT_SCRIPT, &[], &P2WPKH)]), Ok(()));
+        assert_eq!(parse(&[], &[(PSBT_OUT_SP_V0_INFO, &[], &info)]), Ok(()));
+
+        // a label needs a code
+        assert_eq!(
+            parse(
+                &[],
+                &[
+                    (PSBT_OUT_SCRIPT, &[], &P2WPKH),
+                    (PSBT_OUT_SP_V0_LABEL, &[], &[1, 0, 0, 0])
+                ]
+            ),
+            Err(PsbtError::InvalidSilentPayment)
+        );
+
+        // once the script of a code is computed, inputs and outputs can't be modified anymore
+        let p2tr = p2tr(1);
+        let computed: [Entry; 2] = [
+            (PSBT_OUT_SCRIPT, &[], p2tr.as_bytes()),
+            (PSBT_OUT_SP_V0_INFO, &[], &info),
+        ];
+        assert_eq!(parse(&[], &computed), Ok(()));
+        for (flags, res) in [
+            (0b000, Ok(())),
+            (0b100, Ok(())),
+            (0b001, Err(PsbtError::InvalidSilentPayment)),
+            (0b010, Err(PsbtError::InvalidSilentPayment)),
+        ] {
+            assert_eq!(
+                parse(&[(PSBT_GLOBAL_TX_MODIFIABLE, &[], &[flags])], &computed),
+                res
+            );
+        }
+        // but they can be while the script isn't computed
+        assert_eq!(
+            parse(
+                &[(PSBT_GLOBAL_TX_MODIFIABLE, &[], &[0b011])],
+                &[(PSBT_OUT_SP_V0_INFO, &[], &info)]
+            ),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn sp_output_scripts() {
+        let info = sp_info();
+        let sp: &[Entry] = &[(PSBT_OUT_SP_V0_INFO, &[], &info)];
+        let raw = sp_psbt(&[], &[&[]], &[sp, &[(PSBT_OUT_SCRIPT, &[], &P2WPKH)], sp]);
+        let parse = || Psbt::parse(&raw).unwrap();
+        let invalid = Err(PsbtError::InvalidOutputScripts);
+
+        // the transaction can't be built without the scripts
+        let psbt = parse();
+        assert_eq!(psbt.output_script(0), None);
+        assert_eq!(
+            psbt.unsigned_tx().err(),
+            Some(PsbtError::MissingOutputScript)
+        );
+
+        // a script for each silent payment output without one, and nothing else
+        for scripts in [
+            alloc::vec![(0, p2tr(1))],
+            alloc::vec![(0, p2tr(1)), (2, p2tr(2)), (1, p2tr(3))],
+            alloc::vec![(0, p2tr(1)), (2, p2tr(2)), (0, p2tr(3))],
+            alloc::vec![(0, p2tr(1)), (2, p2tr(2)), (3, p2tr(3))],
+            alloc::vec![(0, p2tr(1)), (2, ScriptBuf::from_bytes(P2WPKH.to_vec()))],
+        ] {
+            assert_eq!(parse().set_sp_output_scripts(scripts), invalid);
+        }
+
+        let mut psbt = parse();
+        psbt.set_sp_output_scripts(alloc::vec![(2, p2tr(2)), (0, p2tr(1))])
+            .unwrap();
+        assert_eq!(psbt.output_script(0), Some(p2tr(1).as_bytes()));
+        assert_eq!(psbt.output_script(1), Some(&P2WPKH[..]));
+        let tx = psbt.unsigned_tx().unwrap();
+        let scripts: Vec<_> = tx.output.iter().map(|o| o.script_pubkey.clone()).collect();
+        assert_eq!(
+            scripts,
+            [p2tr(1), ScriptBuf::from_bytes(P2WPKH.to_vec()), p2tr(2)]
+        );
+
+        // only once, and not after the transaction was built
+        assert_eq!(
+            psbt.set_sp_output_scripts(alloc::vec![(0, p2tr(1)), (2, p2tr(2))]),
+            invalid
+        );
+        let raw = sp_psbt(&[], &[&[]], &[&[(PSBT_OUT_SCRIPT, &[], &P2WPKH)]]);
+        let mut psbt = Psbt::parse(&raw).unwrap();
+        psbt.unsigned_tx().unwrap();
+        assert_eq!(psbt.set_sp_output_scripts(alloc::vec![]), invalid);
     }
 }
