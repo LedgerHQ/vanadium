@@ -125,6 +125,10 @@ pub enum Error {
     // Silent payments
     #[n(48)]
     UnsupportedSilentPayment,
+
+    // Signing
+    #[n(49)]
+    UnsupportedSighashType,
 }
 
 impl fmt::Display for Error {
@@ -206,6 +210,8 @@ impl fmt::Display for Error {
             ),
 
             UnsupportedSilentPayment => write!(f, "Unsupported silent payment"),
+
+            UnsupportedSighashType => write!(f, "Unsupported sighash type"),
         }
     }
 }

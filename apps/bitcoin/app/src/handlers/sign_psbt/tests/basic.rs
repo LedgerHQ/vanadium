@@ -1,9 +1,16 @@
 //! Single-signature accounts: one signature per supported script type.
 
 use base64::{engine::general_purpose::STANDARD, Engine as _};
-use bitcoin::{psbt::Psbt, secp256k1::schnorr::Signature, XOnlyPublicKey};
+use bitcoin::{
+    hashes::Hash,
+    psbt::{Psbt, PsbtSighashType},
+    secp256k1::schnorr::Signature,
+    sighash::{Prevouts, SighashCache},
+    TapSighashType, XOnlyPublicKey,
+};
 use common::{
     bip388::WalletPolicy,
+    errors::Error,
     message::{PartialSignature, Response},
     por::{ProofOfRegistration, Registerable},
 };
@@ -129,6 +136,92 @@ fn test_handle_sign_psbt_tr() {
         &pubkey,
     )
     .expect("Signature verification failed");
+}
+
+/// A wpkh input whose PSBT asks for SIGHASH_ALL gets the same signature as one without a sighash
+/// type; the other types aren't supported.
+#[test]
+fn test_handle_sign_psbt_wpkh_sighash_types() {
+    let psbt_b64 = "cHNidP8BAHQCAAAAAXoqmXlWwJ+Op/0oGcGph7sU4iv5rc2vIKiXY3Is7uJkAQAAAAD9////AqC7DQAAAAAAGXapFDRKD0jKFQ7CuQOBdmC5tosTpnAmiKx0OCMAAAAAABYAFOs4+puBKPgfJule2wxf+uqDaQ/kAAAAAAABAH0CAAAAAa+/rgZZD3Qf8a9ZtqxGESYzakxKgttVPfb++rc3rDPzAQAAAAD9////AnARAQAAAAAAIgAg/e5EHFblsG0N+CwSTHBwFKXKGWWL4LmFa8oW8e0yWfel9DAAAAAAABYAFDr4QprVlUql7oozyYP9ih6GeZJLAAAAAAEBH6X0MAAAAAAAFgAUOvhCmtWVSqXuijPJg/2KHoZ5kksiBgPuLD2Y6x+TwKGqjlpACbcOt7ROrRXxZm8TawEq1Y0waBj1rML9VAAAgAEAAIAAAACAAQAAAAgAAAAAACICAinsR3JxMe0liKIMRu2pq7fapvSf1Quv5wucWqaWHE7MGPWswv1UAACAAQAAgAAAAIABAAAACgAAAAA=";
+    let wallet_policy = WalletPolicy::new(
+        "wpkh(@0/**)",
+        vec![
+            "[f5acc2fd/84'/1'/0']tpubDCtKfsNyRhULjZ9XMS4VKKtVcPdVDi8MKUbcSD9MJDyjRu1A2ND5MiipozyyspBT9bg8upEp7a8EAgFxNxXn1d7QkdbL52Ty5jiSLcxPt1P".try_into().unwrap()
+        ]
+    ).unwrap();
+    let account_name = "My segwit account #0";
+    let por =
+        ProofOfRegistration::new(&wallet_policy.registration_id(account_name)).dangerous_as_bytes();
+    let sign = |sighash_type: u32| {
+        let mut psbt = Psbt::deserialize(&STANDARD.decode(psbt_b64).unwrap()).unwrap();
+        psbt.inputs[0].sighash_type = Some(PsbtSighashType::from_u32(sighash_type));
+        let psbt_v2 = prepare_as_psbtv2(&psbt, &[(&wallet_policy, account_name, &por)]);
+        sdk::executor::block_on(handle_sign_psbt(&mut sdk::App::singleton(), &psbt_v2))
+    };
+
+    let Response::PsbtSigned { signatures, .. } = sign(0x01).unwrap() else {
+        panic!("Expected PsbtSigned response");
+    };
+    assert_eq!(signatures[0].signature, hex!("3045022100ab44f34dd7e87c9054591297a101e8500a0641d1d591878d0d23cf8096fa79e802205d12d1062d925e27b57bdcf994ecf332ad0a8e67b8fe407bab2101255da632aa01"));
+
+    // SIGHASH_DEFAULT only exists for taproot
+    for sighash_type in [0x00, 0x02, 0x03, 0x81, 0x83, 0x101] {
+        assert_eq!(sign(sighash_type), Err(Error::UnsupportedSighashType));
+    }
+}
+
+/// A taproot input whose PSBT asks for SIGHASH_DEFAULT or SIGHASH_ALL gets a signature with that
+/// sighash type, whose byte ends it for SIGHASH_ALL; the other types aren't supported.
+#[test]
+fn test_handle_sign_psbt_tr_sighash_types() {
+    let psbt_b64 = "cHNidP8BAH0CAAAAAeFoYcDSl0n1LNLt3hDLzE9ZEhBxD2QOXY4UQM6F2W3GAQAAAAD9////Ao00lwAAAAAAIlEgC450hrwwagrvt6fACvBAVULbGs1z7syoJ3HM9f5etg+ghgEAAAAAABYAFBOZuKCYR6A5sDUvWNISwYC6sX93AAAAAAABASvfu5gAAAAAACJRIImQSmNI1/+aRNSduLaoB8Yi6Gg2TFR9pCbzC1piExhqIRbpxpsJXtBLVir8jUFpGTa6Vz629om8I2YAvk+jkm9kEhkA9azC/VYAAIABAACAAAAAgAEAAAADAAAAARcg6cabCV7QS1Yq/I1BaRk2ulc+tvaJvCNmAL5Po5JvZBIAAQUgApCB7OVhaqHLmTGfxIdO/uR/CM66X2AEY2yMQ0CaXwohBwKQgezlYWqhy5kxn8SHTv7kfwjOul9gBGNsjENAml8KGQD1rML9VgAAgAEAAIAAAACAAQAAAAIAAAAAAA==";
+    let psbt = Psbt::deserialize(&STANDARD.decode(psbt_b64).unwrap()).unwrap();
+    let wallet_policy = WalletPolicy::new(
+        "tr(@0/**)",
+        vec![
+            "[f5acc2fd/86'/1'/0']tpubDDKYE6BREvDsSWMazgHoyQWiJwYaDDYPbCFjYxN3HFXJP5fokeiK4hwK5tTLBNEDBwrDXn8cQ4v9b2xdW62Xr5yxoQdMu1v6c7UDXYVH27U".try_into().unwrap()
+        ]
+    ).unwrap();
+    let account_name = "My taproot account #0";
+    let por =
+        ProofOfRegistration::new(&wallet_policy.registration_id(account_name)).dangerous_as_bytes();
+    let sign = |sighash_type: u32| {
+        let mut psbt = psbt.clone();
+        psbt.inputs[0].sighash_type = Some(PsbtSighashType::from_u32(sighash_type));
+        let psbt_v2 = prepare_as_psbtv2(&psbt, &[(&wallet_policy, account_name, &por)]);
+        sdk::executor::block_on(handle_sign_psbt(&mut sdk::App::singleton(), &psbt_v2))
+    };
+
+    for sighash_type in [TapSighashType::Default, TapSighashType::All] {
+        let Response::PsbtSigned { signatures, .. } = sign(sighash_type as u32).unwrap() else {
+            panic!("Expected PsbtSigned response");
+        };
+        assert_eq!(signatures.len(), 1);
+        let signature = match sighash_type {
+            TapSighashType::Default => &signatures[0].signature[..],
+            _ => {
+                let (byte, signature) = signatures[0].signature.split_last().unwrap();
+                assert_eq!(*byte, sighash_type as u8);
+                signature
+            }
+        };
+
+        let prevout = psbt.inputs[0].witness_utxo.clone().unwrap();
+        let sighash = SighashCache::new(&psbt.unsigned_tx)
+            .taproot_key_spend_signature_hash(0, &Prevouts::All(&[prevout]), sighash_type)
+            .unwrap();
+        let secp = bitcoin::secp256k1::Secp256k1::new();
+        secp.verify_schnorr(
+            &Signature::from_slice(signature).unwrap(),
+            &bitcoin::secp256k1::Message::from_digest(sighash.to_byte_array()),
+            &XOnlyPublicKey::from_slice(&signatures[0].pubkey).unwrap(),
+        )
+        .expect("Signature verification failed");
+    }
+
+    for sighash_type in [0x02, 0x03, 0x81, 0x83, 0x101] {
+        assert_eq!(sign(sighash_type), Err(Error::UnsupportedSighashType));
+    }
 }
 
 #[test]
