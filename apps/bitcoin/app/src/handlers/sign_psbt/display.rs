@@ -194,7 +194,7 @@ mod tests {
     use super::*;
 
     use super::super::analyze::analyze_transaction;
-    use super::super::test_utils::{legacy_pkh_psbt, serialize_as_psbtv2};
+    use super::super::test_utils::legacy_pkh_psbt;
 
     #[test]
     fn format_amount_pads_the_fractional_part() {
@@ -209,8 +209,7 @@ mod tests {
     /// included. It used to be rendered as a raw satoshi count under the same ticker.
     #[test]
     fn fee_is_shown_in_whole_coins() {
-        let psbt = legacy_pkh_psbt();
-        let serialized = serialize_as_psbtv2(&psbt);
+        let serialized = legacy_pkh_psbt().serialize();
         let parsed = fastpsbt::Psbt::parse(&serialized).unwrap();
         let (summary, _) = analyze_transaction(&parsed).unwrap();
 
@@ -225,8 +224,7 @@ mod tests {
     /// screen reads consistently top to bottom.
     #[test]
     fn spend_and_output_amounts_are_shown_in_whole_coins() {
-        let psbt = legacy_pkh_psbt();
-        let serialized = serialize_as_psbtv2(&psbt);
+        let serialized = legacy_pkh_psbt().serialize();
         let parsed = fastpsbt::Psbt::parse(&serialized).unwrap();
         let (summary, _) = analyze_transaction(&parsed).unwrap();
 

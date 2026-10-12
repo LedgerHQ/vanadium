@@ -3,15 +3,15 @@ use crate::{
     bip388::KeyExpression,
 };
 
-use alloc::{collections::btree_map::BTreeMap, string::String, vec::Vec};
+use alloc::{string::String, vec::Vec};
 use bitcoin::{
     bip32::{DerivationPath, Fingerprint},
     consensus::Encodable,
-    psbt::{self, raw::ProprietaryKey, Psbt},
-    TapLeafHash,
 };
 
-use super::{GlobalHasProprietaryFields, InputHasProprietaryFields, OutputHasProprietaryFields};
+use super::{
+    v2, GlobalHasProprietaryFields, InputHasProprietaryFields, OutputHasProprietaryFields, PsbtV2,
+};
 
 /// Proprietary key prefix for account-related data in PSBT fields
 pub const PSBT_ACCOUNT_PROPRIETARY_IDENTIFIER: [u8; 7] = *b"ACCOUNT";
@@ -240,23 +240,27 @@ pub trait PsbtAccountOutputWrite {
     ) -> Result<(), PsbtAccountError>;
 }
 
-impl PsbtAccountGlobalWrite for Psbt {
-    fn set_account(&mut self, id: u32, account: PsbtAccount) -> Result<(), PsbtAccountError> {
-        let mut id_raw = Vec::with_capacity(1); // unlikely to be more than 1 byte
-        let _ = id.consensus_encode(&mut id_raw).unwrap();
-        let key = ProprietaryKey {
-            prefix: PSBT_ACCOUNT_PROPRIETARY_IDENTIFIER.to_vec(),
-            subtype: PSBT_ACCOUNT_GLOBAL_ACCOUNT_DESCRIPTOR,
-            key: id_raw,
-        };
+// The key data of the global account fields: the compact size account id.
+fn account_id_key(id: u32) -> Vec<u8> {
+    let mut id_raw = Vec::with_capacity(1); // unlikely to be more than 1 byte
+    let _ = id.consensus_encode(&mut id_raw).unwrap();
+    id_raw
+}
 
+impl PsbtAccountGlobalWrite for PsbtV2 {
+    fn set_account(&mut self, id: u32, account: PsbtAccount) -> Result<(), PsbtAccountError> {
         match account {
             PsbtAccount::WalletPolicy(wp) => {
                 let ser_wp = wp.serialize();
                 let mut res = Vec::with_capacity(1 + ser_wp.len());
                 res.push(0x00);
                 res.extend_from_slice(&ser_wp);
-                self.proprietary.insert(key, res);
+                self.global.insert_proprietary(
+                    &PSBT_ACCOUNT_PROPRIETARY_IDENTIFIER,
+                    PSBT_ACCOUNT_GLOBAL_ACCOUNT_DESCRIPTOR,
+                    &account_id_key(id),
+                    res,
+                );
             }
         }
 
@@ -264,18 +268,15 @@ impl PsbtAccountGlobalWrite for Psbt {
     }
 
     fn set_account_name(&mut self, id: u32, name: &str) -> Result<(), PsbtAccountError> {
-        let mut id_raw = Vec::with_capacity(1); // unlikely to be more than 1 byte
-        let _ = id.consensus_encode(&mut id_raw).unwrap();
-        let key = ProprietaryKey {
-            prefix: PSBT_ACCOUNT_PROPRIETARY_IDENTIFIER.to_vec(),
-            subtype: PSBT_ACCOUNT_GLOBAL_ACCOUNT_NAME,
-            key: id_raw,
-        };
-
         if !is_valid_account_name(name.as_bytes()) {
             return Err(PsbtAccountError::InvalidAccountName);
         }
-        self.proprietary.insert(key, name.as_bytes().to_vec());
+        self.global.insert_proprietary(
+            &PSBT_ACCOUNT_PROPRIETARY_IDENTIFIER,
+            PSBT_ACCOUNT_GLOBAL_ACCOUNT_NAME,
+            &account_id_key(id),
+            name.as_bytes().to_vec(),
+        );
 
         Ok(())
     }
@@ -285,121 +286,85 @@ impl PsbtAccountGlobalWrite for Psbt {
         id: u32,
         por: &[u8],
     ) -> Result<(), PsbtAccountError> {
-        let mut id_raw = Vec::with_capacity(1); // unlikely to be more than 1 byte
-        let _ = id.consensus_encode(&mut id_raw).unwrap();
-        let key = ProprietaryKey {
-            prefix: PSBT_ACCOUNT_PROPRIETARY_IDENTIFIER.to_vec(),
-            subtype: PSBT_ACCOUNT_GLOBAL_ACCOUNT_POR,
-            key: id_raw,
-        };
-
         if por.len() < 1 {
             return Err(PsbtAccountError::EmptyValue);
         }
-
-        self.proprietary.insert(key, por.to_vec());
+        self.global.insert_proprietary(
+            &PSBT_ACCOUNT_PROPRIETARY_IDENTIFIER,
+            PSBT_ACCOUNT_GLOBAL_ACCOUNT_POR,
+            &account_id_key(id),
+            por.to_vec(),
+        );
 
         Ok(())
     }
 }
 
-impl PsbtAccountInputWrite for psbt::Input {
+// The value of the coordinates fields: the account id, the account tag, then the coordinates.
+fn coordinates_value(
+    id: u32,
+    coordinates: PsbtAccountCoordinates,
+) -> Result<Vec<u8>, PsbtAccountError> {
+    if id > MAX_SINGLE_BYTE_COMPACTSIZE as u32 {
+        // specs would want a compact size, but we use 1 byte for simplicity
+        return Err(PsbtAccountError::AccountIdTooLarge);
+    }
+    match coordinates {
+        PsbtAccountCoordinates::WalletPolicy(coords) => {
+            let serialized_coords = coords.serialize();
+            let mut serialized_value = Vec::with_capacity(1 + 1 + serialized_coords.len());
+            serialized_value.push(id as u8);
+            serialized_value.push(0); // tag
+            serialized_value.extend_from_slice(&serialized_coords);
+            Ok(serialized_value)
+        }
+    }
+}
+
+impl PsbtAccountInputWrite for v2::Input {
     fn set_account_coordinates(
         &mut self,
         id: u32,
         coordinates: PsbtAccountCoordinates,
     ) -> Result<(), PsbtAccountError> {
-        if id > MAX_SINGLE_BYTE_COMPACTSIZE as u32 {
-            return Err(PsbtAccountError::AccountIdTooLarge);
-        }
-        let key = ProprietaryKey {
-            prefix: PSBT_ACCOUNT_PROPRIETARY_IDENTIFIER.to_vec(),
-            subtype: PSBT_ACCOUNT_IN_COORDINATES,
-            key: Vec::new(),
-        };
-
-        match coordinates {
-            PsbtAccountCoordinates::WalletPolicy(coords) => {
-                let serialized_coords = coords.serialize();
-                let mut serialized_value = Vec::with_capacity(1 + 1 + serialized_coords.len());
-                serialized_value.push(id as u8);
-                serialized_value.push(0); // tag
-                serialized_value.extend_from_slice(&serialized_coords);
-                self.proprietary.insert(key, serialized_value);
-            }
-        }
-
+        let value = coordinates_value(id, coordinates)?;
+        self.insert_proprietary(
+            &PSBT_ACCOUNT_PROPRIETARY_IDENTIFIER,
+            PSBT_ACCOUNT_IN_COORDINATES,
+            &[],
+            value,
+        );
         Ok(())
     }
 }
 
-impl PsbtAccountOutputWrite for psbt::Output {
+impl PsbtAccountOutputWrite for v2::Output {
     fn set_account_coordinates(
         &mut self,
         id: u32,
         coordinates: PsbtAccountCoordinates,
     ) -> Result<(), PsbtAccountError> {
-        if id > MAX_SINGLE_BYTE_COMPACTSIZE as u32 {
-            // specs would want a compact size, but we use 1 byte for simplicity
-            return Err(PsbtAccountError::TooManyAccounts);
-        }
-        let key = ProprietaryKey {
-            prefix: PSBT_ACCOUNT_PROPRIETARY_IDENTIFIER.to_vec(),
-            subtype: PSBT_ACCOUNT_OUT_COORDINATES,
-            key: Vec::new(),
-        };
-
-        match coordinates {
-            PsbtAccountCoordinates::WalletPolicy(coords) => {
-                let serialized_coords = coords.serialize();
-                let mut serialized_value = Vec::with_capacity(1 + 1 + serialized_coords.len());
-                serialized_value.push(id as u8);
-                serialized_value.push(0); // tag
-                serialized_value.extend_from_slice(&serialized_coords);
-                self.proprietary.insert(key, serialized_value);
-            }
-        }
-
+        let value = coordinates_value(id, coordinates)?;
+        self.insert_proprietary(
+            &PSBT_ACCOUNT_PROPRIETARY_IDENTIFIER,
+            PSBT_ACCOUNT_OUT_COORDINATES,
+            &[],
+            value,
+        );
         Ok(())
     }
 }
 
-// Helper function to get wallet policy coordinates from a PSBT input or output
+// Helper function to get wallet policy coordinates from the key origins of a PSBT input or output
 fn get_wallet_policy_coordinates(
-    bip32_derivation: &BTreeMap<bitcoin::secp256k1::PublicKey, (Fingerprint, DerivationPath)>,
-    tap_bip32_derivation: &BTreeMap<
-        bitcoin::secp256k1::XOnlyPublicKey,
-        (Vec<TapLeafHash>, (Fingerprint, DerivationPath)),
-    >,
+    key_origins: &[(Fingerprint, DerivationPath)],
     fingerprint: Fingerprint,
     origin_path_len: usize,
     key_placeholder: &KeyExpression,
 ) -> Option<WalletPolicyCoordinates> {
     // iterate over all derivations; if it's a key derived from the internal key,
     // deduce the coordinates and insert them
-    for (_, (fpr, der)) in bip32_derivation.iter() {
-        if *fpr != fingerprint {
-            continue;
-        }
-        if origin_path_len + 2 != der.len() {
-            continue;
-        }
-        let change_step: u32 = der[der.len() - 2].into();
-        let is_change = match change_step {
-            n if n == key_placeholder.num1 => false,
-            n if n == key_placeholder.num2 => true,
-            _ => continue, // this could only happen in case of a fingerprint collision
-        };
-        let address_index: u32 = der[der.len() - 1].into();
-        return Some(WalletPolicyCoordinates {
-            is_change,
-            address_index,
-        });
-    }
-
-    // do the same for the tap_bip32_derivations
-    // TODO: we might want to avoid the code duplication
-    for (_, (_, (fpr, der))) in tap_bip32_derivation.iter() {
+    for (fpr, der) in key_origins {
         if *fpr != fingerprint {
             continue;
         }
@@ -429,7 +394,7 @@ fn get_wallet_policy_coordinates(
 // Coordinates are deduced from the bip32 derivations in the PSBT, only using keys with
 // full key origin information in the wallet policy.
 pub fn fill_psbt_with_bip388_coordinates(
-    psbt: &mut Psbt,
+    psbt: &mut PsbtV2,
     wallet_policy: &WalletPolicy,
     name: Option<&str>,
     proof_of_registrations: Option<&[u8]>,
@@ -495,11 +460,10 @@ pub fn fill_psbt_with_bip388_coordinates(
         }
     }
 
-    let find_coords = |bip32: &_, tap: &_| -> Option<WalletPolicyCoordinates> {
+    let find_coords = |key_origins: &[_]| -> Option<WalletPolicyCoordinates> {
         for (fingerprint, origin_path_len) in &lookups {
             if let Some(c) = get_wallet_policy_coordinates(
-                bip32,
-                tap,
+                key_origins,
                 *fingerprint,
                 *origin_path_len,
                 key_placeholder,
@@ -511,7 +475,10 @@ pub fn fill_psbt_with_bip388_coordinates(
     };
 
     for input in psbt.inputs.iter_mut() {
-        if let Some(coords) = find_coords(&input.bip32_derivation, &input.tap_key_origins) {
+        let key_origins = input
+            .key_origins()
+            .map_err(|_| PsbtAccountError::InvalidValue)?;
+        if let Some(coords) = find_coords(&key_origins) {
             input.set_account_coordinates(
                 account_id,
                 PsbtAccountCoordinates::WalletPolicy(coords),
@@ -520,7 +487,10 @@ pub fn fill_psbt_with_bip388_coordinates(
     }
 
     for output in psbt.outputs.iter_mut() {
-        if let Some(coords) = find_coords(&output.bip32_derivation, &output.tap_key_origins) {
+        let key_origins = output
+            .key_origins()
+            .map_err(|_| PsbtAccountError::InvalidValue)?;
+        if let Some(coords) = find_coords(&key_origins) {
             output.set_account_coordinates(
                 account_id,
                 PsbtAccountCoordinates::WalletPolicy(coords),
@@ -533,7 +503,7 @@ pub fn fill_psbt_with_bip388_coordinates(
 
 // Fills the PSBT with accounts and coordinates.
 pub fn prepare_psbt(
-    psbt: &mut Psbt,
+    psbt: &mut PsbtV2,
     named_accounts: &[(&WalletPolicy, &str, &[u8; 32])],
 ) -> Result<(), PsbtAccountError> {
     // TODO: generalize this function to support transactions involving multiple accounts, and accounts of different types.
@@ -562,18 +532,18 @@ pub fn prepare_psbt(
 #[cfg(test)]
 mod tests {
     use base64::{engine::general_purpose::STANDARD, Engine as _};
-    use bitcoin::psbt::{self, Psbt};
+    use bitcoin::psbt::Psbt;
 
     use super::*;
 
     const TEST_PSBT: &str = "cHNidP8BAFUCAAAAAVEiws3mgj5VdUF1uSycV6Co4ayDw44Xh/06H/M0jpUTAQAAAAD9////AXhBDwAAAAAAGXapFBPX1YFmlGw+wCKTQGbYwNER0btBiKwaBB0AAAEA+QIAAAAAAQHsIw5TCVJWBSokKCcO7ASYlEsQ9vHFePQxwj0AmLSuWgEAAAAXFgAUKBU5gg4t6XOuQbpgBLQxySHE2G3+////AnJydQAAAAAAF6kUyLkGrymMcOYDoow+/C+uGearKA+HQEIPAAAAAAAZdqkUy65bUM+Tnm9TG4prer14j+FLApeIrAJHMEQCIDfstCSDYar9T4wR5wXw+npfvc1ZUXL81WQ/OxG+/11AAiACDG0yb2w31jzsra9OszX67ffETgX17x0raBQLAjvRPQEhA9rIL8Cs/Pw2NI1KSKRvAc6nfyuezj+MO0yZ0LCy+ZXShPIcACIGAu6GCCB+IQKEJvaedkR9fj1eB3BJ9eaDwxNsIxR2KkcYGPWswv0sAACAAQAAgAAAAIAAAAAAAAAAAAAA";
 
-    fn psbt_from_str(psbt: &str) -> Result<Psbt, String> {
+    fn psbt_from_str(psbt: &str) -> Result<PsbtV2, String> {
         let decoded = STANDARD
             .decode(psbt)
             .map_err(|e| format!("Failed to decode PSBT: {}", e))?;
-        let psbt = Psbt::deserialize(&decoded)
-            .map_err(|e| format!("Failed to deserialize PSBT: {}", e))?;
+        let psbt =
+            PsbtV2::from_v0(&decoded).map_err(|e| format!("Failed to convert PSBT: {:?}", e))?;
         Ok(psbt)
     }
 
@@ -654,7 +624,7 @@ mod tests {
 
     #[test]
     fn test_set_and_get_input_coordinates() {
-        let mut input = psbt::Input::default();
+        let mut input = v2::Input::default();
         let account_id = 0;
         let coords = PsbtAccountCoordinates::WalletPolicy(WalletPolicyCoordinates {
             is_change: false,
@@ -669,7 +639,7 @@ mod tests {
 
     #[test]
     fn test_set_and_get_output_coordinates() {
-        let mut output = psbt::Output::default();
+        let mut output = v2::Output::default();
         let account_id = 0;
         let coords = PsbtAccountCoordinates::WalletPolicy(WalletPolicyCoordinates {
             is_change: true,
@@ -774,6 +744,7 @@ mod tests {
         psbt.inputs[0]
             .tap_key_origins
             .insert(xonly, (vec![], (xpub1.fingerprint(), path)));
+        let mut psbt = PsbtV2::from_v0(&psbt.serialize()).unwrap();
 
         let key_placeholder = wallet_policy
             .descriptor_template()
