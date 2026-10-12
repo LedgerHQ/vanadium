@@ -6,7 +6,7 @@ use crate::{
 use alloc::{string::String, vec::Vec};
 use bitcoin::{
     bip32::{DerivationPath, Fingerprint},
-    consensus::Encodable,
+    consensus::{encode::VarInt, Encodable},
     Script,
 };
 
@@ -49,6 +49,15 @@ fn is_valid_account_name(value: &[u8]) -> bool {
         && value.iter().all(|&c| c >= 0x20 && c <= 0x7E) // no disallowed characters
 }
 
+// The key data of the global account fields: the compact size account id.
+fn account_id_key(id: u32) -> Vec<u8> {
+    let mut id_raw = Vec::with_capacity(1); // unlikely to be more than 1 byte
+    VarInt(id.into())
+        .consensus_encode(&mut id_raw)
+        .expect("writing to a Vec doesn't fail");
+    id_raw
+}
+
 #[derive(Debug, Clone)]
 pub enum PsbtAccount {
     WalletPolicy(WalletPolicy),
@@ -77,8 +86,7 @@ pub trait PsbtAccountGlobalRead: GlobalHasProprietaryFields {
         Ok(res)
     }
     fn get_account(&self, id: u32) -> Result<Option<PsbtAccount>, PsbtAccountError> {
-        let mut id_raw = Vec::with_capacity(1);
-        let _ = id.consensus_encode(&mut id_raw).unwrap();
+        let id_raw = account_id_key(id);
         for entry in self.iter_proprietary() {
             if entry.prefix == PSBT_ACCOUNT_PROPRIETARY_IDENTIFIER
                 && entry.subtype == PSBT_ACCOUNT_GLOBAL_ACCOUNT_DESCRIPTOR
@@ -101,8 +109,7 @@ pub trait PsbtAccountGlobalRead: GlobalHasProprietaryFields {
         Ok(None)
     }
     fn get_account_name(&self, id: u32) -> Result<Option<String>, PsbtAccountError> {
-        let mut id_raw = Vec::with_capacity(1);
-        let _ = id.consensus_encode(&mut id_raw).unwrap();
+        let id_raw = account_id_key(id);
         for entry in self.iter_proprietary() {
             if entry.prefix == PSBT_ACCOUNT_PROPRIETARY_IDENTIFIER
                 && entry.subtype == PSBT_ACCOUNT_GLOBAL_ACCOUNT_NAME
@@ -120,8 +127,7 @@ pub trait PsbtAccountGlobalRead: GlobalHasProprietaryFields {
         &self,
         id: u32,
     ) -> Result<Option<Vec<u8>>, PsbtAccountError> {
-        let mut id_raw = Vec::with_capacity(1);
-        let _ = id.consensus_encode(&mut id_raw).unwrap();
+        let id_raw = account_id_key(id);
         for entry in self.iter_proprietary() {
             if entry.prefix == PSBT_ACCOUNT_PROPRIETARY_IDENTIFIER
                 && entry.subtype == PSBT_ACCOUNT_GLOBAL_ACCOUNT_POR
@@ -241,13 +247,6 @@ pub trait PsbtAccountOutputWrite {
         id: u32,
         coordinates: PsbtAccountCoordinates,
     ) -> Result<(), PsbtAccountError>;
-}
-
-// The key data of the global account fields: the compact size account id.
-fn account_id_key(id: u32) -> Vec<u8> {
-    let mut id_raw = Vec::with_capacity(1); // unlikely to be more than 1 byte
-    let _ = id.consensus_encode(&mut id_raw).unwrap();
-    id_raw
 }
 
 impl PsbtAccountGlobalWrite for PsbtV2 {
@@ -550,6 +549,26 @@ mod tests {
         assert!(psbt.set_account_name(account_id, valid_name).is_ok());
         let ret = psbt.get_account_name(account_id).unwrap();
         assert_eq!(ret, Some(valid_name.to_string()));
+    }
+
+    #[test]
+    fn test_account_id_is_a_compact_size() {
+        let mut psbt = psbt_from_str(TEST_PSBT).unwrap();
+        for (id, id_raw) in [(1, &[0x01][..]), (253, &[0xfd, 0xfd, 0x00][..])] {
+            psbt.set_account_name(id, "TestAccount").unwrap();
+            let key_data = [
+                &[PSBT_ACCOUNT_PROPRIETARY_IDENTIFIER.len() as u8][..],
+                &PSBT_ACCOUNT_PROPRIETARY_IDENTIFIER,
+                &[PSBT_ACCOUNT_GLOBAL_ACCOUNT_NAME],
+                id_raw,
+            ]
+            .concat();
+            assert_eq!(psbt.global.get(0xFC, &key_data), Some(&b"TestAccount"[..]));
+            assert_eq!(
+                psbt.get_account_name(id).unwrap(),
+                Some("TestAccount".to_string())
+            );
+        }
     }
 
     #[test]
