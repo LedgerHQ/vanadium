@@ -12,10 +12,11 @@
 use alloc::{string::String, vec, vec::Vec};
 
 use common::{
-    bip388::SegwitVersion,
+    bip388::{SegwitVersion, WalletPolicy},
     errors::Error,
     fastpsbt,
     identity::{build_identity_message, IdentityKey, MSG_TYPE_OUTPUT},
+    message::WalletPolicyCoordinates,
     por::{ProofOfRegistration, Registerable},
     psbt::{
         PsbtAccount, PsbtAccountCoordinates, PsbtAccountGlobalRead, PsbtAccountInputRead,
@@ -62,6 +63,18 @@ pub(super) struct TransactionSummary {
 impl TransactionSummary {
     pub(super) fn fee(&self) -> u64 {
         self.inputs_total_amount - self.outputs_total_amount
+    }
+
+    /// The account that input `input_index` spends from: its id, its wallet policy, and the
+    /// input's coordinates in it.
+    pub(super) fn input_account(
+        &self,
+        input_index: usize,
+    ) -> (u32, &WalletPolicy, &WalletPolicyCoordinates) {
+        let (account_id, ref coords) = self.input_coordinates[input_index];
+        let PsbtAccount::WalletPolicy(wallet_policy) = &self.accounts[account_id as usize];
+        let PsbtAccountCoordinates::WalletPolicy(coords) = coords;
+        (account_id, wallet_policy, coords)
     }
 }
 

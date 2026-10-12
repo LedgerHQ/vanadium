@@ -3,7 +3,6 @@
 //! [`super::musig`].
 
 use alloc::vec::Vec;
-use core::cell::OnceCell;
 
 use bitcoin::{
     bip32::ChildNumber,
@@ -13,19 +12,15 @@ use bitcoin::{
     TapLeafHash, TapNodeHash, TapSighashType, Transaction, TxOut,
 };
 use common::{
-    account::Account,
-    bip388::SegwitVersion,
-    errors::Error,
-    fastpsbt,
-    message::PartialSignature,
-    psbt::{PsbtAccount, PsbtAccountCoordinates},
+    account::Account, bip388::SegwitVersion, errors::Error, fastpsbt, message::PartialSignature,
 };
 use sdk::curve::{EcfpPrivateKey, ToPublicKey};
+use zeroize::Zeroizing;
 
 use crate::handlers::musig_signing::{self, MusigSigningState};
 
 use super::analyze::{ensure_prevouts, TransactionSummary};
-use super::context::{PlaceholderCtx, SignedInputs, SigningCtx};
+use super::context::{PlaceholderCtx, SignedInputs, SigningCtx, TaptreeHashes};
 use super::key_resolution::{resolve_private_key, KeySource, LocalKeys};
 use super::musig;
 use super::sighash::{compute_taproot_sighash, leaf_hash_for, taproot_sighash_type};
@@ -61,6 +56,19 @@ fn sign_input_ecdsa(
     })
 }
 
+/// The private key of the taproot output key of the internal key `internal_privkey`, with the tap
+/// tree root `taptree_hash` (BIP-341): the key that signs a key-path spend.
+pub(super) fn taproot_output_private_key(
+    internal_privkey: &[u8; 32],
+    taptree_hash: Option<[u8; 32]>,
+) -> Result<Zeroizing<[u8; 32]>, Error> {
+    let secp = bitcoin::secp256k1::Secp256k1::new();
+    let keypair =
+        Keypair::from_seckey_slice(&secp, internal_privkey).map_err(|_| Error::InvalidKey)?;
+    let tweaked_keypair = keypair.tap_tweak(&secp, taptree_hash.map(TapNodeHash::from_byte_array));
+    Ok(Zeroizing::new(tweaked_keypair.to_keypair().secret_bytes()))
+}
+
 fn sign_input_schnorr(
     input_index: usize,
     sighash_cache: &mut SighashCache<&Transaction>,
@@ -79,19 +87,11 @@ fn sign_input_schnorr(
     )?;
 
     let hd_node = resolve_private_key(key_source)?;
-    let secp = bitcoin::secp256k1::Secp256k1::new();
-    let keypair: Keypair = Keypair::from_seckey_slice(&secp, hd_node.privkey.as_ref())
-        .map_err(|_| Error::InvalidKey)?;
-
     let signing_privkey = if leaf_hash.is_some() {
         // script path signing, no further tweak
-        EcfpPrivateKey::new(keypair.secret_bytes())
+        EcfpPrivateKey::new(*hd_node.privkey)
     } else {
-        // key path signing, apply tap_tweak
-        let tweaked_keypair =
-            keypair.tap_tweak(&secp, taptree_hash.map(TapNodeHash::from_byte_array));
-
-        EcfpPrivateKey::new(tweaked_keypair.to_keypair().secret_bytes())
+        EcfpPrivateKey::new(*taproot_output_private_key(&hd_node.privkey, taptree_hash)?)
     };
 
     let mut signature = signing_privkey
@@ -162,9 +162,14 @@ fn sign_plain_key_placeholder(
 /// - Plain key + legacy    → ECDSA partial signature.
 /// - musig() inside tr()   → round 1 pubnonce or round 2 partial signature,
 ///   depending on whether this device's pubnonce is already in the PSBT.
+///
+/// `local_keys` and `taptree_hashes` carry what earlier stages already learned about the
+/// inputs' keys and tap trees.
 pub(super) fn sign_all_inputs(
     psbt: &fastpsbt::Psbt,
     summary: &TransactionSummary,
+    local_keys: LocalKeys,
+    taptree_hashes: &TaptreeHashes,
     musig_state: &mut MusigSigningState,
 ) -> Result<SignedInputs, Error> {
     let unsigned_tx = psbt
@@ -176,7 +181,7 @@ pub(super) fn sign_all_inputs(
         psbt,
         sighash_cache: SighashCache::new(unsigned_tx),
         prevouts: None,
-        local_keys: LocalKeys::new()?,
+        local_keys,
         out: SignedInputs {
             signatures: Vec::with_capacity(psbt.inputs.len()),
             musig_pubnonces: Vec::new(),
@@ -185,9 +190,7 @@ pub(super) fn sign_all_inputs(
     };
 
     for (input_index, input) in psbt.inputs.iter().enumerate() {
-        let (account_id, ref coords) = summary.input_coordinates[input_index];
-        let PsbtAccountCoordinates::WalletPolicy(coords) = coords;
-        let PsbtAccount::WalletPolicy(wallet_policy) = &summary.accounts[account_id as usize];
+        let (account_id, wallet_policy, coords) = summary.input_account(input_index);
 
         // (wallet, tx) → 32-byte session id, used to bind MuSig2 session
         // state to a specific (wallet policy, transaction) pair.
@@ -196,10 +199,6 @@ pub(super) fn sign_all_inputs(
             .unwrap_or("");
         let wallet_id = wallet_policy.get_id(account_name);
         let session_id = musig_signing::compute_psbt_session_id(&wallet_id, &unsigned_tx_id);
-
-        // Filled in by the first placeholder of this input that needs the tap tree
-        // root, if any, and reused by the rest — see `PlaceholderCtx::taptree_hash`.
-        let taptree_hash_memo = OnceCell::new();
 
         for (placeholder_index, (kp, tapleaf_desc)) in wallet_policy
             .descriptor_template()
@@ -216,7 +215,7 @@ pub(super) fn sign_all_inputs(
                 kp,
                 tapleaf_desc,
                 session_id,
-                taptree_hash_memo: &taptree_hash_memo,
+                taptree_hashes,
             };
 
             if kp.is_musig() {
