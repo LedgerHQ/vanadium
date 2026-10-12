@@ -28,7 +28,7 @@ use super::analyze::{ensure_prevouts, TransactionSummary};
 use super::context::{PlaceholderCtx, SignedInputs, SigningCtx};
 use super::key_resolution::{resolve_private_key, KeySource, LocalKeys};
 use super::musig;
-use super::sighash::{compute_taproot_sighash, leaf_hash_for};
+use super::sighash::{compute_taproot_sighash, leaf_hash_for, taproot_sighash_type};
 
 fn sign_input_ecdsa(
     psbt: &fastpsbt::Psbt,
@@ -68,9 +68,15 @@ fn sign_input_schnorr(
     key_source: &KeySource,
     taptree_hash: Option<[u8; 32]>,
     leaf_hash: Option<TapLeafHash>,
+    sighash_type: TapSighashType,
 ) -> Result<PartialSignature, Error> {
-    let sighash_type = TapSighashType::Default; // TODO: only DEFAULT is supported for now
-    let sighash = compute_taproot_sighash(input_index, sighash_cache, prevouts, leaf_hash)?;
+    let sighash = compute_taproot_sighash(
+        input_index,
+        sighash_cache,
+        prevouts,
+        leaf_hash,
+        sighash_type,
+    )?;
 
     let hd_node = resolve_private_key(key_source)?;
     let secp = bitcoin::secp256k1::Secp256k1::new();
@@ -135,6 +141,7 @@ fn sign_plain_key_placeholder(
                     key_source,
                     taptree_hash,
                     leaf_hash,
+                    taproot_sighash_type(ph.input)?,
                 )?;
                 ctx.out.signatures.push(sig);
             }

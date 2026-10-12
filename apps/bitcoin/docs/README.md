@@ -107,6 +107,8 @@ The device also shows extra warnings before the transaction review when:
 - the segwit-v0 inputs cannot be fully verified because the non-witness UTXO is missing;
 - the transaction fee exceeds a configured fraction of the total input amount (high-fee warning).
 
+Only `SIGHASH_ALL` is supported, and `SIGHASH_DEFAULT` for taproot inputs: a PSBT whose `PSBT_IN_SIGHASH_TYPE` asks for another type is rejected before the review. Without one, the device signs with `SIGHASH_ALL` (`SIGHASH_DEFAULT` for taproot inputs).
+
 Both the standard tree or the resident tree are supported during signing.
 
 *Remark*: The Ledger bitcoin app also takes the `wallet_policy` (and its *Proof-of-Registration* if needed) as a separate input. Here, the account information and the coordinates are included in the PSBT itself, for each affected input/output of the transaction.

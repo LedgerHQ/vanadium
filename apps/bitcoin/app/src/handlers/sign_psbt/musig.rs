@@ -16,7 +16,9 @@ use crate::handlers::musig_signing::{self, MusigSigningState, SpendPath};
 use super::analyze::ensure_prevouts;
 use super::context::{PlaceholderCtx, SigningCtx};
 use super::key_resolution::{resolve_private_key, KeySource};
-use super::sighash::{compute_taproot_sighash, is_taproot_policy, leaf_hash_for};
+use super::sighash::{
+    compute_taproot_sighash, is_taproot_policy, leaf_hash_for, taproot_sighash_type,
+};
 
 /// Handles a single `musig(...)` placeholder for one PSBT input. Pushes either
 /// a round-1 pubnonce or a round-2 partial signature into `out`, *for each*
@@ -117,8 +119,14 @@ pub(super) fn handle_musig_placeholder(
         } else {
             // Round 2: aggregate nonces and produce a partial signature.
             let prev = ensure_prevouts(&mut ctx.prevouts, ctx.psbt)?;
-            let sighash =
-                compute_taproot_sighash(ph.input_index, &mut ctx.sighash_cache, prev, leaf_hash)?;
+            // for SIGHASH_ALL, the aggregator appends its byte to the aggregate signature
+            let sighash = compute_taproot_sighash(
+                ph.input_index,
+                &mut ctx.sighash_cache,
+                prev,
+                leaf_hash,
+                taproot_sighash_type(ph.input)?,
+            )?;
             let session = musig_signing::round2_initialize(&ph.session_id, musig_state)?
                 .ok_or(Error::MissingMusigSession)?;
             let data = musig_signing::sign_sighash_musig(

@@ -136,6 +136,8 @@ pub enum PsbtError {
     /// The scripts of the silent payment outputs can't be set: they don't match the outputs
     /// without `PSBT_OUT_SCRIPT`, or the unsigned transaction was already built.
     InvalidOutputScripts,
+    /// `PSBT_IN_SIGHASH_TYPE` isn't a standard sighash type for the input.
+    InvalidSighashType,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -732,7 +734,11 @@ impl<'a> Psbt<'a> {
             return Err(PsbtError::UnknownOutputType);
         };
 
-        let hash_ty = EcdsaSighashType::All; // TODO: compute correctly from the PSBT
+        let hash_ty = match input.sighash_type {
+            None => EcdsaSighashType::All,
+            Some(sighash_type) => EcdsaSighashType::from_standard(sighash_type)
+                .map_err(|_| PsbtError::InvalidSighashType)?,
+        };
 
         match output_type {
             OutputType::Bare => {

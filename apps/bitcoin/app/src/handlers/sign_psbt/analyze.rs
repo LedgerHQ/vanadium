@@ -195,6 +195,13 @@ fn analyze_input<'i>(
         .get_segwit_version()
         .map_err(|_| Error::InvalidWalletPolicy)?;
 
+    // Only SIGHASH_ALL is supported, and its taproot equivalent SIGHASH_DEFAULT. Without a
+    // sighash type, the device signs with SIGHASH_ALL (SIGHASH_DEFAULT for taproot).
+    match (input.sighash_type, segwit_version) {
+        (None | Some(0x01), _) | (Some(0x00), SegwitVersion::Taproot) => {}
+        _ => return Err(Error::UnsupportedSighashType),
+    }
+
     if segwit_version == SegwitVersion::Legacy && input.witness_utxo.is_some() {
         return Err(Error::WitnessUtxoNotAllowedForLegacy);
     }

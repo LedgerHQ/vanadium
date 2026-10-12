@@ -9,18 +9,31 @@ use bitcoin::{
 use common::{
     bip388::DescriptorTemplate,
     errors::Error,
+    fastpsbt,
     taproot::{GetTapLeafHash, GetTapTreeHash},
 };
 
-/// Computes a 32-byte BIP-341 sighash for the given input. The output goes to
-/// either `schnorr_sign` (plain key path) or `musig::sign` (musig path).
+/// The sighash type that a taproot input is signed with: its `PSBT_IN_SIGHASH_TYPE`, or
+/// `SIGHASH_DEFAULT` without one.
+pub(super) fn taproot_sighash_type(input: &fastpsbt::Input) -> Result<TapSighashType, Error> {
+    match input.sighash_type {
+        None => Ok(TapSighashType::Default),
+        Some(sighash_type) => u8::try_from(sighash_type)
+            .ok()
+            .and_then(|sighash_type| TapSighashType::from_consensus_u8(sighash_type).ok())
+            .ok_or(Error::UnsupportedSighashType),
+    }
+}
+
+/// Computes a 32-byte BIP-341 sighash for the given input, with `sighash_type`. The
+/// output goes to either `schnorr_sign` (plain key path) or `musig::sign` (musig path).
 pub(super) fn compute_taproot_sighash(
     input_index: usize,
     sighash_cache: &mut SighashCache<&Transaction>,
     prevouts: &[TxOut],
     leaf_hash: Option<TapLeafHash>,
+    sighash_type: TapSighashType,
 ) -> Result<[u8; 32], Error> {
-    let sighash_type = TapSighashType::Default;
     let sighash = if let Some(leaf_hash) = leaf_hash {
         sighash_cache
             .taproot_script_spend_signature_hash(
