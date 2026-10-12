@@ -4,6 +4,7 @@
 //! flow as a whole. Fixtures shared with those unit tests live in
 //! [`super::test_utils`].
 
+mod accounts;
 mod basic;
 mod identity;
 mod musig;
