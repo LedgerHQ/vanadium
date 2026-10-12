@@ -17,7 +17,6 @@ use common::{
     message::Response,
     musig as musig_lib,
     por::{ProofOfRegistration, Registerable},
-    psbt::prepare_psbt,
     script::ToScript,
 };
 use hex_literal::hex;
@@ -26,7 +25,7 @@ use sdk::curve::{Curve, EcfpPrivateKey, EcfpPublicKey, ToPublicKey};
 use crate::handlers::musig_signing;
 
 use super::super::handle_sign_psbt;
-use super::super::test_utils::{device_xpub, serialize_as_psbtv2, DEVICE_PATH};
+use super::super::test_utils::{device_xpub, prepare_as_psbtv2, DEVICE_PATH};
 
 /// A PSBT for `tr(musig(@0,@1)/**)` whose participant xpubs the device
 /// doesn't control. The musig branch should fire (no longer silently
@@ -101,11 +100,11 @@ fn test_handle_sign_psbt_musig_no_local_participant() {
     let account_name = "Musig for my ears";
     let por =
         ProofOfRegistration::new(&wallet_policy.registration_id(account_name)).dangerous_as_bytes();
-    prepare_psbt(&mut psbt, &[(&wallet_policy, account_name, &por)]).unwrap();
+    let accounts = [(&wallet_policy, account_name, &por)];
 
     let response = sdk::executor::block_on(handle_sign_psbt(
         &mut sdk::App::singleton(),
-        &serialize_as_psbtv2(&psbt),
+        &prepare_as_psbtv2(&psbt, &accounts),
     ))
     .unwrap();
 
@@ -278,12 +277,12 @@ fn test_handle_sign_psbt_musig_2of2_keypath_round_trip() {
     let mut psbt = build_musig_keypath_psbt(&wallet_policy, address_index);
     let por =
         ProofOfRegistration::new(&wallet_policy.registration_id(account_name)).dangerous_as_bytes();
-    prepare_psbt(&mut psbt, &[(&wallet_policy, account_name, &por)]).unwrap();
+    let accounts = [(&wallet_policy, account_name, &por)];
 
     // ---- Round 1 ----
     let r1 = sdk::executor::block_on(handle_sign_psbt(
         &mut sdk::App::singleton(),
-        &serialize_as_psbtv2(&psbt),
+        &prepare_as_psbtv2(&psbt, &accounts),
     ))
     .unwrap();
     let device_pubnonce = match r1 {
@@ -318,7 +317,7 @@ fn test_handle_sign_psbt_musig_2of2_keypath_round_trip() {
 
     let r2 = sdk::executor::block_on(handle_sign_psbt(
         &mut sdk::App::singleton(),
-        &serialize_as_psbtv2(&psbt),
+        &prepare_as_psbtv2(&psbt, &accounts),
     ))
     .unwrap();
     let device_psig = match r2 {
@@ -409,7 +408,7 @@ fn test_handle_sign_psbt_musig_round2_without_round1_errors() {
     let mut psbt = build_musig_keypath_psbt(&wallet_policy, address_index);
     let por =
         ProofOfRegistration::new(&wallet_policy.registration_id(account_name)).dangerous_as_bytes();
-    prepare_psbt(&mut psbt, &[(&wallet_policy, account_name, &por)]).unwrap();
+    let accounts = [(&wallet_policy, account_name, &por)];
 
     // Compute what the agg_pk would be so we can inject pubnonces under
     // the right BIP-373 key — the device will *try* to enter round 2.
@@ -449,7 +448,7 @@ fn test_handle_sign_psbt_musig_round2_without_round1_errors() {
     // No prior round 1 ⇒ no session in storage ⇒ MissingMusigSession.
     let result = sdk::executor::block_on(handle_sign_psbt(
         &mut sdk::App::singleton(),
-        &serialize_as_psbtv2(&psbt),
+        &prepare_as_psbtv2(&psbt, &accounts),
     ));
     assert_eq!(result, Err(Error::MissingMusigSession));
 }
@@ -467,12 +466,12 @@ fn test_handle_sign_psbt_musig_round2_missing_cosigner_pubnonce_errors() {
     let mut psbt = build_musig_keypath_psbt(&wallet_policy, address_index);
     let por =
         ProofOfRegistration::new(&wallet_policy.registration_id(account_name)).dangerous_as_bytes();
-    prepare_psbt(&mut psbt, &[(&wallet_policy, account_name, &por)]).unwrap();
+    let accounts = [(&wallet_policy, account_name, &por)];
 
     // ---- Round 1 (real) ----
     let r1 = sdk::executor::block_on(handle_sign_psbt(
         &mut sdk::App::singleton(),
-        &serialize_as_psbtv2(&psbt),
+        &prepare_as_psbtv2(&psbt, &accounts),
     ))
     .unwrap();
     let device_pubnonce = match r1 {
@@ -494,7 +493,7 @@ fn test_handle_sign_psbt_musig_round2_missing_cosigner_pubnonce_errors() {
 
     let result = sdk::executor::block_on(handle_sign_psbt(
         &mut sdk::App::singleton(),
-        &serialize_as_psbtv2(&psbt),
+        &prepare_as_psbtv2(&psbt, &accounts),
     ));
     assert_eq!(result, Err(Error::MissingMusigPubnonce));
 }

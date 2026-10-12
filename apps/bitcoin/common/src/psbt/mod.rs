@@ -7,7 +7,6 @@ pub use id_auth::*;
 pub use v2::{PsbtV2, PsbtV2Error};
 
 use bitcoin::consensus::{encode::VarInt, Decodable};
-use bitcoin::psbt;
 
 /// A single proprietary key-value entry from a PSBT map section.
 pub struct ProprietaryEntry<'a> {
@@ -47,39 +46,6 @@ pub trait InputHasProprietaryFields {
 /// Trait for types that expose PSBT per-output proprietary key-value fields.
 pub trait OutputHasProprietaryFields {
     fn iter_proprietary(&self) -> impl Iterator<Item = ProprietaryEntry<'_>> + '_;
-}
-
-impl GlobalHasProprietaryFields for psbt::Psbt {
-    fn iter_proprietary(&self) -> impl Iterator<Item = ProprietaryEntry<'_>> + '_ {
-        self.proprietary.iter().map(|(k, v)| ProprietaryEntry {
-            prefix: &k.prefix,
-            subtype: k.subtype,
-            key: &k.key,
-            value: v,
-        })
-    }
-}
-
-impl InputHasProprietaryFields for psbt::Input {
-    fn iter_proprietary(&self) -> impl Iterator<Item = ProprietaryEntry<'_>> + '_ {
-        self.proprietary.iter().map(|(k, v)| ProprietaryEntry {
-            prefix: &k.prefix,
-            subtype: k.subtype,
-            key: &k.key,
-            value: v,
-        })
-    }
-}
-
-impl OutputHasProprietaryFields for psbt::Output {
-    fn iter_proprietary(&self) -> impl Iterator<Item = ProprietaryEntry<'_>> + '_ {
-        self.proprietary.iter().map(|(k, v)| ProprietaryEntry {
-            prefix: &k.prefix,
-            subtype: k.subtype,
-            key: &k.key,
-            value: v,
-        })
-    }
 }
 
 impl<'a> GlobalHasProprietaryFields for crate::fastpsbt::Psbt<'a> {

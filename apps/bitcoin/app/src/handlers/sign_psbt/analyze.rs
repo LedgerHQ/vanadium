@@ -506,14 +506,16 @@ impl DeferredChecks {
 mod tests {
     use super::*;
 
-    use bitcoin::{hashes::Hash, Amount, ScriptBuf, Transaction, TxOut, Txid};
+    use bitcoin::{
+        consensus::serialize, hashes::Hash, Amount, ScriptBuf, Transaction, TxOut, Txid,
+    };
+    use common::{fastpsbt::*, psbt::PsbtV2};
 
     use super::super::test_utils::{legacy_pkh_psbt, segwit_wpkh_psbt, serialize_as_psbtv2};
 
-    /// Runs the analysis over a `bitcoin::psbt::Psbt` fixture, re-encoding it as PSBTv2
-    /// the way the handler receives it.
-    fn analyze(psbt: &bitcoin::psbt::Psbt) -> Result<(TransactionSummary, DeferredChecks), Error> {
-        let serialized = serialize_as_psbtv2(psbt);
+    /// Runs the analysis over a PSBT fixture, serialized the way the handler receives it.
+    fn analyze(psbt: &PsbtV2) -> Result<(TransactionSummary, DeferredChecks), Error> {
+        let serialized = psbt.serialize();
         let parsed = fastpsbt::Psbt::parse(&serialized).unwrap();
         analyze_transaction(&parsed)
     }
@@ -547,7 +549,7 @@ mod tests {
         let mut psbt = legacy_pkh_psbt();
         // The referenced transaction has 2 outputs; select a nonexistent one. The txid
         // still matches, so the non-witness-UTXO check ahead of this one passes.
-        psbt.unsigned_tx.input[0].previous_output.vout = 5;
+        psbt.inputs[0].insert(PSBT_IN_OUTPUT_INDEX, &[], 5u32.to_le_bytes().to_vec());
 
         assert_eq!(analyze(&psbt).err(), Some(Error::InvalidNonWitnessUtxo));
     }
@@ -555,10 +557,11 @@ mod tests {
     #[test]
     fn legacy_input_may_not_carry_a_witness_utxo() {
         let mut psbt = legacy_pkh_psbt();
-        psbt.inputs[0].witness_utxo = Some(TxOut {
+        let utxo = TxOut {
             value: Amount::from_sat(1_000_000),
             script_pubkey: ScriptBuf::new(),
-        });
+        };
+        psbt.inputs[0].insert(PSBT_IN_WITNESS_UTXO, &[], serialize(&utxo));
 
         assert_eq!(
             analyze(&psbt).err(),
@@ -569,7 +572,7 @@ mod tests {
     #[test]
     fn legacy_input_requires_a_non_witness_utxo() {
         let mut psbt = legacy_pkh_psbt();
-        psbt.inputs[0].non_witness_utxo = None;
+        psbt.inputs[0].remove(PSBT_IN_NON_WITNESS_UTXO, &[]);
 
         assert_eq!(analyze(&psbt).err(), Some(Error::NonWitnessUtxoRequired));
     }
@@ -578,7 +581,7 @@ mod tests {
     fn non_witness_utxo_must_hash_to_the_spent_txid() {
         let mut psbt = legacy_pkh_psbt();
         // Keep the UTXO, point the input somewhere else.
-        psbt.unsigned_tx.input[0].previous_output.txid = Txid::from_byte_array([0x42; 32]);
+        psbt.inputs[0].insert(PSBT_IN_PREVIOUS_TXID, &[], vec![0x42; 32]);
 
         assert_eq!(analyze(&psbt).err(), Some(Error::NonWitnessUtxoMismatch));
     }
@@ -586,7 +589,7 @@ mod tests {
     #[test]
     fn legacy_redeem_script_must_hash_to_the_prevout_script() {
         let mut psbt = legacy_pkh_psbt();
-        psbt.inputs[0].redeem_script = Some(bogus_redeem_script());
+        psbt.inputs[0].insert(PSBT_IN_REDEEM_SCRIPT, &[], bogus_redeem_script().to_bytes());
 
         assert_eq!(analyze(&psbt).err(), Some(Error::RedeemScriptMismatch));
     }
@@ -594,7 +597,7 @@ mod tests {
     #[test]
     fn segwit_input_requires_a_witness_utxo() {
         let mut psbt = segwit_wpkh_psbt();
-        psbt.inputs[0].witness_utxo = None;
+        psbt.inputs[0].remove(PSBT_IN_WITNESS_UTXO, &[]);
 
         assert_eq!(
             analyze(&psbt).err(),
@@ -605,7 +608,7 @@ mod tests {
     #[test]
     fn segwit_redeem_script_must_hash_to_the_witness_utxo_script() {
         let mut psbt = segwit_wpkh_psbt();
-        psbt.inputs[0].redeem_script = Some(bogus_redeem_script());
+        psbt.inputs[0].insert(PSBT_IN_REDEEM_SCRIPT, &[], bogus_redeem_script().to_bytes());
 
         assert_eq!(
             analyze(&psbt).err(),
@@ -617,7 +620,7 @@ mod tests {
     fn outputs_may_not_exceed_inputs() {
         let mut psbt = legacy_pkh_psbt();
         // The single input is worth 1_000_000 sat.
-        psbt.unsigned_tx.output[0].value = Amount::from_sat(1_000_001);
+        psbt.outputs[0].insert(PSBT_OUT_AMOUNT, &[], 1_000_001u64.to_le_bytes().to_vec());
 
         assert_eq!(analyze(&psbt).err(), Some(Error::InputsLessThanOutputs));
     }
@@ -627,7 +630,7 @@ mod tests {
     #[test]
     fn segwit_input_without_non_witness_utxo_warns() {
         let mut psbt = segwit_wpkh_psbt();
-        psbt.inputs[0].non_witness_utxo = None;
+        psbt.inputs[0].remove(PSBT_IN_NON_WITNESS_UTXO, &[]);
 
         let (summary, _) = analyze(&psbt).unwrap();
         assert!(summary.warn_unverified_inputs);

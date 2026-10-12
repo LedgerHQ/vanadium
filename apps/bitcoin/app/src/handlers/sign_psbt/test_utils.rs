@@ -11,23 +11,33 @@ use bitcoin::{
 use common::{
     bip388::WalletPolicy,
     por::{ProofOfRegistration, Registerable},
-    psbt::prepare_psbt,
+    psbt::{prepare_psbt, PsbtV2},
 };
 use sdk::curve::{Curve, EcfpPrivateKey, ToPublicKey};
 
 /// rust-bitcoin doesn't support PSBTv2, so we use this helper for conversion.
 pub(super) fn serialize_as_psbtv2(psbt: &Psbt) -> Vec<u8> {
-    common::psbt::PsbtV2::from_v0(&psbt.serialize())
+    PsbtV2::from_v0(&psbt.serialize())
         .expect("Failed to convert PSBTv0 to PSBTv2")
         .serialize()
+}
+
+/// Converts `psbt` to PSBTv2, fills it with `accounts` with [`prepare_psbt`], and serializes it.
+pub(super) fn prepare_as_psbtv2(
+    psbt: &Psbt,
+    accounts: &[(&WalletPolicy, &str, &[u8; 32])],
+) -> Vec<u8> {
+    let mut psbt = PsbtV2::from_v0(&psbt.serialize()).expect("Failed to convert PSBTv0 to PSBTv2");
+    prepare_psbt(&mut psbt, accounts).unwrap();
+    psbt.serialize()
 }
 
 /// A legacy `pkh(@0/**)` transaction: one 1_000_000 sat input, whose non-witness
 /// UTXO carries two outputs and which spends vout 1, paying a single external
 /// output of 999_800 sat — so the fee is 200 sat.
-pub(super) fn legacy_pkh_psbt() -> Psbt {
+pub(super) fn legacy_pkh_psbt() -> PsbtV2 {
     let psbt_b64 = "cHNidP8BAFUCAAAAAVEiws3mgj5VdUF1uSycV6Co4ayDw44Xh/06H/M0jpUTAQAAAAD9////AXhBDwAAAAAAGXapFBPX1YFmlGw+wCKTQGbYwNER0btBiKwaBB0AAAEA+QIAAAAAAQHsIw5TCVJWBSokKCcO7ASYlEsQ9vHFePQxwj0AmLSuWgEAAAAXFgAUKBU5gg4t6XOuQbpgBLQxySHE2G3+////AnJydQAAAAAAF6kUyLkGrymMcOYDoow+/C+uGearKA+HQEIPAAAAAAAZdqkUy65bUM+Tnm9TG4prer14j+FLApeIrAJHMEQCIDfstCSDYar9T4wR5wXw+npfvc1ZUXL81WQ/OxG+/11AAiACDG0yb2w31jzsra9OszX67ffETgX17x0raBQLAjvRPQEhA9rIL8Cs/Pw2NI1KSKRvAc6nfyuezj+MO0yZ0LCy+ZXShPIcACIGAu6GCCB+IQKEJvaedkR9fj1eB3BJ9eaDwxNsIxR2KkcYGPWswv0sAACAAQAAgAAAAIAAAAAAAAAAAAAA";
-    let mut psbt = Psbt::deserialize(&STANDARD.decode(psbt_b64).unwrap()).unwrap();
+    let mut psbt = PsbtV2::from_v0(&STANDARD.decode(psbt_b64).unwrap()).unwrap();
 
     let wallet_policy = WalletPolicy::new(
         "pkh(@0/**)",
@@ -46,9 +56,9 @@ pub(super) fn legacy_pkh_psbt() -> Psbt {
 
 /// A `wpkh(@0/**)` transaction: one SegWit v0 input carrying both a witness UTXO and
 /// the non-witness UTXO that backs it.
-pub(super) fn segwit_wpkh_psbt() -> Psbt {
+pub(super) fn segwit_wpkh_psbt() -> PsbtV2 {
     let psbt_b64 = "cHNidP8BAHQCAAAAAXoqmXlWwJ+Op/0oGcGph7sU4iv5rc2vIKiXY3Is7uJkAQAAAAD9////AqC7DQAAAAAAGXapFDRKD0jKFQ7CuQOBdmC5tosTpnAmiKx0OCMAAAAAABYAFOs4+puBKPgfJule2wxf+uqDaQ/kAAAAAAABAH0CAAAAAa+/rgZZD3Qf8a9ZtqxGESYzakxKgttVPfb++rc3rDPzAQAAAAD9////AnARAQAAAAAAIgAg/e5EHFblsG0N+CwSTHBwFKXKGWWL4LmFa8oW8e0yWfel9DAAAAAAABYAFDr4QprVlUql7oozyYP9ih6GeZJLAAAAAAEBH6X0MAAAAAAAFgAUOvhCmtWVSqXuijPJg/2KHoZ5kksiBgPuLD2Y6x+TwKGqjlpACbcOt7ROrRXxZm8TawEq1Y0waBj1rML9VAAAgAEAAIAAAACAAQAAAAgAAAAAACICAinsR3JxMe0liKIMRu2pq7fapvSf1Quv5wucWqaWHE7MGPWswv1UAACAAQAAgAAAAIABAAAACgAAAAA=";
-    let mut psbt = Psbt::deserialize(&STANDARD.decode(psbt_b64).unwrap()).unwrap();
+    let mut psbt = PsbtV2::from_v0(&STANDARD.decode(psbt_b64).unwrap()).unwrap();
 
     let wallet_policy = WalletPolicy::new(
         "wpkh(@0/**)",

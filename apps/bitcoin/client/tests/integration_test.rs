@@ -1,10 +1,9 @@
 #![cfg(feature = "speculos-tests")]
 
 use base64::{self, Engine};
-use bitcoin::Psbt;
 use common::{
     message::{Account, KeyTree},
-    psbt::prepare_psbt,
+    psbt::{prepare_psbt, PsbtV2},
 };
 use sdk::test_utils::{setup_test, TestSetup};
 
@@ -49,12 +48,6 @@ pub fn parse_wallet_policy(
         .map_err(|_| "Failed to build wallet policy")
 }
 
-fn serialize_as_psbtv2(psbt: &Psbt) -> Vec<u8> {
-    common::psbt::PsbtV2::from_v0(&psbt.serialize())
-        .expect("Failed to convert PSBTv0 to PSBTv2")
-        .serialize()
-}
-
 #[tokio::test]
 async fn test_get_fingerprint() {
     let mut setup = setup().await;
@@ -74,7 +67,7 @@ async fn test_e2e_sign_transaction() {
     let client = &mut setup.client;
 
     let psbt_b64 = "cHNidP8BAH0CAAAAAeFoYcDSl0n1LNLt3hDLzE9ZEhBxD2QOXY4UQM6F2W3GAQAAAAD9////Ao00lwAAAAAAIlEgC450hrwwagrvt6fACvBAVULbGs1z7syoJ3HM9f5etg+ghgEAAAAAABYAFBOZuKCYR6A5sDUvWNISwYC6sX93AAAAAAABASvfu5gAAAAAACJRIImQSmNI1/+aRNSduLaoB8Yi6Gg2TFR9pCbzC1piExhqIRbpxpsJXtBLVir8jUFpGTa6Vz629om8I2YAvk+jkm9kEhkA9azC/VYAAIABAACAAAAAgAEAAAADAAAAARcg6cabCV7QS1Yq/I1BaRk2ulc+tvaJvCNmAL5Po5JvZBIAAQUgApCB7OVhaqHLmTGfxIdO/uR/CM66X2AEY2yMQ0CaXwohBwKQgezlYWqhy5kxn8SHTv7kfwjOul9gBGNsjENAml8KGQD1rML9VgAAgAEAAIAAAACAAQAAAAIAAAAAAA==";
-    let mut psbt = Psbt::deserialize(
+    let mut psbt = PsbtV2::from_v0(
         &base64::engine::general_purpose::STANDARD
             .decode(&psbt_b64)
             .unwrap(),
@@ -106,7 +99,7 @@ async fn test_e2e_sign_transaction() {
     )
     .unwrap();
 
-    let result = client.sign_psbt(&serialize_as_psbtv2(&psbt)).await.unwrap();
+    let result = client.sign_psbt(&psbt.serialize()).await.unwrap();
 
     // we don't check the actual signatures here, just that we got something back
     // more detailed tests are in the unit tests of the handlers

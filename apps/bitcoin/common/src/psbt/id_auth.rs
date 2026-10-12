@@ -1,7 +1,6 @@
 use alloc::{string::String, vec::Vec};
-use bitcoin::psbt::{self, raw::ProprietaryKey, Psbt};
 
-use super::{GlobalHasProprietaryFields, OutputHasProprietaryFields};
+use super::{v2, GlobalHasProprietaryFields, OutputHasProprietaryFields, PsbtV2};
 
 /// Proprietary key prefix for output authentication data in PSBT fields
 pub const PSBT_IDAUTH_PROPRIETARY_IDENTIFIER: [u8; 6] = *b"IDAUTH";
@@ -141,7 +140,7 @@ pub trait PsbtOutputAuthWrite {
     fn add_auth_proof(&mut self, proof: &OutputAuthProof) -> Result<(), PsbtIdAuthError>;
 }
 
-impl PsbtIdAuthGlobalWrite for Psbt {
+impl PsbtIdAuthGlobalWrite for PsbtV2 {
     fn add_registered_identity_key(
         &mut self,
         entry: &RegisteredIdentityKey,
@@ -150,34 +149,34 @@ impl PsbtIdAuthGlobalWrite for Psbt {
             return Err(PsbtIdAuthError::InvalidNameLength);
         }
         let name_bytes = entry.name.as_bytes();
-        let key = ProprietaryKey {
-            prefix: PSBT_IDAUTH_PROPRIETARY_IDENTIFIER.to_vec(),
-            subtype: PSBT_IDAUTH_GLOBAL_REGISTERED_IDENTITY_KEY,
-            key: entry.pubkey.to_vec(),
-        };
         // value: <name_len (1 byte)> <name> <32-byte por>
         let mut value = Vec::with_capacity(1 + name_bytes.len() + 32);
         value.push(name_bytes.len() as u8);
         value.extend_from_slice(name_bytes);
         value.extend_from_slice(&entry.por);
-        self.proprietary.insert(key, value);
+        self.global.insert_proprietary(
+            &PSBT_IDAUTH_PROPRIETARY_IDENTIFIER,
+            PSBT_IDAUTH_GLOBAL_REGISTERED_IDENTITY_KEY,
+            &entry.pubkey,
+            value,
+        );
         Ok(())
     }
 }
 
-impl PsbtOutputAuthWrite for psbt::Output {
+impl PsbtOutputAuthWrite for v2::Output {
     fn add_auth_proof(&mut self, proof: &OutputAuthProof) -> Result<(), PsbtIdAuthError> {
         match proof {
             OutputAuthProof::IdentitySignature { pubkey, sig } => {
                 let mut key_bytes = Vec::with_capacity(34);
                 key_bytes.push(PSBT_IDAUTH_TAG_IDENTITY);
                 key_bytes.extend_from_slice(pubkey);
-                let key = ProprietaryKey {
-                    prefix: PSBT_IDAUTH_PROPRIETARY_IDENTIFIER.to_vec(),
-                    subtype: PSBT_IDAUTH_OUT_SIGNATURE,
-                    key: key_bytes,
-                };
-                self.proprietary.insert(key, sig.to_vec());
+                self.insert_proprietary(
+                    &PSBT_IDAUTH_PROPRIETARY_IDENTIFIER,
+                    PSBT_IDAUTH_OUT_SIGNATURE,
+                    &key_bytes,
+                    sig.to_vec(),
+                );
             }
         }
         Ok(())
@@ -186,24 +185,27 @@ impl PsbtOutputAuthWrite for psbt::Output {
 
 #[cfg(test)]
 mod tests {
-    use bitcoin::{
-        psbt::{self, raw::ProprietaryKey},
-        Psbt,
-    };
+    use bitcoin::Psbt;
 
     use super::*;
 
-    // --- Global identity key tests ---
-
-    #[test]
-    fn test_add_and_get_registered_identity_key() {
+    /// A PSBT without inputs and outputs.
+    fn empty_psbt() -> PsbtV2 {
         let unsigned_tx = bitcoin::Transaction {
             version: bitcoin::transaction::Version::TWO,
             lock_time: bitcoin::absolute::LockTime::ZERO,
             input: vec![],
             output: vec![],
         };
-        let mut psbt = Psbt::from_unsigned_tx(unsigned_tx).unwrap();
+        let psbt = Psbt::from_unsigned_tx(unsigned_tx).unwrap();
+        PsbtV2::from_v0(&psbt.serialize()).unwrap()
+    }
+
+    // --- Global identity key tests ---
+
+    #[test]
+    fn test_add_and_get_registered_identity_key() {
+        let mut psbt = empty_psbt();
 
         let entry = RegisteredIdentityKey {
             pubkey: [0x02u8; 33],
@@ -220,13 +222,7 @@ mod tests {
 
     #[test]
     fn test_add_multiple_registered_identity_keys() {
-        let unsigned_tx = bitcoin::Transaction {
-            version: bitcoin::transaction::Version::TWO,
-            lock_time: bitcoin::absolute::LockTime::ZERO,
-            input: vec![],
-            output: vec![],
-        };
-        let mut psbt = Psbt::from_unsigned_tx(unsigned_tx).unwrap();
+        let mut psbt = empty_psbt();
 
         let entry1 = RegisteredIdentityKey {
             pubkey: [0x02u8; 33],
@@ -250,13 +246,7 @@ mod tests {
 
     #[test]
     fn test_registered_identity_key_empty_name_rejected() {
-        let unsigned_tx = bitcoin::Transaction {
-            version: bitcoin::transaction::Version::TWO,
-            lock_time: bitcoin::absolute::LockTime::ZERO,
-            input: vec![],
-            output: vec![],
-        };
-        let mut psbt = Psbt::from_unsigned_tx(unsigned_tx).unwrap();
+        let mut psbt = empty_psbt();
 
         let entry = RegisteredIdentityKey {
             pubkey: [0x02u8; 33],
@@ -270,7 +260,7 @@ mod tests {
 
     #[test]
     fn test_add_and_get_output_auth_proof() {
-        let mut output = psbt::Output::default();
+        let mut output = v2::Output::default();
         let pubkey = [0x02u8; 33]; // dummy compressed pubkey
         let sig = [0x11u8; 64]; // dummy Schnorr signature
         let proof = OutputAuthProof::IdentitySignature { pubkey, sig };
@@ -284,7 +274,7 @@ mod tests {
 
     #[test]
     fn test_output_auth_multiple_proofs() {
-        let mut output = psbt::Output::default();
+        let mut output = v2::Output::default();
         let pubkey1 = [0x02u8; 33];
         let sig1 = [0x11u8; 64];
         let pubkey2 = [0x03u8; 33];
@@ -309,17 +299,17 @@ mod tests {
 
     #[test]
     fn test_output_auth_malformed_value_returns_error() {
-        let mut output = psbt::Output::default();
+        let mut output = v2::Output::default();
         // Manually insert a malformed entry (wrong signature length)
         let mut key_bytes = Vec::with_capacity(34);
         key_bytes.push(PSBT_IDAUTH_TAG_IDENTITY);
         key_bytes.extend_from_slice(&[0x02u8; 33]);
-        let key = ProprietaryKey {
-            prefix: PSBT_IDAUTH_PROPRIETARY_IDENTIFIER.to_vec(),
-            subtype: PSBT_IDAUTH_OUT_SIGNATURE,
-            key: key_bytes,
-        };
-        output.proprietary.insert(key, vec![0x11u8; 32]); // wrong: 32 bytes instead of 64
+        output.insert_proprietary(
+            &PSBT_IDAUTH_PROPRIETARY_IDENTIFIER,
+            PSBT_IDAUTH_OUT_SIGNATURE,
+            &key_bytes,
+            vec![0x11u8; 32], // wrong: 32 bytes instead of 64
+        );
 
         let proofs = output.get_auth_proofs();
         assert_eq!(proofs, Err(PsbtIdAuthError::MalformedEntry));
