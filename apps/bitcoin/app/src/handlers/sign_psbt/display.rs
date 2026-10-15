@@ -15,6 +15,7 @@ use sdk::ux::{Icon, TagValue};
 use crate::constants::COIN_TICKER;
 
 use super::analyze::TransactionSummary;
+use super::silent_payments::SilentPayments;
 
 const AUTO_APPROVE: bool = cfg!(any(test, feature = "autoapprove"));
 
@@ -97,9 +98,13 @@ fn format_amount(value: u64, ticker: &str) -> String {
 }
 
 /// Build the `TagValue` pairs shown to the user during transaction review.
+///
+/// An output to a silent payment code shows the address of the code: its script, if the PSBT has
+/// one, is only checked against the code after the review.
 pub(super) fn build_display_pairs(
     psbt: &fastpsbt::Psbt,
     summary: &TransactionSummary,
+    silent_payments: Option<&SilentPayments>,
 ) -> Result<Vec<TagValue>, Error> {
     let fee = summary.fee();
     let n_accounts = summary.accounts.len();
@@ -153,11 +158,17 @@ pub(super) fn build_display_pairs(
     // External outputs (show address, prefixed with identity key name if auth proof present)
     for (i, &output_index) in summary.external_outputs_indexes.iter().enumerate() {
         let output = &psbt.outputs[output_index];
-        let out_script_pubkey = output.script.ok_or(Error::OutputScriptMissing)?;
-        let out_script_pubkey = ScriptBuf::from_bytes(out_script_pubkey.to_vec());
         let amount = output.amount.ok_or(Error::OutputAmountMissing)?;
-        let address = Address::from_script(&out_script_pubkey, bitcoin::Network::Testnet)
-            .map_err(|_| Error::AddressFromScriptFailed)?;
+        let address = match silent_payments.and_then(|sp| sp.address(output_index)) {
+            Some(address) => address.to_string(),
+            None => {
+                let out_script_pubkey = output.script.ok_or(Error::OutputScriptMissing)?;
+                let out_script_pubkey = ScriptBuf::from_bytes(out_script_pubkey.to_vec());
+                Address::from_script(&out_script_pubkey, bitcoin::Network::Testnet)
+                    .map_err(|_| Error::AddressFromScriptFailed)?
+                    .to_string()
+            }
+        };
 
         let address_value = if let Some(ref name) = summary.external_output_auth_names[i] {
             if sdk::ux::has_page_api() {
@@ -215,7 +226,7 @@ mod tests {
 
         assert_eq!(summary.fee(), 200);
 
-        let pairs = build_display_pairs(&parsed, &summary).unwrap();
+        let pairs = build_display_pairs(&parsed, &summary, None).unwrap();
         let fee = pairs.iter().find(|p| p.tag == "Fee").expect("no Fee pair");
         assert_eq!(fee.value, "0.00000200 TEST");
     }
@@ -228,7 +239,7 @@ mod tests {
         let parsed = fastpsbt::Psbt::parse(&serialized).unwrap();
         let (summary, _) = analyze_transaction(&parsed).unwrap();
 
-        let pairs = build_display_pairs(&parsed, &summary).unwrap();
+        let pairs = build_display_pairs(&parsed, &summary, None).unwrap();
         let tags: Vec<&str> = pairs.iter().map(|p| p.tag.as_str()).collect();
         assert_eq!(tags, ["Spend from", "Amount", "Output 0", "Amount", "Fee"]);
 

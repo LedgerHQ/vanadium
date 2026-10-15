@@ -1,5 +1,8 @@
 pub const COIN_TICKER: &'static str = "TEST";
 
+/// The human-readable part of silent payment addresses (BIP-352): `tsp` on the test networks.
+pub const SILENT_PAYMENT_HRP: &str = "tsp";
+
 pub const BIP32_TESTNET_PUBKEY_VERSION: u32 = 0x043587CFu32;
 
 // For amount (in sats) not smaller than THRESHOLD_WARN_HIGH_FEES_AMOUNT, we show a warning

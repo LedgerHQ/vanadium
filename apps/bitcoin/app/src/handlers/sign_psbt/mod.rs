@@ -1,10 +1,12 @@
 //! PSBT signing handler.
 //!
-//! Pipeline: parse the PSBT, run cheap structural analysis ([`analyze`]), spawn the
+//! Pipeline: parse the PSBT, run cheap structural analysis ([`analyze`], and
+//! [`silent_payments::analyze`] for outputs to silent payment codes), spawn the
 //! expensive verification as a background task that runs concurrently with the
 //! approval UI, show warnings, display the transaction for approval ([`display`]),
-//! wait for verification, sign ([`signing`], dispatching to [`musig`] where needed),
-//! and respond.
+//! wait for verification, compute the scripts of the outputs to silent payment codes
+//! ([`silent_payments::finalize`]), sign ([`signing`], dispatching to [`musig`] where
+//! needed), and respond.
 
 mod analyze;
 mod context;
@@ -13,6 +15,7 @@ mod key_resolution;
 mod musig;
 mod sighash;
 mod signing;
+mod silent_payments;
 
 #[cfg(test)]
 mod test_utils;
@@ -26,10 +29,12 @@ use crate::handlers::musig_signing::{self, MusigSigningState};
 pub async fn handle_sign_psbt(app: &mut sdk::App, psbt: &[u8]) -> Result<Response, Error> {
     app.show_spinner("Processing...");
 
-    let psbt = fastpsbt::Psbt::parse(psbt).map_err(|_| Error::FailedToDeserializePsbt)?;
+    let mut psbt = fastpsbt::Psbt::parse(psbt).map_err(|_| Error::FailedToDeserializePsbt)?;
 
     // Lightweight analysis: structural validation + extract data for display and verification
     let (summary, deferred_checks) = analyze::analyze_transaction(&psbt)?;
+    let mut local_keys = key_resolution::LocalKeys::new()?;
+    let silent_payments = silent_payments::analyze(&psbt, &summary, &mut local_keys)?;
 
     // Spawn expensive verification (proof-of-registration + script derivation) as a background
     // task so it runs concurrently with the UX flows below.
@@ -52,7 +57,7 @@ pub async fn handle_sign_psbt(app: &mut sdk::App, psbt: &[u8]) -> Result<Respons
     }
 
     // Display transaction for user approval
-    let pairs = display::build_display_pairs(&psbt, &summary)?;
+    let pairs = display::build_display_pairs(&psbt, &summary, silent_payments.as_ref())?;
     if !display::display_transaction(app, &pairs).await {
         display::show_transaction_rejected(app);
         return Err(Error::UserRejected);
@@ -61,10 +66,13 @@ pub async fn handle_sign_psbt(app: &mut sdk::App, psbt: &[u8]) -> Result<Respons
     // Wait for verification to complete (likely already done by now)
     app.await_task("Verifying...", verification_handle)?;
 
-    // All checks passed — sign
+    // All checks passed — compute the outputs to silent payment codes, then sign
     app.show_spinner("Signing transaction...");
-    let local_keys = key_resolution::LocalKeys::new()?;
     let taptree_hashes = context::TaptreeHashes::new(psbt.inputs.len());
+    let finalized = match &silent_payments {
+        Some(sp) => silent_payments::finalize(&mut psbt, &summary, sp, &taptree_hashes)?,
+        None => silent_payments::Finalized::default(),
+    };
     let mut musig_state = MusigSigningState::default();
     let signed = signing::sign_all_inputs(
         &psbt,
@@ -84,5 +92,7 @@ pub async fn handle_sign_psbt(app: &mut sdk::App, psbt: &[u8]) -> Result<Respons
         signatures: signed.signatures,
         musig_pubnonces: signed.musig_pubnonces,
         musig_partial_sigs: signed.musig_partial_sigs,
+        sp_shares: finalized.shares,
+        sp_output_scripts: finalized.output_scripts,
     })
 }

@@ -113,6 +113,7 @@ fn test_handle_sign_psbt_musig_no_local_participant() {
             signatures,
             musig_pubnonces,
             musig_partial_sigs,
+            ..
         } => {
             assert!(
                 signatures.is_empty(),
@@ -147,7 +148,7 @@ fn cosigner_xpub(secp: &Secp256k1<bitcoin::secp256k1::All>) -> Xpub {
 /// `@0` is device-controlled (with origin info) and `@1` is the bare hot
 /// cosigner xpub. The exact origin path doesn't matter as long as the
 /// device can re-derive it locally.
-fn make_2of2_keypath_policy() -> WalletPolicy {
+pub(super) fn make_2of2_keypath_policy() -> WalletPolicy {
     let secp = Secp256k1::new();
     let standard_fpr = sdk::curve::Secp256k1::get_master_fingerprint();
     let key_info_0 = KeyInformation {
@@ -168,7 +169,7 @@ fn make_2of2_keypath_policy() -> WalletPolicy {
 /// `(is_change=false, address_index)`. The output is a dummy P2WPKH. The
 /// witness UTXO scriptPubKey is derived via the wallet policy itself so
 /// `analyze_transaction` accepts the PSBT.
-fn build_musig_keypath_psbt(wallet_policy: &WalletPolicy, address_index: u32) -> Psbt {
+pub(super) fn build_musig_keypath_psbt(wallet_policy: &WalletPolicy, address_index: u32) -> Psbt {
     let secp = Secp256k1::new();
     let expected_script = wallet_policy.to_script(false, address_index).unwrap();
 
@@ -290,6 +291,7 @@ fn test_handle_sign_psbt_musig_2of2_keypath_round_trip() {
             signatures,
             musig_pubnonces,
             musig_partial_sigs,
+            ..
         } => {
             assert!(signatures.is_empty());
             assert!(musig_partial_sigs.is_empty());
@@ -325,6 +327,7 @@ fn test_handle_sign_psbt_musig_2of2_keypath_round_trip() {
             signatures,
             musig_pubnonces,
             musig_partial_sigs,
+            ..
         } => {
             assert!(signatures.is_empty());
             assert!(musig_pubnonces.is_empty());

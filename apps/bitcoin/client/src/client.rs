@@ -3,7 +3,7 @@ use std::str::FromStr;
 use bitcoin::bip32::DerivationPath;
 use common::message::{
     self, IdentitySignature, MuSig2PartialSignature, MuSig2Pubnonce, PartialSignature, Request,
-    Response,
+    Response, SilentPaymentOutputScript, SilentPaymentShare,
 };
 use common::por::{ProofOfRegistration, RegistrationId};
 use sdk::vanadium_client::{VAppExecutionError, VAppTransport};
@@ -354,10 +354,14 @@ impl<'a> BitcoinClient {
                 signatures,
                 musig_pubnonces,
                 musig_partial_sigs,
+                sp_shares,
+                sp_output_scripts,
             } => Ok(SignedPsbtResponse {
                 signatures,
                 musig_pubnonces,
                 musig_partial_sigs,
+                sp_shares,
+                sp_output_scripts,
             }),
             e => Err(BitcoinClientError::InvalidResponse(format!(
                 "Invalid response: {:?}",
@@ -372,10 +376,14 @@ impl<'a> BitcoinClient {
 /// `signatures` covers ECDSA and Schnorr partial signatures for plain key
 /// placeholders. The two `musig_*` fields are non-empty only for PSBTs that
 /// involve `musig(...)` placeholders this device participates in — see
-/// [`BitcoinClient::sign_psbt`] for the round 1 / round 2 dispatch.
+/// [`BitcoinClient::sign_psbt`] for the round 1 / round 2 dispatch. The two `sp_*`
+/// fields are non-empty only for PSBTs that pay to silent payment codes: the
+/// signatures commit to those scripts, so they must be set in the PSBT too.
 #[derive(Debug, Clone)]
 pub struct SignedPsbtResponse {
     pub signatures: Vec<PartialSignature>,
     pub musig_pubnonces: Vec<MuSig2Pubnonce>,
     pub musig_partial_sigs: Vec<MuSig2PartialSignature>,
+    pub sp_shares: Vec<SilentPaymentShare>,
+    pub sp_output_scripts: Vec<SilentPaymentOutputScript>,
 }
