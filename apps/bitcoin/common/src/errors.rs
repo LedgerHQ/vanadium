@@ -129,6 +129,22 @@ pub enum Error {
     // Signing
     #[n(49)]
     UnsupportedSighashType,
+
+    // Silent payments
+    #[n(50)]
+    InvalidSilentPayment,
+    #[n(51)]
+    SilentPaymentInputNotHeld,
+    #[n(52)]
+    SilentPaymentNoEligibleInputs,
+    #[n(53)]
+    SilentPaymentSegwitVersion,
+    #[n(54)]
+    SilentPaymentSighashType,
+    #[n(55)]
+    SilentPaymentShareMismatch,
+    #[n(56)]
+    SilentPaymentOutputScriptMismatch,
 }
 
 impl fmt::Display for Error {
@@ -212,6 +228,29 @@ impl fmt::Display for Error {
             UnsupportedSilentPayment => write!(f, "Unsupported silent payment"),
 
             UnsupportedSighashType => write!(f, "Unsupported sighash type"),
+
+            InvalidSilentPayment => write!(f, "Invalid silent payment output"),
+            SilentPaymentInputNotHeld => write!(
+                f,
+                "Silent payments need the private key of an input that the device doesn't fully hold"
+            ),
+            SilentPaymentNoEligibleInputs => {
+                write!(f, "No input of the transaction can pay to silent payment addresses")
+            }
+            SilentPaymentSegwitVersion => write!(
+                f,
+                "An input spends a segwit version above 1, which silent payments don't allow"
+            ),
+            SilentPaymentSighashType => {
+                write!(f, "Silent payments require SIGHASH_ALL or no sighash type")
+            }
+            SilentPaymentShareMismatch => write!(
+                f,
+                "The PSBT has an ECDH share or a DLEQ proof that doesn't match the device's"
+            ),
+            SilentPaymentOutputScriptMismatch => {
+                write!(f, "Silent payment output script does not match its code")
+            }
         }
     }
 }

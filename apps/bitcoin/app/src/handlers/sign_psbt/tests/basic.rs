@@ -51,6 +51,8 @@ fn test_handle_sign_psbt_pkh() {
         ],
         musig_pubnonces: Vec::new(),
         musig_partial_sigs: Vec::new(),
+        sp_shares: Vec::new(),
+        sp_output_scripts: Vec::new(),
     });
 }
 
@@ -84,6 +86,8 @@ fn test_handle_sign_psbt_wpkh() {
         ],
         musig_pubnonces: Vec::new(),
         musig_partial_sigs: Vec::new(),
+        sp_shares: Vec::new(),
+        sp_output_scripts: Vec::new(),
     });
 }
 

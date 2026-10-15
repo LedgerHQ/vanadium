@@ -250,6 +250,33 @@ pub struct MuSig2PartialSignature {
     pub leaf_hash: Option<[u8; 32]>,
 }
 
+/// A BIP-375 global ECDH share, for the outputs to one scan key: `a·B_scan`, where `a` is the sum
+/// of the private keys of all the eligible inputs, with its BIP-374 DLEQ proof. The host sets them
+/// as `PSBT_GLOBAL_SP_ECDH_SHARE` and `PSBT_GLOBAL_SP_DLEQ`.
+#[derive(Encode, Decode, Debug, Clone, PartialEq, Eq)]
+#[cbor(map)]
+pub struct SilentPaymentShare {
+    /// 33-byte compressed scan key `B_scan`.
+    #[cbor(n(0), with = "minicbor::bytes")]
+    pub scan_key: [u8; 33],
+    /// 33-byte compressed ECDH share.
+    #[cbor(n(1), with = "minicbor::bytes")]
+    pub share: [u8; 33],
+    #[cbor(n(2), with = "minicbor::bytes")]
+    pub dleq_proof: [u8; 64],
+}
+
+/// The script of an output to a silent payment code, as the device computed it (BIP-375). The
+/// host sets it as the output's `PSBT_OUT_SCRIPT`.
+#[derive(Encode, Decode, Debug, Clone, PartialEq, Eq)]
+#[cbor(map)]
+pub struct SilentPaymentOutputScript {
+    #[n(0)]
+    pub output_index: u32,
+    #[cbor(n(1), with = "minicbor::bytes")]
+    pub script: Vec<u8>,
+}
+
 #[derive(Encode, Decode, Debug, Clone, PartialEq, Eq)]
 pub enum Response {
     #[n(0)]
@@ -311,6 +338,15 @@ pub enum Response {
         /// pubnonces back into the PSBT).
         #[n(2)]
         musig_partial_sigs: Vec<MuSig2PartialSignature>,
+        /// For a transaction that pays to silent payment codes, the ECDH share of each of their
+        /// scan keys. The signatures commit to the scripts computed from them.
+        #[n(3)]
+        #[cbor(default)]
+        sp_shares: Vec<SilentPaymentShare>,
+        /// The scripts of the outputs to silent payment codes.
+        #[n(4)]
+        #[cbor(default)]
+        sp_output_scripts: Vec<SilentPaymentOutputScript>,
     },
 
     #[n(6)]
@@ -400,6 +436,8 @@ mod tests {
                 aggregate_pubkey: [0xEF; 33],
                 leaf_hash: Some([0x12; 32]),
             }],
+            sp_shares: vec![],
+            sp_output_scripts: vec![],
         };
         let bytes = minicbor::to_vec(&resp).unwrap();
         let decoded: Response = minicbor::decode(&bytes).unwrap();
@@ -415,9 +453,48 @@ mod tests {
             signatures: vec![],
             musig_pubnonces: vec![],
             musig_partial_sigs: vec![],
+            sp_shares: vec![],
+            sp_output_scripts: vec![],
         };
         let bytes = minicbor::to_vec(&resp).unwrap();
         let decoded: Response = minicbor::decode(&bytes).unwrap();
         assert_eq!(resp, decoded);
+    }
+
+    /// `Response::PsbtSigned` with silent payment shares and scripts round-trips, and a response
+    /// without them, as an older V-App sends it, decodes with both lists empty.
+    #[test]
+    fn response_psbt_signed_roundtrip_silent_payments() {
+        let resp = Response::PsbtSigned {
+            signatures: vec![],
+            musig_pubnonces: vec![],
+            musig_partial_sigs: vec![],
+            sp_shares: vec![SilentPaymentShare {
+                scan_key: [0x02; 33],
+                share: [0x03; 33],
+                dleq_proof: [0x44; 64],
+            }],
+            sp_output_scripts: vec![SilentPaymentOutputScript {
+                output_index: 1,
+                script: vec![0x51, 0x20, 0x55],
+            }],
+        };
+        let bytes = minicbor::to_vec(&resp).unwrap();
+        let decoded: Response = minicbor::decode(&bytes).unwrap();
+        assert_eq!(resp, decoded);
+
+        // variant 5, a map with the 3 fields of the older versions, all empty arrays
+        let older = [0x82, 0x05, 0xa3, 0x00, 0x80, 0x01, 0x80, 0x02, 0x80];
+        let decoded: Response = minicbor::decode(&older).unwrap();
+        assert_eq!(
+            decoded,
+            Response::PsbtSigned {
+                signatures: vec![],
+                musig_pubnonces: vec![],
+                musig_partial_sigs: vec![],
+                sp_shares: vec![],
+                sp_output_scripts: vec![],
+            }
+        );
     }
 }

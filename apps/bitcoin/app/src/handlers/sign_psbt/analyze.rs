@@ -150,7 +150,7 @@ fn read_identity_keys(psbt: &fastpsbt::Psbt) -> Result<Vec<([u8; 33], String)>, 
 ///
 /// `output_index` comes straight from the PSBT and is attacker-controlled, so it is
 /// bounds-checked against the referenced transaction rather than used to index.
-fn input_prevout<'i>(input: &'i fastpsbt::Input<'_>) -> Result<&'i TxOut, Error> {
+pub(super) fn input_prevout<'i>(input: &'i fastpsbt::Input<'_>) -> Result<&'i TxOut, Error> {
     if let Some(witness_utxo) = input
         .get_witness_utxo()
         .map_err(|_| Error::InvalidWitnessUtxo)?
@@ -309,6 +309,20 @@ fn analyze_output(
     n_accounts: usize,
     identity_key_names: &[([u8; 33], String)],
 ) -> Result<AnalyzedOutput, Error> {
+    // An output to a silent payment code is external: its script, if the PSBT has one, is only
+    // checked against the code after the review. Identity keys sign scripts, and the coordinates
+    // of a wallet policy derive one, so neither can apply to it.
+    if output.sp_v0_info.is_some() {
+        let has_auth_proofs = !output
+            .get_auth_proofs()
+            .map_err(|_| Error::InvalidIdentitySignature)?
+            .is_empty();
+        if coordinates.is_some() || has_auth_proofs {
+            return Err(Error::UnsupportedSilentPayment);
+        }
+        return Ok(AnalyzedOutput::External(None));
+    }
+
     let Some((account_id, coords)) = coordinates else {
         let proofs = output
             .get_auth_proofs()
@@ -434,11 +448,6 @@ pub(super) fn analyze_transaction(
         .collect::<Result<Vec<_>, Error>>()?;
 
     for (output_index, output) in psbt.outputs.iter().enumerate() {
-        // Paying to a silent payment code isn't supported yet. Even when the PSBT has the script
-        // of the code, the device must compute it before the user approves the script.
-        if output.sp_v0_info.is_some() {
-            return Err(Error::UnsupportedSilentPayment);
-        }
         let amount = output.amount.ok_or(Error::OutputAmountMissing)?;
 
         match analyze_output(
