@@ -92,6 +92,37 @@ impl SilentPaymentAccount {
     pub fn spend_key(&self) -> &Secp256k1Point {
         &self.spend_key
     }
+
+    /// The serialization of the account, as in a PSBT: the account index (4 bytes, little-endian),
+    /// the scan private key (32 bytes) and the compressed spend public key (33 bytes).
+    pub fn serialize(&self) -> Vec<u8> {
+        let mut res = Vec::with_capacity(4 + 32 + 33);
+        res.extend_from_slice(&self.account_index.to_le_bytes());
+        res.extend_from_slice(self.scan_key.as_be_bytes());
+        res.extend_from_slice(
+            &self
+                .spend_key
+                .to_compressed()
+                .expect("the spend key is not the point at infinity"),
+        );
+        res
+    }
+
+    /// Reads an account serialized with [`serialize`](Self::serialize).
+    pub fn deserialize<R: Read + ?Sized>(r: &mut R) -> Result<Self, encode::Error> {
+        let account_index = u32::consensus_decode(r)?;
+        let mut scan_key = zeroize::Zeroizing::new([0u8; 32]);
+        r.read_exact(&mut scan_key[..])?;
+        let mut spend_key = [0u8; 33];
+        r.read_exact(&mut spend_key)?;
+
+        let scan_key = Secp256k1Scalar::from_be_bytes(&scan_key)
+            .ok_or(encode::Error::ParseFailed("Invalid scan key"))?;
+        let spend_key = Secp256k1Point::from_compressed(&spend_key)
+            .map_err(|_| encode::Error::ParseFailed("Invalid spend key"))?;
+        Self::new(account_index, scan_key, spend_key)
+            .map_err(|_| encode::Error::ParseFailed("Invalid silent payment account"))
+    }
 }
 
 impl AccountCoordinates for SilentPaymentCoordinates {
@@ -140,14 +171,7 @@ impl Account for SilentPaymentAccount {
     fn serialize(&self) -> Vec<u8> {
         let mut res = Vec::with_capacity(4 + 4 + 32 + 33);
         res.extend_from_slice(&Self::VERSION.to_le_bytes());
-        res.extend_from_slice(&self.account_index.to_le_bytes());
-        res.extend_from_slice(self.scan_key.as_be_bytes());
-        res.extend_from_slice(
-            &self
-                .spend_key
-                .to_compressed()
-                .expect("the spend key is not the point at infinity"),
-        );
+        res.extend(SilentPaymentAccount::serialize(self));
         res
     }
 
@@ -156,18 +180,7 @@ impl Account for SilentPaymentAccount {
         if version != Self::VERSION {
             return Err(encode::Error::ParseFailed("Unsupported version"));
         }
-        let account_index = u32::consensus_decode(r)?;
-        let mut scan_key = zeroize::Zeroizing::new([0u8; 32]);
-        r.read_exact(&mut scan_key[..])?;
-        let mut spend_key = [0u8; 33];
-        r.read_exact(&mut spend_key)?;
-
-        let scan_key = Secp256k1Scalar::from_be_bytes(&scan_key)
-            .ok_or(encode::Error::ParseFailed("Invalid scan key"))?;
-        let spend_key = Secp256k1Point::from_compressed(&spend_key)
-            .map_err(|_| encode::Error::ParseFailed("Invalid spend key"))?;
-        Self::new(account_index, scan_key, spend_key)
-            .map_err(|_| encode::Error::ParseFailed("Invalid silent payment account"))
+        SilentPaymentAccount::deserialize(r)
     }
 
     /// The code `(B_scan, B_m)` of `Code` coordinates, or the script of the output that `Tweak`
