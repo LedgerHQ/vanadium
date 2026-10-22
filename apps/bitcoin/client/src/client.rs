@@ -1,6 +1,7 @@
 use std::str::FromStr;
 
 use bitcoin::bip32::DerivationPath;
+use common::account::{Account, SilentPaymentAccount};
 use common::fastpsbt::{
     PSBT_GLOBAL_SP_DLEQ, PSBT_GLOBAL_SP_ECDH_SHARE, PSBT_GLOBAL_TX_MODIFIABLE,
     PSBT_IN_MUSIG2_PARTIAL_SIG, PSBT_IN_MUSIG2_PUB_NONCE, PSBT_IN_PARTIAL_SIG, PSBT_IN_TAP_KEY_SIG,
@@ -223,23 +224,24 @@ impl<'a> BitcoinClient {
         }
     }
 
-    pub async fn register_account(
+    /// Registers `account` with the name `name`, returning its id and its proof of registration.
+    ///
+    /// The identities and key signatures authenticate the keys of a wallet policy; a silent payment
+    /// account has none.
+    pub async fn register_account<T>(
         &mut self,
         name: &str,
-        account: &message::Account,
+        account: &T,
         registered_identities: Option<Vec<message::RegisteredIdentityEntry>>,
         key_signatures: Option<Vec<Option<message::IdentitySignature>>>,
         show_cleartext: bool,
-    ) -> Result<
-        (
-            RegistrationId<common::bip388::WalletPolicy>,
-            ProofOfRegistration<common::bip388::WalletPolicy>,
-        ),
-        BitcoinClientError,
-    > {
+    ) -> Result<(RegistrationId<T>, ProofOfRegistration<T>), BitcoinClientError>
+    where
+        T: Account + Clone + Into<message::Account>,
+    {
         let msg = minicbor::to_vec(&Request::RegisterAccount {
             name: name.into(),
-            account: account.clone(),
+            account: account.clone().into(),
             registered_identities,
             key_signatures,
             show_cleartext,
@@ -297,23 +299,29 @@ impl<'a> BitcoinClient {
         }
     }
 
-    pub async fn get_address(
+    /// The address of the registered `account` at `coords`, with an identity signature over its
+    /// script if `identity_index` is given.
+    pub async fn get_address<T>(
         &mut self,
-        account: &message::Account,
+        account: &T,
         name: &str,
-        coords: &message::AccountCoordinates,
-        por: Option<&ProofOfRegistration<common::bip388::WalletPolicy>>,
+        coords: &T::Coordinates,
+        por: Option<&ProofOfRegistration<T>>,
         display: bool,
         identity_index: Option<u32>,
-    ) -> Result<(String, Option<IdentitySignature>), BitcoinClientError> {
+    ) -> Result<(String, Option<IdentitySignature>), BitcoinClientError>
+    where
+        T: Account + Clone + Into<message::Account>,
+        T::Coordinates: Clone + Into<message::AccountCoordinates>,
+    {
         let msg = minicbor::to_vec(&Request::GetAddress {
             display,
             name: Some(name.to_string()),
-            account: account.clone(),
+            account: account.clone().into(),
             por: por
                 .map(|p| p.dangerous_as_bytes().to_vec())
                 .unwrap_or(vec![]),
-            coordinates: coords.clone(),
+            coordinates: coords.clone().into(),
             identity_index,
         })
         .map_err(|_| {
@@ -326,6 +334,33 @@ impl<'a> BitcoinClient {
                 address,
                 identity_sig,
             } => Ok((address, identity_sig)),
+            e => Err(BitcoinClientError::InvalidResponse(format!(
+                "Invalid response: {:?}",
+                e
+            ))),
+        }
+    }
+
+    /// Exports the scan key of the device's silent payment account `account_index`, after the user
+    /// approves it, and returns the account, ready to be registered.
+    pub async fn export_silent_payment_scan_key(
+        &mut self,
+        account_index: u32,
+    ) -> Result<SilentPaymentAccount, BitcoinClientError> {
+        let msg = minicbor::to_vec(&Request::ExportSilentPaymentScanKey { account_index })
+            .map_err(|_| {
+                BitcoinClientError::GenericError(
+                    "Failed to serialize ExportSilentPaymentScanKey request".to_string(),
+                )
+            })?;
+
+        let response_raw = self.send_message(&msg).await?;
+        match Self::parse_response(&response_raw).await? {
+            Response::SilentPaymentScanKey { scan_key } => {
+                SilentPaymentAccount::from_spscan(account_index, &scan_key).map_err(|_| {
+                    BitcoinClientError::InvalidResponse("Invalid scan key".to_string())
+                })
+            }
             e => Err(BitcoinClientError::InvalidResponse(format!(
                 "Invalid response: {:?}",
                 e
