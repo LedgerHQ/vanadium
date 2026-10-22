@@ -20,7 +20,7 @@
 //! The outputs to silent payment codes are always external for now: the device shows the
 //! address of the code.
 
-use alloc::{string::String, vec::Vec};
+use alloc::vec::Vec;
 
 use bitcoin::{hashes::Hash, OutPoint, ScriptBuf, Txid};
 use common::{
@@ -45,28 +45,11 @@ struct EligibleInput {
     is_taproot: bool,
 }
 
-/// An output to a silent payment code.
-struct Output {
-    recipient: Recipient,
-    /// The address of the code, which the review shows.
-    address: String,
-}
-
 /// What [`analyze`] found out about the outputs to silent payment codes of a PSBT.
 pub(super) struct SilentPayments {
     /// The outputs to silent payment codes, in output order.
-    outputs: Vec<Output>,
+    outputs: Vec<Recipient>,
     eligible_inputs: Vec<EligibleInput>,
-}
-
-impl SilentPayments {
-    /// The silent payment address of output `output_index`, if it pays to a silent payment code.
-    pub(super) fn address(&self, output_index: usize) -> Option<&str> {
-        self.outputs
-            .iter()
-            .find(|output| output.recipient.output_index == output_index)
-            .map(|output| output.address.as_str())
-    }
 }
 
 /// The key that BIP-352 takes from an input of `wallet_policy`, and whether the input is taproot;
@@ -103,17 +86,7 @@ pub(super) fn analyze(
     summary: &TransactionSummary,
     local_keys: &mut LocalKeys,
 ) -> Result<Option<SilentPayments>, Error> {
-    let outputs = sp::recipients(psbt)
-        .map_err(|_| Error::InvalidSilentPayment)?
-        .into_iter()
-        .map(|recipient| {
-            let address = recipient
-                .code
-                .to_address(crate::constants::SILENT_PAYMENT_HRP)
-                .map_err(|_| Error::InvalidSilentPayment)?;
-            Ok(Output { recipient, address })
-        })
-        .collect::<Result<Vec<_>, Error>>()?;
+    let outputs = sp::recipients(psbt).map_err(|_| Error::InvalidSilentPayment)?;
     if outputs.is_empty() {
         return Ok(None);
     }
@@ -171,7 +144,7 @@ pub(super) fn analyze(
     for scan_key in shares.chain(proofs) {
         if !outputs
             .iter()
-            .any(|output| output.recipient.code.to_bytes()[..33] == scan_key[..])
+            .any(|output| output.code.to_bytes()[..33] == scan_key[..])
         {
             return Err(Error::SilentPaymentShareMismatch);
         }
@@ -246,18 +219,18 @@ struct Share {
 /// the response then keeps.
 fn ecdh_shares(
     psbt: &fastpsbt::Psbt,
-    outputs: &[Output],
+    outputs: &[Recipient],
     a: &Secp256k1Scalar,
     a_pub: &Secp256k1Point,
 ) -> Result<Vec<Share>, Error> {
     let g = Secp256k1::get_generator();
     let mut shares: Vec<Share> = Vec::new();
     for output in outputs {
-        let scan = output.recipient.code.scan();
+        let scan = output.code.scan();
         if shares.iter().any(|share| share.scan == *scan) {
             continue;
         }
-        let scan_key = output.recipient.code.to_bytes()[..33].try_into().unwrap();
+        let scan_key = output.code.to_bytes()[..33].try_into().unwrap();
         let share = sp::ecdh_share(a, scan);
         let share_bytes = share.to_compressed().ok_or(Error::InvalidSilentPayment)?;
         let dleq_proof = match (
@@ -295,7 +268,7 @@ fn ecdh_shares(
 /// scan keys. Fails if the PSBT already has a different script.
 fn output_scripts(
     psbt: &fastpsbt::Psbt,
-    outputs: &[Output],
+    outputs: &[Recipient],
     input_hash: &Secp256k1Scalar,
     shares: &[Share],
 ) -> Result<Vec<SilentPaymentOutputScript>, Error> {
@@ -309,8 +282,7 @@ fn output_scripts(
         .collect::<Result<Vec<_>, Error>>()?;
 
     let mut scripts = Vec::new();
-    for output in outputs {
-        let recipient = &output.recipient;
+    for recipient in outputs {
         let (_, secret) = secrets
             .iter()
             .find(|(scan, _)| scan == recipient.code.scan())

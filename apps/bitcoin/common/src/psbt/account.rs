@@ -1,5 +1,6 @@
 use crate::{
-    account::{AccountCoordinates, WalletPolicy, WalletPolicyCoordinates},
+    account::{Account, AccountCoordinates, Destination, WalletPolicy, WalletPolicyCoordinates},
+    errors::Error,
     script::ToScript,
 };
 
@@ -68,6 +69,21 @@ pub enum PsbtAccount {
 pub enum PsbtAccountCoordinates {
     WalletPolicy(WalletPolicyCoordinates),
     // coordinates for other account types will be added here
+}
+
+impl PsbtAccount {
+    /// The destination of the account at `coords`, which tells whether an input or an output
+    /// belongs to it.
+    pub fn destination(&self, coords: &PsbtAccountCoordinates) -> Result<Destination, Error> {
+        match (self, coords) {
+            (
+                PsbtAccount::WalletPolicy(wallet_policy),
+                PsbtAccountCoordinates::WalletPolicy(coords),
+            ) => wallet_policy
+                .destination(coords)
+                .map_err(|_| Error::InvalidWalletPolicy),
+        }
+    }
 }
 
 pub trait PsbtAccountGlobalRead: GlobalHasProprietaryFields {

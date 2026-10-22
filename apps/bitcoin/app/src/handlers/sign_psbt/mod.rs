@@ -57,7 +57,7 @@ pub async fn handle_sign_psbt(app: &mut sdk::App, psbt: &[u8]) -> Result<Respons
     }
 
     // Display transaction for user approval
-    let pairs = display::build_display_pairs(&psbt, &summary, silent_payments.as_ref())?;
+    let pairs = display::build_display_pairs(&psbt, &summary)?;
     if !display::display_transaction(app, &pairs).await {
         display::show_transaction_rejected(app);
         return Err(Error::UserRejected);

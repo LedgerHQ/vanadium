@@ -12,6 +12,7 @@
 use alloc::{string::String, vec, vec::Vec};
 
 use common::{
+    account::{Account, Destination},
     bip388::{SegwitVersion, WalletPolicy},
     errors::Error,
     fastpsbt,
@@ -22,27 +23,35 @@ use common::{
         PsbtAccount, PsbtAccountCoordinates, PsbtAccountGlobalRead, PsbtAccountInputRead,
         PsbtAccountOutputRead, PsbtIdAuthGlobalRead, PsbtOutputAuthRead,
     },
-    script::ToScript,
+    silent_payments::SilentPaymentCode,
 };
 
 use bitcoin::{hashes::Hash, ScriptBuf, TxOut};
 use sdk::curve::EcfpPublicKey;
 
-/// A script derivation check to be verified in the background task.
-struct ScriptCheck {
+/// A check, verified in the background task, that an input or an output belongs to the account
+/// it claims: the account's destination at its coordinates must be the input's or output's.
+struct OwnershipCheck {
     account_id: u32,
-    is_change: bool,
-    address_index: u32,
-    expected_script: ScriptBuf,
+    coords: PsbtAccountCoordinates,
+    expected: Destination,
     is_input: bool,
 }
 
 /// The checks [`analyze_transaction`] hands to the background task: proof of
-/// registration for every account, and script derivation for every input and every
+/// registration for every account, and ownership for every input and every
 /// output that belongs to one of them.
 pub(super) struct DeferredChecks {
-    account_proofs: Vec<ProofOfRegistration<common::bip388::WalletPolicy>>,
-    script_checks: Vec<ScriptCheck>,
+    account_proofs: Vec<[u8; 32]>,
+    ownership_checks: Vec<OwnershipCheck>,
+}
+
+/// An output that pays to none of the PSBT's accounts.
+pub(super) struct ExternalOutput {
+    pub(super) output_index: usize,
+    pub(super) destination: Destination,
+    /// `Some(name)` if the output carries a valid id_auth proof from a registered identity key.
+    pub(super) auth_name: Option<String>,
 }
 
 /// The result of analyzing a PSBT: lightweight data needed for UI display and signing.
@@ -51,10 +60,7 @@ pub(super) struct TransactionSummary {
     pub(super) account_names: Vec<Option<String>>,
     pub(super) input_coordinates: Vec<(u32, PsbtAccountCoordinates)>,
     pub(super) account_spent_amounts: Vec<i64>,
-    pub(super) external_outputs_indexes: Vec<usize>,
-    /// Parallel to `external_outputs_indexes`: `Some(name)` if the output carries a valid
-    /// id_auth proof from a registered identity key, `None` otherwise.
-    pub(super) external_output_auth_names: Vec<Option<String>>,
+    pub(super) external_outputs: Vec<ExternalOutput>,
     pub(super) inputs_total_amount: u64,
     pub(super) outputs_total_amount: u64,
     pub(super) warn_unverified_inputs: bool,
@@ -83,7 +89,18 @@ impl TransactionSummary {
 struct Accounts {
     accounts: Vec<PsbtAccount>,
     names: Vec<Option<String>>,
-    proofs: Vec<ProofOfRegistration<common::bip388::WalletPolicy>>,
+    proofs: Vec<[u8; 32]>,
+}
+
+/// Whether `por` is the proof of registration of `account` with the name `name`.
+fn is_registered(account: &PsbtAccount, name: &str, por: &[u8; 32]) -> bool {
+    fn check<T: Account>(account: &T, name: &str, por: &[u8; 32]) -> bool {
+        ProofOfRegistration::<T>::from_bytes(*por)
+            == ProofOfRegistration::new(&account.registration_id(name))
+    }
+    match account {
+        PsbtAccount::WalletPolicy(wallet_policy) => check(wallet_policy, name, por),
+    }
 }
 
 fn read_accounts(psbt: &fastpsbt::Psbt) -> Result<Accounts, Error> {
@@ -103,11 +120,10 @@ fn read_accounts(psbt: &fastpsbt::Psbt) -> Result<Accounts, Error> {
             .get_account_proof_of_registration(account_id as u32)
             .map_err(|_| Error::InvalidWalletPolicy)?;
         let por = por.ok_or(Error::DefaultAccountsNotSupported)?;
-        let por = ProofOfRegistration::from_bytes(
+        proofs.push(
             por.try_into()
                 .map_err(|_| Error::InvalidProofOfRegistrationLength)?,
         );
-        proofs.push(por);
     }
 
     Ok(Accounts {
@@ -288,12 +304,12 @@ fn analyze_input<'i>(
 
 /// What one output turns out to be.
 enum AnalyzedOutput {
-    /// Pays back to one of the PSBT's own accounts; its script goes to the deferred
-    /// derivation check.
-    Internal(ScriptCheck),
-    /// Pays elsewhere. `Some(name)` if it carries a valid id_auth proof from an
-    /// identity key registered in this PSBT.
-    External(Option<String>),
+    /// Pays back to one of the PSBT's own accounts; its destination goes to the deferred
+    /// ownership check.
+    Internal(OwnershipCheck),
+    /// Pays elsewhere: to a destination, and `Some(name)` if it carries a valid id_auth proof
+    /// from an identity key registered in this PSBT.
+    External(Destination, Option<String>),
 }
 
 /// Classifies one output and, when it is external, verifies any identity-key auth
@@ -312,7 +328,7 @@ fn analyze_output(
     // An output to a silent payment code is external: its script, if the PSBT has one, is only
     // checked against the code after the review. Identity keys sign scripts, and the coordinates
     // of a wallet policy derive one, so neither can apply to it.
-    if output.sp_v0_info.is_some() {
+    if let Some(sp_v0_info) = output.sp_v0_info {
         let has_auth_proofs = !output
             .get_auth_proofs()
             .map_err(|_| Error::InvalidIdentitySignature)?
@@ -320,14 +336,19 @@ fn analyze_output(
         if coordinates.is_some() || has_auth_proofs {
             return Err(Error::UnsupportedSilentPayment);
         }
-        return Ok(AnalyzedOutput::External(None));
+        let code =
+            SilentPaymentCode::from_bytes(sp_v0_info).map_err(|_| Error::InvalidSilentPayment)?;
+        return Ok(AnalyzedOutput::External(
+            Destination::SilentPaymentCode(code),
+            None,
+        ));
     }
 
     let Some((account_id, coords)) = coordinates else {
         let proofs = output
             .get_auth_proofs()
             .map_err(|_| Error::InvalidIdentitySignature)?;
-        let out_script_bytes = output.script.ok_or(Error::OutputScriptMissing)?.to_vec();
+        let out_script = output.script.ok_or(Error::OutputScriptMissing)?;
 
         let mut first_auth_name: Option<String> = None;
         for proof in proofs {
@@ -337,7 +358,7 @@ fn analyze_output(
                     let ecfp_pubkey =
                         EcfpPublicKey::<sdk::curve::Secp256k1, 32>::from_compressed(&pubkey)
                             .map_err(|_| Error::InvalidIdentitySignature)?;
-                    let msg = build_identity_message(MSG_TYPE_OUTPUT, &out_script_bytes)
+                    let msg = build_identity_message(MSG_TYPE_OUTPUT, out_script)
                         .map_err(|_| Error::InvalidIdentitySignature)?;
                     ecfp_pubkey
                         .schnorr_verify(&msg, &sig)
@@ -352,22 +373,22 @@ fn analyze_output(
                 }
             }
         }
-        return Ok(AnalyzedOutput::External(first_auth_name));
+        return Ok(AnalyzedOutput::External(
+            Destination::Script(ScriptBuf::from_bytes(out_script.to_vec())),
+            first_auth_name,
+        ));
     };
 
     if *account_id as usize >= n_accounts {
         return Err(Error::InvalidAccountId);
     }
-    let PsbtAccountCoordinates::WalletPolicy(coords) = coords;
 
     let out_script_pubkey = output.script.ok_or(Error::OutputScriptMissing)?;
-    let out_script_pubkey = ScriptBuf::from_bytes(out_script_pubkey.to_vec());
 
-    Ok(AnalyzedOutput::Internal(ScriptCheck {
+    Ok(AnalyzedOutput::Internal(OwnershipCheck {
         account_id: *account_id,
-        is_change: coords.is_change,
-        address_index: coords.address_index,
-        expected_script: out_script_pubkey,
+        coords: coords.clone(),
+        expected: Destination::Script(ScriptBuf::from_bytes(out_script_pubkey.to_vec())),
         is_input: false,
     }))
 }
@@ -389,12 +410,11 @@ pub(super) fn analyze_transaction(
     let identity_key_names = read_identity_keys(psbt)?;
 
     let mut account_spent_amounts: Vec<i64> = vec![0; accounts.len()];
-    let mut external_outputs_indexes = Vec::new();
-    let mut external_output_auth_names: Vec<Option<String>> = Vec::new();
+    let mut external_outputs = Vec::new();
     let mut inputs_total_amount: u64 = 0;
     let mut outputs_total_amount: u64 = 0;
     let mut warn_unverified_inputs = false;
-    let mut script_checks = Vec::new();
+    let mut ownership_checks = Vec::new();
 
     /***** input checks (structural only — script derivation is deferred) *****/
 
@@ -417,16 +437,14 @@ pub(super) fn analyze_transaction(
         }
 
         let PsbtAccount::WalletPolicy(wallet_policy) = &accounts[account_id as usize];
-        let PsbtAccountCoordinates::WalletPolicy(coords) = coords;
 
         let analyzed = analyze_input(input, wallet_policy)?;
         warn_unverified_inputs |= analyzed.amount_unverified;
 
-        script_checks.push(ScriptCheck {
+        ownership_checks.push(OwnershipCheck {
             account_id,
-            is_change: coords.is_change,
-            address_index: coords.address_index,
-            expected_script: analyzed.prevout.script_pubkey.clone(),
+            coords: coords.clone(),
+            expected: Destination::Script(analyzed.prevout.script_pubkey.clone()),
             is_input: true,
         });
 
@@ -458,11 +476,14 @@ pub(super) fn analyze_transaction(
         )? {
             AnalyzedOutput::Internal(check) => {
                 account_spent_amounts[check.account_id as usize] -= amount as i64;
-                script_checks.push(check);
+                ownership_checks.push(check);
             }
-            AnalyzedOutput::External(auth_name) => {
-                external_outputs_indexes.push(output_index);
-                external_output_auth_names.push(auth_name);
+            AnalyzedOutput::External(destination, auth_name) => {
+                external_outputs.push(ExternalOutput {
+                    output_index,
+                    destination,
+                    auth_name,
+                });
             }
         }
 
@@ -478,8 +499,7 @@ pub(super) fn analyze_transaction(
         account_names,
         input_coordinates,
         account_spent_amounts,
-        external_outputs_indexes,
-        external_output_auth_names,
+        external_outputs,
         inputs_total_amount,
         outputs_total_amount,
         warn_unverified_inputs,
@@ -489,7 +509,7 @@ pub(super) fn analyze_transaction(
         summary,
         DeferredChecks {
             account_proofs,
-            script_checks,
+            ownership_checks,
         },
     ))
 }
@@ -502,22 +522,17 @@ impl DeferredChecks {
 
         // Verify proof-of-registration for each account
         for (account_id, account) in accounts.iter().enumerate() {
-            let PsbtAccount::WalletPolicy(wallet_policy) = account;
             let account_name = summary.account_names[account_id].as_deref().unwrap_or("");
-            let id = wallet_policy.registration_id(account_name);
-            if self.account_proofs[account_id] != ProofOfRegistration::new(&id) {
+            if !is_registered(account, account_name, &self.account_proofs[account_id]) {
                 return Err(Error::InvalidProofOfRegistration);
             }
             sdk::executor::yield_now().await;
         }
 
-        // Verify that each input/output script matches the account derivation
-        for check in &self.script_checks {
-            let PsbtAccount::WalletPolicy(wallet_policy) = &accounts[check.account_id as usize];
-            let derived_script = wallet_policy
-                .to_script(check.is_change, check.address_index)
-                .map_err(|_| Error::InvalidWalletPolicy)?;
-            if derived_script != check.expected_script {
+        // Verify that each input/output has the account's destination at its coordinates
+        for check in &self.ownership_checks {
+            let destination = accounts[check.account_id as usize].destination(&check.coords)?;
+            if destination != check.expected {
                 return Err(if check.is_input {
                     Error::InputScriptMismatch
                 } else {
@@ -563,9 +578,10 @@ mod tests {
         let (summary, checks) = analyze(&legacy_pkh_psbt()).unwrap();
         assert_eq!(summary.inputs_total_amount, 1_000_000);
         // One input belonging to the account; the single output is external.
-        assert_eq!(checks.script_checks.len(), 1);
-        assert!(checks.script_checks[0].is_input);
-        assert_eq!(summary.external_outputs_indexes, vec![0]);
+        assert_eq!(checks.ownership_checks.len(), 1);
+        assert!(checks.ownership_checks[0].is_input);
+        assert_eq!(summary.external_outputs.len(), 1);
+        assert_eq!(summary.external_outputs[0].output_index, 0);
         assert!(!summary.warn_unverified_inputs);
 
         assert!(analyze(&segwit_wpkh_psbt()).is_ok());

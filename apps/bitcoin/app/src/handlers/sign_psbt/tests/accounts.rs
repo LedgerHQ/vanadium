@@ -109,7 +109,8 @@ fn test_handle_sign_psbt_transfer_to_another_account() {
     // the taproot account receives its output, and only the payment is external
     let (summary, _) = analyze_transaction(&fastpsbt::Psbt::parse(&psbt_v2).unwrap()).unwrap();
     assert_eq!(summary.account_spent_amounts, [100_000, -39_000]);
-    assert_eq!(summary.external_outputs_indexes, [0]);
+    assert_eq!(summary.external_outputs.len(), 1);
+    assert_eq!(summary.external_outputs[0].output_index, 0);
 
     let response =
         sdk::executor::block_on(handle_sign_psbt(&mut sdk::App::singleton(), &psbt_v2)).unwrap();
