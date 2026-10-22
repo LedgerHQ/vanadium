@@ -23,7 +23,7 @@ use common::{
         PsbtAccount, PsbtAccountCoordinates, PsbtAccountGlobalRead, PsbtAccountInputRead,
         PsbtAccountOutputRead, PsbtIdAuthGlobalRead, PsbtOutputAuthRead,
     },
-    silent_payments::{SilentPaymentCode, SilentPaymentCoordinates},
+    silent_payments::{SilentPaymentAccount, SilentPaymentCode, SilentPaymentCoordinates},
 };
 
 use bitcoin::{hashes::Hash, ScriptBuf, TxOut};
@@ -71,22 +71,39 @@ impl TransactionSummary {
         self.inputs_total_amount - self.outputs_total_amount
     }
 
-    /// The account that input `input_index` spends from: its id, its wallet policy, and the
-    /// input's coordinates in it.
-    pub(super) fn input_account(
-        &self,
-        input_index: usize,
-    ) -> (u32, &WalletPolicy, &WalletPolicyCoordinates) {
+    /// The account that input `input_index` spends from, with the input's coordinates in it.
+    pub(super) fn input_account(&self, input_index: usize) -> InputAccount<'_> {
         let (account_id, ref coords) = self.input_coordinates[input_index];
-        let (
-            PsbtAccount::WalletPolicy(wallet_policy),
-            PsbtAccountCoordinates::WalletPolicy(coords),
-        ) = (&self.accounts[account_id as usize], coords)
-        else {
-            unreachable!("the analysis only accepts wallet policies");
-        };
-        (account_id, wallet_policy, coords)
+        match (&self.accounts[account_id as usize], coords) {
+            (
+                PsbtAccount::WalletPolicy(wallet_policy),
+                PsbtAccountCoordinates::WalletPolicy(coords),
+            ) => InputAccount::WalletPolicy {
+                account_id,
+                wallet_policy,
+                coords,
+            },
+            (
+                PsbtAccount::SilentPayment(account),
+                PsbtAccountCoordinates::SilentPayment(SilentPaymentCoordinates::Tweak(tweak)),
+            ) => InputAccount::SilentPayment { account, tweak },
+            _ => unreachable!("the analysis checks the coordinates of the inputs"),
+        }
     }
+}
+
+/// The account that an input spends from, with the input's coordinates in it.
+pub(super) enum InputAccount<'a> {
+    WalletPolicy {
+        account_id: u32,
+        wallet_policy: &'a WalletPolicy,
+        coords: &'a WalletPolicyCoordinates,
+    },
+    /// A silent payment account, and the tweak of the output that the input spends (BIP-376).
+    SilentPayment {
+        account: &'a SilentPaymentAccount,
+        tweak: &'a [u8; 32],
+    },
 }
 
 /// The accounts a PSBT declares in its global section, with their names and the raw
@@ -136,12 +153,6 @@ fn read_accounts(psbt: &fastpsbt::Psbt) -> Result<Accounts, Error> {
     let accounts = psbt
         .get_accounts()
         .map_err(|_| Error::InvalidWalletPolicy)?;
-    if accounts
-        .iter()
-        .any(|account| matches!(account, PsbtAccount::SilentPayment(_)))
-    {
-        return Err(Error::UnsupportedSilentPayment);
-    }
 
     let mut names = Vec::with_capacity(accounts.len());
     let mut proofs = Vec::with_capacity(accounts.len());
@@ -250,14 +261,32 @@ struct AnalyzedInput<'i> {
 
 /// Structural validation of a single input against the account it claims to belong to:
 /// the UTXO kinds its segwit version permits, the non-witness UTXO's txid, and the
-/// redeem/witness scripts. Script *derivation* is deferred.
+/// redeem/witness scripts, and for an input of a silent payment account its tweak. Checking that
+/// the account's destination is the spent script is deferred.
 fn analyze_input<'i>(
     input: &'i fastpsbt::Input<'_>,
-    wallet_policy: &common::bip388::WalletPolicy,
+    account: &PsbtAccount,
+    coords: &PsbtAccountCoordinates,
 ) -> Result<AnalyzedInput<'i>, Error> {
-    let segwit_version = wallet_policy
-        .get_segwit_version()
-        .map_err(|_| Error::InvalidWalletPolicy)?;
+    let segwit_version = match (account, coords) {
+        (PsbtAccount::WalletPolicy(wallet_policy), PsbtAccountCoordinates::WalletPolicy(_)) => {
+            wallet_policy
+                .get_segwit_version()
+                .map_err(|_| Error::InvalidWalletPolicy)?
+        }
+        // BIP-376: the input spends a taproot output with the tweak of its coordinates, which other
+        // signers find in its PSBT_IN_SP_TWEAK
+        (
+            PsbtAccount::SilentPayment(_),
+            PsbtAccountCoordinates::SilentPayment(SilentPaymentCoordinates::Tweak(tweak)),
+        ) => {
+            if input.sp_tweak != Some(tweak) {
+                return Err(Error::SilentPaymentTweakMismatch);
+            }
+            SegwitVersion::Taproot
+        }
+        _ => return Err(Error::AccountCoordinatesMismatch),
+    };
 
     // Only SIGHASH_ALL is supported, and its taproot equivalent SIGHASH_DEFAULT. Without a
     // sighash type, the device signs with SIGHASH_ALL (SIGHASH_DEFAULT for taproot).
@@ -474,11 +503,8 @@ pub(super) fn analyze_transaction(
 
         let account = &accounts[account_id as usize];
         check_coordinates(account, coords, true)?;
-        let PsbtAccount::WalletPolicy(wallet_policy) = account else {
-            unreachable!("the analysis only accepts wallet policies");
-        };
 
-        let analyzed = analyze_input(input, wallet_policy)?;
+        let analyzed = analyze_input(input, account, coords)?;
         warn_unverified_inputs |= analyzed.amount_unverified;
 
         ownership_checks.push(OwnershipCheck {

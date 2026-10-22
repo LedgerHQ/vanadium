@@ -32,7 +32,7 @@ use common::{
 };
 use sdk::curve::{Secp256k1, Secp256k1Point, Secp256k1Scalar};
 
-use super::analyze::{input_prevout, TransactionSummary};
+use super::analyze::{input_prevout, InputAccount, TransactionSummary};
 use super::context::TaptreeHashes;
 use super::key_resolution::{resolve_private_key, KeySource, LocalKeys};
 use super::signing::taproot_output_private_key;
@@ -114,7 +114,14 @@ pub(super) fn analyze(
             return Err(Error::SilentPaymentShareMismatch);
         }
 
-        let (account_id, wallet_policy, coords) = summary.input_account(input_index);
+        let InputAccount::WalletPolicy {
+            account_id,
+            wallet_policy,
+            coords,
+        } = summary.input_account(input_index)
+        else {
+            return Err(Error::UnsupportedSilentPayment);
+        };
         let Some((kp, is_taproot)) = eligible_key(wallet_policy) else {
             continue;
         };
@@ -182,7 +189,14 @@ fn sum_input_keys(
 ) -> Result<Secp256k1Scalar, Error> {
     let mut a = Secp256k1Scalar::zero();
     for input in &silent_payments.eligible_inputs {
-        let (_, wallet_policy, coords) = summary.input_account(input.input_index);
+        let InputAccount::WalletPolicy {
+            wallet_policy,
+            coords,
+            ..
+        } = summary.input_account(input.input_index)
+        else {
+            unreachable!("the eligible inputs are inputs of wallet policies");
+        };
         a = &a + &input_private_key(input, wallet_policy, coords, taptree_hashes)?;
     }
     if a.is_zero() {
