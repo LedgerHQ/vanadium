@@ -34,8 +34,6 @@ use sdk::curve::{Curve, EcfpPublicKey, Secp256k1Point, Secp256k1Scalar};
 use super::super::analyze::analyze_transaction;
 use super::super::display::build_display_pairs;
 use super::super::handle_sign_psbt;
-use super::super::key_resolution::LocalKeys;
-use super::super::silent_payments;
 use super::musig::{build_musig_keypath_psbt, make_2of2_keypath_policy};
 
 const LEGACY_KEY: &str = "[f5acc2fd/44'/1'/0']tpubDCwYjpDhUdPGP5rS3wgNg13mTrrjBuG8V9VpWbyptX6TRPbNoZVXsoVUSkCjmQ8jJycjuDKBb9eataSymXakTTaGifxR6kmVsfFehH1ZgJT";
@@ -549,11 +547,13 @@ fn test_pay_to_silent_payment_codes() {
     let raw = fx.psbt.serialize();
     let parsed = fastpsbt::Psbt::parse(&raw).unwrap();
     let (summary, _) = analyze_transaction(&parsed).unwrap();
-    assert_eq!(summary.external_outputs_indexes, [0, 1, 2, 3]);
-    let sp = silent_payments::analyze(&parsed, &summary, &mut LocalKeys::new().unwrap())
-        .unwrap()
-        .unwrap();
-    let pairs = build_display_pairs(&parsed, &summary, Some(&sp)).unwrap();
+    let external: Vec<usize> = summary
+        .external_outputs
+        .iter()
+        .map(|output| output.output_index)
+        .collect();
+    assert_eq!(external, [0, 1, 2, 3]);
+    let pairs = build_display_pairs(&parsed, &summary).unwrap();
     let output_0 = pairs.iter().find(|p| p.tag == "Output 0").unwrap();
     assert_eq!(output_0.value, code(11, 12).to_address("tsp").unwrap());
     assert!(output_0.value.starts_with("tsp1q"));
