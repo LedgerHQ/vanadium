@@ -12,7 +12,7 @@ The bitcoin app implements standards to guarantee interoperability, security and
 - [BIP-370](https://github.com/bitcoin/bips/blob/master/bip-0370.mediawiki) PSBTs Version 2 are used to describe transactions to the application.
 - [BIP-388](https://github.com/bitcoin/bips/blob/master/bip-0388.mediawiki) wallet policies build on top of descriptors ([BIP-380](https://github.com/bitcoin/bips/blob/master/bip-0380.mediawiki) and related BIPs) to describe standardized *wallet accounts* that work for any kind of spending conditions, including using [miniscript](https://github.com/bitcoin/bips/blob/master/bip-0379.md).
 - [BIP-327](https://github.com/bitcoin/bips/blob/master/bip-0327.mediawiki) MuSig2 support for compatible BIP-388 wallet policies.
-- [BIP-352](https://github.com/bitcoin/bips/blob/master/bip-0352.mediawiki) Silent Payments: paying to silent payment addresses, with the PSBT fields of [BIP-375](https://github.com/bitcoin/bips/blob/master/bip-0375.mediawiki) and the DLEQ proofs of [BIP-374](https://github.com/bitcoin/bips/blob/master/bip-0374.mediawiki), and silent payment accounts to receive, with their [BIP-392](https://github.com/bitcoin/bips/blob/master/bip-0392.mediawiki) scan keys. See [silent_payments.md](silent_payments.md).
+- [BIP-352](https://github.com/bitcoin/bips/blob/master/bip-0352.mediawiki) Silent Payments: paying to silent payment addresses, with the PSBT fields of [BIP-375](https://github.com/bitcoin/bips/blob/master/bip-0375.mediawiki) and the DLEQ proofs of [BIP-374](https://github.com/bitcoin/bips/blob/master/bip-0374.mediawiki), and silent payment accounts, with their [BIP-392](https://github.com/bitcoin/bips/blob/master/bip-0392.mediawiki) scan keys, which receive, spend what they receive ([BIP-376](https://github.com/bitcoin/bips/blob/master/bip-0376.mediawiki)) and get change to their change label. See [silent_payments.md](silent_payments.md).
 
 
 ## PSBT-level extensions
@@ -31,7 +31,7 @@ They are documented in [PSBT.md](PSBT.md).
 
 ## Planned features
 
-- Spending what [BIP-352](https://github.com/bitcoin/bips/blob/master/bip-0352.mediawiki) silent payment accounts receive ([BIP-376](https://github.com/bitcoin/bips/blob/master/bip-0376.mediawiki)), and silent payment change. Silent Payment addresses could also be used as *identity pubkeys*. This would allow a DNS-based Root of Trust that doesn't require an explicit registration step.
+- Silent Payment addresses could also be used as *identity pubkeys*. This would allow a DNS-based Root of Trust that doesn't require an explicit registration step.
 - DNSSEC-based authentication for identity pubkeys. Similar to [BIP-353](https://github.com/bitcoin/bips/blob/master/bip-0353.mediawiki) but for identity pubkeys.
 - Signing policies: derive keys that will only sign transactions (and possibly auto-sign) if they satisfy certain spending policies.
 
@@ -115,7 +115,7 @@ The transaction is analyzed in an account-centric manner: for each of the affect
 
 Account info and coordinates are also used to identify external outputs belonging to known accounts (allowing the user to validate the destination account, rather than the actual address). External outputs that are not associated with any known account may be authenticated by attaching a Schnorr signature, from a registered identity key, over the output `scriptPubkey` (see [PSBT.md](PSBT.md)); if the signature is valid, the corresponding name is displayed alongside the address during review.
 
-Outputs to silent payment addresses (`PSBT_OUT_SP_V0_INFO`, BIP-375) are external, and shown with their address. The device computes their scripts after the review, and the signatures commit to them, so the host must add them to the PSBT; see [silent_payments.md](silent_payments.md) for the flow and its requirements on the inputs.
+Outputs to silent payment addresses (`PSBT_OUT_SP_V0_INFO`, BIP-375) are shown with their address, unless they pay to one of the PSBT's silent payment accounts, like their change. The device computes their scripts after the review, and the signatures commit to them, so the host must add them to the PSBT; see [silent_payments.md](silent_payments.md) for the flow, its requirements on the inputs, and spending from silent payment accounts.
 
 The device also shows extra warnings before the transaction review when:
 - the segwit-v0 inputs cannot be fully verified because the non-witness UTXO is missing;

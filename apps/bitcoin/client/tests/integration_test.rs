@@ -293,3 +293,136 @@ async fn test_e2e_silent_payment_account() {
         ))
     ));
 }
+
+#[tokio::test]
+async fn test_e2e_spend_from_silent_payment_account() {
+    // this test registers a silent payment account, finds a payment to it by scanning, and spends
+    // it with the change to the account's change label
+    use bitcoin::{
+        hashes::Hash,
+        secp256k1::{schnorr::Signature, Message, Secp256k1, XOnlyPublicKey},
+        sighash::{Prevouts, SighashCache},
+        Amount, OutPoint, ScriptBuf, TapSighashType, Transaction, TxIn, TxOut, Txid, WPubkeyHash,
+    };
+    use common::{
+        account::{Account, Destination, SilentPaymentCoordinates},
+        fastpsbt::{PSBT_IN_SP_TWEAK, PSBT_OUT_SCRIPT, PSBT_OUT_SP_V0_INFO, PSBT_OUT_SP_V0_LABEL},
+        silent_payments::{
+            self as sp, Secp256k1 as Curve, Secp256k1Point, Secp256k1Scalar, SilentPaymentCode,
+        },
+    };
+
+    let mut setup = setup().await;
+    let client = &mut setup.client;
+
+    let account = client.export_silent_payment_scan_key(2).await.unwrap();
+    let name = "Silent payments #2";
+    let (_, por) = client
+        .register_account(name, &account, None, None, false)
+        .await
+        .unwrap();
+    let code = |label| -> SilentPaymentCode {
+        let coords = SilentPaymentCoordinates::Code { label };
+        let Destination::SilentPaymentCode(code) = account.destination(&coords).unwrap() else {
+            panic!("not a code");
+        };
+        code
+    };
+    let p2tr = |x: &[u8; 32]| ScriptBuf::from_bytes([&[0x51, 0x20][..], x].concat());
+    // the sum of the keys of a transaction's only input, a taproot one
+    let input_key = |x: &[u8; 32]| {
+        Secp256k1Point::from_compressed(&[&[0x02][..], x].concat().try_into().unwrap()).unwrap()
+    };
+
+    // a sender pays to the account's address, and scanning finds the tweak of the payment
+    let sender_key = Secp256k1Scalar::from_be_bytes(&[0x42; 32]).unwrap();
+    let sender_outpoint = OutPoint {
+        txid: Txid::from_byte_array([7; 32]),
+        vout: 1,
+    };
+    let payment = sp::create_outputs(&sender_key, &[sender_outpoint], &[code(None)]).unwrap()[0];
+    let found = sp::scan(
+        account.scan_key(),
+        account.spend_key(),
+        &(&Curve::get_generator() * &sender_key),
+        &[sender_outpoint],
+        &[payment],
+        &sp::Labels::new(),
+    )
+    .unwrap();
+    let tweak = *found[0].tweak.as_be_bytes();
+    let received = TxOut {
+        value: Amount::from_sat(100_000),
+        script_pubkey: p2tr(&payment),
+    };
+
+    // the account spends it: a payment to a script, and the change to the change label
+    let outpoint = OutPoint {
+        txid: Txid::from_byte_array([9; 32]),
+        vout: 0,
+    };
+    let mut tx = Transaction {
+        version: bitcoin::transaction::Version::TWO,
+        lock_time: bitcoin::absolute::LockTime::ZERO,
+        input: vec![TxIn {
+            previous_output: outpoint,
+            ..Default::default()
+        }],
+        // the script of the change is a placeholder, removed below
+        output: vec![
+            TxOut {
+                value: Amount::from_sat(60_000),
+                script_pubkey: ScriptBuf::new_p2wpkh(&WPubkeyHash::from_byte_array([2; 20])),
+            },
+            TxOut {
+                value: Amount::from_sat(39_000),
+                script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
+            },
+        ],
+    };
+    let mut psbt_v0 = bitcoin::psbt::Psbt::from_unsigned_tx(tx.clone()).unwrap();
+    psbt_v0.inputs[0].witness_utxo = Some(received.clone());
+    let mut psbt = PsbtV2::from_v0(&psbt_v0.serialize()).unwrap();
+    psbt.inputs[0].insert(PSBT_IN_SP_TWEAK, &[], tweak.to_vec());
+    psbt.outputs[1].remove(PSBT_OUT_SCRIPT, &[]);
+    psbt.outputs[1].insert(PSBT_OUT_SP_V0_INFO, &[], code(Some(0)).to_bytes().to_vec());
+    psbt.outputs[1].insert(PSBT_OUT_SP_V0_LABEL, &[], 0u32.to_le_bytes().to_vec());
+    prepare_psbt(&mut psbt, &[(&account, name, &por.dangerous_as_bytes())]).unwrap();
+
+    let result = client.sign_psbt(&psbt.serialize()).await.unwrap();
+    assert_eq!(result.signatures.len(), 1);
+    assert_eq!(result.sp_shares.len(), 1);
+    assert_eq!(result.sp_output_scripts.len(), 1);
+    result.merge_into(&mut psbt).unwrap();
+
+    // the signature spends the received output
+    let change_script = ScriptBuf::from_bytes(result.sp_output_scripts[0].script.clone());
+    tx.output[1].script_pubkey = change_script.clone();
+    let sighash = SighashCache::new(&tx)
+        .taproot_key_spend_signature_hash(0, &Prevouts::All(&[received]), TapSighashType::Default)
+        .unwrap();
+    let signature = &result.signatures[0];
+    assert_eq!(signature.pubkey, payment);
+    Secp256k1::new()
+        .verify_schnorr(
+            &Signature::from_slice(&signature.signature).unwrap(),
+            &Message::from_digest(sighash.to_byte_array()),
+            &XOnlyPublicKey::from_slice(&payment).unwrap(),
+        )
+        .unwrap();
+
+    // scanning with the account's scan key finds the change
+    let change: [u8; 32] = change_script.as_bytes()[2..].try_into().unwrap();
+    let mut labels = sp::Labels::new();
+    labels.insert(account.scan_key(), 0).unwrap();
+    let found = sp::scan(
+        account.scan_key(),
+        account.spend_key(),
+        &input_key(&payment),
+        &[outpoint],
+        &[change],
+        &labels,
+    )
+    .unwrap();
+    assert_eq!(found.len(), 1);
+}
