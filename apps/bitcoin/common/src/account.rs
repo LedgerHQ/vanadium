@@ -17,6 +17,7 @@ use bitcoin::{params::Params, Address, ScriptBuf};
 use crate::errors::Error;
 use crate::script::ToScript;
 use crate::silent_payments::SilentPaymentCode;
+pub use crate::silent_payments::{SilentPaymentAccount, SilentPaymentCoordinates};
 
 // TODO: maybe we can modify the serialize() methods to use bitcoin::io::Write instead
 

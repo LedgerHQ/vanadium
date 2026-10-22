@@ -8,9 +8,11 @@ use bitcoin::hex::{DisplayHex, FromHex};
 use bitcoin::{OutPoint, Script, Txid, Witness};
 use sdk::curve::{EcfpPrivateKey, Secp256k1, Secp256k1Point, Secp256k1Scalar};
 use serde_json::Value;
+use vnd_bitcoin_common::account::{Account, Destination};
 use vnd_bitcoin_common::silent_payments::{
     create_outputs, ecdh_share, input_hash, input_private_key, labeled_spend_key, scan,
-    shared_secret, spending_key, Labels, SilentPaymentCode,
+    shared_secret, spending_key, Labels, SilentPaymentAccount, SilentPaymentCode,
+    SilentPaymentCoordinates,
 };
 
 const VECTORS: &str = include_str!("data/bip352/send_and_receive_test_vectors.json");
@@ -230,6 +232,20 @@ fn check_receiving(case: &str, test: &Value) -> usize {
         .collect();
     assert_eq!(addresses, expected_addresses, "{case}: addresses");
 
+    // an account with the receiver's keys has the same codes as destinations
+    let account = SilentPaymentAccount::new(0, b_scan.clone(), spend_key).unwrap();
+    let labels = core::iter::once(None).chain(label_ms.iter().map(|&m| Some(m)));
+    for (label, address) in labels.zip(&expected_addresses) {
+        let (_, code) = SilentPaymentCode::from_address(address).unwrap();
+        assert_eq!(
+            account
+                .destination(&SilentPaymentCoordinates::Code { label })
+                .unwrap(),
+            Destination::SilentPaymentCode(code),
+            "{case}: code of label {label:?}"
+        );
+    }
+
     let eligible: Vec<Secp256k1Point> = inputs
         .iter()
         .filter_map(|i| i.eligible.map(|e| e.0))
@@ -294,6 +310,19 @@ fn check_receiving(case: &str, test: &Value) -> usize {
 
     match (expected.get("outputs"), expected.get("n_outputs")) {
         (Some(outputs), _) => {
+            // the account's destination at the tweak of an output is the output's script
+            for o in outputs.as_array().unwrap() {
+                let tweak = bytes(&o["priv_key_tweak"]).try_into().unwrap();
+                let script = [&[0x51, 0x20][..], &bytes(&o["pub_key"])].concat();
+                assert_eq!(
+                    account
+                        .destination(&SilentPaymentCoordinates::Tweak(tweak))
+                        .unwrap(),
+                    Destination::Script(script.into()),
+                    "{case}: script of an output"
+                );
+            }
+
             let expected: HashSet<(String, String, String)> = outputs
                 .as_array()
                 .unwrap()

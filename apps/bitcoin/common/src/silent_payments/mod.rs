@@ -4,6 +4,7 @@
 //! Everything works on the SDK's points and scalars, so it runs both on the device and on the
 //! host. Scalars that hold secrets (input keys, the scan and spend keys) are zeroized on drop.
 
+mod account;
 mod address;
 mod dleq;
 mod psbt;
@@ -14,6 +15,7 @@ mod tags;
 // the curve types of this module's API, for the users that don't depend on the SDK, like the host
 pub use sdk::curve::{Secp256k1, Secp256k1Point, Secp256k1Scalar};
 
+pub use account::{SilentPaymentAccount, SilentPaymentCoordinates};
 pub use address::{decode_spscan, encode_spscan, SilentPaymentCode};
 pub use dleq::{generate_proof, verify_proof};
 pub use psbt::{recipients, Recipient};
