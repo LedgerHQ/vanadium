@@ -151,6 +151,8 @@ pub enum Error {
     SilentPaymentChangeLabel,
     #[n(59)]
     AccountCoordinatesMismatch,
+    #[n(60)]
+    SilentPaymentTweakMismatch,
 }
 
 impl fmt::Display for Error {
@@ -267,6 +269,10 @@ impl fmt::Display for Error {
             AccountCoordinatesMismatch => {
                 write!(f, "The coordinates don't fit the account, or the input or output")
             }
+            SilentPaymentTweakMismatch => write!(
+                f,
+                "The tweak of a silent payment input is missing, or not the one of its coordinates"
+            ),
         }
     }
 }
