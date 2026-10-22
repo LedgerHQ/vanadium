@@ -23,7 +23,7 @@ use common::{
         PsbtAccount, PsbtAccountCoordinates, PsbtAccountGlobalRead, PsbtAccountInputRead,
         PsbtAccountOutputRead, PsbtIdAuthGlobalRead, PsbtOutputAuthRead,
     },
-    silent_payments::SilentPaymentCode,
+    silent_payments::{SilentPaymentCode, SilentPaymentCoordinates},
 };
 
 use bitcoin::{hashes::Hash, ScriptBuf, TxOut};
@@ -78,8 +78,13 @@ impl TransactionSummary {
         input_index: usize,
     ) -> (u32, &WalletPolicy, &WalletPolicyCoordinates) {
         let (account_id, ref coords) = self.input_coordinates[input_index];
-        let PsbtAccount::WalletPolicy(wallet_policy) = &self.accounts[account_id as usize];
-        let PsbtAccountCoordinates::WalletPolicy(coords) = coords;
+        let (
+            PsbtAccount::WalletPolicy(wallet_policy),
+            PsbtAccountCoordinates::WalletPolicy(coords),
+        ) = (&self.accounts[account_id as usize], coords)
+        else {
+            unreachable!("the analysis only accepts wallet policies");
+        };
         (account_id, wallet_policy, coords)
     }
 }
@@ -100,6 +105,30 @@ fn is_registered(account: &PsbtAccount, name: &str, por: &[u8; 32]) -> bool {
     }
     match account {
         PsbtAccount::WalletPolicy(wallet_policy) => check(wallet_policy, name, por),
+        PsbtAccount::SilentPayment(account) => check(account, name, por),
+    }
+}
+
+/// Fails unless `coords` are coordinates of `account` that an input (if `is_input`) or an output
+/// can have. An input of a silent payment account spends an output that the account received, by
+/// its tweak; an output pays to one of its codes. An output with a tweak would pay to the account,
+/// but scanning with its scan key would never find it.
+fn check_coordinates(
+    account: &PsbtAccount,
+    coords: &PsbtAccountCoordinates,
+    is_input: bool,
+) -> Result<(), Error> {
+    match (account, coords) {
+        (PsbtAccount::WalletPolicy(_), PsbtAccountCoordinates::WalletPolicy(_)) => Ok(()),
+        (
+            PsbtAccount::SilentPayment(_),
+            PsbtAccountCoordinates::SilentPayment(SilentPaymentCoordinates::Tweak(_)),
+        ) if is_input => Ok(()),
+        (
+            PsbtAccount::SilentPayment(_),
+            PsbtAccountCoordinates::SilentPayment(SilentPaymentCoordinates::Code { .. }),
+        ) if !is_input => Ok(()),
+        _ => Err(Error::AccountCoordinatesMismatch),
     }
 }
 
@@ -107,6 +136,12 @@ fn read_accounts(psbt: &fastpsbt::Psbt) -> Result<Accounts, Error> {
     let accounts = psbt
         .get_accounts()
         .map_err(|_| Error::InvalidWalletPolicy)?;
+    if accounts
+        .iter()
+        .any(|account| matches!(account, PsbtAccount::SilentPayment(_)))
+    {
+        return Err(Error::UnsupportedSilentPayment);
+    }
 
     let mut names = Vec::with_capacity(accounts.len());
     let mut proofs = Vec::with_capacity(accounts.len());
@@ -322,7 +357,7 @@ enum AnalyzedOutput {
 fn analyze_output(
     output: &fastpsbt::Output<'_>,
     coordinates: Option<&(u32, PsbtAccountCoordinates)>,
-    n_accounts: usize,
+    accounts: &[PsbtAccount],
     identity_key_names: &[([u8; 33], String)],
 ) -> Result<AnalyzedOutput, Error> {
     // An output to a silent payment code is external: its script, if the PSBT has one, is only
@@ -379,9 +414,10 @@ fn analyze_output(
         ));
     };
 
-    if *account_id as usize >= n_accounts {
-        return Err(Error::InvalidAccountId);
-    }
+    let account = accounts
+        .get(*account_id as usize)
+        .ok_or(Error::InvalidAccountId)?;
+    check_coordinates(account, coords, false)?;
 
     let out_script_pubkey = output.script.ok_or(Error::OutputScriptMissing)?;
 
@@ -436,7 +472,11 @@ pub(super) fn analyze_transaction(
             return Err(Error::InvalidAccountId);
         }
 
-        let PsbtAccount::WalletPolicy(wallet_policy) = &accounts[account_id as usize];
+        let account = &accounts[account_id as usize];
+        check_coordinates(account, coords, true)?;
+        let PsbtAccount::WalletPolicy(wallet_policy) = account else {
+            unreachable!("the analysis only accepts wallet policies");
+        };
 
         let analyzed = analyze_input(input, wallet_policy)?;
         warn_unverified_inputs |= analyzed.amount_unverified;
@@ -471,7 +511,7 @@ pub(super) fn analyze_transaction(
         match analyze_output(
             output,
             output_coordinates[output_index].as_ref(),
-            accounts.len(),
+            &accounts,
             &identity_key_names,
         )? {
             AnalyzedOutput::Internal(check) => {
@@ -668,6 +708,31 @@ mod tests {
         psbt.outputs[0].insert(PSBT_OUT_AMOUNT, &[], 1_000_001u64.to_le_bytes().to_vec());
 
         assert_eq!(analyze(&psbt).err(), Some(Error::InputsLessThanOutputs));
+    }
+
+    /// The coordinates of an input or an output must be those of its account's type.
+    #[test]
+    fn coordinates_must_fit_the_account() {
+        use common::psbt::{PsbtAccountInputWrite, PsbtAccountOutputWrite};
+
+        let coords = || {
+            PsbtAccountCoordinates::SilentPayment(SilentPaymentCoordinates::Code { label: None })
+        };
+        let mut psbt = segwit_wpkh_psbt();
+        psbt.inputs[0].set_account_coordinates(0, coords()).unwrap();
+        assert_eq!(
+            analyze(&psbt).err(),
+            Some(Error::AccountCoordinatesMismatch)
+        );
+
+        let mut psbt = segwit_wpkh_psbt();
+        psbt.outputs[0]
+            .set_account_coordinates(0, coords())
+            .unwrap();
+        assert_eq!(
+            analyze(&psbt).err(),
+            Some(Error::AccountCoordinatesMismatch)
+        );
     }
 
     /// A SegWit v0 input with no non-witness UTXO is accepted, but its amount can't be

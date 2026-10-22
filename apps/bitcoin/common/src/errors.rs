@@ -149,6 +149,8 @@ pub enum Error {
     SilentPaymentAccountKeyMismatch,
     #[n(58)]
     SilentPaymentChangeLabel,
+    #[n(59)]
+    AccountCoordinatesMismatch,
 }
 
 impl fmt::Display for Error {
@@ -262,6 +264,9 @@ impl fmt::Display for Error {
                 f,
                 "The change label of a silent payment account is not an address to hand out"
             ),
+            AccountCoordinatesMismatch => {
+                write!(f, "The coordinates don't fit the account, or the input or output")
+            }
         }
     }
 }
