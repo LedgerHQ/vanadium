@@ -192,6 +192,15 @@ pub enum Request {
         #[cbor(n(1), with = "minicbor::bytes")]
         pubkey: Vec<u8>,
     },
+
+    /// Exports the scan key of a silent payment account, after the user approves it.
+    #[n(8)]
+    #[cbor(map)]
+    ExportSilentPaymentScanKey {
+        /// The BIP-352 account index, below 2^31.
+        #[n(0)]
+        account_index: u32,
+    },
 }
 
 #[derive(Encode, Decode, Debug, Clone, PartialEq, Eq)]
@@ -363,6 +372,15 @@ pub enum Response {
     Error {
         #[n(0)]
         error: crate::errors::Error,
+    },
+
+    #[n(8)]
+    #[cbor(map)]
+    SilentPaymentScanKey {
+        /// The BIP-392 `tspscan` key of the account: its scan private key, which reveals all its
+        /// payments, and its spend public key.
+        #[n(0)]
+        scan_key: String,
     },
 }
 

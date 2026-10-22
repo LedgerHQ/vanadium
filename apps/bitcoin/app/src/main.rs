@@ -7,6 +7,7 @@ mod constants;
 mod handlers;
 mod identity;
 mod resident_key;
+mod sp_keys;
 
 use handlers::*;
 
@@ -71,6 +72,9 @@ async fn handle_request(
             .await
         }
         Request::SignPsbt { psbt } => handle_sign_psbt(app, psbt).await,
+        Request::ExportSilentPaymentScanKey { account_index } => {
+            handle_export_sp_scan_key(app, *account_index).await
+        }
     }
 }
 
