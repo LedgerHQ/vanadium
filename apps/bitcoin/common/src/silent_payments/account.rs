@@ -29,14 +29,20 @@ pub struct SilentPaymentAccount {
 }
 
 /// The coordinates of a silent payment account.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, minicbor::Encode, minicbor::Decode)]
 pub enum SilentPaymentCoordinates {
     /// The account's silent payment code, or the code of one of its labels: what an output pays
     /// to. Label 0 is the change label (BIP-352), that wallets never hand out.
-    Code { label: Option<u32> },
+    #[n(0)]
+    #[cbor(map)]
+    Code {
+        #[n(0)]
+        label: Option<u32>,
+    },
     /// One output that the account received, by its tweak: the tweak to add to the spend private
     /// key to spend it (BIP-376), the label's included. That is what an input spends.
-    Tweak([u8; 32]),
+    #[n(1)]
+    Tweak(#[cbor(n(0), with = "minicbor::bytes")] [u8; 32]),
 }
 
 impl SilentPaymentAccount {

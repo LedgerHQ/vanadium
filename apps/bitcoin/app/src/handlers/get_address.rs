@@ -1,9 +1,8 @@
 use common::{
-    account::Account,
-    bip388,
+    account::{Account, SilentPaymentCoordinates},
     errors::Error,
     identity,
-    message::Response,
+    message::{self, Response},
     por::{ProofOfRegistration, Registerable},
     script::ToScript,
 };
@@ -12,12 +11,17 @@ use crate::identity::compute_identity_signature;
 
 const AUTO_APPROVE: bool = cfg!(any(test, feature = "autoapprove"));
 
-async fn display_address(app: &mut sdk::App, account_name: Option<&str>, addr: &str) -> bool {
+async fn display_address(
+    app: &mut sdk::App,
+    account_name: Option<&str>,
+    label: Option<u32>,
+    addr: &str,
+) -> bool {
     if AUTO_APPROVE {
         return true;
     }
 
-    use alloc::vec;
+    use alloc::{string::ToString, vec};
     use sdk::ux::{Icon, TagValue};
 
     let mut pairs = match account_name {
@@ -31,6 +35,12 @@ async fn display_address(app: &mut sdk::App, account_name: Option<&str>, addr: &
             vec![]
         }
     };
+    if let Some(label) = label {
+        pairs.push(TagValue {
+            tag: "Label".into(),
+            value: label.to_string(),
+        });
+    }
     pairs.push(TagValue {
         tag: "Address".into(),
         value: addr.into(),
@@ -60,19 +70,12 @@ async fn display_address(app: &mut sdk::App, account_name: Option<&str>, addr: &
     approved
 }
 
-pub async fn handle_get_address(
-    app: &mut sdk::App,
+/// Checks that `por` is the proof of registration of `account` with the name `name`.
+fn check_proof_of_registration<T: Account>(
+    account: &T,
     name: Option<&str>,
-    account: &common::message::Account,
     por: &[u8],
-    coordinates: &common::message::AccountCoordinates,
-    display: bool,
-    identity_index: Option<u32>,
-) -> Result<Response, Error> {
-    app.show_spinner("Processing...");
-
-    let common::message::Account::WalletPolicy(wallet_policy) = account;
-
+) -> Result<(), Error> {
     // hmac should be empty or a 32 byte vector; if not, give an error, otherwise convert to Option<[u8; 32]>
     let hmac: Option<&[u8; 32]> = match por.len() {
         0 => None,
@@ -82,40 +85,75 @@ pub async fn handle_get_address(
 
     let hmac = hmac.ok_or(Error::DefaultAccountsNotSupported)?;
 
-    let id = wallet_policy.registration_id(name.unwrap_or(""));
-    let por = ProofOfRegistration::<bip388::WalletPolicy>::from_bytes(*hmac);
-    if por != ProofOfRegistration::new(&id) {
+    let id = account.registration_id(name.unwrap_or(""));
+    if ProofOfRegistration::<T>::from_bytes(*hmac) != ProofOfRegistration::new(&id) {
         return Err(Error::InvalidProofOfRegistration);
     }
+    Ok(())
+}
 
-    let common::message::AccountCoordinates::WalletPolicy(coordinates) = coordinates;
-    let address = wallet_policy
-        .get_address(&common::account::WalletPolicyCoordinates {
-            is_change: coordinates.is_change,
-            address_index: coordinates.address_index,
-        })
-        .map_err(|_| Error::InvalidWalletPolicy)?;
+pub async fn handle_get_address(
+    app: &mut sdk::App,
+    name: Option<&str>,
+    account: &message::Account,
+    por: &[u8],
+    coordinates: &message::AccountCoordinates,
+    display: bool,
+    identity_index: Option<u32>,
+) -> Result<Response, Error> {
+    app.show_spinner("Processing...");
+
+    let (address, label, identity_sig) = match (account, coordinates) {
+        (
+            message::Account::WalletPolicy(wallet_policy),
+            message::AccountCoordinates::WalletPolicy(coordinates),
+        ) => {
+            check_proof_of_registration(wallet_policy, name, por)?;
+            let address = wallet_policy
+                .get_address(coordinates)
+                .map_err(|_| Error::InvalidWalletPolicy)?;
+
+            let identity_sig = match identity_index {
+                Some(i) => {
+                    // Derive the scriptPubKey to sign over
+                    let script = wallet_policy
+                        .to_script(coordinates.is_change, coordinates.address_index)
+                        .map_err(|_| Error::InvalidWalletPolicy)?;
+                    Some(compute_identity_signature(
+                        identity::MSG_TYPE_OUTPUT,
+                        script.as_bytes(),
+                        i,
+                    )?)
+                }
+                None => None,
+            };
+            (address, None, identity_sig)
+        }
+        (
+            message::Account::SilentPayment(account),
+            message::AccountCoordinates::SilentPayment(coordinates),
+        ) => {
+            // an address to hand out is a code, and identity signatures are over scripts
+            let SilentPaymentCoordinates::Code { label } = *coordinates else {
+                return Err(Error::InvalidParameter);
+            };
+            if identity_index.is_some() {
+                return Err(Error::InvalidParameter);
+            }
+            if label == Some(0) {
+                return Err(Error::SilentPaymentChangeLabel);
+            }
+            check_proof_of_registration(account, name, por)?;
+            (account.get_address(coordinates)?, label, None)
+        }
+        _ => return Err(Error::InvalidParameter),
+    };
 
     if display {
-        if !display_address(app, name, &address).await {
+        if !display_address(app, name, label, &address).await {
             return Err(Error::UserRejected);
         }
     }
-
-    let identity_sig = match identity_index {
-        Some(i) => {
-            // Derive the scriptPubKey to sign over
-            let script = wallet_policy
-                .to_script(coordinates.is_change, coordinates.address_index)
-                .map_err(|_| Error::InvalidWalletPolicy)?;
-            Some(compute_identity_signature(
-                identity::MSG_TYPE_OUTPUT,
-                script.as_bytes(),
-                i,
-            )?)
-        }
-        None => None,
-    };
 
     Ok(Response::Address {
         address,
@@ -125,7 +163,7 @@ pub async fn handle_get_address(
 
 #[cfg(test)]
 mod tests {
-    use common::{account::KeyInformation, message};
+    use common::{account::KeyInformation, bip388, message};
 
     use super::*;
 
@@ -138,7 +176,9 @@ mod tests {
     }
 
     fn wallet_policy_of(account: &message::Account) -> &bip388::WalletPolicy {
-        let message::Account::WalletPolicy(wp) = account;
+        let message::Account::WalletPolicy(wp) = account else {
+            panic!("not a wallet policy");
+        };
         wp
     }
 
@@ -175,6 +215,83 @@ mod tests {
                 address: "tb1qzdr7s2sr0dwmkwx033r4nujzk86u0cy6fmzfjk".into(),
                 identity_sig: None,
             }
+        );
+    }
+
+    #[test]
+    fn test_get_address_silent_payments() {
+        let account = crate::sp_keys::account(2).unwrap();
+        let name = "Silent payments";
+        let hmac = ProofOfRegistration::new(&account.registration_id(name)).dangerous_as_bytes();
+        let get_address =
+            |coords: SilentPaymentCoordinates, hmac: &[u8], identity_index: Option<u32>| {
+                sdk::executor::block_on(handle_get_address(
+                    &mut sdk::App::singleton(),
+                    Some(name),
+                    &message::Account::SilentPayment(account.clone()),
+                    hmac,
+                    &message::AccountCoordinates::SilentPayment(coords),
+                    false,
+                    identity_index,
+                ))
+            };
+
+        for label in [None, Some(1), Some(42)] {
+            let coords = SilentPaymentCoordinates::Code { label };
+            let address = get_address(coords.clone(), &hmac, None).unwrap();
+            assert_eq!(
+                address,
+                Response::Address {
+                    address: account.get_address(&coords).unwrap(),
+                    identity_sig: None,
+                }
+            );
+        }
+
+        let code = SilentPaymentCoordinates::Code { label: Some(1) };
+        // the change label is never handed out
+        assert_eq!(
+            get_address(
+                SilentPaymentCoordinates::Code { label: Some(0) },
+                &hmac,
+                None
+            ),
+            Err(Error::SilentPaymentChangeLabel)
+        );
+        // an address to hand out is a code
+        assert_eq!(
+            get_address(SilentPaymentCoordinates::Tweak([1; 32]), &hmac, None),
+            Err(Error::InvalidParameter)
+        );
+        // identity signatures are over scripts
+        assert_eq!(
+            get_address(code.clone(), &hmac, Some(0)),
+            Err(Error::InvalidParameter)
+        );
+        assert_eq!(
+            get_address(code.clone(), &[0; 32], None),
+            Err(Error::InvalidProofOfRegistration)
+        );
+        assert_eq!(
+            get_address(code, &[], None),
+            Err(Error::DefaultAccountsNotSupported)
+        );
+
+        // coordinates of another account type
+        assert_eq!(
+            sdk::executor::block_on(handle_get_address(
+                &mut sdk::App::singleton(),
+                Some(name),
+                &message::Account::SilentPayment(account.clone()),
+                &hmac,
+                &message::AccountCoordinates::WalletPolicy(message::WalletPolicyCoordinates {
+                    is_change: false,
+                    address_index: 0,
+                }),
+                false,
+                None,
+            )),
+            Err(Error::InvalidParameter)
         );
     }
 }

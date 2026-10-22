@@ -145,6 +145,10 @@ pub enum Error {
     SilentPaymentShareMismatch,
     #[n(56)]
     SilentPaymentOutputScriptMismatch,
+    #[n(57)]
+    SilentPaymentAccountKeyMismatch,
+    #[n(58)]
+    SilentPaymentChangeLabel,
 }
 
 impl fmt::Display for Error {
@@ -251,6 +255,13 @@ impl fmt::Display for Error {
             SilentPaymentOutputScriptMismatch => {
                 write!(f, "Silent payment output script does not match its code")
             }
+            SilentPaymentAccountKeyMismatch => {
+                write!(f, "The keys of the silent payment account are not the device's")
+            }
+            SilentPaymentChangeLabel => write!(
+                f,
+                "The change label of a silent payment account is not an address to hand out"
+            ),
         }
     }
 }

@@ -1,5 +1,6 @@
 use alloc::{string::String, vec::Vec};
 use common::{
+    account::{Account, SilentPaymentAccount, SilentPaymentCoordinates},
     bip388,
     errors::Error,
     identity::{build_identity_message, IdentityKey, MSG_TYPE_XPUB},
@@ -8,7 +9,7 @@ use common::{
 };
 use sdk::curve::{EcfpPrivateKey, EcfpPublicKey, Secp256k1, ToPublicKey};
 
-use crate::{bip32::KeyTree, constants::NUMS_COMPRESSED_PUBKEY};
+use crate::{bip32::KeyTree, constants::NUMS_COMPRESSED_PUBKEY, sp_keys};
 
 const AUTO_APPROVE: bool = cfg!(any(test, feature = "autoapprove"));
 
@@ -91,6 +92,90 @@ async fn display_wallet_policy(
     approved
 }
 
+async fn display_silent_payment_account(
+    app: &mut sdk::App,
+    name: &str,
+    account: &SilentPaymentAccount,
+    address: &str,
+) -> bool {
+    if AUTO_APPROVE {
+        return true;
+    }
+
+    use alloc::{string::ToString, vec};
+    use sdk::ux::TagValue;
+
+    let pairs = vec![
+        TagValue {
+            tag: "Account".into(),
+            value: name.into(),
+        },
+        TagValue {
+            tag: "Type".into(),
+            value: "Silent payments".into(),
+        },
+        TagValue {
+            tag: "Account index".into(),
+            value: account.account_index().to_string(),
+        },
+        TagValue {
+            tag: "Address".into(),
+            value: address.into(),
+        },
+    ];
+
+    let (intro_text, intro_subtext) = if sdk::ux::has_page_api() {
+        ("Register Bitcoin\naccount", "")
+    } else {
+        ("Register Bitcoin", "account")
+    };
+
+    let approved = app
+        .review_pairs(
+            intro_text,
+            intro_subtext,
+            &pairs,
+            "Confirm registration",
+            "Register",
+            false,
+        )
+        .await;
+
+    if approved {
+        app.show_info(sdk::ux::Icon::Success, "Account registered");
+    } else {
+        app.show_info(sdk::ux::Icon::Failure, "Registration cancelled");
+    }
+
+    approved
+}
+
+/// Registers a silent payment account of the device. Its keys must be the device's keys for its
+/// index: the proof of registration vouches for them, so that the device never needs to derive them
+/// again to compute the account's destinations.
+async fn register_silent_payment_account(
+    app: &mut sdk::App,
+    name: &str,
+    account: &SilentPaymentAccount,
+) -> Result<Response, Error> {
+    if sp_keys::account(account.account_index())? != *account {
+        return Err(Error::SilentPaymentAccountKeyMismatch);
+    }
+
+    let address = account.get_address(&SilentPaymentCoordinates::Code { label: None })?;
+    if !display_silent_payment_account(app, name, account, &address).await {
+        return Err(Error::UserRejected);
+    }
+
+    let id = account.registration_id(name);
+    let por = ProofOfRegistration::new(&id);
+
+    Ok(Response::AccountRegistered {
+        account_id: *id.as_bytes(),
+        hmac: por.dangerous_as_bytes(),
+    })
+}
+
 pub async fn handle_register_account(
     app: &mut sdk::App,
     name: &str,
@@ -101,7 +186,18 @@ pub async fn handle_register_account(
 ) -> Result<Response, Error> {
     app.show_spinner("Processing...");
 
-    let message::Account::WalletPolicy(wallet_policy) = account;
+    let wallet_policy = match account {
+        message::Account::WalletPolicy(wallet_policy) => wallet_policy,
+        message::Account::SilentPayment(account) => {
+            // a silent payment account has no keys to authenticate
+            if registered_identities.is_some_and(|i| !i.is_empty())
+                || key_signatures.is_some_and(|s| !s.is_empty())
+            {
+                return Err(Error::InvalidParameter);
+            }
+            return register_silent_payment_account(app, name, account).await;
+        }
+    };
 
     // Verify PoRs for registered identity keys and build a (pubkey ==> name) lookup table.
     let identity_key_names: Vec<([u8; 33], String)> = match registered_identities {
@@ -249,7 +345,9 @@ mod tests {
     }
 
     fn wallet_policy_of(account: &message::Account) -> &bip388::WalletPolicy {
-        let message::Account::WalletPolicy(wp) = account;
+        let message::Account::WalletPolicy(wp) = account else {
+            panic!("not a wallet policy");
+        };
         wp
     }
 
@@ -373,6 +471,58 @@ mod tests {
                 // can't really test the hmac here, so we duplicate the app's logic
                 hmac: ProofOfRegistration::new(&expected_account_id).dangerous_as_bytes(),
             })
+        );
+    }
+
+    #[test]
+    fn test_register_silent_payment_account() {
+        let register =
+            |account: &SilentPaymentAccount,
+             registered_identities: Option<&[message::RegisteredIdentityEntry]>| {
+                sdk::executor::block_on(handle_register_account(
+                    &mut sdk::App::singleton(),
+                    "Silent payments",
+                    &message::Account::SilentPayment(account.clone()),
+                    registered_identities,
+                    None,
+                    false,
+                ))
+            };
+
+        let account = sp_keys::account(4).unwrap();
+        let id = account.registration_id("Silent payments");
+        assert_eq!(
+            register(&account, None),
+            Ok(Response::AccountRegistered {
+                account_id: *id.as_bytes(),
+                hmac: ProofOfRegistration::new(&id).dangerous_as_bytes(),
+            })
+        );
+        assert!(register(&account, Some(&[])).is_ok());
+
+        // the keys must be the device's for the account's index
+        let other = sp_keys::account(5).unwrap();
+        for (index, scan_key, spend_key) in [
+            (5, account.scan_key(), account.spend_key()),
+            (4, other.scan_key(), account.spend_key()),
+            (4, account.scan_key(), other.spend_key()),
+        ] {
+            let account = SilentPaymentAccount::new(index, scan_key.clone(), *spend_key).unwrap();
+            assert_eq!(
+                register(&account, None),
+                Err(Error::SilentPaymentAccountKeyMismatch)
+            );
+        }
+
+        // a silent payment account has no keys to authenticate
+        let identity = message::RegisteredIdentityEntry {
+            pubkey: vec![0x02; 33],
+            name: "Alice".into(),
+            por: vec![0; 32],
+        };
+        assert_eq!(
+            register(&account, Some(&[identity])),
+            Err(Error::InvalidParameter)
         );
     }
 }
