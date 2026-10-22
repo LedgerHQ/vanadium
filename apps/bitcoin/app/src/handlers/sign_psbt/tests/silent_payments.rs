@@ -148,6 +148,26 @@ enum Out<'a> {
     Script(ScriptBuf, u64),
     /// The change address `index` of a single-key segwit account.
     Change(&'a WalletPolicy, u32, u64),
+    /// A code of a silent payment account, with an optional label.
+    SilentPaymentChange(&'a SilentPaymentAccount, Option<u32>, u64),
+}
+
+/// The code of `account` with label `label`, computed from the device's keys.
+fn account_code(account: &SilentPaymentAccount, label: Option<u32>) -> SilentPaymentCode {
+    let key = |branch| {
+        let path: DerivationPath = format!("m/352'/1'/{}'/{branch}'/0", account.account_index())
+            .parse()
+            .unwrap();
+        Secp256k1Scalar::from_be_bytes(&device_private_key(&(Fingerprint::default(), path)))
+            .unwrap()
+    };
+    let g = sdk::curve::Secp256k1::get_generator();
+    let (b_scan, spend) = (key(1), &g * &key(0));
+    let spend = match label {
+        Some(m) => sp::labeled_spend_key(&spend, &b_scan, m).unwrap(),
+        None => spend,
+    };
+    SilentPaymentCode::new(&g * &b_scan, spend).unwrap()
 }
 
 /// A test transaction, as a prepared PSBTv2, with what the tests check the device against.
@@ -217,7 +237,7 @@ fn fixture_with(spends: &[Spend], sp_spends: &[SpSpend], outs: &[Out]) -> Fixtur
         output: outs
             .iter()
             .map(|out| match out {
-                Out::Code(_, amount) => TxOut {
+                Out::Code(_, amount) | Out::SilentPaymentChange(_, _, amount) => TxOut {
                     value: Amount::from_sat(*amount),
                     script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
                 },
@@ -375,6 +395,16 @@ fn fixture_with(spends: &[Spend], sp_spends: &[SpSpend], outs: &[Out]) -> Fixtur
     for (i, spend) in sp_spends.iter().enumerate() {
         psbt.inputs[spends.len() + i].insert(PSBT_IN_SP_TWEAK, &[], spend.tweak.to_vec());
     }
+    for (output, out) in psbt.outputs.iter_mut().zip(outs) {
+        if let Out::SilentPaymentChange(account, label, _) = out {
+            output.remove(PSBT_OUT_SCRIPT, &[]).unwrap();
+            let code = account_code(account, *label);
+            output.insert(PSBT_OUT_SP_V0_INFO, &[], code.to_bytes().to_vec());
+            if let Some(label) = label {
+                output.insert(PSBT_OUT_SP_V0_LABEL, &[], label.to_le_bytes().to_vec());
+            }
+        }
+    }
     prepare_psbt(&mut psbt, &accounts).unwrap();
     for (output, out) in psbt.outputs.iter_mut().zip(outs) {
         if let Out::Code(code, _) = out {
@@ -400,10 +430,12 @@ fn sign(psbt: &PsbtV2) -> Result<Response, Error> {
     ))
 }
 
-/// The response's signatures, ECDH shares and scripts, once checked against the fixture.
+/// The response's signatures and ECDH shares, and the transaction with the computed scripts, once
+/// checked against the fixture.
 struct Checked {
     signatures: Vec<PartialSignature>,
     shares: Vec<SilentPaymentShare>,
+    tx: Transaction,
 }
 
 /// Checks the device's response against what BIP-352 and BIP-375 give for `fx`.
@@ -524,6 +556,7 @@ fn check(fx: &Fixture, response: Response) -> Checked {
     Checked {
         signatures,
         shares: sp_shares,
+        tx,
     }
 }
 
@@ -823,13 +856,14 @@ fn test_existing_shares_and_scripts() {
     assert_eq!(sign(&psbt), Err(Error::SilentPaymentOutputScriptMismatch));
 }
 
-/// Identity keys sign scripts, and the coordinates of an account derive one: neither applies to
-/// an output whose script the device computes.
+/// Identity keys sign scripts, which don't apply to an output whose script the device computes,
+/// and a wallet policy's coordinates give a script, never the output's code.
 #[test]
 fn test_unsupported_output_fields() {
     let segwit = segwit_policy();
     let fx = simple_fixture(&segwit);
 
+    // a wallet policy's destinations are scripts, never codes
     let mut psbt = fx.psbt.clone();
     psbt.outputs[0]
         .set_account_coordinates(
@@ -837,7 +871,7 @@ fn test_unsupported_output_fields() {
             PsbtAccountCoordinates::WalletPolicy(WalletPolicyCoordinates::new(false, 5)),
         )
         .unwrap();
-    assert_eq!(sign(&psbt), Err(Error::UnsupportedSilentPayment));
+    assert_eq!(sign(&psbt), Err(Error::OutputScriptMismatch));
 
     let mut psbt = fx.psbt.clone();
     psbt.outputs[0]
@@ -946,6 +980,107 @@ fn test_silent_payment_input_tweak() {
     let mut psbt = fx.psbt.clone();
     psbt.inputs[0]
         .set_account_coordinates(0, coords(SilentPaymentCoordinates::Code { label: None }))
+        .unwrap();
+    assert_eq!(sign(&psbt).err(), Some(Error::AccountCoordinatesMismatch));
+}
+
+/// Paying a silent payment code from a silent payment account and a wallet policy, with the change
+/// to the account's change label: the change is the account's, its script is computed like the
+/// other's, and scanning with the account's scan key finds it.
+#[test]
+fn test_silent_payment_change() {
+    let segwit = segwit_policy();
+    let account = silent_payment_account(1);
+    let fx = fixture_with(
+        &[Spend {
+            policy: &segwit,
+            index: 4,
+            amount: 20_000,
+            kind: Kind::SingleKey,
+        }],
+        &[SpSpend {
+            account: &account,
+            tweak: [0x33; 32],
+            amount: 60_000,
+        }],
+        &[
+            Out::Code(code(11, 12), 40_000),
+            Out::SilentPaymentChange(&account, Some(0), 39_000),
+        ],
+    );
+
+    // the review shows the payment, and the change in what the account spends
+    let raw = fx.psbt.serialize();
+    let parsed = fastpsbt::Psbt::parse(&raw).unwrap();
+    let (summary, _) = analyze_transaction(&parsed).unwrap();
+    assert_eq!(summary.account_spent_amounts, [20_000, 21_000]);
+    assert_eq!(summary.external_outputs.len(), 1);
+    assert_eq!(summary.external_outputs[0].output_index, 0);
+
+    // one share for the recipient's scan key, one for the account's
+    let checked = check(&fx, sign(&fx.psbt).unwrap());
+    assert_eq!(checked.signatures.len(), 2);
+    assert_eq!(checked.shares.len(), 2);
+
+    let outpoints: Vec<OutPoint> = fx.tx.input.iter().map(|i| i.previous_output).collect();
+    let outputs: Vec<[u8; 32]> = checked
+        .tx
+        .output
+        .iter()
+        .map(|o| o.script_pubkey.as_bytes()[2..].try_into().unwrap())
+        .collect();
+    let a_pub = &sdk::curve::Secp256k1::get_generator() * fx.a.as_ref().unwrap();
+    let mut labels = sp::Labels::new();
+    labels.insert(account.scan_key(), 0).unwrap();
+    let found = sp::scan(
+        account.scan_key(),
+        account.spend_key(),
+        &a_pub,
+        &outpoints,
+        &outputs,
+        &labels,
+    )
+    .unwrap();
+    assert_eq!(found.len(), 1);
+    assert_eq!(found[0].output_key, outputs[1]);
+    // and the account can spend it
+    assert_eq!(
+        received_script(&account, found[0].tweak.as_be_bytes()),
+        checked.tx.output[1].script_pubkey
+    );
+}
+
+/// An output is the account's only if its code is the account's, at its coordinates; and an output
+/// pays to a code, not to the tweak of an output that the account received.
+#[test]
+fn test_silent_payment_change_is_the_accounts() {
+    let account = silent_payment_account(1);
+    let fx = fixture_with(
+        &[],
+        &[SpSpend {
+            account: &account,
+            tweak: [0x33; 32],
+            amount: 60_000,
+        }],
+        &[
+            Out::Code(code(11, 12), 40_000),
+            Out::SilentPaymentChange(&account, Some(0), 19_000),
+        ],
+    );
+    assert!(sign(&fx.psbt).is_ok());
+
+    // the code of another label
+    let mut psbt = fx.psbt.clone();
+    let other = account_code(&account, Some(1));
+    psbt.outputs[1].insert(PSBT_OUT_SP_V0_INFO, &[], other.to_bytes().to_vec());
+    assert_eq!(sign(&psbt).err(), Some(Error::OutputScriptMismatch));
+
+    let mut psbt = fx.psbt.clone();
+    psbt.outputs[1]
+        .set_account_coordinates(
+            0,
+            PsbtAccountCoordinates::SilentPayment(SilentPaymentCoordinates::Tweak([0x33; 32])),
+        )
         .unwrap();
     assert_eq!(sign(&psbt).err(), Some(Error::AccountCoordinatesMismatch));
 }

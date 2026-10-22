@@ -389,23 +389,26 @@ fn analyze_output(
     accounts: &[PsbtAccount],
     identity_key_names: &[([u8; 33], String)],
 ) -> Result<AnalyzedOutput, Error> {
-    // An output to a silent payment code is external: its script, if the PSBT has one, is only
-    // checked against the code after the review. Identity keys sign scripts, and the coordinates
-    // of a wallet policy derive one, so neither can apply to it.
+    // The destination of an output to a silent payment code is the code: its script, if the PSBT
+    // has one, is only checked against the code after the review. Identity keys sign scripts, so
+    // they can't apply to it.
     if let Some(sp_v0_info) = output.sp_v0_info {
         let has_auth_proofs = !output
             .get_auth_proofs()
             .map_err(|_| Error::InvalidIdentitySignature)?
             .is_empty();
-        if coordinates.is_some() || has_auth_proofs {
+        if has_auth_proofs {
             return Err(Error::UnsupportedSilentPayment);
         }
         let code =
             SilentPaymentCode::from_bytes(sp_v0_info).map_err(|_| Error::InvalidSilentPayment)?;
-        return Ok(AnalyzedOutput::External(
-            Destination::SilentPaymentCode(code),
-            None,
-        ));
+        let destination = Destination::SilentPaymentCode(code);
+        return match coordinates {
+            Some((account_id, coords)) => {
+                internal_output(accounts, *account_id, coords, destination)
+            }
+            None => Ok(AnalyzedOutput::External(destination, None)),
+        };
     }
 
     let Some((account_id, coords)) = coordinates else {
@@ -443,17 +446,31 @@ fn analyze_output(
         ));
     };
 
+    let out_script_pubkey = output.script.ok_or(Error::OutputScriptMissing)?;
+    internal_output(
+        accounts,
+        *account_id,
+        coords,
+        Destination::Script(ScriptBuf::from_bytes(out_script_pubkey.to_vec())),
+    )
+}
+
+/// An output with destination `destination` that claims to belong to the account `account_id`,
+/// at `coords`: the deferred checks prove that the account's destination there is `destination`.
+fn internal_output(
+    accounts: &[PsbtAccount],
+    account_id: u32,
+    coords: &PsbtAccountCoordinates,
+    destination: Destination,
+) -> Result<AnalyzedOutput, Error> {
     let account = accounts
-        .get(*account_id as usize)
+        .get(account_id as usize)
         .ok_or(Error::InvalidAccountId)?;
     check_coordinates(account, coords, false)?;
-
-    let out_script_pubkey = output.script.ok_or(Error::OutputScriptMissing)?;
-
     Ok(AnalyzedOutput::Internal(OwnershipCheck {
-        account_id: *account_id,
+        account_id,
         coords: coords.clone(),
-        expected: Destination::Script(ScriptBuf::from_bytes(out_script_pubkey.to_vec())),
+        expected: destination,
         is_input: false,
     }))
 }

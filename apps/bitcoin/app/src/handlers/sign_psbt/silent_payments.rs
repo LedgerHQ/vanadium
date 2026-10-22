@@ -17,8 +17,9 @@
 //! support inputs of a key that is only partly ours, like a `musig()` internal key: that would need
 //! a second round and verifying the others' DLEQ proofs, and isn't supported.
 //!
-//! The outputs to silent payment codes are always external for now: the device shows the
-//! address of the code.
+//! An output to a code of one of the PSBT's silent payment accounts is that account's, like its
+//! change; the others are external, and the device shows the address of their code. The scripts
+//! of both are computed the same way.
 
 use alloc::vec::Vec;
 
@@ -27,7 +28,7 @@ use common::{
     bip388::{DescriptorTemplate, KeyExpression, WalletPolicy},
     errors::Error,
     fastpsbt,
-    message::{SilentPaymentOutputScript, SilentPaymentShare, WalletPolicyCoordinates},
+    message::{SilentPaymentOutputScript, SilentPaymentShare},
     silent_payments::{self as sp, Recipient},
 };
 use sdk::curve::{Secp256k1, Secp256k1Point, Secp256k1Scalar};
@@ -36,13 +37,24 @@ use super::analyze::{input_prevout, InputAccount, TransactionSummary};
 use super::context::TaptreeHashes;
 use super::key_resolution::{resolve_private_key, KeySource, LocalKeys};
 use super::signing::taproot_output_private_key;
+use crate::sp_keys;
 
 /// An eligible input, with the key that BIP-352 takes from it.
 struct EligibleInput {
     input_index: usize,
-    /// The input's key, or for a taproot input its internal key.
-    key_source: KeySource,
-    is_taproot: bool,
+    key: InputKey,
+}
+
+/// Where the key of an eligible input comes from.
+enum InputKey {
+    /// An input of a wallet policy: its key, or for a taproot input its internal key.
+    WalletPolicy {
+        key_source: KeySource,
+        is_taproot: bool,
+    },
+    /// An output that a silent payment account received: a taproot output, whose key is
+    /// `b_spend + tweak` (BIP-376).
+    SilentPayment { account_index: u32, tweak: [u8; 32] },
 }
 
 /// What [`analyze`] found out about the outputs to silent payment codes of a PSBT.
@@ -114,33 +126,38 @@ pub(super) fn analyze(
             return Err(Error::SilentPaymentShareMismatch);
         }
 
-        let InputAccount::WalletPolicy {
-            account_id,
-            wallet_policy,
-            coords,
-        } = summary.input_account(input_index)
-        else {
-            return Err(Error::UnsupportedSilentPayment);
+        let key = match summary.input_account(input_index) {
+            InputAccount::WalletPolicy {
+                account_id,
+                wallet_policy,
+                coords,
+            } => {
+                let Some((kp, is_taproot)) = eligible_key(wallet_policy) else {
+                    continue;
+                };
+                let key_index = kp
+                    .plain_key_index()
+                    .ok_or(Error::SilentPaymentInputNotHeld)?;
+                let change_step = if coords.is_change { kp.num2 } else { kp.num1 };
+                let key_source = local_keys
+                    .resolve(
+                        &wallet_policy.key_information()[key_index as usize],
+                        (account_id, key_index),
+                        Some((change_step.into(), coords.address_index.into())),
+                    )
+                    .ok_or(Error::SilentPaymentInputNotHeld)?;
+                InputKey::WalletPolicy {
+                    key_source,
+                    is_taproot,
+                }
+            }
+            // a taproot output, that the device's account received
+            InputAccount::SilentPayment { account, tweak } => InputKey::SilentPayment {
+                account_index: account.account_index(),
+                tweak: *tweak,
+            },
         };
-        let Some((kp, is_taproot)) = eligible_key(wallet_policy) else {
-            continue;
-        };
-        let key_index = kp
-            .plain_key_index()
-            .ok_or(Error::SilentPaymentInputNotHeld)?;
-        let change_step = if coords.is_change { kp.num2 } else { kp.num1 };
-        let key_source = local_keys
-            .resolve(
-                &wallet_policy.key_information()[key_index as usize],
-                (account_id, key_index),
-                Some((change_step.into(), coords.address_index.into())),
-            )
-            .ok_or(Error::SilentPaymentInputNotHeld)?;
-        eligible_inputs.push(EligibleInput {
-            input_index,
-            key_source,
-            is_taproot,
-        });
+        eligible_inputs.push(EligibleInput { input_index, key });
     }
     if eligible_inputs.is_empty() {
         return Err(Error::SilentPaymentNoEligibleInputs);
@@ -166,19 +183,45 @@ pub(super) fn analyze(
 /// The private key of an eligible input, as it enters the sum `a`.
 fn input_private_key(
     input: &EligibleInput,
-    wallet_policy: &WalletPolicy,
-    coords: &WalletPolicyCoordinates,
+    summary: &TransactionSummary,
     taptree_hashes: &TaptreeHashes,
 ) -> Result<Secp256k1Scalar, Error> {
-    let hd_node = resolve_private_key(&input.key_source)?;
-    let key = if input.is_taproot {
-        let taptree_hash = taptree_hashes.get(input.input_index, wallet_policy, coords)?;
-        taproot_output_private_key(&hd_node.privkey, taptree_hash)?
-    } else {
-        hd_node.privkey.clone()
+    let (key, is_taproot) = match &input.key {
+        InputKey::WalletPolicy {
+            key_source,
+            is_taproot,
+        } => {
+            let hd_node = resolve_private_key(key_source)?;
+            let key = if *is_taproot {
+                let InputAccount::WalletPolicy {
+                    wallet_policy,
+                    coords,
+                    ..
+                } = summary.input_account(input.input_index)
+                else {
+                    unreachable!("the key of a wallet policy is the key of one of its inputs");
+                };
+                let taptree_hash = taptree_hashes.get(input.input_index, wallet_policy, coords)?;
+                taproot_output_private_key(&hd_node.privkey, taptree_hash)?
+            } else {
+                hd_node.privkey.clone()
+            };
+            (
+                Secp256k1Scalar::from_be_bytes(&key).ok_or(Error::InvalidKey)?,
+                *is_taproot,
+            )
+        }
+        InputKey::SilentPayment {
+            account_index,
+            tweak,
+        } => {
+            let tweak = Secp256k1Scalar::from_be_bytes(tweak).ok_or(Error::InvalidKey)?;
+            let key = sp::spending_key(&sp_keys::spend_key(*account_index)?, &tweak)
+                .map_err(|_| Error::InvalidKey)?;
+            (key, true)
+        }
     };
-    let key = Secp256k1Scalar::from_be_bytes(&key).ok_or(Error::InvalidKey)?;
-    Ok(sp::input_private_key(&key, input.is_taproot))
+    Ok(sp::input_private_key(&key, is_taproot))
 }
 
 /// The sum `a` of the private keys of the eligible inputs.
@@ -189,15 +232,7 @@ fn sum_input_keys(
 ) -> Result<Secp256k1Scalar, Error> {
     let mut a = Secp256k1Scalar::zero();
     for input in &silent_payments.eligible_inputs {
-        let InputAccount::WalletPolicy {
-            wallet_policy,
-            coords,
-            ..
-        } = summary.input_account(input.input_index)
-        else {
-            unreachable!("the eligible inputs are inputs of wallet policies");
-        };
-        a = &a + &input_private_key(input, wallet_policy, coords, taptree_hashes)?;
+        a = &a + &input_private_key(input, summary, taptree_hashes)?;
     }
     if a.is_zero() {
         return Err(Error::InvalidSilentPayment);
