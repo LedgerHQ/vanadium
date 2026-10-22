@@ -2,7 +2,7 @@
 
 [BIP-352](https://github.com/bitcoin/bips/blob/master/bip-0352.mediawiki) silent payment addresses are static addresses that never appear on chain: the sender derives a fresh taproot output for each payment, from the recipient's code and from the transaction's own inputs.
 
-The app can **pay to silent payment addresses** from its accounts, following the signer role of [BIP-375](https://github.com/bitcoin/bips/blob/master/bip-0375.mediawiki), with the DLEQ proofs of [BIP-374](https://github.com/bitcoin/bips/blob/master/bip-0374.mediawiki). Silent payment *accounts* (receiving to and spending from silent payment addresses) are not supported yet.
+The app can **pay to silent payment addresses** from its accounts, following the signer role of [BIP-375](https://github.com/bitcoin/bips/blob/master/bip-0375.mediawiki), with the DLEQ proofs of [BIP-374](https://github.com/bitcoin/bips/blob/master/bip-0374.mediawiki). It also has **silent payment accounts**, which receive to silent payment addresses; spending what they receive ([BIP-376](https://github.com/bitcoin/bips/blob/master/bip-0376.mediawiki)) is not supported yet.
 
 ## Paying to a silent payment address
 
@@ -42,3 +42,34 @@ BIP-375 also lets each signer add the shares of its own inputs, with a DLEQ proo
 ### The order of the outputs to the same scan key
 
 The `k` of each output among the outputs to the same scan key counts them in **output order**, as the reference validator and the test vectors of BIP-375 v0.1.2 do. The text of BIP-375 instead asks to sort the codes of each scan key lexicographically, but its own test vectors only pass in output order. The rule is in `common::silent_payments::recipients`, the one place to change should BIP-375 settle on its text.
+
+## Silent payment accounts
+
+A silent payment account is the BIP-352 account `n` of the device, with its two keys, in the standard tree:
+
+| Key | Path |
+|---|---|
+| scan key `b_scan` | `m/352'/1'/n'/1'/0` |
+| spend key `b_spend` | `m/352'/1'/n'/0'/0` |
+
+The account holds the account index, the scan *private* key and the spend *public* key `B_spend`: the keys of a [BIP-392](https://github.com/bitcoin/bips/blob/master/bip-0392.mediawiki) `tspscan` key, which is what a wallet needs to find the account's payments. The spend private key, which spends them, never leaves the device.
+
+### Setting up an account
+
+1. `export_silent_payment_scan_key` returns the `tspscan` key of the account `n`. The user always confirms the export, after a warning: the scan key reveals every payment to the account, though it can't spend them.
+2. The host builds the account from it, and registers it with `register_account`. The device checks that the keys are its own for the account index, and shows the name, the index and the account's address. The proof of registration then vouches for the keys, so the device never derives them again to compute the account's addresses.
+
+### Addresses, labels and change
+
+`get_address` returns the account's silent payment address, `tsp1…`, or the address of one of its labels `m`, whose spend key is `B_m = B_spend + hash(b_scan || m)·G` (BIP-352). A wallet must scan for each label that it hands out.
+
+Label 0 is the change label of BIP-352: `get_address` never returns it, so that every payment to it is the account's own change.
+
+### Destinations
+
+Like any account, a silent payment account tells which inputs and outputs are its own by computing their *destination* from its coordinates:
+
+- the coordinates of an address are its label, if any, and the destination is the account's code `(B_scan, B_m)`: in a PSBT, an output to a code has `PSBT_OUT_SP_V0_INFO` and no script, as the script of each payment depends on the whole transaction;
+- the coordinates of an output that the account received are its tweak, as in `PSBT_IN_SP_TWEAK` (BIP-376), the label's included, and the destination is that output's script, `OP_1 x(B_spend + tweak·G)`.
+
+The transactions that spend from silent payment accounts, or send change to them, will use these destinations.
