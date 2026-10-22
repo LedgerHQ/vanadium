@@ -53,6 +53,21 @@ pub enum Destination {
     SilentPaymentCode(SilentPaymentCode),
 }
 
+impl Destination {
+    /// The address of the destination: the testnet address of a script, or the `tsp1…` address of
+    /// a silent payment code.
+    pub fn address(&self) -> Result<String, Error> {
+        match self {
+            Destination::Script(script) => Address::from_script(script, Params::TESTNET4)
+                .map(|address| address.to_string())
+                .map_err(|_| Error::AddressFromScriptFailed),
+            Destination::SilentPaymentCode(code) => code
+                .to_address("tsp")
+                .map_err(|_| Error::InvalidSilentPayment),
+        }
+    }
+}
+
 pub(crate) const ACCOUNT_MAGIC: [u8; 14] = *b"\x0DNAMED_ACCOUNT";
 
 /// A generic trait for "accounts", parameterized by the type of coordinates.
@@ -74,14 +89,7 @@ pub trait Account: Sized {
     /// The address of the destination at `coords`: the testnet address of a script, or the `tsp1…`
     /// address of a silent payment code.
     fn get_address(&self, coords: &Self::Coordinates) -> Result<String, Error> {
-        match self.destination(coords)? {
-            Destination::Script(script) => Address::from_script(&script, Params::TESTNET4)
-                .map(|address| address.to_string())
-                .map_err(|_| Error::AddressFromScriptFailed),
-            Destination::SilentPaymentCode(code) => code
-                .to_address("tsp")
-                .map_err(|_| Error::InvalidSilentPayment),
-        }
+        self.destination(coords)?.address()
     }
 
     /// Returns a unique identifier for the named account.

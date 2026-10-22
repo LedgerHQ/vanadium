@@ -1,13 +1,14 @@
 use crate::{
-    account::{AccountCoordinates, WalletPolicy, WalletPolicyCoordinates},
-    script::ToScript,
+    account::{Account, AccountCoordinates, Destination, WalletPolicy, WalletPolicyCoordinates},
+    errors::Error,
+    fastpsbt::{PSBT_IN_SP_TWEAK, PSBT_OUT_SP_V0_INFO, PSBT_OUT_SP_V0_LABEL},
+    silent_payments::{SilentPaymentAccount, SilentPaymentCode, SilentPaymentCoordinates},
 };
 
 use alloc::{string::String, vec::Vec};
 use bitcoin::{
     bip32::{DerivationPath, Fingerprint},
     consensus::{encode::VarInt, Encodable},
-    Script,
 };
 
 use super::{
@@ -58,16 +59,51 @@ fn account_id_key(id: u32) -> Vec<u8> {
     id_raw
 }
 
+/// An account of a PSBT, with its tag: 0 for a wallet policy, 1 for a silent payment account.
 #[derive(Debug, Clone)]
 pub enum PsbtAccount {
     WalletPolicy(WalletPolicy),
-    // other account types will be added here
+    /// A silent payment account carries its scan private key, which reveals all its payments: it
+    /// must only be added to the PSBT that is sent to the signing device.
+    SilentPayment(SilentPaymentAccount),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PsbtAccountCoordinates {
     WalletPolicy(WalletPolicyCoordinates),
-    // coordinates for other account types will be added here
+    SilentPayment(SilentPaymentCoordinates),
+}
+
+impl From<&WalletPolicy> for PsbtAccount {
+    fn from(wallet_policy: &WalletPolicy) -> Self {
+        PsbtAccount::WalletPolicy(wallet_policy.clone())
+    }
+}
+
+impl From<&SilentPaymentAccount> for PsbtAccount {
+    fn from(account: &SilentPaymentAccount) -> Self {
+        PsbtAccount::SilentPayment(account.clone())
+    }
+}
+
+impl PsbtAccount {
+    /// The destination of the account at `coords`, which tells whether an input or an output
+    /// belongs to it.
+    pub fn destination(&self, coords: &PsbtAccountCoordinates) -> Result<Destination, Error> {
+        match (self, coords) {
+            (
+                PsbtAccount::WalletPolicy(wallet_policy),
+                PsbtAccountCoordinates::WalletPolicy(coords),
+            ) => wallet_policy
+                .destination(coords)
+                .map_err(|_| Error::InvalidWalletPolicy),
+            (
+                PsbtAccount::SilentPayment(account),
+                PsbtAccountCoordinates::SilentPayment(coords),
+            ) => account.destination(coords),
+            _ => Err(Error::AccountCoordinatesMismatch),
+        }
+    }
 }
 
 pub trait PsbtAccountGlobalRead: GlobalHasProprietaryFields {
@@ -101,6 +137,15 @@ pub trait PsbtAccountGlobalRead: GlobalHasProprietaryFields {
                         let wp = WalletPolicy::deserialize(&mut &value[1..])
                             .map_err(|_| PsbtAccountError::DeserializeError)?;
                         Ok(Some(PsbtAccount::WalletPolicy(wp)))
+                    }
+                    1 => {
+                        let mut rest = &value[1..];
+                        let account = SilentPaymentAccount::deserialize(&mut rest)
+                            .map_err(|_| PsbtAccountError::DeserializeError)?;
+                        if !rest.is_empty() {
+                            return Err(PsbtAccountError::InvalidValue);
+                        }
+                        Ok(Some(PsbtAccount::SilentPayment(account)))
                     }
                     _ => Err(PsbtAccountError::UnknownAccountType),
                 };
@@ -161,6 +206,27 @@ pub trait PsbtAccountGlobalWrite {
     ) -> Result<(), PsbtAccountError>;
 }
 
+// The coordinates with tag `tag`, serialized in `value`.
+fn read_coordinates(tag: u8, value: &[u8]) -> Result<PsbtAccountCoordinates, PsbtAccountError> {
+    match tag {
+        0 => {
+            let coords = AccountCoordinates::deserialize(&mut &value[..])
+                .map_err(|_| PsbtAccountError::DeserializeError)?;
+            Ok(PsbtAccountCoordinates::WalletPolicy(coords))
+        }
+        1 => {
+            let mut rest = value;
+            let coords = SilentPaymentCoordinates::deserialize(&mut rest)
+                .map_err(|_| PsbtAccountError::DeserializeError)?;
+            if !rest.is_empty() {
+                return Err(PsbtAccountError::InvalidValue);
+            }
+            Ok(PsbtAccountCoordinates::SilentPayment(coords))
+        }
+        _ => Err(PsbtAccountError::UnknownAccountType),
+    }
+}
+
 pub trait PsbtAccountInputRead: InputHasProprietaryFields {
     fn get_account_coordinates(
         &self,
@@ -178,17 +244,7 @@ pub trait PsbtAccountInputRead: InputHasProprietaryFields {
                 if account_id > MAX_SINGLE_BYTE_COMPACTSIZE as u32 {
                     return Err(PsbtAccountError::AccountIdTooLarge);
                 }
-                match value[1] {
-                    0 => {
-                        let coords = AccountCoordinates::deserialize(&mut &value[2..])
-                            .map_err(|_| PsbtAccountError::DeserializeError)?;
-                        return Ok(Some((
-                            account_id,
-                            PsbtAccountCoordinates::WalletPolicy(coords),
-                        )));
-                    }
-                    _ => return Err(PsbtAccountError::UnknownAccountType),
-                }
+                return Ok(Some((account_id, read_coordinates(value[1], &value[2..])?)));
             }
         }
         Ok(None)
@@ -214,17 +270,7 @@ pub trait PsbtAccountOutputRead: OutputHasProprietaryFields {
                 if account_id > MAX_SINGLE_BYTE_COMPACTSIZE as u32 {
                     return Err(PsbtAccountError::AccountIdTooLarge);
                 }
-                match value[1] {
-                    0 => {
-                        let coords = AccountCoordinates::deserialize(&mut &value[2..])
-                            .map_err(|_| PsbtAccountError::DeserializeError)?;
-                        return Ok(Some((
-                            account_id,
-                            PsbtAccountCoordinates::WalletPolicy(coords),
-                        )));
-                    }
-                    _ => return Err(PsbtAccountError::UnknownAccountType),
-                }
+                return Ok(Some((account_id, read_coordinates(value[1], &value[2..])?)));
             }
         }
         Ok(None)
@@ -251,20 +297,19 @@ pub trait PsbtAccountOutputWrite {
 
 impl PsbtAccountGlobalWrite for PsbtV2 {
     fn set_account(&mut self, id: u32, account: PsbtAccount) -> Result<(), PsbtAccountError> {
-        match account {
-            PsbtAccount::WalletPolicy(wp) => {
-                let ser_wp = wp.serialize();
-                let mut res = Vec::with_capacity(1 + ser_wp.len());
-                res.push(0x00);
-                res.extend_from_slice(&ser_wp);
-                self.global.insert_proprietary(
-                    &PSBT_ACCOUNT_PROPRIETARY_IDENTIFIER,
-                    PSBT_ACCOUNT_GLOBAL_ACCOUNT_DESCRIPTOR,
-                    &account_id_key(id),
-                    res,
-                );
-            }
-        }
+        let (tag, serialized) = match account {
+            PsbtAccount::WalletPolicy(wp) => (0x00, wp.serialize()),
+            PsbtAccount::SilentPayment(account) => (0x01, account.serialize()),
+        };
+        let mut res = Vec::with_capacity(1 + serialized.len());
+        res.push(tag);
+        res.extend_from_slice(&serialized);
+        self.global.insert_proprietary(
+            &PSBT_ACCOUNT_PROPRIETARY_IDENTIFIER,
+            PSBT_ACCOUNT_GLOBAL_ACCOUNT_DESCRIPTOR,
+            &account_id_key(id),
+            res,
+        );
 
         Ok(())
     }
@@ -311,16 +356,15 @@ fn coordinates_value(
         // specs would want a compact size, but we use 1 byte for simplicity
         return Err(PsbtAccountError::AccountIdTooLarge);
     }
-    match coordinates {
-        PsbtAccountCoordinates::WalletPolicy(coords) => {
-            let serialized_coords = coords.serialize();
-            let mut serialized_value = Vec::with_capacity(1 + 1 + serialized_coords.len());
-            serialized_value.push(id as u8);
-            serialized_value.push(0); // tag
-            serialized_value.extend_from_slice(&serialized_coords);
-            Ok(serialized_value)
-        }
-    }
+    let (tag, serialized_coords) = match coordinates {
+        PsbtAccountCoordinates::WalletPolicy(coords) => (0, coords.serialize()),
+        PsbtAccountCoordinates::SilentPayment(coords) => (1, coords.serialize()),
+    };
+    let mut serialized_value = Vec::with_capacity(1 + 1 + serialized_coords.len());
+    serialized_value.push(id as u8);
+    serialized_value.push(tag);
+    serialized_value.extend_from_slice(&serialized_coords);
+    Ok(serialized_value)
 }
 
 impl PsbtAccountInputWrite for v2::Input {
@@ -441,20 +485,44 @@ fn candidate_coordinates(
     Ok(res)
 }
 
-// The account of `accounts` that an input or output with script `script` and key origins
-// `key_origins` belongs to, if any, with its id and the coordinates of the input or output in it.
-fn find_account(
-    accounts: &[(&WalletPolicy, &str, &[u8; 32])],
-    script: &Script,
+// The coordinates in `account` that an input or output with key origins `key_origins` might
+// have: for a wallet policy, those that its key origins point to; for a silent payment account,
+// those in `silent_payment_coordinates`, which the input's tweak or the output's label give.
+fn candidates(
+    account: &PsbtAccount,
     key_origins: &[(Fingerprint, DerivationPath)],
-) -> Result<Option<(u32, WalletPolicyCoordinates)>, PsbtAccountError> {
+    silent_payment_coordinates: Option<SilentPaymentCoordinates>,
+) -> Result<Vec<PsbtAccountCoordinates>, PsbtAccountError> {
+    Ok(match account {
+        PsbtAccount::WalletPolicy(wallet_policy) => {
+            candidate_coordinates(wallet_policy, key_origins)?
+                .into_iter()
+                .map(PsbtAccountCoordinates::WalletPolicy)
+                .collect()
+        }
+        PsbtAccount::SilentPayment(_) => silent_payment_coordinates
+            .into_iter()
+            .map(PsbtAccountCoordinates::SilentPayment)
+            .collect(),
+    })
+}
+
+// The account of `accounts` that an input or output with destination `destination` belongs to, if
+// any, with its id and the coordinates of the input or output in it: an account whose destination,
+// at one of the candidate coordinates, is `destination`.
+fn find_account(
+    accounts: &[PsbtAccount],
+    destination: &Destination,
+    key_origins: &[(Fingerprint, DerivationPath)],
+    silent_payment_coordinates: Option<SilentPaymentCoordinates>,
+) -> Result<Option<(u32, PsbtAccountCoordinates)>, PsbtAccountError> {
     let mut found = None;
-    for (id, (wallet_policy, _, _)) in accounts.iter().enumerate() {
-        for coords in candidate_coordinates(wallet_policy, key_origins)? {
-            let account_script = wallet_policy
-                .to_script(coords.is_change, coords.address_index)
+    for (id, account) in accounts.iter().enumerate() {
+        for coords in candidates(account, key_origins, silent_payment_coordinates.clone())? {
+            let account_destination = account
+                .destination(&coords)
                 .map_err(|_| PsbtAccountError::InvalidValue)?;
-            if account_script.as_script() == script {
+            if account_destination == *destination {
                 if found.is_some() {
                     return Err(PsbtAccountError::AmbiguousAccount);
                 }
@@ -470,20 +538,30 @@ fn find_account(
 /// coordinates of the inputs and outputs that belong to them.
 ///
 /// The accounts get ids in the order given. An input or output belongs to an account if the
-/// account's script, at the coordinates that one of its key origins points to, is the script that
-/// the input spends, or the script of the output. It is an error if it belongs to more than one
-/// account. The inputs and outputs without a script don't belong to any.
-pub fn prepare_psbt(
+/// account's destination at some coordinates is the input's or output's: the script that the input
+/// spends; the code of an output to a silent payment code (`PSBT_OUT_SP_V0_INFO`), or else the
+/// output's script. The coordinates tried are those that the key origins point to for a wallet
+/// policy, and for a silent payment account the tweak of the input (`PSBT_IN_SP_TWEAK`) or the
+/// label of the output (`PSBT_OUT_SP_V0_LABEL`, or none). It is an error if an input or output
+/// belongs to more than one account. The outputs without a destination don't belong to any.
+///
+/// A silent payment account carries its scan private key, which reveals all its payments: only
+/// fill the PSBT that is sent to the signing device, never a copy that is stored or shared.
+pub fn prepare_psbt<A: Clone + Into<PsbtAccount>>(
     psbt: &mut PsbtV2,
-    accounts: &[(&WalletPolicy, &str, &[u8; 32])],
+    accounts: &[(A, &str, &[u8; 32])],
 ) -> Result<(), PsbtAccountError> {
     // the account ids of the coordinates are a single byte
     if accounts.len() > MAX_SINGLE_BYTE_COMPACTSIZE as usize + 1 {
         return Err(PsbtAccountError::TooManyAccounts);
     }
-    for (id, (wallet_policy, name, por)) in accounts.iter().enumerate() {
+    let psbt_accounts: Vec<PsbtAccount> = accounts
+        .iter()
+        .map(|(account, _, _)| account.clone().into())
+        .collect();
+    for (id, (account, (_, name, por))) in psbt_accounts.iter().zip(accounts).enumerate() {
         let id = id as u32;
-        psbt.set_account(id, PsbtAccount::WalletPolicy((*wallet_policy).clone()))?;
+        psbt.set_account(id, account.clone())?;
         psbt.set_account_name(id, name)?;
         psbt.set_account_proof_of_registration(id, *por)?;
     }
@@ -498,20 +576,53 @@ pub fn prepare_psbt(
         let key_origins = input
             .key_origins()
             .map_err(|_| PsbtAccountError::InvalidValue)?;
-        if let Some((id, coords)) = find_account(accounts, &script, &key_origins)? {
-            input.set_account_coordinates(id, PsbtAccountCoordinates::WalletPolicy(coords))?;
+        let tweak = match input.get(PSBT_IN_SP_TWEAK, &[]) {
+            Some(tweak) => Some(SilentPaymentCoordinates::Tweak(
+                tweak
+                    .try_into()
+                    .map_err(|_| PsbtAccountError::InvalidValue)?,
+            )),
+            None => None,
+        };
+        let destination = Destination::Script(script);
+        if let Some((id, coords)) = find_account(&psbt_accounts, &destination, &key_origins, tweak)?
+        {
+            input.set_account_coordinates(id, coords)?;
         }
     }
 
     for output in psbt.outputs.iter_mut() {
-        let Some(script) = output.script() else {
-            continue;
+        let (destination, label) = match output.get(PSBT_OUT_SP_V0_INFO, &[]) {
+            Some(code) => {
+                let code = SilentPaymentCode::from_bytes(
+                    code.try_into()
+                        .map_err(|_| PsbtAccountError::InvalidValue)?,
+                )
+                .map_err(|_| PsbtAccountError::InvalidValue)?;
+                let label = match output.get(PSBT_OUT_SP_V0_LABEL, &[]) {
+                    Some(label) => Some(u32::from_le_bytes(
+                        label
+                            .try_into()
+                            .map_err(|_| PsbtAccountError::InvalidValue)?,
+                    )),
+                    None => None,
+                };
+                (
+                    Destination::SilentPaymentCode(code),
+                    Some(SilentPaymentCoordinates::Code { label }),
+                )
+            }
+            None => match output.script() {
+                Some(script) => (Destination::Script(script), None),
+                None => continue,
+            },
         };
         let key_origins = output
             .key_origins()
             .map_err(|_| PsbtAccountError::InvalidValue)?;
-        if let Some((id, coords)) = find_account(accounts, &script, &key_origins)? {
-            output.set_account_coordinates(id, PsbtAccountCoordinates::WalletPolicy(coords))?;
+        if let Some((id, coords)) = find_account(&psbt_accounts, &destination, &key_origins, label)?
+        {
+            output.set_account_coordinates(id, coords)?;
         }
     }
 
@@ -529,6 +640,9 @@ mod tests {
     };
 
     use super::*;
+    use crate::fastpsbt::PSBT_OUT_SCRIPT;
+    use crate::script::ToScript;
+    use crate::silent_payments::{Secp256k1, Secp256k1Scalar};
 
     const TEST_PSBT: &str = "cHNidP8BAFUCAAAAAVEiws3mgj5VdUF1uSycV6Co4ayDw44Xh/06H/M0jpUTAQAAAAD9////AXhBDwAAAAAAGXapFBPX1YFmlGw+wCKTQGbYwNER0btBiKwaBB0AAAEA+QIAAAAAAQHsIw5TCVJWBSokKCcO7ASYlEsQ9vHFePQxwj0AmLSuWgEAAAAXFgAUKBU5gg4t6XOuQbpgBLQxySHE2G3+////AnJydQAAAAAAF6kUyLkGrymMcOYDoow+/C+uGearKA+HQEIPAAAAAAAZdqkUy65bUM+Tnm9TG4prer14j+FLApeIrAJHMEQCIDfstCSDYar9T4wR5wXw+npfvc1ZUXL81WQ/OxG+/11AAiACDG0yb2w31jzsra9OszX67ffETgX17x0raBQLAjvRPQEhA9rIL8Cs/Pw2NI1KSKRvAc6nfyuezj+MO0yZ0LCy+ZXShPIcACIGAu6GCCB+IQKEJvaedkR9fj1eB3BJ9eaDwxNsIxR2KkcYGPWswv0sAACAAQAAgAAAAIAAAAAAAAAAAAAA";
 
@@ -852,6 +966,186 @@ mod tests {
                 ],
             ),
             Err(PsbtAccountError::AmbiguousAccount)
+        );
+    }
+
+    // a silent payment account, and the script of the output with tweak `tweak` that it received
+    fn silent_payment_account() -> SilentPaymentAccount {
+        let g = Secp256k1::get_generator();
+        let spend_key = &g * &Secp256k1Scalar::from_be_bytes(&[0x22; 32]).unwrap();
+        SilentPaymentAccount::new(
+            3,
+            Secp256k1Scalar::from_be_bytes(&[0x11; 32]).unwrap(),
+            spend_key,
+        )
+        .unwrap()
+    }
+
+    fn received_script(account: &SilentPaymentAccount, tweak: [u8; 32]) -> ScriptBuf {
+        let Destination::Script(script) = account
+            .destination(&SilentPaymentCoordinates::Tweak(tweak))
+            .unwrap()
+        else {
+            panic!("not a script");
+        };
+        script
+    }
+
+    fn code(account: &SilentPaymentAccount, label: Option<u32>) -> SilentPaymentCode {
+        let Destination::SilentPaymentCode(code) = account
+            .destination(&SilentPaymentCoordinates::Code { label })
+            .unwrap()
+        else {
+            panic!("not a code");
+        };
+        code
+    }
+
+    #[test]
+    fn test_set_and_get_silent_payment_account() {
+        let mut psbt = psbt_from_str(TEST_PSBT).unwrap();
+        let account = silent_payment_account();
+        psbt.set_account(0, PsbtAccount::SilentPayment(account.clone()))
+            .unwrap();
+        let Some(PsbtAccount::SilentPayment(retrieved)) = psbt.get_account(0).unwrap() else {
+            panic!("Unexpected or missing account type");
+        };
+        assert_eq!(retrieved, account);
+
+        // the value is the tag 1 and the account, and nothing else
+        let key = |subtype| {
+            [
+                &[PSBT_ACCOUNT_PROPRIETARY_IDENTIFIER.len() as u8][..],
+                &PSBT_ACCOUNT_PROPRIETARY_IDENTIFIER,
+                &[subtype, 0],
+            ]
+            .concat()
+        };
+        let value = psbt
+            .global
+            .get(0xFC, &key(PSBT_ACCOUNT_GLOBAL_ACCOUNT_DESCRIPTOR))
+            .unwrap();
+        assert_eq!(value, [&[1][..], &account.serialize()].concat());
+        let mut trailing = value.to_vec();
+        trailing.push(0);
+        psbt.global
+            .insert(0xFC, &key(PSBT_ACCOUNT_GLOBAL_ACCOUNT_DESCRIPTOR), trailing);
+        assert_eq!(
+            psbt.get_account(0).err(),
+            Some(PsbtAccountError::InvalidValue)
+        );
+    }
+
+    #[test]
+    fn test_set_and_get_silent_payment_coordinates() {
+        let tweak = PsbtAccountCoordinates::SilentPayment(SilentPaymentCoordinates::Tweak([7; 32]));
+        let mut input = v2::Input::default();
+        input.set_account_coordinates(2, tweak.clone()).unwrap();
+        assert_eq!(input.get_account_coordinates().unwrap(), Some((2, tweak)));
+
+        let change = PsbtAccountCoordinates::SilentPayment(SilentPaymentCoordinates::Code {
+            label: Some(0),
+        });
+        let mut output = v2::Output::default();
+        output.set_account_coordinates(1, change.clone()).unwrap();
+        assert_eq!(output.get_account_coordinates().unwrap(), Some((1, change)));
+
+        // coordinates with a trailing byte are rejected
+        let key = [
+            &[PSBT_ACCOUNT_PROPRIETARY_IDENTIFIER.len() as u8][..],
+            &PSBT_ACCOUNT_PROPRIETARY_IDENTIFIER,
+            &[PSBT_ACCOUNT_OUT_COORDINATES],
+        ]
+        .concat();
+        output.insert(0xFC, &key, vec![1, 1, 0, 0, 0]);
+        assert_eq!(
+            output.get_account_coordinates().err(),
+            Some(PsbtAccountError::InvalidValue)
+        );
+    }
+
+    #[test]
+    fn test_destination_of_other_coordinates() {
+        let account = PsbtAccount::SilentPayment(silent_payment_account());
+        let coords = PsbtAccountCoordinates::WalletPolicy(WalletPolicyCoordinates::new(false, 0));
+        assert_eq!(
+            account.destination(&coords),
+            Err(Error::AccountCoordinatesMismatch)
+        );
+    }
+
+    /// A silent payment account gets the inputs whose tweak gives the spent script, and the outputs
+    /// to its codes, by their label; a wallet policy in the same PSBT gets its own.
+    #[test]
+    fn test_prepare_psbt_silent_payments() {
+        let singlesig = WalletPolicy::new("wpkh(@0/**)", vec![XPUB0.try_into().unwrap()]).unwrap();
+        let account = silent_payment_account();
+        let other = SilentPaymentAccount::new(
+            3,
+            Secp256k1Scalar::from_be_bytes(&[0x33; 32]).unwrap(),
+            *account.spend_key(),
+        )
+        .unwrap();
+
+        let placeholder = ScriptBuf::new_op_return([]);
+        let mut psbt = psbt_v0(
+            &[
+                singlesig.to_script(false, 0).unwrap(),
+                received_script(&account, [5; 32]),
+                received_script(&account, [6; 32]),
+            ],
+            &[
+                placeholder.clone(),
+                placeholder.clone(),
+                placeholder.clone(),
+            ],
+        );
+        psbt.inputs[0].bip32_derivation = [child(XPUB0, 0, 0)].into_iter().collect();
+        let mut psbt = PsbtV2::from_v0(&psbt.serialize()).unwrap();
+        psbt.inputs[1].insert(PSBT_IN_SP_TWEAK, &[], vec![5; 32]);
+        // the tweak of another output
+        psbt.inputs[2].insert(PSBT_IN_SP_TWEAK, &[], vec![7; 32]);
+        for (output, code, label) in [
+            (0, code(&account, Some(0)), Some(0u32)),
+            (1, code(&other, None), None),
+            (2, code(&account, None), None),
+        ] {
+            let output = &mut psbt.outputs[output];
+            output.remove(PSBT_OUT_SCRIPT, &[]);
+            output.insert(PSBT_OUT_SP_V0_INFO, &[], code.to_bytes().to_vec());
+            if let Some(label) = label {
+                output.insert(PSBT_OUT_SP_V0_LABEL, &[], label.to_le_bytes().to_vec());
+            }
+        }
+
+        prepare_psbt(
+            &mut psbt,
+            &[
+                (PsbtAccount::from(&singlesig), "Singlesig", &[0; 32]),
+                (PsbtAccount::from(&account), "Silent payments", &[1; 32]),
+            ],
+        )
+        .unwrap();
+
+        let silent_payment = |coords| Some((1, PsbtAccountCoordinates::SilentPayment(coords)));
+        assert_eq!(
+            psbt.inputs[0].get_account_coordinates().unwrap(),
+            coordinates(0, false, 0)
+        );
+        assert_eq!(
+            psbt.inputs[1].get_account_coordinates().unwrap(),
+            silent_payment(SilentPaymentCoordinates::Tweak([5; 32]))
+        );
+        assert_eq!(psbt.inputs[2].get_account_coordinates().unwrap(), None);
+        assert_eq!(
+            psbt.outputs[0].get_account_coordinates().unwrap(),
+            silent_payment(SilentPaymentCoordinates::Code { label: Some(0) })
+        );
+        // the code of another account, with the same spend key
+        assert_eq!(psbt.outputs[1].get_account_coordinates().unwrap(), None);
+        assert_eq!(
+            psbt.outputs[2].get_account_coordinates().unwrap(),
+            silent_payment(SilentPaymentCoordinates::Code { label: None })
         );
     }
 }

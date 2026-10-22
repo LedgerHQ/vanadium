@@ -12,14 +12,20 @@ use bitcoin::{
     TapLeafHash, TapNodeHash, TapSighashType, Transaction, TxOut,
 };
 use common::{
-    account::Account, bip388::SegwitVersion, errors::Error, fastpsbt, message::PartialSignature,
+    account::{Account, SilentPaymentAccount},
+    bip388::SegwitVersion,
+    errors::Error,
+    fastpsbt,
+    message::PartialSignature,
+    silent_payments as sp,
 };
-use sdk::curve::{EcfpPrivateKey, ToPublicKey};
+use sdk::curve::{EcfpPrivateKey, Secp256k1Scalar, ToPublicKey};
 use zeroize::Zeroizing;
 
 use crate::handlers::musig_signing::{self, MusigSigningState};
+use crate::sp_keys;
 
-use super::analyze::{ensure_prevouts, TransactionSummary};
+use super::analyze::{ensure_prevouts, InputAccount, TransactionSummary};
 use super::context::{PlaceholderCtx, SignedInputs, SigningCtx, TaptreeHashes};
 use super::key_resolution::{resolve_private_key, KeySource, LocalKeys};
 use super::musig;
@@ -78,14 +84,6 @@ fn sign_input_schnorr(
     leaf_hash: Option<TapLeafHash>,
     sighash_type: TapSighashType,
 ) -> Result<PartialSignature, Error> {
-    let sighash = compute_taproot_sighash(
-        input_index,
-        sighash_cache,
-        prevouts,
-        leaf_hash,
-        sighash_type,
-    )?;
-
     let hd_node = resolve_private_key(key_source)?;
     let signing_privkey = if leaf_hash.is_some() {
         // script path signing, no further tweak
@@ -93,6 +91,59 @@ fn sign_input_schnorr(
     } else {
         EcfpPrivateKey::new(*taproot_output_private_key(&hd_node.privkey, taptree_hash)?)
     };
+
+    schnorr_signature(
+        input_index,
+        sighash_cache,
+        prevouts,
+        &signing_privkey,
+        leaf_hash,
+        sighash_type,
+    )
+}
+
+/// Signs input `input_index`, which spends the output with tweak `tweak` that the silent payment
+/// account `account` received (BIP-376): through the key path, with the key `b_spend + tweak`. The
+/// output key is `B_spend + tweak·G` itself, with no BIP-341 tweak.
+fn sign_input_silent_payment(
+    input_index: usize,
+    sighash_cache: &mut SighashCache<&Transaction>,
+    prevouts: &[TxOut],
+    account: &SilentPaymentAccount,
+    tweak: &[u8; 32],
+    sighash_type: TapSighashType,
+) -> Result<PartialSignature, Error> {
+    let b_spend = sp_keys::spend_key(account.account_index())?;
+    let tweak = Secp256k1Scalar::from_be_bytes(tweak).ok_or(Error::InvalidKey)?;
+    let d = sp::spending_key(&b_spend, &tweak).map_err(|_| Error::InvalidKey)?;
+
+    schnorr_signature(
+        input_index,
+        sighash_cache,
+        prevouts,
+        &EcfpPrivateKey::new(*d.as_be_bytes()),
+        None,
+        sighash_type,
+    )
+}
+
+/// The BIP-340 signature of input `input_index` with `signing_privkey`, through the key path or,
+/// with `leaf_hash`, through that leaf.
+fn schnorr_signature(
+    input_index: usize,
+    sighash_cache: &mut SighashCache<&Transaction>,
+    prevouts: &[TxOut],
+    signing_privkey: &EcfpPrivateKey<sdk::curve::Secp256k1, 32>,
+    leaf_hash: Option<TapLeafHash>,
+    sighash_type: TapSighashType,
+) -> Result<PartialSignature, Error> {
+    let sighash = compute_taproot_sighash(
+        input_index,
+        sighash_cache,
+        prevouts,
+        leaf_hash,
+        sighash_type,
+    )?;
 
     let mut signature = signing_privkey
         .schnorr_sign(sighash.as_ref(), None)
@@ -190,7 +241,26 @@ pub(super) fn sign_all_inputs(
     };
 
     for (input_index, input) in psbt.inputs.iter().enumerate() {
-        let (account_id, wallet_policy, coords) = summary.input_account(input_index);
+        let (account_id, wallet_policy, coords) = match summary.input_account(input_index) {
+            InputAccount::WalletPolicy {
+                account_id,
+                wallet_policy,
+                coords,
+            } => (account_id, wallet_policy, coords),
+            InputAccount::SilentPayment { account, tweak } => {
+                let prevouts = ensure_prevouts(&mut ctx.prevouts, psbt)?;
+                let sig = sign_input_silent_payment(
+                    input_index,
+                    &mut ctx.sighash_cache,
+                    prevouts,
+                    account,
+                    tweak,
+                    taproot_sighash_type(input)?,
+                )?;
+                ctx.out.signatures.push(sig);
+                continue;
+            }
+        };
 
         // (wallet, tx) → 32-byte session id, used to bind MuSig2 session
         // state to a specific (wallet policy, transaction) pair.

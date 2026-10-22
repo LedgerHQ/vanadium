@@ -41,16 +41,33 @@ The coordinates are serialized as:
 - a single byte 0 if not change, 1 if change
 - followed by 4 byte little-endian address index.
 
-### Silent Payments Address ([BIP-352](https://github.com/bitcoin/bips/blob/master/bip-0352.mediawiki))
+### Silent payment account ([BIP-352](https://github.com/bitcoin/bips/blob/master/bip-0352.mediawiki))
 
-TODO
+`account_tag` is 1 for silent payment accounts (and their coordinates).
+
+- Account: the BIP-352 account `n` of the signing device, with its scan private key and its spend public key; see [silent_payments.md](silent_payments.md#silent-payment-accounts).
+- Coordinates: either a code of the account, the account's or one of its labels', which is what an output pays to; or the tweak of an output that the account received, as in `PSBT_IN_SP_TWEAK` ([BIP-376](https://github.com/bitcoin/bips/blob/master/bip-0376.mediawiki)), which is what an input spends.
+
+The account is serialized as the concatenation of:
+- 4 bytes: the account index `n`, little-endian, below 2<sup>31</sup>
+- 32 bytes: the scan private key `b_scan`
+- 33 bytes: the compressed spend public key `B_spend`
+
+The coordinates are serialized as:
+- for a code: a single byte 0, followed by a single byte 0 if there is no label, or by a single byte 1 and the 4-byte little-endian label;
+- for a tweak: a single byte 1, followed by the 32-byte tweak.
+
+An input of the account has the coordinates of a tweak, which must be the input's `PSBT_IN_SP_TWEAK`; an output of the account pays to a silent payment code (`PSBT_OUT_SP_V0_INFO`, [BIP-375](https://github.com/bitcoin/bips/blob/master/bip-0375.mediawiki)), and has the coordinates of that code.
+
+> [!WARNING]
+> The scan private key reveals every payment to the account. Only add a silent payment account to the PSBT right before sending it to the signing device, and never to a copy of the PSBT that is stored or shared with anyone else.
 
 ## Global subkey types
 
 | Name&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;| `<subkeytype>`&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;| `<subkeydata>`&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;| `<subkeydata>` Description | `<valuedata>`&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;| `<valuedata>`&nbsp;Description&nbsp;&nbsp; | Versions Requiring Inclusion | Versions Requiring Exclusion | Versions Allowing Inclusion | Parent BIP |
 |-----------------------|-------------------------------------------------|-----------------------------|----------------|-------------------------------------|---------------------------------------------------------------------------------------|------|-|------|--------|
 | Account Description   | `PSBT_ACCOUNT_GLOBAL_ACCOUNT_DESCRIPTOR = 0x00` | `<compact size account ID>` | The account ID | `<byte account_tag> <bytes serialized account>`        | The single byte account tag, followed by the full description of the account, serialized as per the rules of that account type | 0, 2 | | 0, 2 | No BIP |
-| Account Name          | `PSBT_ACCOUNT_GLOBAL_ACCOUNT_NAME = 0x01`       | `<compact size account ID>` | The account ID | `<compact size name length> <name>` | The non-zero length of the name, followed by the name of the account                  |      | | 0, 2 | No BIP |
+| Account Name          | `PSBT_ACCOUNT_GLOBAL_ACCOUNT_NAME = 0x01`       | `<compact size account ID>` | The account ID | `<name>`                            | The name of the account: 1 to 64 printable ASCII characters, neither starting nor ending with a space |      | | 0, 2 | No BIP |
 | Proof of Registration | `PSBT_ACCOUNT_GLOBAL_ACCOUNT_POR = 0x02`        | `<compact size account ID>` | The account ID | `<bytes>`                           | If required by the signer, the _Proof of Registration_ for the account                |      | | 0, 2 | No BIP |
 
 

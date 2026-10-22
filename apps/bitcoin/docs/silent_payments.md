@@ -2,11 +2,11 @@
 
 [BIP-352](https://github.com/bitcoin/bips/blob/master/bip-0352.mediawiki) silent payment addresses are static addresses that never appear on chain: the sender derives a fresh taproot output for each payment, from the recipient's code and from the transaction's own inputs.
 
-The app can **pay to silent payment addresses** from its accounts, following the signer role of [BIP-375](https://github.com/bitcoin/bips/blob/master/bip-0375.mediawiki), with the DLEQ proofs of [BIP-374](https://github.com/bitcoin/bips/blob/master/bip-0374.mediawiki). It also has **silent payment accounts**, which receive to silent payment addresses; spending what they receive ([BIP-376](https://github.com/bitcoin/bips/blob/master/bip-0376.mediawiki)) is not supported yet.
+The app can **pay to silent payment addresses** from its accounts, following the signer role of [BIP-375](https://github.com/bitcoin/bips/blob/master/bip-0375.mediawiki), with the DLEQ proofs of [BIP-374](https://github.com/bitcoin/bips/blob/master/bip-0374.mediawiki). It also has **silent payment accounts**, which receive to silent payment addresses, spend what they receive ([BIP-376](https://github.com/bitcoin/bips/blob/master/bip-0376.mediawiki)), and get their change to their own change label.
 
 ## Paying to a silent payment address
 
-The host describes the payment as an output with `PSBT_OUT_SP_V0_INFO`, the recipient's code `B_scan || B_m`, and no `PSBT_OUT_SCRIPT`: the script depends on the whole transaction, so the signer computes it. Such an output is always external: the review shows the `tsp1…` address of the code.
+The host describes the payment as an output with `PSBT_OUT_SP_V0_INFO`, the recipient's code `B_scan || B_m`, and no `PSBT_OUT_SCRIPT`: the script depends on the whole transaction, so the signer computes it. The review shows the `tsp1…` address of the code, unless the output pays to one of the PSBT's silent payment accounts, like its change (see [below](#change)).
 
 `sign_psbt` then works in four steps:
 
@@ -14,8 +14,8 @@ The host describes the payment as an output with `PSBT_OUT_SP_V0_INFO`, the reci
    - no input spends a segwit version above 1, and no taproot input asks for `SIGHASH_DEFAULT` explicitly: when a sighash type is specified, BIP-375 requires `SIGHASH_ALL`, which is the only other type the app accepts in any transaction. Without one, the device signs with `SIGHASH_ALL`; for taproot inputs it uses `SIGHASH_DEFAULT`, which BIP-341 defines to commit to exactly what `SIGHASH_ALL` commits to, with a signature one byte shorter. BIP-375 only rules out the types that let the outputs change after signing;
    - at least one input is *eligible*, and the device holds the private key of each one (see below);
    - the PSBT has no ECDH share or DLEQ proof that the device wouldn't compute: no per-input ones, and no global ones for a scan key that no output pays to;
-   - the outputs to codes carry no identity-key proof and no account coordinates: both are about a script, which these outputs don't have yet.
-2. **The review**, during which the usual deferred checks prove that each input belongs to its account.
+   - the outputs to codes carry no identity-key proof, which is about a script that these outputs don't have yet.
+2. **The review**, during which the usual deferred checks prove that each input and each output of an account belongs to it.
 3. **After the approval**, the app computes the sum `a` of the private keys of the eligible inputs, and for each scan key the global ECDH share `a·B_scan` with its DLEQ proof, then the script of each output to a code. If the PSBT already has a global share or a script, it must be the one the device computes, and a global share must come with a valid DLEQ proof: this lets the host send again a PSBT in which it merged a previous response.
 4. **The signatures**, over the transaction with those scripts.
 
@@ -29,6 +29,7 @@ BIP-352 takes a key from each input that it calls eligible, whatever its account
 |---|---|
 | `pkh()`, `wpkh()`, `sh(wpkh())` | the input's key |
 | `tr()`, spent by any path | the taproot *output* key: the internal key, tweaked with the tap tree |
+| a silent payment account's | the key of the output it spends, `b_spend + tweak` |
 | others, like `wsh()` | none: the input is not eligible, and doesn't affect the outputs |
 
 The app computes a single global share for each scan key, so it needs the private key of *every* eligible input. It fails with `SilentPaymentInputNotHeld` for:
@@ -72,4 +73,18 @@ Like any account, a silent payment account tells which inputs and outputs are it
 - the coordinates of an address are its label, if any, and the destination is the account's code `(B_scan, B_m)`: in a PSBT, an output to a code has `PSBT_OUT_SP_V0_INFO` and no script, as the script of each payment depends on the whole transaction;
 - the coordinates of an output that the account received are its tweak, as in `PSBT_IN_SP_TWEAK` (BIP-376), the label's included, and the destination is that output's script, `OP_1 x(B_spend + tweak·G)`.
 
-The transactions that spend from silent payment accounts, or send change to them, will use these destinations.
+In a PSBT, the account and the coordinates are in the fields of [PSBT.md](PSBT.md#silent-payment-account-bip-352). The account carries its scan private key: add it only to the PSBT that goes to the device, never to a copy that is stored or shared.
+
+### Spending what an account received
+
+An input of the account spends an output that it received, found by scanning with the scan key: its coordinates are the tweak of the output, which must also be its `PSBT_IN_SP_TWEAK` (BIP-376). During the review, the deferred checks prove that `OP_1 x(B_spend + tweak·G)` is the spent script. The device then signs through the key path, with the private key `b_spend + tweak` (negated if its public key has an odd y-coordinate, as BIP-340 signing does): the output key has no BIP-341 tweak.
+
+The device ignores `PSBT_IN_SP_SPEND_BIP32_DERIVATION`, which tells other signers where the spend key comes from: the account already says it.
+
+### Change
+
+An output to a code of the account belongs to the account: it has `PSBT_OUT_SP_V0_INFO` and the coordinates of the code, usually label 0 for change. The deferred checks prove that the account's code at those coordinates is the output's, and the review counts the output in what the account spends, instead of showing it. Its script is then computed like the script of any output to a code. Comparing codes, rather than scripts, also proves that scanning with the account's scan key finds the output, so that a wallet restored from the seed finds it too.
+
+An output can't have the coordinates of a tweak: its script would pay to the account, but no scan would find it. The device ignores `PSBT_OUT_SP_V0_LABEL`, which only tells other signers which label the code has.
+
+As the change is a payment to a code, it costs the same as any: one ECDH share with its DLEQ proof for the account's scan key, about 3 s on a Nano S+.

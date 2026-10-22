@@ -23,19 +23,19 @@ use common::{
     message::{PartialSignature, Response, SilentPaymentShare, WalletPolicyCoordinates},
     por::{ProofOfRegistration, Registerable},
     psbt::{
-        prepare_psbt, OutputAuthProof, PsbtAccountCoordinates, PsbtAccountOutputWrite,
-        PsbtOutputAuthWrite, PsbtV2,
+        prepare_psbt, OutputAuthProof, PsbtAccount, PsbtAccountCoordinates, PsbtAccountInputWrite,
+        PsbtAccountOutputWrite, PsbtOutputAuthWrite, PsbtV2,
     },
     script::ToScript,
-    silent_payments::{self as sp, SilentPaymentCode},
+    silent_payments::{
+        self as sp, SilentPaymentAccount, SilentPaymentCode, SilentPaymentCoordinates,
+    },
 };
 use sdk::curve::{Curve, EcfpPublicKey, Secp256k1Point, Secp256k1Scalar};
 
 use super::super::analyze::analyze_transaction;
 use super::super::display::build_display_pairs;
 use super::super::handle_sign_psbt;
-use super::super::key_resolution::LocalKeys;
-use super::super::silent_payments;
 use super::musig::{build_musig_keypath_psbt, make_2of2_keypath_policy};
 
 const LEGACY_KEY: &str = "[f5acc2fd/44'/1'/0']tpubDCwYjpDhUdPGP5rS3wgNg13mTrrjBuG8V9VpWbyptX6TRPbNoZVXsoVUSkCjmQ8jJycjuDKBb9eataSymXakTTaGifxR6kmVsfFehH1ZgJT";
@@ -118,11 +118,56 @@ enum Kind {
     NotHeld,
 }
 
+/// An input that spends an output that a silent payment account received, with its tweak.
+struct SpSpend<'a> {
+    account: &'a SilentPaymentAccount,
+    tweak: [u8; 32],
+    amount: u64,
+}
+
+/// The device's private key of an output with tweak `tweak` that the silent payment account
+/// `account` received, `b_spend + tweak` (BIP-376), with `b_spend` derived here.
+fn received_private_key(account: &SilentPaymentAccount, tweak: &[u8; 32]) -> Secp256k1Scalar {
+    let path: DerivationPath = format!("m/352'/1'/{}'/0'/0", account.account_index())
+        .parse()
+        .unwrap();
+    let b_spend = device_private_key(&(Fingerprint::default(), path));
+    &Secp256k1Scalar::from_be_bytes(&b_spend).unwrap()
+        + &Secp256k1Scalar::from_be_bytes(tweak).unwrap()
+}
+
+/// The script of the output with tweak `tweak` that `account` received: `OP_1 x(d·G)`.
+fn received_script(account: &SilentPaymentAccount, tweak: &[u8; 32]) -> ScriptBuf {
+    let d = received_private_key(account, tweak);
+    let key = &sdk::curve::Secp256k1::get_generator() * &d;
+    ScriptBuf::from_bytes([&[0x51, 0x20][..], key.x()].concat())
+}
+
 enum Out<'a> {
     Code(SilentPaymentCode, u64),
     Script(ScriptBuf, u64),
     /// The change address `index` of a single-key segwit account.
     Change(&'a WalletPolicy, u32, u64),
+    /// A code of a silent payment account, with an optional label.
+    SilentPaymentChange(&'a SilentPaymentAccount, Option<u32>, u64),
+}
+
+/// The code of `account` with label `label`, computed from the device's keys.
+fn account_code(account: &SilentPaymentAccount, label: Option<u32>) -> SilentPaymentCode {
+    let key = |branch| {
+        let path: DerivationPath = format!("m/352'/1'/{}'/{branch}'/0", account.account_index())
+            .parse()
+            .unwrap();
+        Secp256k1Scalar::from_be_bytes(&device_private_key(&(Fingerprint::default(), path)))
+            .unwrap()
+    };
+    let g = sdk::curve::Secp256k1::get_generator();
+    let (b_scan, spend) = (key(1), &g * &key(0));
+    let spend = match label {
+        Some(m) => sp::labeled_spend_key(&spend, &b_scan, m).unwrap(),
+        None => spend,
+    };
+    SilentPaymentCode::new(&g * &b_scan, spend).unwrap()
 }
 
 /// A test transaction, as a prepared PSBTv2, with what the tests check the device against.
@@ -138,6 +183,11 @@ struct Fixture {
 }
 
 fn fixture(spends: &[Spend], outs: &[Out]) -> Fixture {
+    fixture_with(spends, &[], outs)
+}
+
+/// A test transaction whose inputs spend `spends`, then `sp_spends`, and whose outputs are `outs`.
+fn fixture_with(spends: &[Spend], sp_spends: &[SpSpend], outs: &[Out]) -> Fixture {
     let secp = Secp256k1::new();
     let prevouts: Vec<TxOut> = spends
         .iter()
@@ -145,6 +195,10 @@ fn fixture(spends: &[Spend], outs: &[Out]) -> Fixture {
             value: Amount::from_sat(spend.amount),
             script_pubkey: spend.policy.to_script(false, spend.index).unwrap(),
         })
+        .chain(sp_spends.iter().map(|spend| TxOut {
+            value: Amount::from_sat(spend.amount),
+            script_pubkey: received_script(spend.account, &spend.tweak),
+        }))
         .collect();
     // a legacy input comes with the whole transaction that it spends, output `i` for input `i`
     let funding_txs: Vec<Option<Transaction>> = prevouts
@@ -183,7 +237,7 @@ fn fixture(spends: &[Spend], outs: &[Out]) -> Fixture {
         output: outs
             .iter()
             .map(|out| match out {
-                Out::Code(_, amount) => TxOut {
+                Out::Code(_, amount) | Out::SilentPaymentChange(_, _, amount) => TxOut {
                     value: Amount::from_sat(*amount),
                     script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
                 },
@@ -294,26 +348,63 @@ fn fixture(spends: &[Spend], outs: &[Out]) -> Fixture {
         redeem_scripts.push(redeem_script);
         witness_scripts.push(witness_script);
     }
+    for (i, spend) in sp_spends.iter().enumerate() {
+        let i = spends.len() + i;
+        psbt.inputs[i].witness_utxo = Some(prevouts[i].clone());
+        let key = sp::input_private_key(&received_private_key(spend.account, &spend.tweak), true);
+        let point = &sdk::curve::Secp256k1::get_generator() * &key;
+        assert_eq!(point.x()[..], prevouts[i].script_pubkey.as_bytes()[2..]);
+        a = Some(match a {
+            Some(a) => &a + &key,
+            None => key,
+        });
+        redeem_scripts.push(None);
+        witness_scripts.push(None);
+    }
 
-    let mut accounts: Vec<(&WalletPolicy, String, [u8; 32])> = Vec::new();
+    // each account once, with a name and its proof of registration
+    let mut accounts: Vec<(PsbtAccount, String, [u8; 32])> = Vec::new();
+    let mut policies: Vec<&WalletPolicy> = Vec::new();
     for spend in spends {
-        if accounts
-            .iter()
-            .any(|(p, _, _)| core::ptr::eq(*p, spend.policy))
-        {
+        if policies.iter().any(|p| core::ptr::eq(*p, spend.policy)) {
             continue;
         }
+        policies.push(spend.policy);
         let name = format!("Account {}", accounts.len());
         let por =
             ProofOfRegistration::new(&spend.policy.registration_id(&name)).dangerous_as_bytes();
-        accounts.push((spend.policy, name, por));
+        accounts.push((spend.policy.into(), name, por));
     }
-    let accounts: Vec<(&WalletPolicy, &str, &[u8; 32])> = accounts
+    let mut sp_accounts: Vec<&SilentPaymentAccount> = Vec::new();
+    for spend in sp_spends {
+        if sp_accounts.iter().any(|a| core::ptr::eq(*a, spend.account)) {
+            continue;
+        }
+        sp_accounts.push(spend.account);
+        let name = format!("Account {}", accounts.len());
+        let por =
+            ProofOfRegistration::new(&spend.account.registration_id(&name)).dangerous_as_bytes();
+        accounts.push((spend.account.into(), name, por));
+    }
+    let accounts: Vec<(PsbtAccount, &str, &[u8; 32])> = accounts
         .iter()
-        .map(|(policy, name, por)| (*policy, name.as_str(), por))
+        .map(|(account, name, por)| (account.clone(), name.as_str(), por))
         .collect();
 
     let mut psbt = PsbtV2::from_v0(&psbt.serialize()).unwrap();
+    for (i, spend) in sp_spends.iter().enumerate() {
+        psbt.inputs[spends.len() + i].insert(PSBT_IN_SP_TWEAK, &[], spend.tweak.to_vec());
+    }
+    for (output, out) in psbt.outputs.iter_mut().zip(outs) {
+        if let Out::SilentPaymentChange(account, label, _) = out {
+            output.remove(PSBT_OUT_SCRIPT, &[]).unwrap();
+            let code = account_code(account, *label);
+            output.insert(PSBT_OUT_SP_V0_INFO, &[], code.to_bytes().to_vec());
+            if let Some(label) = label {
+                output.insert(PSBT_OUT_SP_V0_LABEL, &[], label.to_le_bytes().to_vec());
+            }
+        }
+    }
     prepare_psbt(&mut psbt, &accounts).unwrap();
     for (output, out) in psbt.outputs.iter_mut().zip(outs) {
         if let Out::Code(code, _) = out {
@@ -339,10 +430,12 @@ fn sign(psbt: &PsbtV2) -> Result<Response, Error> {
     ))
 }
 
-/// The response's signatures, ECDH shares and scripts, once checked against the fixture.
+/// The response's signatures and ECDH shares, and the transaction with the computed scripts, once
+/// checked against the fixture.
 struct Checked {
     signatures: Vec<PartialSignature>,
     shares: Vec<SilentPaymentShare>,
+    tx: Transaction,
 }
 
 /// Checks the device's response against what BIP-352 and BIP-375 give for `fx`.
@@ -463,6 +556,7 @@ fn check(fx: &Fixture, response: Response) -> Checked {
     Checked {
         signatures,
         shares: sp_shares,
+        tx,
     }
 }
 
@@ -549,11 +643,13 @@ fn test_pay_to_silent_payment_codes() {
     let raw = fx.psbt.serialize();
     let parsed = fastpsbt::Psbt::parse(&raw).unwrap();
     let (summary, _) = analyze_transaction(&parsed).unwrap();
-    assert_eq!(summary.external_outputs_indexes, [0, 1, 2, 3]);
-    let sp = silent_payments::analyze(&parsed, &summary, &mut LocalKeys::new().unwrap())
-        .unwrap()
-        .unwrap();
-    let pairs = build_display_pairs(&parsed, &summary, Some(&sp)).unwrap();
+    let external: Vec<usize> = summary
+        .external_outputs
+        .iter()
+        .map(|output| output.output_index)
+        .collect();
+    assert_eq!(external, [0, 1, 2, 3]);
+    let pairs = build_display_pairs(&parsed, &summary).unwrap();
     let output_0 = pairs.iter().find(|p| p.tag == "Output 0").unwrap();
     assert_eq!(output_0.value, code(11, 12).to_address("tsp").unwrap());
     assert!(output_0.value.starts_with("tsp1q"));
@@ -760,13 +856,14 @@ fn test_existing_shares_and_scripts() {
     assert_eq!(sign(&psbt), Err(Error::SilentPaymentOutputScriptMismatch));
 }
 
-/// Identity keys sign scripts, and the coordinates of an account derive one: neither applies to
-/// an output whose script the device computes.
+/// Identity keys sign scripts, which don't apply to an output whose script the device computes,
+/// and a wallet policy's coordinates give a script, never the output's code.
 #[test]
 fn test_unsupported_output_fields() {
     let segwit = segwit_policy();
     let fx = simple_fixture(&segwit);
 
+    // a wallet policy's destinations are scripts, never codes
     let mut psbt = fx.psbt.clone();
     psbt.outputs[0]
         .set_account_coordinates(
@@ -774,7 +871,7 @@ fn test_unsupported_output_fields() {
             PsbtAccountCoordinates::WalletPolicy(WalletPolicyCoordinates::new(false, 5)),
         )
         .unwrap();
-    assert_eq!(sign(&psbt), Err(Error::UnsupportedSilentPayment));
+    assert_eq!(sign(&psbt), Err(Error::OutputScriptMismatch));
 
     let mut psbt = fx.psbt.clone();
     psbt.outputs[0]
@@ -795,4 +892,195 @@ fn test_invalid_code() {
     info[34..].copy_from_slice(&[0; 32]);
     fx.psbt.outputs[0].insert(PSBT_OUT_SP_V0_INFO, &[], info.to_vec());
     assert_eq!(sign(&fx.psbt), Err(Error::InvalidSilentPayment));
+}
+
+/// The device's silent payment account `index`.
+fn silent_payment_account(index: u32) -> SilentPaymentAccount {
+    crate::sp_keys::account(index).unwrap()
+}
+
+/// Spending outputs that a silent payment account received (BIP-376), with an input of a wallet
+/// policy: each signature is checked against the key of the output it spends.
+#[test]
+fn test_spend_from_silent_payment_account() {
+    let segwit = segwit_policy();
+    let account = silent_payment_account(0);
+    let mut fx = fixture_with(
+        &[Spend {
+            policy: &segwit,
+            index: 4,
+            amount: 10_000,
+            kind: Kind::SingleKey,
+        }],
+        &[
+            SpSpend {
+                account: &account,
+                tweak: [0x11; 32],
+                amount: 50_000,
+            },
+            SpSpend {
+                account: &account,
+                tweak: [0x22; 32],
+                amount: 30_000,
+            },
+        ],
+        &[Out::Script(
+            ScriptBuf::new_p2wpkh(&WPubkeyHash::from_byte_array([2; 20])),
+            89_000,
+        )],
+    );
+
+    // the review shows what each account spends
+    let raw = fx.psbt.serialize();
+    let parsed = fastpsbt::Psbt::parse(&raw).unwrap();
+    let (summary, _) = analyze_transaction(&parsed).unwrap();
+    assert_eq!(summary.account_spent_amounts, [10_000, 80_000]);
+
+    let checked = check(&fx, sign(&fx.psbt).unwrap());
+    assert_eq!(checked.signatures.len(), 3);
+
+    // with SIGHASH_ALL
+    fx.psbt.inputs[2].insert(PSBT_IN_SIGHASH_TYPE, &[], 1u32.to_le_bytes().to_vec());
+    let checked = check(&fx, sign(&fx.psbt).unwrap());
+    assert_eq!(checked.signatures[2].signature.len(), 65);
+}
+
+/// An input of a silent payment account spends an output by its tweak, which must be its
+/// `PSBT_IN_SP_TWEAK`, and the account's script at that tweak must be the spent one.
+#[test]
+fn test_silent_payment_input_tweak() {
+    let account = silent_payment_account(0);
+    let fx = fixture_with(
+        &[],
+        &[SpSpend {
+            account: &account,
+            tweak: [0x11; 32],
+            amount: 50_000,
+        }],
+        &[Out::Script(
+            ScriptBuf::new_p2wpkh(&WPubkeyHash::from_byte_array([2; 20])),
+            49_000,
+        )],
+    );
+    let coords = |coords| PsbtAccountCoordinates::SilentPayment(coords);
+
+    let mut psbt = fx.psbt.clone();
+    psbt.inputs[0].remove(PSBT_IN_SP_TWEAK, &[]);
+    assert_eq!(sign(&psbt).err(), Some(Error::SilentPaymentTweakMismatch));
+    psbt.inputs[0].insert(PSBT_IN_SP_TWEAK, &[], vec![0x12; 32]);
+    assert_eq!(sign(&psbt).err(), Some(Error::SilentPaymentTweakMismatch));
+
+    // both are another tweak
+    psbt.inputs[0]
+        .set_account_coordinates(0, coords(SilentPaymentCoordinates::Tweak([0x12; 32])))
+        .unwrap();
+    assert_eq!(sign(&psbt).err(), Some(Error::InputScriptMismatch));
+
+    // an input doesn't spend a code
+    let mut psbt = fx.psbt.clone();
+    psbt.inputs[0]
+        .set_account_coordinates(0, coords(SilentPaymentCoordinates::Code { label: None }))
+        .unwrap();
+    assert_eq!(sign(&psbt).err(), Some(Error::AccountCoordinatesMismatch));
+}
+
+/// Paying a silent payment code from a silent payment account and a wallet policy, with the change
+/// to the account's change label: the change is the account's, its script is computed like the
+/// other's, and scanning with the account's scan key finds it.
+#[test]
+fn test_silent_payment_change() {
+    let segwit = segwit_policy();
+    let account = silent_payment_account(1);
+    let fx = fixture_with(
+        &[Spend {
+            policy: &segwit,
+            index: 4,
+            amount: 20_000,
+            kind: Kind::SingleKey,
+        }],
+        &[SpSpend {
+            account: &account,
+            tweak: [0x33; 32],
+            amount: 60_000,
+        }],
+        &[
+            Out::Code(code(11, 12), 40_000),
+            Out::SilentPaymentChange(&account, Some(0), 39_000),
+        ],
+    );
+
+    // the review shows the payment, and the change in what the account spends
+    let raw = fx.psbt.serialize();
+    let parsed = fastpsbt::Psbt::parse(&raw).unwrap();
+    let (summary, _) = analyze_transaction(&parsed).unwrap();
+    assert_eq!(summary.account_spent_amounts, [20_000, 21_000]);
+    assert_eq!(summary.external_outputs.len(), 1);
+    assert_eq!(summary.external_outputs[0].output_index, 0);
+
+    // one share for the recipient's scan key, one for the account's
+    let checked = check(&fx, sign(&fx.psbt).unwrap());
+    assert_eq!(checked.signatures.len(), 2);
+    assert_eq!(checked.shares.len(), 2);
+
+    let outpoints: Vec<OutPoint> = fx.tx.input.iter().map(|i| i.previous_output).collect();
+    let outputs: Vec<[u8; 32]> = checked
+        .tx
+        .output
+        .iter()
+        .map(|o| o.script_pubkey.as_bytes()[2..].try_into().unwrap())
+        .collect();
+    let a_pub = &sdk::curve::Secp256k1::get_generator() * fx.a.as_ref().unwrap();
+    let mut labels = sp::Labels::new();
+    labels.insert(account.scan_key(), 0).unwrap();
+    let found = sp::scan(
+        account.scan_key(),
+        account.spend_key(),
+        &a_pub,
+        &outpoints,
+        &outputs,
+        &labels,
+    )
+    .unwrap();
+    assert_eq!(found.len(), 1);
+    assert_eq!(found[0].output_key, outputs[1]);
+    // and the account can spend it
+    assert_eq!(
+        received_script(&account, found[0].tweak.as_be_bytes()),
+        checked.tx.output[1].script_pubkey
+    );
+}
+
+/// An output is the account's only if its code is the account's, at its coordinates; and an output
+/// pays to a code, not to the tweak of an output that the account received.
+#[test]
+fn test_silent_payment_change_is_the_accounts() {
+    let account = silent_payment_account(1);
+    let fx = fixture_with(
+        &[],
+        &[SpSpend {
+            account: &account,
+            tweak: [0x33; 32],
+            amount: 60_000,
+        }],
+        &[
+            Out::Code(code(11, 12), 40_000),
+            Out::SilentPaymentChange(&account, Some(0), 19_000),
+        ],
+    );
+    assert!(sign(&fx.psbt).is_ok());
+
+    // the code of another label
+    let mut psbt = fx.psbt.clone();
+    let other = account_code(&account, Some(1));
+    psbt.outputs[1].insert(PSBT_OUT_SP_V0_INFO, &[], other.to_bytes().to_vec());
+    assert_eq!(sign(&psbt).err(), Some(Error::OutputScriptMismatch));
+
+    let mut psbt = fx.psbt.clone();
+    psbt.outputs[1]
+        .set_account_coordinates(
+            0,
+            PsbtAccountCoordinates::SilentPayment(SilentPaymentCoordinates::Tweak([0x33; 32])),
+        )
+        .unwrap();
+    assert_eq!(sign(&psbt).err(), Some(Error::AccountCoordinatesMismatch));
 }
