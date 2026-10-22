@@ -12,10 +12,11 @@ pub use crate::bip388::{
     DescriptorTemplate, KeyExpression, KeyExpressionType, KeyInformation, TapTree, WalletPolicy,
 };
 use crate::por::{Registerable, RegistrationId};
-use bitcoin::{params::Params, Address};
+use bitcoin::{params::Params, Address, ScriptBuf};
 
 use crate::errors::Error;
 use crate::script::ToScript;
+use crate::silent_payments::SilentPaymentCode;
 
 // TODO: maybe we can modify the serialize() methods to use bitcoin::io::Write instead
 
@@ -40,12 +41,23 @@ impl AccountCoordinates for WalletPolicyCoordinates {
         })
     }
 }
+
+/// Where an account receives at some coordinates: an output script, or a silent payment code.
+///
+/// A code is the destination of the outputs that pay to it in a PSBT (BIP-375), which have no script
+/// until the signer computes it from the whole transaction.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Destination {
+    Script(ScriptBuf),
+    SilentPaymentCode(SilentPaymentCode),
+}
+
 pub(crate) const ACCOUNT_MAGIC: [u8; 14] = *b"\x0DNAMED_ACCOUNT";
 
 /// A generic trait for "accounts", parameterized by the type of coordinates.
 ///
-/// Each implementer will define how to turn its coordinates into an address.
-///
+/// Each implementer defines the destination at each of its coordinates, which tells whether an input
+/// or an output of a transaction belongs to the account.
 pub trait Account: Sized {
     type Coordinates: AccountCoordinates;
 
@@ -55,7 +67,21 @@ pub trait Account: Sized {
     fn serialize(&self) -> Vec<u8>; // TODO: avoid Vec
     fn deserialize<R: Read + ?Sized>(bytes: &mut R) -> Result<Self, encode::Error>;
 
-    fn get_address(&self, coords: &Self::Coordinates) -> Result<String, Error>;
+    /// The destination of the account at `coords`.
+    fn destination(&self, coords: &Self::Coordinates) -> Result<Destination, Error>;
+
+    /// The address of the destination at `coords`: the testnet address of a script, or the `tsp1…`
+    /// address of a silent payment code.
+    fn get_address(&self, coords: &Self::Coordinates) -> Result<String, Error> {
+        match self.destination(coords)? {
+            Destination::Script(script) => Address::from_script(&script, Params::TESTNET4)
+                .map(|address| address.to_string())
+                .map_err(|_| Error::AddressFromScriptFailed),
+            Destination::SilentPaymentCode(code) => code
+                .to_address("tsp")
+                .map_err(|_| Error::InvalidSilentPayment),
+        }
+    }
 
     /// Returns a unique identifier for the named account.
     ///
@@ -104,11 +130,10 @@ impl Account for WalletPolicy {
         WalletPolicy::deserialize(r)
     }
 
-    fn get_address(&self, coords: &WalletPolicyCoordinates) -> Result<String, Error> {
-        let script = self.to_script(coords.is_change, coords.address_index)?;
-        Address::from_script(&script, Params::TESTNET4)
-            .map(|address| address.to_string())
-            .map_err(|_| Error::AddressFromScriptFailed)
+    fn destination(&self, coords: &WalletPolicyCoordinates) -> Result<Destination, Error> {
+        Ok(Destination::Script(
+            self.to_script(coords.is_change, coords.address_index)?,
+        ))
     }
 }
 
@@ -117,5 +142,32 @@ impl<T: Account> Registerable for T {
 
     fn registration_id(&self, name: &str) -> RegistrationId<Self> {
         RegistrationId::<T>::from_bytes(self.get_id(name))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_wallet_policy_destination() {
+        let wallet_policy = WalletPolicy::new(
+            "wpkh(@0/**)",
+            vec![KeyInformation::try_from("[f5acc2fd/84'/1'/0']tpubDCtKfsNyRhULjZ9XMS4VKKtVcPdVDi8MKUbcSD9MJDyjRu1A2ND5MiipozyyspBT9bg8upEp7a8EAgFxNxXn1d7QkdbL52Ty5jiSLcxPt1P").unwrap()],
+        )
+        .unwrap();
+        let coords = WalletPolicyCoordinates::new(false, 0);
+
+        let address = "tb1qzdr7s2sr0dwmkwx033r4nujzk86u0cy6fmzfjk";
+        let script = address
+            .parse::<Address<_>>()
+            .unwrap()
+            .assume_checked()
+            .script_pubkey();
+        assert_eq!(
+            wallet_policy.destination(&coords).unwrap(),
+            Destination::Script(script)
+        );
+        assert_eq!(wallet_policy.get_address(&coords).unwrap(), address);
     }
 }
