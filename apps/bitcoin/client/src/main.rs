@@ -2,6 +2,7 @@ use base64::Engine as _;
 use bitcoin::psbt::Psbt;
 
 use clap::{CommandFactory, Parser, Subcommand};
+use common::account::{SilentPaymentAccount, SilentPaymentCoordinates};
 use common::por::ProofOfRegistration;
 use rustyline::completion::{Completer, Pair};
 use rustyline::error::ReadlineError;
@@ -113,6 +114,36 @@ enum CliCommand {
     SignPsbt {
         #[clap(long)]
         psbt: String,
+    },
+    /// Exports the scan key of a silent payment account, which reveals all its payments
+    ExportSpScanKey {
+        #[clap(long)]
+        account_index: u32,
+    },
+    RegisterSpAccount {
+        #[clap(long)]
+        name: String,
+        #[clap(long)]
+        account_index: u32,
+        /// The account's `tspscan` key, as export_sp_scan_key returns it
+        #[clap(long)]
+        scan_key: String,
+    },
+    GetSpAddress {
+        #[clap(long, default_missing_value = "true", num_args = 0..=1)]
+        display: bool,
+        #[clap(long)]
+        name: Option<String>,
+        #[clap(long)]
+        account_index: u32,
+        /// The account's `tspscan` key, as export_sp_scan_key returns it
+        #[clap(long)]
+        scan_key: String,
+        #[clap(long)]
+        por: Option<String>,
+        /// The label of the address, if any. Label 0 is for change, and is never shown.
+        #[clap(long)]
+        label: Option<u32>,
     },
 }
 
@@ -261,6 +292,20 @@ fn prepare_prompt_for_clap(line: &str) -> Result<Vec<String>, String> {
     Ok(clap_args)
 }
 
+// The commands whose arguments include the scan private key of a silent payment account.
+const COMMANDS_WITH_SCAN_KEY: [&str; 2] = ["register_sp_account", "get_sp_address"];
+
+// Whether `line` may contain the scan private key of a silent payment account, which reveals all
+// its payments: such lines are never saved in the history. That includes malformed ones, so any
+// line that looks like a BIP-392 key counts, whatever its command.
+fn may_contain_scan_key(line: &str) -> bool {
+    let line = line.to_lowercase();
+    line.split_whitespace()
+        .next()
+        .is_some_and(|command| COMMANDS_WITH_SCAN_KEY.contains(&command))
+        || line.contains("spscan1")
+}
+
 // parse the keys_info arg in the format "key_info1, key_info2, ..."
 fn parse_keys_info(
     keys_info: &str,
@@ -280,6 +325,18 @@ fn parse_wallet_policy(
 ) -> Result<common::bip388::WalletPolicy, common::bip388::ParseError> {
     let keys_info = parse_keys_info(keys_info)?;
     common::bip388::WalletPolicy::new(descriptor_template, keys_info)
+}
+
+// parse a proof of registration given in hex
+fn parse_por<T>(por: Option<&str>) -> Result<Option<ProofOfRegistration<T>>, &'static str> {
+    por.map(|s| {
+        let bytes = hex::decode(s).map_err(|_| "Failed to decode proof of registration")?;
+        let array: [u8; 32] = bytes
+            .try_into()
+            .map_err(|_| "Proof of registration must be 32 bytes long")?;
+        Ok(ProofOfRegistration::from_bytes(array))
+    })
+    .transpose()
 }
 
 async fn handle_cli_command(
@@ -336,9 +393,8 @@ async fn handle_cli_command(
             // TODO: passing registered identities and key signatures is not yet supported in the CLI
 
             let wallet_policy = parse_wallet_policy(descriptor_template, keys_info)?;
-            let account = common::message::Account::WalletPolicy(wallet_policy);
             let (account_id, hmac) = bitcoin_client
-                .register_account(name, &account, None, None, *show_cleartext)
+                .register_account(name, &wallet_policy, None, None, *show_cleartext)
                 .await?;
             println!(
                 "Account {} registered.\nAccount ID: {}\nHMAC: {}",
@@ -377,28 +433,13 @@ async fn handle_cli_command(
                 is_change: *is_change,
                 address_index: *address_index,
             };
-            // convert por from hex to bytes if provided
-            let proof_of_registration = por
-                .as_ref()
-                .map(
-                    |s| -> Result<ProofOfRegistration<common::bip388::WalletPolicy>, &'static str> {
-                        let bytes =
-                            hex::decode(s).map_err(|_| "Failed to decode proof of registration")?;
-
-                        let array: [u8; 32] = bytes
-                            .try_into()
-                            .map_err(|_| "Proof of registration must be 32 bytes long")?;
-
-                        Ok(ProofOfRegistration::from_bytes(array))
-                    },
-                )
-                .transpose()?; // Result<Option<ProofOfRegistration<...>>, _>
+            let proof_of_registration = parse_por(por.as_deref())?;
 
             let (addr, identity_sig) = bitcoin_client
                 .get_address(
-                    &common::message::Account::WalletPolicy(wallet_policy),
+                    &wallet_policy,
                     name.as_deref().unwrap_or(""),
-                    &common::message::AccountCoordinates::WalletPolicy(wallet_policy_coords),
+                    &wallet_policy_coords,
                     proof_of_registration.as_ref(),
                     *display,
                     *identity_index,
@@ -410,6 +451,51 @@ async fn handle_cli_command(
                 println!("Identity pubkey: {}", hex::encode(&sig.identity_pubkey));
                 println!("Identity signature: {}", hex::encode(&sig.signature));
             }
+        }
+        CliCommand::ExportSpScanKey { account_index } => {
+            let account = bitcoin_client
+                .export_silent_payment_scan_key(*account_index)
+                .await?;
+            println!("{}", account.to_spscan());
+        }
+        CliCommand::RegisterSpAccount {
+            name,
+            account_index,
+            scan_key,
+        } => {
+            let account = SilentPaymentAccount::from_spscan(*account_index, scan_key)
+                .map_err(|_| "Invalid scan key")?;
+            let (account_id, hmac) = bitcoin_client
+                .register_account(name, &account, None, None, false)
+                .await?;
+            println!(
+                "Account {} registered.\nAccount ID: {}\nHMAC: {}",
+                name,
+                hex::encode(account_id.as_bytes()),
+                hex::encode(hmac.dangerous_as_bytes())
+            );
+        }
+        CliCommand::GetSpAddress {
+            display,
+            name,
+            account_index,
+            scan_key,
+            por,
+            label,
+        } => {
+            let account = SilentPaymentAccount::from_spscan(*account_index, scan_key)
+                .map_err(|_| "Invalid scan key")?;
+            let (addr, _) = bitcoin_client
+                .get_address(
+                    &account,
+                    name.as_deref().unwrap_or(""),
+                    &SilentPaymentCoordinates::Code { label: *label },
+                    parse_por(por.as_deref())?.as_ref(),
+                    *display,
+                    None,
+                )
+                .await?;
+            println!("{}", addr);
         }
         CliCommand::SignPsbt { psbt } => {
             let mut psbt = base64::engine::general_purpose::STANDARD
@@ -547,7 +633,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     break;
                 }
 
-                rl.add_history_entry(line.as_str())?;
+                if !may_contain_scan_key(&line) {
+                    rl.add_history_entry(line.as_str())?;
+                }
 
                 let clap_args = match prepare_prompt_for_clap(&line) {
                     Ok(args) => args,
@@ -599,4 +687,30 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn scan_keys_are_not_saved_in_the_history() {
+        for line in [
+            "register_sp_account name=SP account_index=0 scan_key=tspscan1qqq",
+            "get_sp_address account_index=0 scan_key=tspscan1qqq",
+            // malformed or misspelled, but with a key
+            "get_sp_address scan_key",
+            "  register_sp_account",
+            "register_sp_acount scan_key=tspscan1qqq",
+            "get_sp_address scan_key=TSPSCAN1QQQ",
+        ] {
+            assert!(may_contain_scan_key(line), "{line}");
+        }
+        for line in [
+            "export_sp_scan_key account_index=0",
+            "get_address descriptor_template=\"wpkh(@0/**)\"",
+        ] {
+            assert!(!may_contain_scan_key(line), "{line}");
+        }
+    }
 }

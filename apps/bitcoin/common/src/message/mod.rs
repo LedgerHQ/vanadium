@@ -85,6 +85,30 @@ pub enum AccountCoordinates {
     SilentPayment(#[n(0)] crate::silent_payments::SilentPaymentCoordinates),
 }
 
+impl From<crate::bip388::WalletPolicy> for Account {
+    fn from(wallet_policy: crate::bip388::WalletPolicy) -> Self {
+        Self::WalletPolicy(wallet_policy)
+    }
+}
+
+impl From<crate::silent_payments::SilentPaymentAccount> for Account {
+    fn from(account: crate::silent_payments::SilentPaymentAccount) -> Self {
+        Self::SilentPayment(account)
+    }
+}
+
+impl From<WalletPolicyCoordinates> for AccountCoordinates {
+    fn from(coords: WalletPolicyCoordinates) -> Self {
+        Self::WalletPolicy(coords)
+    }
+}
+
+impl From<crate::silent_payments::SilentPaymentCoordinates> for AccountCoordinates {
+    fn from(coords: crate::silent_payments::SilentPaymentCoordinates) -> Self {
+        Self::SilentPayment(coords)
+    }
+}
+
 /// A Schnorr signature for object authentication, containing the compressed public key of the
 /// identity key that produced the signature, and the 64-byte BIP-340 signature.
 #[derive(Encode, Decode, Debug, Clone, PartialEq, Eq)]

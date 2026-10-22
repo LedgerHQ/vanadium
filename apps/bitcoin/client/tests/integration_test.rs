@@ -2,7 +2,7 @@
 
 use base64::{self, Engine};
 use common::{
-    message::{Account, KeyTree},
+    message::KeyTree,
     psbt::{prepare_psbt, PsbtV2},
 };
 use sdk::test_utils::{setup_test, TestSetup};
@@ -82,13 +82,7 @@ async fn test_e2e_sign_transaction() {
 
     let account_name = "My taproot account #0";
     let (_, por) = client
-        .register_account(
-            account_name,
-            &Account::WalletPolicy(wallet_policy.clone()),
-            None,
-            None,
-            false,
-        )
+        .register_account(account_name, &wallet_policy, None, None, false)
         .await
         .unwrap();
     println!("Registered account, got POR: {:?}", por);
@@ -130,13 +124,7 @@ async fn test_e2e_send_to_silent_payment_address() {
         parse_wallet_policy("wpkh(@0/**)", &[&format!("[f5acc2fd/84'/1'/0']{xpub}")]).unwrap();
     let account_name = "My segwit account #0";
     let (_, por) = client
-        .register_account(
-            account_name,
-            &Account::WalletPolicy(wallet_policy.clone()),
-            None,
-            None,
-            false,
-        )
+        .register_account(account_name, &wallet_policy, None, None, false)
         .await
         .unwrap();
 
@@ -240,4 +228,68 @@ async fn test_e2e_send_to_silent_payment_address() {
         &key,
     )
     .unwrap();
+}
+
+#[tokio::test]
+async fn test_e2e_silent_payment_account() {
+    // this test exports the scan key of a silent payment account, registers the account, and gets
+    // its addresses
+    use bitcoin::{
+        bip32::{DerivationPath, Xpriv},
+        secp256k1::Secp256k1,
+        NetworkKind,
+    };
+    use common::{
+        account::{Account, SilentPaymentCoordinates},
+        errors::Error,
+        silent_payments::{Secp256k1 as Curve, Secp256k1Scalar},
+    };
+    use vnd_bitcoin_client::BitcoinClientError;
+
+    let mut setup = setup().await;
+    let client = &mut setup.client;
+
+    let account = client.export_silent_payment_scan_key(3).await.unwrap();
+
+    // the keys of the account, from the default seed of Speculos
+    let seed = hex::decode("b11997faff420a331bb4a4ffdc8bdc8ba7c01732a99a30d83dbbebd469666c84b47d09d3f5f472b3b9384ac634beba2a440ba36ec7661144132f35e206873564").unwrap();
+    let key = |path: &str| {
+        let master = Xpriv::new_master(NetworkKind::Test, &seed).unwrap();
+        let path: DerivationPath = path.parse().unwrap();
+        let key = master.derive_priv(&Secp256k1::new(), &path).unwrap();
+        Secp256k1Scalar::from_be_bytes(&key.private_key.secret_bytes()).unwrap()
+    };
+    assert_eq!(account.account_index(), 3);
+    assert_eq!(account.scan_key(), &key("m/352'/1'/3'/1'/0"));
+    assert_eq!(
+        account.spend_key(),
+        &(&Curve::get_generator() * &key("m/352'/1'/3'/0'/0"))
+    );
+
+    let name = "Silent payments #3";
+    let (_, por) = client
+        .register_account(name, &account, None, None, false)
+        .await
+        .unwrap();
+
+    for label in [None, Some(1)] {
+        let coords = SilentPaymentCoordinates::Code { label };
+        let (address, identity_sig) = client
+            .get_address(&account, name, &coords, Some(&por), false, None)
+            .await
+            .unwrap();
+        assert!(address.starts_with("tsp1"));
+        assert_eq!(address, account.get_address(&coords).unwrap());
+        assert_eq!(identity_sig, None);
+    }
+
+    let change = SilentPaymentCoordinates::Code { label: Some(0) };
+    assert!(matches!(
+        client
+            .get_address(&account, name, &change, Some(&por), false, None)
+            .await,
+        Err(BitcoinClientError::AppError(
+            Error::SilentPaymentChangeLabel
+        ))
+    ));
 }
