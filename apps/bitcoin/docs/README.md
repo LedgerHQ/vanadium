@@ -1,6 +1,6 @@
 This is the Bitcoin application for Vanadium. It (will be) a next-generation application that generalizes the functionality of the [Ledger Bitcoin application](https://github.com/LedgerHQ/app-bitcoin) with more general signing flows, and advanced use cases.
 
-It is also based around the [PSBT standard](https://github.com/bitcoin/bips/blob/master/bip-0174.mediawiki), but fully implements the signing model based on _accounts_, represented initially with [BIP-388 wallet policies](https://github.com/bitcoin/bips/blob/master/bip-0388.mediawiki) - more account types (like [silent payment addresses](https://github.com/bitcoin/bips/blob/master/bip-0352.mediawiki)) may be added in the future.
+It is also based around the [PSBT standard](https://github.com/bitcoin/bips/blob/master/bip-0174.mediawiki), but fully implements the signing model based on _accounts_, represented with [BIP-388 wallet policies](https://github.com/bitcoin/bips/blob/master/bip-0388.mediawiki) and [BIP-352 silent payment accounts](https://github.com/bitcoin/bips/blob/master/bip-0352.mediawiki); more account types may be added in the future.
 
 In the future, experimenting with features like _signed addresses_, _known contacts_, _identity_, etc is planned, in order to further enhance the UX and avoid users from having to manually check addresses whenever possible.
 
@@ -12,7 +12,7 @@ The bitcoin app implements standards to guarantee interoperability, security and
 - [BIP-370](https://github.com/bitcoin/bips/blob/master/bip-0370.mediawiki) PSBTs Version 2 are used to describe transactions to the application.
 - [BIP-388](https://github.com/bitcoin/bips/blob/master/bip-0388.mediawiki) wallet policies build on top of descriptors ([BIP-380](https://github.com/bitcoin/bips/blob/master/bip-0380.mediawiki) and related BIPs) to describe standardized *wallet accounts* that work for any kind of spending conditions, including using [miniscript](https://github.com/bitcoin/bips/blob/master/bip-0379.md).
 - [BIP-327](https://github.com/bitcoin/bips/blob/master/bip-0327.mediawiki) MuSig2 support for compatible BIP-388 wallet policies.
-- [BIP-352](https://github.com/bitcoin/bips/blob/master/bip-0352.mediawiki) Silent Payments: paying to silent payment addresses, with the PSBT fields of [BIP-375](https://github.com/bitcoin/bips/blob/master/bip-0375.mediawiki) and the DLEQ proofs of [BIP-374](https://github.com/bitcoin/bips/blob/master/bip-0374.mediawiki). See [silent_payments.md](silent_payments.md).
+- [BIP-352](https://github.com/bitcoin/bips/blob/master/bip-0352.mediawiki) Silent Payments: paying to silent payment addresses, with the PSBT fields of [BIP-375](https://github.com/bitcoin/bips/blob/master/bip-0375.mediawiki) and the DLEQ proofs of [BIP-374](https://github.com/bitcoin/bips/blob/master/bip-0374.mediawiki), and silent payment accounts to receive, with their [BIP-392](https://github.com/bitcoin/bips/blob/master/bip-0392.mediawiki) scan keys. See [silent_payments.md](silent_payments.md).
 
 
 ## PSBT-level extensions
@@ -31,7 +31,7 @@ They are documented in [PSBT.md](PSBT.md).
 
 ## Planned features
 
-- [BIP-352](https://github.com/bitcoin/bips/blob/master/bip-0352.mediawiki) Silent Payments accounts, to receive to silent payment addresses and spend what they receive. Silent Payment addresses could also be used as *identity pubkeys*. This would allow a DNS-based Root of Trust that doesn't require an explicit registration step.
+- Spending what [BIP-352](https://github.com/bitcoin/bips/blob/master/bip-0352.mediawiki) silent payment accounts receive ([BIP-376](https://github.com/bitcoin/bips/blob/master/bip-0376.mediawiki)), and silent payment change. Silent Payment addresses could also be used as *identity pubkeys*. This would allow a DNS-based Root of Trust that doesn't require an explicit registration step.
 - DNSSEC-based authentication for identity pubkeys. Similar to [BIP-353](https://github.com/bitcoin/bips/blob/master/bip-0353.mediawiki) but for identity pubkeys.
 - Signing policies: derive keys that will only sign transactions (and possibly auto-sign) if they satisfy certain spending policies.
 
@@ -83,15 +83,26 @@ For each cosigner key in the wallet policy, the device labels it on screen as:
 
 *Remark*: registering *external* accounts (for which the device is not a cosigner) is supported, in order to enable recognizing their addresses among the outputs during `sign_psbt` even if not spending from them in the inputs.
 
+A silent payment account is the device's own: its scan key and spend key must be the device's keys for its account index, as `export_silent_payment_scan_key` returns them. The device shows the name, the account index and the account's address. Identity keys and signatures are not accepted, as the account has no xpubs. See [silent_payments.md](silent_payments.md#silent-payment-accounts).
+
 
 ## `get_address`
 
 **Inputs:** An optional account name; the account description; the proof of registration (`por`); the coordinates of the specific address; a boolean `display` parameter; an optional `identity_index`.\
 **Outputs:** The address of the account, plus an optional Schnorr signature over the output `scriptPubkey` from the `identity_index`-th identity key.
 
-Initially, only BIP-388 wallet policies are supported as accounts; the coordinates are `(is_change: bool, address_index: 0..2**31-1)`.
+The coordinates depend on the account type:
+- for BIP-388 wallet policies, `(is_change: bool, address_index: 0..2**31-1)`;
+- for silent payment accounts, an optional label: the address is the account's silent payment address, or the address of the label. Label 0 is for change, and is never returned. Identity signatures are not supported, as the address has no script.
 
 The provided proof of registration is validated against the (name, account) pair. Default accounts (no name and no proof of registration) are not yet supported.
+
+## `export_silent_payment_scan_key`
+
+**Inputs:** A BIP-352 account index, below 2<sup>31</sup>.\
+**Outputs:** The [BIP-392](https://github.com/bitcoin/bips/blob/master/bip-0392.mediawiki) `tspscan` key of the device's silent payment account with that index: its scan private key and its spend public key.
+
+The user always confirms the export, after a warning: the scan key reveals every payment to the account, though it can't spend them. The host builds the account from it, to register it with `register_account`.
 
 ## `sign_psbt`
 

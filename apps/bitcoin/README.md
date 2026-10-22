@@ -12,9 +12,10 @@ The `client` is a library crate (see [lib.rs](client/src/lib.rs)), but it also h
 - Support for all legacy, SegWit, and Taproot transaction types
 - Support for [Miniscript wallet policies](https://github.com/bitcoin/bips/blob/master/bip-0388.mediawiki)
 - Support for transactions spending/receiving to an arbitrary number of accounts
+- [Silent Payments](https://github.com/bitcoin/bips/blob/master/bip-0352.mediawiki): paying to silent payment addresses, and silent payment accounts to receive
 
 ### 🚧 Work in Progress / Planned
-- [Silent Payments](https://github.com/bitcoin/bips/blob/master/bip-0352.mediawiki)
+- Spending from silent payment accounts
 - Identity-based output authentication
 - ...anything you can think of
 
