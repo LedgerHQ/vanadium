@@ -27,6 +27,7 @@ use alloc::{string::String, vec::Vec};
 use minicbor::{Decode, Encode};
 
 mod bip388_codec;
+mod silent_payment_codec;
 
 /// BIP32 derivation path. Encoded transparently as a CBOR array of `u32`s.
 #[derive(Encode, Decode, Debug, Clone, PartialEq, Eq)]
@@ -70,14 +71,18 @@ impl WalletPolicyCoordinates {
 pub enum Account {
     #[n(0)]
     WalletPolicy(#[cbor(n(0), with = "bip388_codec")] crate::bip388::WalletPolicy),
-    // more will be added here
+    #[n(1)]
+    SilentPayment(
+        #[cbor(n(0), with = "silent_payment_codec")] crate::silent_payments::SilentPaymentAccount,
+    ),
 }
 
 #[derive(Encode, Decode, Debug, Clone, PartialEq, Eq)]
 pub enum AccountCoordinates {
     #[n(0)]
     WalletPolicy(#[n(0)] WalletPolicyCoordinates),
-    // more will be added here
+    #[n(1)]
+    SilentPayment(#[n(0)] crate::silent_payments::SilentPaymentCoordinates),
 }
 
 /// A Schnorr signature for object authentication, containing the compressed public key of the
@@ -514,5 +519,59 @@ mod tests {
                 sp_output_scripts: vec![],
             }
         );
+    }
+
+    /// CBOR round trips of the silent payment accounts, their coordinates, and the scan key
+    /// export; an account with invalid keys doesn't decode.
+    #[test]
+    fn silent_payment_roundtrip() {
+        use crate::silent_payments::{
+            Secp256k1, Secp256k1Scalar, SilentPaymentAccount, SilentPaymentCoordinates,
+        };
+
+        let scan_key = Secp256k1Scalar::from_be_bytes(&[0x11; 32]).unwrap();
+        let spend_key =
+            &Secp256k1::get_generator() * &Secp256k1Scalar::from_be_bytes(&[0x22; 32]).unwrap();
+        let account = SilentPaymentAccount::new(3, scan_key, spend_key).unwrap();
+
+        let request = Request::GetAddress {
+            display: false,
+            name: Some("SP".into()),
+            account: Account::SilentPayment(account.clone()),
+            por: vec![0x33; 32],
+            coordinates: AccountCoordinates::SilentPayment(SilentPaymentCoordinates::Code {
+                label: Some(5),
+            }),
+            identity_index: None,
+        };
+        let bytes = minicbor::to_vec(&request).unwrap();
+        assert_eq!(minicbor::decode::<Request>(&bytes).unwrap(), request);
+
+        for coords in [
+            SilentPaymentCoordinates::Code { label: None },
+            SilentPaymentCoordinates::Tweak([0x44; 32]),
+        ] {
+            let coords = AccountCoordinates::SilentPayment(coords);
+            let bytes = minicbor::to_vec(&coords).unwrap();
+            assert_eq!(
+                minicbor::decode::<AccountCoordinates>(&bytes).unwrap(),
+                coords
+            );
+        }
+
+        let request = Request::ExportSilentPaymentScanKey { account_index: 3 };
+        let bytes = minicbor::to_vec(&request).unwrap();
+        assert_eq!(minicbor::decode::<Request>(&bytes).unwrap(), request);
+        let response = Response::SilentPaymentScanKey {
+            scan_key: account.to_spscan(),
+        };
+        let bytes = minicbor::to_vec(&response).unwrap();
+        assert_eq!(minicbor::decode::<Response>(&bytes).unwrap(), response);
+
+        // the same account, with a scan key of 0
+        let mut bytes = minicbor::to_vec(Account::SilentPayment(account)).unwrap();
+        let at = bytes.windows(32).position(|w| w == [0x11; 32]).unwrap();
+        bytes[at..at + 32].fill(0);
+        assert!(minicbor::decode::<Account>(&bytes).is_err());
     }
 }
