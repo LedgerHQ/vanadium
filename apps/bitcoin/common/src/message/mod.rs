@@ -65,6 +65,13 @@ impl WalletPolicyCoordinates {
             address_index,
         }
     }
+
+    /// The last two BIP-32 steps of the key expression `kp` at these coordinates: the step that
+    /// `kp`'s `/<num1;num2>` gives for `is_change`, then the address index.
+    pub fn child_steps(&self, kp: &crate::bip388::KeyExpression) -> [u32; 2] {
+        let change_step = if self.is_change { kp.num2 } else { kp.num1 };
+        [change_step, self.address_index]
+    }
 }
 
 #[derive(Encode, Decode, Debug, Clone, PartialEq, Eq)]

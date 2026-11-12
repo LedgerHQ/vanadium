@@ -20,13 +20,13 @@ use common::{
     message::WalletPolicyCoordinates,
     por::{ProofOfRegistration, Registerable},
     psbt::{
-        PsbtAccount, PsbtAccountCoordinates, PsbtAccountGlobalRead, PsbtAccountInputRead,
-        PsbtAccountOutputRead, PsbtIdAuthGlobalRead, PsbtOutputAuthRead,
+        OutputAuthProof, PsbtAccount, PsbtAccountCoordinates, PsbtAccountGlobalRead,
+        PsbtAccountInputRead, PsbtAccountOutputRead, PsbtIdAuthGlobalRead, PsbtOutputAuthRead,
     },
     silent_payments::{SilentPaymentAccount, SilentPaymentCode, SilentPaymentCoordinates},
 };
 
-use bitcoin::{hashes::Hash, Amount, ScriptBuf, TxOut};
+use bitcoin::{hashes::Hash, Amount, Script, ScriptBuf, TxOut};
 use sdk::curve::EcfpPublicKey;
 
 /// A check, verified in the background task, that an input or an output belongs to the account
@@ -171,19 +171,19 @@ fn check_coordinates(
 fn read_accounts(psbt: &fastpsbt::Psbt) -> Result<Accounts, Error> {
     let accounts = psbt
         .get_accounts()
-        .map_err(|_| Error::InvalidWalletPolicy)?;
+        .map_err(|_| Error::FailedToGetAccounts)?;
 
     let mut names = Vec::with_capacity(accounts.len());
     let mut proofs = Vec::with_capacity(accounts.len());
     for account_id in 0..accounts.len() {
         let name = psbt
             .get_account_name(account_id as u32)
-            .map_err(|_| Error::InvalidWalletPolicy)?;
+            .map_err(|_| Error::FailedToGetAccounts)?;
         names.push(name);
 
         let por = psbt
             .get_account_proof_of_registration(account_id as u32)
-            .map_err(|_| Error::InvalidWalletPolicy)?;
+            .map_err(|_| Error::FailedToGetAccounts)?;
         let por = por.ok_or(Error::DefaultAccountsNotSupported)?;
         proofs.push(
             por.try_into()
@@ -411,67 +411,71 @@ fn analyze_output(
     // The destination of an output to a silent payment code is the code: its script, if the PSBT
     // has one, is only checked against the code after the review. Identity keys sign scripts, so
     // they can't apply to it.
-    if let Some(sp_v0_info) = output.sp_v0_info {
-        let has_auth_proofs = !output
-            .get_auth_proofs()
-            .map_err(|_| Error::InvalidIdentitySignature)?
-            .is_empty();
-        if has_auth_proofs {
-            return Err(Error::UnsupportedSilentPayment);
-        }
-        let code =
-            SilentPaymentCode::from_bytes(sp_v0_info).map_err(|_| Error::InvalidSilentPayment)?;
-        let destination = Destination::SilentPaymentCode(code);
-        return match coordinates {
-            Some((account_id, coords)) => {
-                internal_output(accounts, *account_id, coords, destination)
+    let destination = match output.sp_v0_info {
+        Some(sp_v0_info) => {
+            let has_auth_proofs = !output
+                .get_auth_proofs()
+                .map_err(|_| Error::InvalidIdentitySignature)?
+                .is_empty();
+            if has_auth_proofs {
+                return Err(Error::UnsupportedSilentPayment);
             }
-            None => Ok(AnalyzedOutput::External(destination, None)),
-        };
+            let code = SilentPaymentCode::from_bytes(sp_v0_info)
+                .map_err(|_| Error::InvalidSilentPayment)?;
+            Destination::SilentPaymentCode(code)
+        }
+        None => {
+            let script = output.script.ok_or(Error::OutputScriptMissing)?;
+            Destination::Script(ScriptBuf::from_bytes(script.to_vec()))
+        }
+    };
+
+    match coordinates {
+        Some((account_id, coords)) => internal_output(accounts, *account_id, coords, destination),
+        None => {
+            let auth_name = match &destination {
+                Destination::Script(script) => {
+                    let proofs = output
+                        .get_auth_proofs()
+                        .map_err(|_| Error::InvalidIdentitySignature)?;
+                    verify_auth_proofs(script, proofs, identity_key_names)?
+                }
+                Destination::SilentPaymentCode(_) => None,
+            };
+            Ok(AnalyzedOutput::External(destination, auth_name))
+        }
     }
+}
 
-    let Some((account_id, coords)) = coordinates else {
-        let proofs = output
-            .get_auth_proofs()
-            .map_err(|_| Error::InvalidIdentitySignature)?;
-        let out_script = output.script.ok_or(Error::OutputScriptMissing)?;
-
-        let mut first_auth_name: Option<String> = None;
-        for proof in proofs {
-            match proof {
-                common::psbt::OutputAuthProof::IdentitySignature { pubkey, sig } => {
-                    // Verify the Schnorr signature against the output scriptPubKey.
-                    let ecfp_pubkey =
-                        EcfpPublicKey::<sdk::curve::Secp256k1, 32>::from_compressed(&pubkey)
-                            .map_err(|_| Error::InvalidIdentitySignature)?;
-                    let msg = build_identity_message(MSG_TYPE_OUTPUT, out_script)
-                        .map_err(|_| Error::InvalidIdentitySignature)?;
-                    ecfp_pubkey
-                        .schnorr_verify(&msg, &sig)
-                        .map_err(|_| Error::InvalidIdentitySignature)?;
-                    // Look up the registered name for this pubkey
-                    if first_auth_name.is_none() {
-                        first_auth_name = identity_key_names
-                            .iter()
-                            .find(|(pk, _)| *pk == pubkey)
-                            .map(|(_, name)| name.clone());
-                    }
+/// Verifies every identity-key auth proof of an output to `script`, and returns the name of the
+/// first one whose key is registered in the PSBT.
+fn verify_auth_proofs(
+    script: &Script,
+    proofs: Vec<OutputAuthProof>,
+    identity_key_names: &[([u8; 33], String)],
+) -> Result<Option<String>, Error> {
+    let msg = build_identity_message(MSG_TYPE_OUTPUT, script.as_bytes())
+        .map_err(|_| Error::InvalidIdentitySignature)?;
+    let mut first_auth_name: Option<String> = None;
+    for proof in proofs {
+        match proof {
+            OutputAuthProof::IdentitySignature { pubkey, sig } => {
+                // Verify the Schnorr signature against the output scriptPubKey.
+                EcfpPublicKey::<sdk::curve::Secp256k1, 32>::from_compressed(&pubkey)
+                    .map_err(|_| Error::InvalidIdentitySignature)?
+                    .schnorr_verify(&msg, &sig)
+                    .map_err(|_| Error::InvalidIdentitySignature)?;
+                // Look up the registered name for this pubkey
+                if first_auth_name.is_none() {
+                    first_auth_name = identity_key_names
+                        .iter()
+                        .find(|(pk, _)| *pk == pubkey)
+                        .map(|(_, name)| name.clone());
                 }
             }
         }
-        return Ok(AnalyzedOutput::External(
-            Destination::Script(ScriptBuf::from_bytes(out_script.to_vec())),
-            first_auth_name,
-        ));
-    };
-
-    let out_script_pubkey = output.script.ok_or(Error::OutputScriptMissing)?;
-    internal_output(
-        accounts,
-        *account_id,
-        coords,
-        Destination::Script(ScriptBuf::from_bytes(out_script_pubkey.to_vec())),
-    )
+    }
+    Ok(first_auth_name)
 }
 
 /// An output with destination `destination` that claims to belong to the account `account_id`,
