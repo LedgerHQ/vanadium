@@ -16,8 +16,6 @@
 // - Make the compulsory fields from BIP-370 not be typed as an Option<T>; fail in the constructor instead
 // - Add test vectors from BIP-370
 
-#![allow(dead_code)]
-
 use alloc::vec::Vec;
 use bitcoin::{
     consensus::deserialize, hashes::Hash, psbt::OutputType, script::Script, script::ScriptBuf,
@@ -228,25 +226,33 @@ impl<'a> Cursor<'a> {
         Ok(&self.buf[start..start + n])
     }
 
+    /// Reads a compact size, which must be minimally encoded, as Bitcoin Core and BIP-174
+    /// require: a value that fits a shorter encoding fails with
+    /// [`PsbtError::InvalidCompactSize`].
     fn read_compact_size(&mut self) -> Result<u64, PsbtError> {
         let b = *self.take(1)?.first().unwrap();
-        match b {
-            n @ 0x00..=0xfc => Ok(n as u64),
+        let (value, min) = match b {
+            n @ 0x00..=0xfc => return Ok(n as u64),
             0xfd => {
                 let s = self.take(2)?;
-                Ok(u16::from_le_bytes([s[0], s[1]]) as u64)
+                let value = u16::from_le_bytes([s[0], s[1]]) as u64;
+                (value, 0xfd)
             }
             0xfe => {
                 let s = self.take(4)?;
-                Ok(u32::from_le_bytes([s[0], s[1], s[2], s[3]]) as u64)
+                let value = u32::from_le_bytes([s[0], s[1], s[2], s[3]]) as u64;
+                (value, 0x1_0000)
             }
             0xff => {
                 let s = self.take(8)?;
-                Ok(u64::from_le_bytes([
-                    s[0], s[1], s[2], s[3], s[4], s[5], s[6], s[7],
-                ]))
+                let value = u64::from_le_bytes([s[0], s[1], s[2], s[3], s[4], s[5], s[6], s[7]]);
+                (value, 0x1_0000_0000)
             }
+        };
+        if value < min {
+            return Err(PsbtError::InvalidCompactSize);
         }
+        Ok(value)
     }
 
     fn read_len_prefixed(&mut self) -> Result<&'a [u8], PsbtError> {
@@ -507,10 +513,6 @@ impl<'a> Psbt<'a> {
         })
     }
 
-    fn get_global(&self, key_type: u8, key_data: &[u8]) -> Option<&'a [u8]> {
-        self.global_map.get(key_type, key_data)
-    }
-
     /// Iterate global map entries with a given key_type.
     pub fn iter_keys(&self, key_type: u8) -> impl Iterator<Item = (&'a [u8], &'a [u8])> + '_ {
         self.global_map
@@ -744,7 +746,7 @@ impl<'a> Psbt<'a> {
             OutputType::Bare => {
                 let sighash = cache
                     .legacy_signature_hash(input_index, spk, hash_ty.to_u32())
-                    .expect("input checked above");
+                    .map_err(|_| PsbtError::OutOfRange)?;
                 Ok((Message::from(sighash), hash_ty))
             }
             OutputType::Sh => {
@@ -755,7 +757,7 @@ impl<'a> Psbt<'a> {
                 let script_code = Script::from_bytes(script_code);
                 let sighash = cache
                     .legacy_signature_hash(input_index, script_code, hash_ty.to_u32())
-                    .expect("input checked above");
+                    .map_err(|_| PsbtError::OutOfRange)?;
                 Ok((Message::from(sighash), hash_ty))
             }
             OutputType::Wpkh => {
@@ -765,7 +767,10 @@ impl<'a> Psbt<'a> {
                 Ok((Message::from(sighash), hash_ty))
             }
             OutputType::ShWpkh => {
-                let redeem_script = input.redeem_script.as_ref().expect("checked above");
+                let redeem_script = input
+                    .redeem_script
+                    .as_ref()
+                    .ok_or(PsbtError::MissingRedeemScript)?;
                 let redeem_script = Script::from_bytes(redeem_script);
                 let sighash = cache
                     .p2wpkh_signature_hash(input_index, redeem_script, utxo.value, hash_ty)
@@ -783,9 +788,8 @@ impl<'a> Psbt<'a> {
                     .map_err(|_| PsbtError::BadValue)?;
                 Ok((Message::from(sighash), hash_ty))
             }
-            OutputType::Tr => {
-                Err(PsbtError::Unsupported) // different function for taproot sighash
-            }
+            // a taproot input is not a P2SH nor a P2WPKH or P2WSH program, so it is rejected above:
+            // its sighash is computed elsewhere
             _ => Err(PsbtError::Unsupported),
         }
     }
@@ -929,10 +933,6 @@ impl<'a> Input<'a> {
             cached_witness_utxo: OnceCell::new(),
             cached_non_witness_utxo: OnceCell::new(),
         })
-    }
-
-    fn get(&self, key_type: u8, key_data: &[u8]) -> Option<&'a [u8]> {
-        self.map.get(key_type, key_data)
     }
 
     /// Iterate this input's map entries with a given key_type.
@@ -1147,10 +1147,6 @@ impl<'a> Output<'a> {
         })
     }
 
-    fn get(&self, key_type: u8, key_data: &[u8]) -> Option<&'a [u8]> {
-        self.map.get(key_type, key_data)
-    }
-
     /// Iterate this output's map entries with a given key_type.
     pub fn iter_keys(&self, key_type: u8) -> impl Iterator<Item = (&'a [u8], &'a [u8])> + '_ {
         self.map.iter_keys(key_type).map(|p| (p.key_data, p.value))
@@ -1262,6 +1258,33 @@ mod test {
     use hex_literal::hex;
 
     const VALID_PSBT: &'static str = "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";
+
+    /// Each compact size is read from its minimal encoding only.
+    #[test]
+    fn compact_size_must_be_minimal() {
+        let read = |bytes: &[u8]| Cursor::new(bytes, 0).read_compact_size();
+        assert_eq!(read(&[0xfc]), Ok(0xfc));
+        assert_eq!(read(&[0xfd, 0xfd, 0x00]), Ok(0xfd));
+        assert_eq!(read(&[0xfe, 0x00, 0x00, 0x01, 0x00]), Ok(0x1_0000));
+        assert_eq!(
+            read(&[0xff, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00]),
+            Ok(0x1_0000_0000)
+        );
+
+        assert_eq!(
+            read(&[0xfd, 0xfc, 0x00]),
+            Err(PsbtError::InvalidCompactSize)
+        );
+        assert_eq!(
+            read(&[0xfe, 0xff, 0xff, 0x00, 0x00]),
+            Err(PsbtError::InvalidCompactSize)
+        );
+        assert_eq!(
+            read(&[0xff, 0xff, 0xff, 0xff, 0xff, 0x00, 0x00, 0x00, 0x00]),
+            Err(PsbtError::InvalidCompactSize)
+        );
+        assert_eq!(read(&[0xfd, 0x00]), Err(PsbtError::UnexpectedEof));
+    }
 
     #[test]
     fn test_parse_psbt() {
