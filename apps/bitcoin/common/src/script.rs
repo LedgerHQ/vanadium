@@ -1,6 +1,6 @@
 use alloc::{boxed::Box, vec::Vec};
 
-use bitcoin::bip32::{ChildNumber, Xpub};
+use bitcoin::bip32::Xpub;
 use bitcoin::hashes::{hash160, sha256, Hash};
 use bitcoin::key::{TapTweak, UntweakedPublicKey};
 use bitcoin::opcodes::{all::*, OP_0};
@@ -8,6 +8,7 @@ use bitcoin::script::Builder;
 use bitcoin::{PubkeyHash, ScriptBuf, ScriptHash, TapNodeHash, WPubkeyHash, WScriptHash};
 
 use crate::errors::Error;
+use crate::key_expression;
 use crate::taproot::GetTapTreeHash;
 
 // Simple generic bubble sort implementation for Vec<[u8; N]>.
@@ -109,36 +110,7 @@ impl ToScriptWithKeyInfoInner for DescriptorTemplate {
         ctx: ScriptContext,
     ) -> Result<Builder, Error> {
         let derive = |kp: &KeyExpression| -> Result<Xpub, Error> {
-            let change_step = ChildNumber::from(if is_change { kp.num2 } else { kp.num1 });
-            let path = [change_step, ChildNumber::from(address_index)];
-            let secp = bitcoin::secp256k1::Secp256k1::new();
-
-            // Resolve the root xpub of the key expression: either a single
-            // participant's xpub (plain) or the BIP-388 aggregate of several
-            // participants' xpubs (musig).
-            let root_xpub: Xpub = if let Some(idx) = kp.plain_key_index() {
-                key_information
-                    .get(idx as usize)
-                    .ok_or(Error::InvalidKeyIndex)?
-                    .pubkey
-            } else if let Some(indices) = kp.musig_key_indices() {
-                let participant_xpubs: Vec<Xpub> = indices
-                    .iter()
-                    .map(|&i| {
-                        key_information
-                            .get(i as usize)
-                            .map(|ki| ki.pubkey)
-                            .ok_or(Error::InvalidKeyIndex)
-                    })
-                    .collect::<Result<_, _>>()?;
-                crate::musig::aggregate_xpub(&participant_xpubs).map_err(|_| Error::InvalidKey)?
-            } else {
-                return Err(Error::UnsupportedWalletPolicy);
-            };
-
-            root_xpub
-                .derive_pub(&secp, &path)
-                .map_err(|_| Error::InvalidKey)
+            Ok(key_expression::derive(kp, key_information, is_change, address_index)?.xpub)
         };
 
         builder = match self {

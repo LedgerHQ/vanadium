@@ -21,7 +21,6 @@
 //! a small bump of `n_storage_slots` in the manifest.
 
 use alloc::vec::Vec;
-use bitcoin::bip32::{ChildNumber, Xpub};
 use bitcoin::hashes::{sha256t_hash_newtype, Hash, HashEngine};
 use bitcoin::key::{TapTweak, UntweakedPublicKey};
 use bitcoin::secp256k1;
@@ -29,6 +28,7 @@ use bitcoin::{TapNodeHash, TapTweakHash, XOnlyPublicKey};
 use common::bip388::{KeyExpression, KeyInformation};
 use common::errors::Error;
 use common::fastpsbt;
+use common::key_expression;
 use common::message::{MuSig2PartialSignature, MuSig2Pubnonce};
 use common::musig::{self, MusigError, PlainPk, PubNonce, SessionContext};
 use sdk::hash::{Hasher, Sha256};
@@ -356,44 +356,26 @@ pub fn compute_per_input_info(
         return Err(Error::TooManyKeys);
     }
 
-    let change_step = ChildNumber::from(if is_change {
-        placeholder.num2
-    } else {
-        placeholder.num1
-    });
-    let address_step = ChildNumber::from(address_index);
-
     // 1) Per BIP-388, MuSig2 key-aggregation runs on the *master* participant
     //    pubkeys — the BIP-32 `(change, address_index)` derivation is applied
     //    *after* aggregation (and shows up as two non-xonly tweaks in the
     //    session context below). The participants therefore sign with their
     //    master private keys; their derived children are never used.
-    let mut keys: Vec<PlainPk> = Vec::with_capacity(indices.len());
-    let mut participant_xpubs: Vec<Xpub> = Vec::with_capacity(indices.len());
-    for &idx in indices {
-        let xpub = key_information
-            .get(idx as usize)
-            .ok_or(Error::InvalidKeyIndex)?
-            .pubkey;
-        keys.push(xpub.public_key.serialize());
-        participant_xpubs.push(xpub);
-    }
+    let mut keys: Vec<PlainPk> = key_expression::keys(placeholder, key_information)?
+        .iter()
+        .map(|key| key.pubkey.public_key.serialize())
+        .collect();
     keys.sort();
 
     // 2) Aggregate xpub + 2 BIP-32 derivations to (change, address_index).
     let secp = secp256k1::Secp256k1::new();
-    let agg = musig::aggregate_xpub(&participant_xpubs).map_err(|_| Error::InvalidKey)?;
-    let (child1, t0) =
-        musig::ckdpub_with_tweak(&agg, change_step).map_err(|_| Error::KeyDerivationFailed)?;
-    let (child2, t1) =
-        musig::ckdpub_with_tweak(&child1, address_step).map_err(|_| Error::KeyDerivationFailed)?;
+    let derived = key_expression::derive(placeholder, key_information, is_change, address_index)?;
 
     let mut tweaks: [[u8; 32]; 3] = [[0u8; 32]; 3];
     let mut is_xonly: [bool; 3] = [false; 3];
-    tweaks[0] = t0;
-    tweaks[1] = t1;
+    tweaks[..2].copy_from_slice(&derived.tweaks);
 
-    let agg_key_pre_taptweak: [u8; 33] = child2.public_key.serialize();
+    let agg_key_pre_taptweak: [u8; 33] = derived.xpub.public_key.serialize();
 
     let (agg_key_tweaked, n_tweaks) = match spend {
         SpendPath::Tapscript { .. } => (agg_key_pre_taptweak, 2),
@@ -401,7 +383,7 @@ pub fn compute_per_input_info(
             // 3) Apply BIP-341 taptweak.
             let merkle_root: Option<TapNodeHash> =
                 taptree_hash.map(|h| TapNodeHash::from_byte_array(*h));
-            let xonly_internal: UntweakedPublicKey = XOnlyPublicKey::from(child2.public_key);
+            let xonly_internal: UntweakedPublicKey = XOnlyPublicKey::from(derived.xpub.public_key);
             tweaks[2] =
                 TapTweakHash::from_key_and_tweak(xonly_internal, merkle_root).to_byte_array();
             is_xonly[2] = true;
@@ -910,7 +892,7 @@ mod tests {
         // BIP-388 musig signs with the *master* participant key — `info.keys`
         // contains the (sorted) master pubkeys directly, not derived children.
         let internal_pk: [u8; 33] = {
-            let xpub: Xpub = COSIGNER_1_XPUB.parse().unwrap();
+            let xpub: bitcoin::bip32::Xpub = COSIGNER_1_XPUB.parse().unwrap();
             xpub.public_key.serialize()
         };
         assert!(info.keys.contains(&internal_pk));
