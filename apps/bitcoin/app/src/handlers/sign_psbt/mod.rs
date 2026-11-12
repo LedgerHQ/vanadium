@@ -3,7 +3,7 @@
 //! Pipeline: parse the PSBT, run cheap structural analysis ([`analyze`], and
 //! [`silent_payments::analyze`] for outputs to silent payment codes), spawn the
 //! expensive verification as a background task that runs concurrently with the
-//! approval UI, show warnings, display the transaction for approval ([`display`]),
+//! approval UI, show the warnings and the transaction for approval ([`display`]),
 //! wait for verification, compute the scripts of the outputs to silent payment codes
 //! ([`silent_payments::finalize`]), sign ([`signing`], dispatching to [`musig`] where
 //! needed), and respond.
@@ -42,27 +42,12 @@ pub async fn handle_sign_psbt(app: &mut sdk::App, psbt: &[u8]) -> Result<Respons
     // task so it runs concurrently with the UX flows below.
     let verification_handle = app.spawn_task(async { deferred_checks.verify(&accounts).await });
 
-    // Show warnings (runs while verification task progresses in the background)
-    if review.warn_unverified_inputs && !display::display_warning_unverified_inputs(app).await {
+    // Show the warnings and the transaction for approval, while the verification task
+    // progresses in the background
+    let plan = display::review_plan(&review)?;
+    if !display::show_review(app, &plan).await {
         return Err(Error::UserRejected);
         // verification_handle is dropped here → task is cancelled
-    }
-
-    let fee = review.fee();
-    if review.inputs_total_amount >= crate::constants::THRESHOLD_WARN_HIGH_FEES_AMOUNT {
-        let fee_percent = fee.saturating_mul(100) / review.inputs_total_amount;
-        if fee_percent >= crate::constants::THRESHOLD_WARN_HIGH_FEES_PERCENT
-            && !display::display_warning_high_fee(app, fee_percent).await
-        {
-            return Err(Error::UserRejected);
-        }
-    }
-
-    // Display transaction for user approval
-    let pairs = display::build_display_pairs(&review)?;
-    if !display::display_transaction(app, &pairs).await {
-        display::show_transaction_rejected(app);
-        return Err(Error::UserRejected);
     }
 
     // Wait for verification to complete (likely already done by now)

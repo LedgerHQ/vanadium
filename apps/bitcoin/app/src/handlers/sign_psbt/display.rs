@@ -1,5 +1,5 @@
-//! Transaction-review UI: warning dialogs, the main approval screen, and the
-//! `TagValue` pairs shown on it.
+//! Transaction-review UI: what the review shows ([`review_plan`], a pure function of the
+//! [`Review`]), and the screens that show it ([`show_review`]).
 
 use alloc::{
     format,
@@ -11,13 +11,78 @@ use common::errors::Error;
 
 use sdk::ux::{Icon, TagValue};
 
-use crate::constants::COIN_TICKER;
+use crate::constants::{
+    COIN_TICKER, THRESHOLD_WARN_HIGH_FEES_AMOUNT, THRESHOLD_WARN_HIGH_FEES_PERCENT,
+};
 
 use super::analyze::{Review, ReviewedAccount};
 
 const AUTO_APPROVE: bool = cfg!(any(test, feature = "autoapprove"));
 
-pub(super) async fn display_warning_high_fee(app: &mut sdk::App, fee_percent: u64) -> bool {
+/// A warning shown, and approved, before the transaction itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Warning {
+    /// Some inputs have no non-witness UTXO, so their amounts can't be verified.
+    UnverifiedInputs,
+    /// The fee is `percent`% of what the inputs spend, at least
+    /// [`THRESHOLD_WARN_HIGH_FEES_PERCENT`].
+    HighFee { percent: u64 },
+}
+
+/// Everything the review of a transaction shows: the warnings, in the order they are shown,
+/// then the pairs of the approval screen.
+pub(super) struct ReviewPlan {
+    pub(super) warnings: Vec<Warning>,
+    pub(super) pairs: Vec<TagValue>,
+}
+
+/// What the review of `review` shows.
+pub(super) fn review_plan(review: &Review) -> Result<ReviewPlan, Error> {
+    let mut warnings = Vec::new();
+    if review.warn_unverified_inputs {
+        warnings.push(Warning::UnverifiedInputs);
+    }
+    if let Some(percent) = high_fee_percent(review) {
+        warnings.push(Warning::HighFee { percent });
+    }
+    Ok(ReviewPlan {
+        warnings,
+        pairs: build_display_pairs(review)?,
+    })
+}
+
+/// The fee as a whole percentage of what the inputs spend, if the user must be warned about it:
+/// when the inputs spend at least [`THRESHOLD_WARN_HIGH_FEES_AMOUNT`] and the fee is at least
+/// [`THRESHOLD_WARN_HIGH_FEES_PERCENT`] of it.
+fn high_fee_percent(review: &Review) -> Option<u64> {
+    if review.inputs_total_amount < THRESHOLD_WARN_HIGH_FEES_AMOUNT {
+        return None;
+    }
+    // Both amounts are at most MAX_MONEY, so this doesn't overflow.
+    let percent = review.fee() * 100 / review.inputs_total_amount;
+    (percent >= THRESHOLD_WARN_HIGH_FEES_PERCENT).then_some(percent)
+}
+
+/// Shows `plan`: each warning, then the approval screen. Returns whether the user approved all
+/// of them.
+pub(super) async fn show_review(app: &mut sdk::App, plan: &ReviewPlan) -> bool {
+    for warning in &plan.warnings {
+        let approved = match warning {
+            Warning::UnverifiedInputs => display_warning_unverified_inputs(app).await,
+            Warning::HighFee { percent } => display_warning_high_fee(app, *percent).await,
+        };
+        if !approved {
+            return false;
+        }
+    }
+    if !display_transaction(app, &plan.pairs).await {
+        show_transaction_rejected(app);
+        return false;
+    }
+    true
+}
+
+async fn display_warning_high_fee(app: &mut sdk::App, fee_percent: u64) -> bool {
     if AUTO_APPROVE {
         return true;
     }
@@ -30,7 +95,7 @@ pub(super) async fn display_warning_high_fee(app: &mut sdk::App, fee_percent: u6
     .await
 }
 
-pub(super) async fn display_warning_unverified_inputs(app: &mut sdk::App) -> bool {
+async fn display_warning_unverified_inputs(app: &mut sdk::App) -> bool {
     if AUTO_APPROVE {
         return true;
     }
@@ -43,7 +108,7 @@ pub(super) async fn display_warning_unverified_inputs(app: &mut sdk::App) -> boo
     .await
 }
 
-pub(super) async fn display_transaction(app: &mut sdk::App, pairs: &[TagValue]) -> bool {
+async fn display_transaction(app: &mut sdk::App, pairs: &[TagValue]) -> bool {
     if AUTO_APPROVE {
         return true;
     }
@@ -72,7 +137,7 @@ pub(super) async fn display_transaction(app: &mut sdk::App, pairs: &[TagValue]) 
     .await
 }
 
-pub(super) fn show_transaction_rejected(app: &mut sdk::App) {
+fn show_transaction_rejected(app: &mut sdk::App) {
     if AUTO_APPROVE {
         return;
     }
@@ -187,6 +252,103 @@ mod tests {
 
     use super::super::analyze::analyze_transaction;
     use super::super::test_utils::legacy_pkh_psbt;
+
+    /// A review of a transaction whose inputs spend `inputs` sat, with a fee of `fee` sat.
+    fn review_with_fee(inputs: u64, fee: u64, warn_unverified_inputs: bool) -> Review {
+        Review {
+            accounts: Vec::new(),
+            external_outputs: Vec::new(),
+            inputs_total_amount: inputs,
+            outputs_total_amount: inputs - fee,
+            warn_unverified_inputs,
+        }
+    }
+
+    fn warnings(review: &Review) -> Vec<Warning> {
+        review_plan(review).unwrap().warnings
+    }
+
+    #[test]
+    fn no_warnings_for_an_ordinary_transaction() {
+        assert_eq!(warnings(&review_with_fee(1_000_000, 1_000, false)), []);
+    }
+
+    /// The fee warning starts at exactly THRESHOLD_WARN_HIGH_FEES_PERCENT of the inputs, and shows
+    /// the percentage rounded down.
+    #[test]
+    fn high_fee_warning_threshold_percent() {
+        let inputs = 1_000_000;
+        let at_threshold = inputs * THRESHOLD_WARN_HIGH_FEES_PERCENT / 100;
+        assert_eq!(
+            warnings(&review_with_fee(inputs, at_threshold - 1, false)),
+            []
+        );
+        assert_eq!(
+            warnings(&review_with_fee(inputs, at_threshold, false)),
+            [Warning::HighFee {
+                percent: THRESHOLD_WARN_HIGH_FEES_PERCENT
+            }]
+        );
+        assert_eq!(
+            warnings(&review_with_fee(inputs, inputs / 2 + 1, false)),
+            [Warning::HighFee { percent: 50 }]
+        );
+        assert_eq!(
+            warnings(&review_with_fee(inputs, inputs, false)),
+            [Warning::HighFee { percent: 100 }]
+        );
+    }
+
+    /// Below THRESHOLD_WARN_HIGH_FEES_AMOUNT of inputs, no fee is too high to warn about.
+    #[test]
+    fn high_fee_warning_threshold_amount() {
+        let small = THRESHOLD_WARN_HIGH_FEES_AMOUNT - 1;
+        assert_eq!(warnings(&review_with_fee(small, small, false)), []);
+        assert_eq!(
+            warnings(&review_with_fee(
+                THRESHOLD_WARN_HIGH_FEES_AMOUNT,
+                THRESHOLD_WARN_HIGH_FEES_AMOUNT,
+                false
+            )),
+            [Warning::HighFee { percent: 100 }]
+        );
+    }
+
+    /// The fee computation can't overflow, even with the largest amounts the analysis accepts.
+    #[test]
+    fn high_fee_warning_at_max_money() {
+        let max = bitcoin::Amount::MAX_MONEY.to_sat();
+        assert_eq!(
+            warnings(&review_with_fee(max, max, false)),
+            [Warning::HighFee { percent: 100 }]
+        );
+    }
+
+    /// The warning about unverified inputs comes before the one about the fee.
+    #[test]
+    fn warnings_are_in_order() {
+        assert_eq!(
+            warnings(&review_with_fee(1_000_000, 1_000, true)),
+            [Warning::UnverifiedInputs]
+        );
+        assert_eq!(
+            warnings(&review_with_fee(1_000_000, 500_000, true)),
+            [Warning::UnverifiedInputs, Warning::HighFee { percent: 50 }]
+        );
+    }
+
+    /// The pairs of the plan are the pairs of the approval screen.
+    #[test]
+    fn plan_pairs_are_the_display_pairs() {
+        let review = review(&legacy_pkh_psbt());
+        let plan = review_plan(&review).unwrap();
+        let pairs = build_display_pairs(&review).unwrap();
+        assert_eq!(plan.pairs.len(), pairs.len());
+        for (a, b) in plan.pairs.iter().zip(&pairs) {
+            assert_eq!((&a.tag, &a.value), (&b.tag, &b.value));
+        }
+        assert_eq!(plan.warnings, []);
+    }
 
     /// The review of `psbt`, serialized the way the handler receives it.
     fn review(psbt: &PsbtV2) -> Review {
