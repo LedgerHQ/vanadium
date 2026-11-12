@@ -7,6 +7,7 @@ pub use bip388;
 pub mod errors;
 pub mod fastpsbt;
 pub mod identity;
+pub mod key_expression;
 pub mod message;
 pub mod musig;
 pub mod por;

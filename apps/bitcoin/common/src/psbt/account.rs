@@ -2,6 +2,7 @@ use crate::{
     account::{Account, AccountCoordinates, Destination, WalletPolicy, WalletPolicyCoordinates},
     errors::Error,
     fastpsbt::{PSBT_IN_SP_TWEAK, PSBT_OUT_SP_V0_INFO, PSBT_OUT_SP_V0_LABEL},
+    key_expression,
     silent_payments::{SilentPaymentAccount, SilentPaymentCode, SilentPaymentCoordinates},
 };
 
@@ -413,50 +414,34 @@ fn candidate_coordinates(
         // For a plain key, look up the single referenced KeyInformation.
         // For a musig key, every participant is a candidate; the input matches if
         // any one of them has a derivation in the PSBT under the placeholder.
-        let key_indices: Vec<u32> = match (
-            key_placeholder.plain_key_index(),
-            key_placeholder.musig_key_indices(),
-        ) {
-            (Some(idx), _) => alloc::vec![idx],
-            (None, Some(indices)) => indices.clone(),
-            _ => return Err(PsbtAccountError::Unsupported),
-        };
+        let keys = key_expression::keys(key_placeholder, wallet_policy.key_information()).map_err(
+            |e| match e {
+                Error::UnsupportedWalletPolicy => PsbtAccountError::Unsupported,
+                _ => PsbtAccountError::InvalidValue,
+            },
+        )?;
 
         // For each candidate participant, build the (fingerprint, origin_path_len)
         // pair used to identify its derivations inside the PSBT.
-        let mut lookups: Vec<(Fingerprint, usize)> = key_indices
+        let mut lookups: Vec<(Fingerprint, usize)> = keys
             .iter()
-            .map(|&idx| {
-                let key_expr = wallet_policy
-                    .key_information()
-                    .get(idx as usize)
-                    .ok_or(PsbtAccountError::InvalidValue)?;
-                Ok(match &key_expr.origin_info {
-                    Some(orig) => (
-                        orig.fingerprint.to_be_bytes().into(),
-                        orig.derivation_path.len(),
-                    ),
-                    None => (key_expr.pubkey.fingerprint(), 0),
-                })
+            .map(|key| match &key.origin_info {
+                Some(orig) => (
+                    orig.fingerprint.to_be_bytes().into(),
+                    orig.derivation_path.len(),
+                ),
+                None => (key.pubkey.fingerprint(), 0),
             })
-            .collect::<Result<_, _>>()?;
+            .collect();
 
         // For a musig placeholder, the BIP-373 `tap_bip32_derivation` entry is
         // keyed by the BIP-32-derived *aggregate* xonly key — with the aggregate
         // BIP-388 synthetic xpub's fingerprint, not any single participant's.
         // Add that as an extra lookup candidate so we don't miss the entry.
         if key_placeholder.is_musig() {
-            let participant_xpubs: alloc::vec::Vec<_> = key_indices
-                .iter()
-                .map(|&idx| {
-                    wallet_policy
-                        .key_information()
-                        .get(idx as usize)
-                        .ok_or(PsbtAccountError::InvalidValue)
-                        .map(|ki| ki.pubkey)
-                })
-                .collect::<Result<_, _>>()?;
-            if let Ok(agg) = crate::musig::aggregate_xpub(&participant_xpubs) {
+            if let Ok(agg) =
+                key_expression::root_xpub(key_placeholder, wallet_policy.key_information())
+            {
                 lookups.push((agg.fingerprint(), 0));
             }
         }
