@@ -96,8 +96,8 @@ pub trait PsbtIdAuthGlobalWrite {
 }
 
 pub trait PsbtOutputAuthRead: OutputHasProprietaryFields {
-    /// Returns all well-formed output authentication proofs for this output.
-    /// Unknown auth_tag values and malformed entries are silently skipped.
+    /// Returns all the output authentication proofs of this output. Fails if any entry is
+    /// malformed, or has an unknown auth_tag.
     fn get_auth_proofs(&self) -> Result<Vec<OutputAuthProof>, PsbtIdAuthError> {
         let mut proofs = Vec::new();
         for entry in self.iter_proprietary() {
