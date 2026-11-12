@@ -934,7 +934,7 @@ fn test_spend_from_silent_payment_account() {
     let raw = fx.psbt.serialize();
     let parsed = fastpsbt::Psbt::parse(&raw).unwrap();
     let (summary, _) = analyze_transaction(&parsed).unwrap();
-    assert_eq!(summary.account_spent_amounts, [10_000, 80_000]);
+    assert_eq!(summary.net_spent_amounts(), [10_000, 80_000]);
 
     let checked = check(&fx, sign(&fx.psbt).unwrap());
     assert_eq!(checked.signatures.len(), 3);
@@ -1013,7 +1013,7 @@ fn test_silent_payment_change() {
     let raw = fx.psbt.serialize();
     let parsed = fastpsbt::Psbt::parse(&raw).unwrap();
     let (summary, _) = analyze_transaction(&parsed).unwrap();
-    assert_eq!(summary.account_spent_amounts, [20_000, 21_000]);
+    assert_eq!(summary.net_spent_amounts(), [20_000, 21_000]);
     assert_eq!(summary.external_outputs.len(), 1);
     assert_eq!(summary.external_outputs[0].output_index, 0);
 
