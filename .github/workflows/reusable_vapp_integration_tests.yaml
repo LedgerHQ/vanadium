@@ -41,7 +41,9 @@ on:
 jobs:
   integration-tests:
     name: Integration tests (${{ inputs.vapp_name }}) on Speculos (${{ matrix.model }})
-    runs-on: ubuntu-latest
+    # Speculos needs ubuntu-24.04: on 26.04 (ubuntu-latest since November 2026), pygame has no wheels
+    # for the system Python 3.14, and no package provides the `qemu-arm-static` that Speculos runs.
+    runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:

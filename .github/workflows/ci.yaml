@@ -99,7 +99,9 @@ jobs:
   # This also collects execution metrics and uploads them as artifacts
   build_benchmark_test_cases:
     name: Build and run benchmark V-Apps on Speculos, collect metrics
-    runs-on: ubuntu-latest
+    # Speculos needs ubuntu-24.04: on 26.04 (ubuntu-latest since November 2026), pygame has no wheels
+    # for the system Python 3.14, and no package provides the `qemu-arm-static` that Speculos runs.
+    runs-on: ubuntu-24.04
     needs: [build_vanadium_app_for_benchmarks]
     steps:
       - name: Set up Rust toolchain
@@ -163,7 +165,9 @@ jobs:
         include:
           - model: flex  # not much reasons to run this test on all devices
 
-    runs-on: ubuntu-latest
+    # Speculos needs ubuntu-24.04: on 26.04 (ubuntu-latest since November 2026), pygame has no wheels
+    # for the system Python 3.14, and no package provides the `qemu-arm-static` that Speculos runs.
+    runs-on: ubuntu-24.04
     needs: [build_vanadium_app_for_tests]
     steps:
       - name: Set up Rust toolchain
