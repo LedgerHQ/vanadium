@@ -3,7 +3,6 @@ mod get_address;
 mod get_extended_pubkey;
 mod get_master_fingerprint;
 mod get_version;
-pub(crate) mod musig_signing;
 mod register_account;
 mod register_identity_key;
 mod sign_psbt;

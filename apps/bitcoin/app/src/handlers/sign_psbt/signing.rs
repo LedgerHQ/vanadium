@@ -17,7 +17,7 @@ use common::{
 use sdk::curve::{EcfpPrivateKey, Secp256k1Scalar, ToPublicKey};
 use zeroize::Zeroizing;
 
-use crate::handlers::musig_signing::MusigSigningState;
+use super::musig::session::MusigSigningState;
 use crate::sp_keys;
 
 use super::analyze::{ensure_prevouts, InputAccount, TransactionSummary};

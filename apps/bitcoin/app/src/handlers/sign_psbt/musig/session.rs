@@ -39,10 +39,6 @@ pub const MUSIG_SESSION_ID_SLOT: u32 = 1;
 /// Slot index for the 32-byte session randomness root.
 pub const MUSIG_SESSION_RAND_SLOT: u32 = 2;
 
-/// Maximum number of MuSig2 sessions stored at once. The initial cut is 1; the
-/// constant is exposed for future expansion.
-pub const MAX_N_MUSIG_SESSIONS: usize = 1;
-
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct PsbtSession {
     pub id: [u8; 32],
@@ -223,9 +219,7 @@ mod storage {
     }
 
     pub fn is_slot_empty(slot: u32) -> Result<bool, Error> {
-        SLOTS.with(|s: &RefCell<[[u8; 32]; N]>| {
-            Ok(s.borrow()[slot as usize] == [0u8; 32])
-        })
+        SLOTS.with(|s: &RefCell<[[u8; 32]; N]>| Ok(s.borrow()[slot as usize] == [0u8; 32]))
     }
     pub fn read_slot(slot: u32) -> Result<[u8; 32], Error> {
         SLOTS.with(|s: &RefCell<[[u8; 32]; N]>| Ok(s.borrow()[slot as usize]))
@@ -391,8 +385,8 @@ pub fn compute_per_input_info(
     let agg = musig::aggregate_xpub(&participant_xpubs).map_err(|_| Error::InvalidKey)?;
     let (child1, t0) =
         musig::ckdpub_with_tweak(&agg, change_step).map_err(|_| Error::KeyDerivationFailed)?;
-    let (child2, t1) = musig::ckdpub_with_tweak(&child1, address_step)
-        .map_err(|_| Error::KeyDerivationFailed)?;
+    let (child2, t1) =
+        musig::ckdpub_with_tweak(&child1, address_step).map_err(|_| Error::KeyDerivationFailed)?;
 
     let mut tweaks: [[u8; 32]; 3] = [[0u8; 32]; 3];
     let mut is_xonly: [bool; 3] = [false; 3];
@@ -501,9 +495,7 @@ pub fn sign_sighash_musig(
 
     // Recompute our secnonce deterministically from the session.
     let rand_i_j = compute_rand_i_j(session, input_index, placeholder_index);
-    let aggpk_xonly: [u8; 32] = agg_pk[1..]
-        .try_into()
-        .expect("agg_key_tweaked is 33 bytes");
+    let aggpk_xonly: [u8; 32] = agg_pk[1..].try_into().expect("agg_key_tweaked is 33 bytes");
     let (secnonce, pubnonce) =
         musig::nonce_gen(&rand_i_j, internal_pk, &aggpk_xonly).map_err(map_musig_err)?;
     // The aggregate nonce must contain the nonce we sign with: our pubnonce in the
@@ -875,11 +867,8 @@ mod tests {
     #[test]
     fn compute_per_input_info_rejects_plain_placeholder() {
         // `tr(@0/**)` — the only placeholder is plain, not musig.
-        let policy = WalletPolicy::new(
-            "tr(@0/**)",
-            vec![COSIGNER_1_XPUB.try_into().unwrap()],
-        )
-        .unwrap();
+        let policy =
+            WalletPolicy::new("tr(@0/**)", vec![COSIGNER_1_XPUB.try_into().unwrap()]).unwrap();
         let placeholder = policy
             .descriptor_template()
             .placeholders()
@@ -930,9 +919,14 @@ mod tests {
             id: [0x77; 32],
             rand_root: [0x11; 32],
         };
-        let data = produce_pubnonce(&info, &internal_pk, &session, 4, 0, SpendPath::Keypath {
-            taptree_hash: None,
-        })
+        let data = produce_pubnonce(
+            &info,
+            &internal_pk,
+            &session,
+            4,
+            0,
+            SpendPath::Keypath { taptree_hash: None },
+        )
         .unwrap();
 
         assert_eq!(data.input_index, 4);
@@ -992,7 +986,9 @@ mod tests {
             &placeholder,
             false,
             0,
-            SpendPath::Tapscript { leaf_hash: &leaf_hash },
+            SpendPath::Tapscript {
+                leaf_hash: &leaf_hash,
+            },
         )
         .unwrap();
 
@@ -1008,7 +1004,9 @@ mod tests {
             &session,
             0,
             0,
-            SpendPath::Tapscript { leaf_hash: &leaf_hash },
+            SpendPath::Tapscript {
+                leaf_hash: &leaf_hash,
+            },
         )
         .unwrap();
 

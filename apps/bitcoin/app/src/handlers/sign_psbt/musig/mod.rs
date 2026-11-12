@@ -1,6 +1,5 @@
 //! MuSig2 placeholder dispatch: the glue between [`super::signing`]'s per-input loop
-//! and the PSBT-structure-agnostic MuSig2 session/crypto engine in
-//! `crate::handlers::musig_signing`.
+//! and the PSBT-structure-agnostic MuSig2 session/crypto engine in [`session`].
 //!
 //! Depends on [`super::sighash`] and [`super::key_resolution`] but deliberately not on
 //! [`super::signing`], which dispatches to this module.
@@ -11,7 +10,9 @@ use bitcoin::hashes::Hash;
 use common::{account::Account, errors::Error, psbt::PsbtAccount};
 use sdk::curve::{EcfpPrivateKey, ToPublicKey};
 
-use crate::handlers::musig_signing::{self, SpendPath};
+pub(super) mod session;
+
+use session::SpendPath;
 
 use super::analyze::{ensure_prevouts, TransactionSummary};
 use super::context::{PlaceholderCtx, SigningCtx};
@@ -39,7 +40,7 @@ pub(super) fn session_id(summary: &TransactionSummary, unsigned_tx_id: &[u8; 32]
             _ => None,
         })
         .collect();
-    musig_signing::compute_psbt_session_id(unsigned_tx_id, &musig_account_ids)
+    session::compute_psbt_session_id(unsigned_tx_id, &musig_account_ids)
 }
 
 /// Handles a single `musig(...)` placeholder for one PSBT input. Pushes either
@@ -99,7 +100,7 @@ pub(super) fn handle_musig_placeholder(
     };
 
     // Per-input info is the same for every "ours" participant; compute once.
-    let info = musig_signing::compute_per_input_info(
+    let info = session::compute_per_input_info(
         ph.wallet_policy.key_information(),
         ph.kp,
         ph.coords.is_change,
@@ -128,7 +129,7 @@ pub(super) fn handle_musig_placeholder(
         if !my_pubnonce_in_psbt {
             // Round 1: yield the device's pubnonce.
             let session = ctx.musig.round1()?;
-            let data = musig_signing::produce_pubnonce(
+            let data = session::produce_pubnonce(
                 &info,
                 &internal_pk,
                 session,
@@ -149,7 +150,7 @@ pub(super) fn handle_musig_placeholder(
                 taproot_sighash_type(ph.input)?,
             )?;
             let session = ctx.musig.round2()?;
-            let data = musig_signing::sign_sighash_musig(
+            let data = session::sign_sighash_musig(
                 &info,
                 &internal_pk,
                 &hd.privkey,

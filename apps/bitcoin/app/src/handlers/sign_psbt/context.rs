@@ -14,7 +14,7 @@ use common::{
     message::{MuSig2PartialSignature, MuSig2Pubnonce, PartialSignature, WalletPolicyCoordinates},
 };
 
-use crate::handlers::musig_signing::MusigSigningState;
+use super::musig::session::MusigSigningState;
 
 use super::key_resolution::LocalKeys;
 use super::sighash::taptree_hash_for;
