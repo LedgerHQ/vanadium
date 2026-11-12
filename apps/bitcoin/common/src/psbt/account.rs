@@ -87,6 +87,30 @@ impl From<&SilentPaymentAccount> for PsbtAccount {
     }
 }
 
+/// The two enums have the same variants: [`crate::message::Account`] is the account of a request,
+/// in CBOR, and [`PsbtAccount`] the account of a PSBT.
+impl From<crate::message::Account> for PsbtAccount {
+    fn from(account: crate::message::Account) -> Self {
+        match account {
+            crate::message::Account::WalletPolicy(wallet_policy) => {
+                PsbtAccount::WalletPolicy(wallet_policy)
+            }
+            crate::message::Account::SilentPayment(account) => PsbtAccount::SilentPayment(account),
+        }
+    }
+}
+
+impl From<PsbtAccount> for crate::message::Account {
+    fn from(account: PsbtAccount) -> Self {
+        match account {
+            PsbtAccount::WalletPolicy(wallet_policy) => {
+                crate::message::Account::WalletPolicy(wallet_policy)
+            }
+            PsbtAccount::SilentPayment(account) => crate::message::Account::SilentPayment(account),
+        }
+    }
+}
+
 impl PsbtAccount {
     /// The destination of the account at `coords`, which tells whether an input or an output
     /// belongs to it.
@@ -964,6 +988,28 @@ mod tests {
             spend_key,
         )
         .unwrap()
+    }
+
+    /// An account converts to the account of a request and back unchanged.
+    #[test]
+    fn message_account_round_trip() {
+        let wallet_policy = WalletPolicy::new(
+            "wpkh(@0/**)",
+            [
+                "[f5acc2fd/84'/1'/0']tpubDCtKfsNyRhULjZ9XMS4VKKtVcPdVDi8MKUbcSD9MJDyjRu1A2ND5MiipozyyspBT9bg8upEp7a8EAgFxNxXn1d7QkdbL52Ty5jiSLcxPt1P"
+                    .try_into()
+                    .unwrap(),
+            ]
+            .to_vec(),
+        )
+        .unwrap();
+        for account in [
+            crate::message::Account::WalletPolicy(wallet_policy),
+            crate::message::Account::SilentPayment(silent_payment_account()),
+        ] {
+            let psbt_account = PsbtAccount::from(account.clone());
+            assert_eq!(crate::message::Account::from(psbt_account), account);
+        }
     }
 
     fn received_script(account: &SilentPaymentAccount, tweak: [u8; 32]) -> ScriptBuf {

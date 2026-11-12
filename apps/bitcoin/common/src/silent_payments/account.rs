@@ -168,14 +168,14 @@ impl Account for SilentPaymentAccount {
 
     const VERSION: u32 = 2;
 
-    fn serialize(&self) -> Vec<u8> {
+    fn serialize_versioned(&self) -> Vec<u8> {
         let mut res = Vec::with_capacity(4 + 4 + 32 + 33);
         res.extend_from_slice(&Self::VERSION.to_le_bytes());
         res.extend(SilentPaymentAccount::serialize(self));
         res
     }
 
-    fn deserialize<R: Read + ?Sized>(r: &mut R) -> Result<Self, encode::Error> {
+    fn deserialize_versioned<R: Read + ?Sized>(r: &mut R) -> Result<Self, encode::Error> {
         let version = u32::consensus_decode(r)?;
         if version != Self::VERSION {
             return Err(encode::Error::ParseFailed("Unsupported version"));
@@ -260,7 +260,7 @@ mod tests {
     #[test]
     fn test_serialization() {
         let account = account(7);
-        let serialized = Account::serialize(&account);
+        let serialized = account.serialize_versioned();
         assert_eq!(serialized.len(), 73);
         assert_eq!(serialized[..8], [2, 0, 0, 0, 7, 0, 0, 0]);
         assert_eq!(serialized[8..40], SCAN_KEY);
@@ -269,7 +269,7 @@ mod tests {
             account.spend_key().to_compressed().unwrap()
         );
         assert_eq!(
-            <SilentPaymentAccount as Account>::deserialize(&mut &serialized[..]).unwrap(),
+            SilentPaymentAccount::deserialize_versioned(&mut &serialized[..]).unwrap(),
             account
         );
 
@@ -278,7 +278,7 @@ mod tests {
         let invalid = |at: usize, bytes: &[u8]| {
             let mut serialized = serialized.clone();
             serialized[at..at + bytes.len()].copy_from_slice(bytes);
-            <SilentPaymentAccount as Account>::deserialize(&mut &serialized[..]).is_err()
+            SilentPaymentAccount::deserialize_versioned(&mut &serialized[..]).is_err()
         };
         assert!(invalid(0, &[1]));
         assert!(invalid(4, &[0, 0, 0, 0x80]));
@@ -286,7 +286,7 @@ mod tests {
         assert!(invalid(8, &[0xff; 32]));
         assert!(invalid(40, &[0x05]));
         // truncated
-        assert!(<SilentPaymentAccount as Account>::deserialize(&mut &serialized[..72]).is_err());
+        assert!(SilentPaymentAccount::deserialize_versioned(&mut &serialized[..72]).is_err());
     }
 
     #[test]

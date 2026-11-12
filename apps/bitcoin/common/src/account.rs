@@ -80,8 +80,12 @@ pub trait Account: Sized {
     /// Each implementation of Account should define a different version number
     const VERSION: u32;
 
-    fn serialize(&self) -> Vec<u8>; // TODO: avoid Vec
-    fn deserialize<R: Read + ?Sized>(bytes: &mut R) -> Result<Self, encode::Error>;
+    /// The serialization of the account, prefixed with [`Self::VERSION`]. Named apart from the
+    /// unversioned serializations of the accounts themselves, so that each call says which one it
+    /// means.
+    fn serialize_versioned(&self) -> Vec<u8>; // TODO: avoid Vec
+    /// Reads an account serialized with [`Self::serialize_versioned`].
+    fn deserialize_versioned<R: Read + ?Sized>(bytes: &mut R) -> Result<Self, encode::Error>;
 
     /// The destination of the account at `coords`.
     fn destination(&self, coords: &Self::Coordinates) -> Result<Destination, Error>;
@@ -113,7 +117,7 @@ pub trait Account: Sized {
 
         hasher.update(name.as_bytes());
 
-        hasher.update(&self.serialize());
+        hasher.update(&self.serialize_versioned());
         hasher.finalize().into()
     }
 }
@@ -124,14 +128,14 @@ impl Account for WalletPolicy {
 
     const VERSION: u32 = 1;
 
-    fn serialize(&self) -> Vec<u8> {
+    fn serialize_versioned(&self) -> Vec<u8> {
         let mut res = Vec::new();
         res.extend_from_slice(&Self::VERSION.to_le_bytes());
         res.extend(WalletPolicy::serialize(self));
         res
     }
 
-    fn deserialize<R: Read + ?Sized>(r: &mut R) -> Result<Self, encode::Error> {
+    fn deserialize_versioned<R: Read + ?Sized>(r: &mut R) -> Result<Self, encode::Error> {
         let version = u32::consensus_decode(r)?;
         if version != Self::VERSION {
             return Err(encode::Error::ParseFailed("Unsupported version"));
