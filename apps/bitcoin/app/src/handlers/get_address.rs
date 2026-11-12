@@ -99,7 +99,7 @@ pub async fn handle_get_address(
         ) => {
             // an address to hand out is a code, and identity signatures are over scripts
             let SilentPaymentCoordinates::Code { label } = *coordinates else {
-                return Err(Error::InvalidParameter);
+                return Err(Error::AccountCoordinatesMismatch);
             };
             if identity_index.is_some() {
                 return Err(Error::InvalidParameter);
@@ -110,7 +110,7 @@ pub async fn handle_get_address(
             check_proof_of_registration(account, name, por)?;
             (account.get_address(coordinates)?, label, None)
         }
-        _ => return Err(Error::InvalidParameter),
+        _ => return Err(Error::AccountCoordinatesMismatch),
     };
 
     if display {
@@ -229,7 +229,7 @@ mod tests {
         // an address to hand out is a code
         assert_eq!(
             get_address(SilentPaymentCoordinates::Tweak([1; 32]), &hmac, None),
-            Err(Error::InvalidParameter)
+            Err(Error::AccountCoordinatesMismatch)
         );
         // identity signatures are over scripts
         assert_eq!(
@@ -259,7 +259,7 @@ mod tests {
                 false,
                 None,
             )),
-            Err(Error::InvalidParameter)
+            Err(Error::AccountCoordinatesMismatch)
         );
     }
 }

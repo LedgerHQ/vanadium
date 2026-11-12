@@ -172,7 +172,7 @@ pub async fn handle_register_account(
                     .pubkey
                     .as_slice()
                     .try_into()
-                    .map_err(|_| Error::InvalidIdentitySignature)?;
+                    .map_err(|_| Error::InvalidIdentityKey)?;
                 let por: [u8; 32] = entry
                     .por
                     .as_slice()
@@ -200,17 +200,16 @@ pub async fn handle_register_account(
                     .identity_pubkey
                     .as_slice()
                     .try_into()
-                    .map_err(|_| Error::InvalidIdentitySignature)?;
+                    .map_err(|_| Error::InvalidIdentityKey)?;
                 let signature: [u8; 64] = sig
                     .signature
                     .as_slice()
                     .try_into()
                     .map_err(|_| Error::InvalidIdentitySignature)?;
                 let ecfp_pubkey = EcfpPublicKey::<Secp256k1, 32>::from_compressed(&identity_pubkey)
-                    .map_err(|_| Error::InvalidIdentitySignature)?;
+                    .map_err(|_| Error::InvalidIdentityKey)?;
                 let xpub_bytes = wallet_policy.key_information()[i].pubkey.encode();
-                let msg = build_identity_message(MSG_TYPE_XPUB, &xpub_bytes)
-                    .map_err(|_| Error::InvalidIdentitySignature)?;
+                let msg = build_identity_message(MSG_TYPE_XPUB, &xpub_bytes)?;
                 ecfp_pubkey
                     .schnorr_verify(&msg, &signature)
                     .map_err(|_| Error::InvalidIdentitySignature)?;
@@ -354,6 +353,47 @@ mod tests {
             register(&[None, None]),
             Err(Error::InvalidKeySignatureCount)
         );
+    }
+
+    /// A malformed identity key is reported as such, not as a bad signature.
+    #[test]
+    fn test_register_account_invalid_identity_key() {
+        let account = make_account(
+            "wpkh(@0/**)",
+            &["[f5acc2fd/84'/1'/0']tpubDCtKfsNyRhULjZ9XMS4VKKtVcPdVDi8MKUbcSD9MJDyjRu1A2ND5MiipozyyspBT9bg8upEp7a8EAgFxNxXn1d7QkdbL52Ty5jiSLcxPt1P"],
+        );
+        let register =
+            |identities: &[message::RegisteredIdentityEntry],
+             key_signatures: &[Option<message::IdentitySignature>]| {
+                sdk::executor::block_on(handle_register_account(
+                    &mut sdk::App::singleton(),
+                    "My Test Account",
+                    &account,
+                    Some(identities),
+                    Some(key_signatures),
+                    false,
+                ))
+            };
+        let bad_pubkey = |pubkey: Vec<u8>| message::IdentitySignature {
+            identity_pubkey: pubkey,
+            signature: vec![0; 64],
+        };
+        let bad_entry = |pubkey: Vec<u8>| message::RegisteredIdentityEntry {
+            pubkey,
+            name: "Alice".into(),
+            por: vec![0; 32],
+        };
+
+        for pubkey in [vec![0x02; 20], vec![0x05; 33]] {
+            assert_eq!(
+                register(&[], &[Some(bad_pubkey(pubkey.clone()))]),
+                Err(Error::InvalidIdentityKey)
+            );
+            assert_eq!(
+                register(&[bad_entry(pubkey)], &[None]),
+                Err(Error::InvalidIdentityKey)
+            );
+        }
     }
 
     #[test]

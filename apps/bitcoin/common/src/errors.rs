@@ -3,163 +3,155 @@ use minicbor::{Decode, Encode};
 
 // Central error type used across the app; variants stay small and descriptive.
 //
-// Each variant carries a stable CBOR index. NEVER reuse an index; only ever
-// append new variants at fresh indices.
+// Each variant carries a CBOR index, which is how a client tells them apart. The indices are
+// stable from the first release; until then, they are renumbered to keep each section contiguous.
 #[derive(Encode, Decode, Debug, Clone, PartialEq, Eq)]
 #[cbor(index_only)]
 pub enum Error {
-    // Generic / request
+    // Generic
     #[n(0)]
     InvalidRequest,
     #[n(1)]
     InvalidParameter,
-
-    // Wallet policy / account
     #[n(2)]
-    InvalidWalletPolicy,
+    UserRejected,
     #[n(3)]
-    DefaultAccountsNotSupported,
+    StorageError,
     #[n(4)]
-    InvalidProofOfRegistrationLength,
+    RandomGenerationFailed,
+
+    // Accounts and wallet policies
     #[n(5)]
-    InvalidProofOfRegistration,
+    InvalidWalletPolicy,
     #[n(6)]
-    InvalidAccountId,
-    #[n(7)]
-    InvalidKeyIndex,
-    #[n(8)]
-    InvalidScriptContext,
-    #[n(9)]
-    TooManyKeys,
-    #[n(10)]
-    InvalidMultisigQuorum,
-    #[n(11)]
     UnsupportedWalletPolicy,
-
-    // Derivation / crypto
+    #[n(7)]
+    DefaultAccountsNotSupported,
+    #[n(8)]
+    InvalidProofOfRegistrationLength,
+    #[n(9)]
+    InvalidProofOfRegistration,
+    #[n(10)]
+    InvalidAccountId,
+    #[n(11)]
+    AccountCoordinatesMismatch,
     #[n(12)]
-    DerivationPathTooLong,
+    InvalidKeyIndex,
     #[n(13)]
-    KeyDerivationFailed,
+    InvalidScriptContext,
     #[n(14)]
-    HardenedDerivationNotSupported,
+    TooManyKeys,
     #[n(15)]
-    InvalidKey,
-    #[n(16)]
-    ErrorComputingSighash,
-    #[n(17)]
-    SigningFailed,
+    InvalidMultisigQuorum,
 
-    // PSBT / UTXO checks
+    // Keys and signatures
+    #[n(16)]
+    DerivationPathTooLong,
+    #[n(17)]
+    KeyDerivationFailed,
     #[n(18)]
-    FailedToDeserializePsbt,
+    InvalidKey,
     #[n(19)]
-    FailedToGetAccounts,
+    ErrorComputingSighash,
     #[n(20)]
-    ExternalInputsNotSupported,
+    UnsupportedSighashType,
     #[n(21)]
-    WitnessUtxoNotAllowedForLegacy,
+    SigningFailed,
     #[n(22)]
-    InvalidNonWitnessUtxo,
+    UnexpectedTaprootPolicy,
+
+    // PSBT and UTXO checks
     #[n(23)]
-    NonWitnessUtxoMismatch,
+    FailedToDeserializePsbt,
     #[n(24)]
-    NonWitnessUtxoRequired,
+    FailedToGetAccounts,
     #[n(25)]
-    WitnessUtxoRequiredForSegwit,
-    #[n(26)]
-    InvalidWitnessUtxo,
-    #[n(27)]
-    RedeemScriptMismatchWitness,
-    #[n(28)]
-    WitnessScriptRequiredForP2WSH,
-    #[n(29)]
-    WitnessScriptMismatchWitness,
-    #[n(30)]
-    RedeemScriptMismatch,
-    #[n(31)]
-    MissingPreviousOutputIndex,
-    #[n(32)]
-    MissingInputUtxo,
-    #[n(33)]
-    InputScriptMismatch,
-    #[n(34)]
-    OutputScriptMissing,
-    #[n(35)]
-    OutputAmountMissing,
-    #[n(36)]
-    OutputScriptMismatch,
-    #[n(37)]
-    InputsLessThanOutputs,
-    #[n(38)]
     FailedUnsignedTransaction,
+    #[n(26)]
+    ExternalInputsNotSupported,
+    #[n(27)]
+    MissingInputUtxo,
+    #[n(28)]
+    MissingPreviousOutputIndex,
+    #[n(29)]
+    WitnessUtxoNotAllowedForLegacy,
+    #[n(30)]
+    InvalidNonWitnessUtxo,
+    #[n(31)]
+    NonWitnessUtxoMismatch,
+    #[n(32)]
+    NonWitnessUtxoRequired,
+    #[n(33)]
+    WitnessUtxoRequiredForSegwit,
+    #[n(34)]
+    InvalidWitnessUtxo,
+    #[n(35)]
+    RedeemScriptMismatch,
+    #[n(36)]
+    RedeemScriptMismatchWitness,
+    #[n(37)]
+    WitnessScriptRequiredForP2WSH,
+    #[n(38)]
+    WitnessScriptMismatchWitness,
     #[n(39)]
+    InputScriptMismatch,
+    #[n(40)]
+    OutputScriptMissing,
+    #[n(41)]
+    OutputAmountMissing,
+    #[n(42)]
+    OutputScriptMismatch,
+    #[n(43)]
+    InvalidAmount,
+    #[n(44)]
+    InputsLessThanOutputs,
+    #[n(45)]
     AddressFromScriptFailed,
 
-    // Identity authentication
-    #[n(40)]
-    InvalidIdentitySignature,
-    #[n(41)]
-    IdentityMessageFieldTooLong,
-
-    // Unexpected states
-    #[n(42)]
-    UnexpectedTaprootPolicy,
-    #[n(43)]
-    UnexpectedSegwitVersion,
-
-    // Storage errors
-    #[n(44)]
-    StorageError,
-
-    // User rejections (separate to keep enum small and avoid strings)
-    #[n(45)]
-    UserRejected,
-
-    // MuSig2
+    // Identity keys
     #[n(46)]
-    MissingMusigSession,
+    InvalidIdentityKey,
     #[n(47)]
-    MissingMusigPubnonce,
-    #[n(61)]
-    MixedMusigRounds,
-    #[n(62)]
-    MusigPubnonceMismatch,
-    #[n(63)]
-    InvalidAmount,
-    #[n(64)]
+    InvalidIdentitySignature,
+    #[n(48)]
+    InvalidIdentityEntry,
+    #[n(49)]
+    IdentityMessageFieldTooLong,
+    #[n(50)]
     InvalidKeySignatureCount,
 
-    // Silent payments
-    #[n(48)]
-    UnsupportedSilentPayment,
-
-    // Signing
-    #[n(49)]
-    UnsupportedSighashType,
-
-    // Silent payments
-    #[n(50)]
-    InvalidSilentPayment,
+    // MuSig2
     #[n(51)]
-    SilentPaymentInputNotHeld,
+    MissingMusigSession,
     #[n(52)]
-    SilentPaymentNoEligibleInputs,
+    MissingMusigPubnonce,
     #[n(53)]
-    SilentPaymentSegwitVersion,
+    MixedMusigRounds,
     #[n(54)]
-    SilentPaymentSighashType,
+    MusigPubnonceMismatch,
+
+    // Silent payments
     #[n(55)]
-    SilentPaymentShareMismatch,
+    UnsupportedSilentPayment,
     #[n(56)]
-    SilentPaymentOutputScriptMismatch,
+    InvalidSilentPayment,
     #[n(57)]
-    SilentPaymentAccountKeyMismatch,
+    SilentPaymentInputNotHeld,
     #[n(58)]
-    SilentPaymentChangeLabel,
+    SilentPaymentNoEligibleInputs,
     #[n(59)]
-    AccountCoordinatesMismatch,
+    SilentPaymentSegwitVersion,
     #[n(60)]
+    SilentPaymentSighashType,
+    #[n(61)]
+    SilentPaymentShareMismatch,
+    #[n(62)]
+    SilentPaymentOutputScriptMismatch,
+    #[n(63)]
+    SilentPaymentAccountKeyMismatch,
+    #[n(64)]
+    SilentPaymentChangeLabel,
+    #[n(65)]
     SilentPaymentTweakMismatch,
 }
 
@@ -169,29 +161,40 @@ impl fmt::Display for Error {
         match self {
             InvalidRequest => write!(f, "Invalid request"),
             InvalidParameter => write!(f, "Invalid parameter"),
+            UserRejected => write!(f, "Rejected by the user"),
+            StorageError => write!(f, "Storage error"),
+            RandomGenerationFailed => write!(f, "Failed to generate randomness"),
 
             InvalidWalletPolicy => write!(f, "Invalid wallet policy"),
+            UnsupportedWalletPolicy => write!(f, "Unsupported wallet policy"),
             DefaultAccountsNotSupported => write!(f, "Default accounts are not supported yet"),
             InvalidProofOfRegistrationLength => {
                 write!(f, "Invalid Proof of Registration length")
             }
             InvalidProofOfRegistration => write!(f, "Invalid proof of registration"),
             InvalidAccountId => write!(f, "Invalid account ID"),
+            AccountCoordinatesMismatch => {
+                write!(f, "The coordinates don't fit the account, or the input or output")
+            }
             InvalidKeyIndex => write!(f, "Invalid key index"),
             InvalidScriptContext => write!(f, "Invalid script context"),
             TooManyKeys => write!(f, "Too many keys"),
             InvalidMultisigQuorum => write!(f, "Invalid multisig quorum"),
-            UnsupportedWalletPolicy => write!(f, "Unsupported wallet policy"),
+
             DerivationPathTooLong => write!(f, "Derivation path is too long"),
             KeyDerivationFailed => write!(f, "Failed to derive key for the given path"),
-            HardenedDerivationNotSupported => write!(f, "Hardened derivation is not supported for resident keys"),
             InvalidKey => write!(f, "Invalid key"),
             ErrorComputingSighash => write!(f, "Error computing sighash"),
+            UnsupportedSighashType => write!(f, "Unsupported sighash type"),
             SigningFailed => write!(f, "Failed to produce signature"),
+            UnexpectedTaprootPolicy => write!(f, "Unexpected state: should be a Taproot wallet policy"),
 
             FailedToDeserializePsbt => write!(f, "Failed to deserialize PSBT"),
             FailedToGetAccounts => write!(f, "Failed to get accounts from PSBT"),
+            FailedUnsignedTransaction => write!(f, "Failed to get unsigned transaction"),
             ExternalInputsNotSupported => write!(f, "External inputs are not supported"),
+            MissingInputUtxo => write!(f, "Each input must have a witness UTXO or a non-witness UTXO"),
+            MissingPreviousOutputIndex => write!(f, "Missing previous output index"),
             WitnessUtxoNotAllowedForLegacy => {
                 write!(f, "Witness UTXO is not allowed for Legacy transaction")
             }
@@ -202,6 +205,9 @@ impl fmt::Display for Error {
             NonWitnessUtxoRequired => write!(f, "Non-witness UTXO is required for legacy transactions"),
             WitnessUtxoRequiredForSegwit => write!(f, "Witness UTXO is required for SegWit"),
             InvalidWitnessUtxo => write!(f, "Invalid witness UTXO"),
+            RedeemScriptMismatch => {
+                write!(f, "Redeem script does not match the non-witness UTXO")
+            }
             RedeemScriptMismatchWitness => {
                 write!(f, "Redeem script does not match the witness UTXO")
             }
@@ -209,28 +215,23 @@ impl fmt::Display for Error {
             WitnessScriptMismatchWitness => {
                 write!(f, "Witness script does not match the witness UTXO")
             }
-            RedeemScriptMismatch => {
-                write!(f, "Redeem script does not match the non-witness UTXO")
-            }
-            MissingPreviousOutputIndex => write!(f, "Missing previous output index"),
-            MissingInputUtxo => write!(f, "Each input must have a witness UTXO or a non-witness UTXO"),
             InputScriptMismatch => write!(f, "Script does not match the account at the coordinates indicated in the PSBT for this input"),
             OutputScriptMissing => write!(f, "Output script is missing"),
             OutputAmountMissing => write!(f, "Output amount is missing"),
             OutputScriptMismatch => write!(f, "Script does not match the account at the coordinates indicated in the PSBT for this output"),
+            InvalidAmount => write!(f, "An amount, or a sum of amounts, is above 21M bitcoins"),
             InputsLessThanOutputs => write!(f, "Transaction outputs total amount is greater than inputs total amount"),
-            FailedUnsignedTransaction => write!(f, "Failed to get unsigned transaction"),
             AddressFromScriptFailed => write!(f, "Failed to convert script to address"),
 
+            InvalidIdentityKey => write!(f, "Invalid identity key"),
             InvalidIdentitySignature => write!(f, "Invalid identity signature on output or xpub"),
+            InvalidIdentityEntry => {
+                write!(f, "Malformed identity key or identity signature entry in the PSBT")
+            }
             IdentityMessageFieldTooLong => write!(f, "Identity message field exceeds maximum length of 255 bytes"),
-
-            UnexpectedTaprootPolicy => write!(f, "Unexpected state: should be a Taproot wallet policy"),
-            UnexpectedSegwitVersion => write!(f, "Unexpected state: should be SegwitV0 or Taproot"),
-
-            StorageError => write!(f, "Storage error"),
-
-            UserRejected => write!(f, "Rejected by the user"),
+            InvalidKeySignatureCount => {
+                write!(f, "The number of key signatures is not the number of keys")
+            }
 
             MissingMusigSession => write!(
                 f,
@@ -248,15 +249,8 @@ impl fmt::Display for Error {
                 f,
                 "The device's MuSig2 pubnonce in the PSBT is not the one of its session"
             ),
-            InvalidAmount => write!(f, "An amount, or a sum of amounts, is above 21M bitcoins"),
-            InvalidKeySignatureCount => {
-                write!(f, "The number of key signatures is not the number of keys")
-            }
 
             UnsupportedSilentPayment => write!(f, "Unsupported silent payment"),
-
-            UnsupportedSighashType => write!(f, "Unsupported sighash type"),
-
             InvalidSilentPayment => write!(f, "Invalid silent payment output"),
             SilentPaymentInputNotHeld => write!(
                 f,
@@ -286,13 +280,116 @@ impl fmt::Display for Error {
                 f,
                 "The change label of a silent payment account is not an address to hand out"
             ),
-            AccountCoordinatesMismatch => {
-                write!(f, "The coordinates don't fit the account, or the input or output")
-            }
             SilentPaymentTweakMismatch => write!(
                 f,
                 "The tweak of a silent payment input is missing, or not the one of its coordinates"
             ),
         }
+    }
+}
+
+/// An account field of a PSBT that can't be read.
+impl From<crate::psbt::PsbtAccountError> for Error {
+    fn from(_: crate::psbt::PsbtAccountError) -> Self {
+        Error::FailedToGetAccounts
+    }
+}
+
+/// An identity key or identity signature field of a PSBT that can't be read.
+impl From<crate::psbt::PsbtIdAuthError> for Error {
+    fn from(_: crate::psbt::PsbtIdAuthError) -> Self {
+        Error::InvalidIdentityEntry
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The indices are contiguous, and each decodes back to its variant.
+    #[test]
+    fn indices_are_contiguous() {
+        use Error::*;
+        let all = [
+            InvalidRequest,
+            InvalidParameter,
+            UserRejected,
+            StorageError,
+            RandomGenerationFailed,
+            InvalidWalletPolicy,
+            UnsupportedWalletPolicy,
+            DefaultAccountsNotSupported,
+            InvalidProofOfRegistrationLength,
+            InvalidProofOfRegistration,
+            InvalidAccountId,
+            AccountCoordinatesMismatch,
+            InvalidKeyIndex,
+            InvalidScriptContext,
+            TooManyKeys,
+            InvalidMultisigQuorum,
+            DerivationPathTooLong,
+            KeyDerivationFailed,
+            InvalidKey,
+            ErrorComputingSighash,
+            UnsupportedSighashType,
+            SigningFailed,
+            UnexpectedTaprootPolicy,
+            FailedToDeserializePsbt,
+            FailedToGetAccounts,
+            FailedUnsignedTransaction,
+            ExternalInputsNotSupported,
+            MissingInputUtxo,
+            MissingPreviousOutputIndex,
+            WitnessUtxoNotAllowedForLegacy,
+            InvalidNonWitnessUtxo,
+            NonWitnessUtxoMismatch,
+            NonWitnessUtxoRequired,
+            WitnessUtxoRequiredForSegwit,
+            InvalidWitnessUtxo,
+            RedeemScriptMismatch,
+            RedeemScriptMismatchWitness,
+            WitnessScriptRequiredForP2WSH,
+            WitnessScriptMismatchWitness,
+            InputScriptMismatch,
+            OutputScriptMissing,
+            OutputAmountMissing,
+            OutputScriptMismatch,
+            InvalidAmount,
+            InputsLessThanOutputs,
+            AddressFromScriptFailed,
+            InvalidIdentityKey,
+            InvalidIdentitySignature,
+            InvalidIdentityEntry,
+            IdentityMessageFieldTooLong,
+            InvalidKeySignatureCount,
+            MissingMusigSession,
+            MissingMusigPubnonce,
+            MixedMusigRounds,
+            MusigPubnonceMismatch,
+            UnsupportedSilentPayment,
+            InvalidSilentPayment,
+            SilentPaymentInputNotHeld,
+            SilentPaymentNoEligibleInputs,
+            SilentPaymentSegwitVersion,
+            SilentPaymentSighashType,
+            SilentPaymentShareMismatch,
+            SilentPaymentOutputScriptMismatch,
+            SilentPaymentAccountKeyMismatch,
+            SilentPaymentChangeLabel,
+            SilentPaymentTweakMismatch,
+        ];
+        for (index, error) in all.iter().enumerate() {
+            let encoded = minicbor::to_vec(error).unwrap();
+            assert_eq!(
+                encoded,
+                minicbor::to_vec(index as u32).unwrap(),
+                "{:?}",
+                error
+            );
+            assert_eq!(&minicbor::decode::<Error>(&encoded).unwrap(), error);
+        }
+        // one past the last index decodes to no variant
+        let past = minicbor::to_vec(all.len() as u32).unwrap();
+        assert!(minicbor::decode::<Error>(&past).is_err());
     }
 }
