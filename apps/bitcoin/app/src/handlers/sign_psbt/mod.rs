@@ -30,23 +30,27 @@ pub async fn handle_sign_psbt(app: &mut sdk::App, psbt: &[u8]) -> Result<Respons
     let mut psbt = fastpsbt::Psbt::parse(psbt).map_err(|_| Error::FailedToDeserializePsbt)?;
 
     // Lightweight analysis: structural validation + extract data for display and verification
-    let (summary, deferred_checks) = analyze::analyze_transaction(&psbt)?;
+    let analyze::Analysis {
+        accounts,
+        review,
+        deferred_checks,
+    } = analyze::analyze_transaction(&psbt)?;
     let mut local_keys = key_resolution::LocalKeys::new()?;
-    let silent_payments = silent_payments::analyze(&psbt, &summary, &mut local_keys)?;
+    let silent_payments = silent_payments::analyze(&psbt, &accounts, &mut local_keys)?;
 
     // Spawn expensive verification (proof-of-registration + script derivation) as a background
     // task so it runs concurrently with the UX flows below.
-    let verification_handle = app.spawn_task(async { deferred_checks.verify(&summary).await });
+    let verification_handle = app.spawn_task(async { deferred_checks.verify(&accounts).await });
 
     // Show warnings (runs while verification task progresses in the background)
-    if summary.warn_unverified_inputs && !display::display_warning_unverified_inputs(app).await {
+    if review.warn_unverified_inputs && !display::display_warning_unverified_inputs(app).await {
         return Err(Error::UserRejected);
         // verification_handle is dropped here → task is cancelled
     }
 
-    let fee = summary.fee();
-    if summary.inputs_total_amount >= crate::constants::THRESHOLD_WARN_HIGH_FEES_AMOUNT {
-        let fee_percent = fee.saturating_mul(100) / summary.inputs_total_amount;
+    let fee = review.fee();
+    if review.inputs_total_amount >= crate::constants::THRESHOLD_WARN_HIGH_FEES_AMOUNT {
+        let fee_percent = fee.saturating_mul(100) / review.inputs_total_amount;
         if fee_percent >= crate::constants::THRESHOLD_WARN_HIGH_FEES_PERCENT
             && !display::display_warning_high_fee(app, fee_percent).await
         {
@@ -55,7 +59,7 @@ pub async fn handle_sign_psbt(app: &mut sdk::App, psbt: &[u8]) -> Result<Respons
     }
 
     // Display transaction for user approval
-    let pairs = display::build_display_pairs(&psbt, &summary)?;
+    let pairs = display::build_display_pairs(&review)?;
     if !display::display_transaction(app, &pairs).await {
         display::show_transaction_rejected(app);
         return Err(Error::UserRejected);
@@ -72,7 +76,7 @@ pub async fn handle_sign_psbt(app: &mut sdk::App, psbt: &[u8]) -> Result<Respons
         None => silent_payments::Finalized::default(),
     };
     let (signed, musig_session) =
-        signing::sign_all_inputs(&psbt, &summary, local_keys, &taptree_hashes)?;
+        signing::sign_all_inputs(&psbt, &accounts, local_keys, &taptree_hashes)?;
 
     // Persist the round-1 session, if any, only after the signing pass has
     // completed successfully — partial failures must leave no stale session.

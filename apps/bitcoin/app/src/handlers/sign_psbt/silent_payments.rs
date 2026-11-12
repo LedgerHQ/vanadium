@@ -33,7 +33,7 @@ use common::{
 };
 use sdk::curve::{Secp256k1, Secp256k1Point, Secp256k1Scalar};
 
-use super::analyze::{input_prevout, InputAccount, TransactionSummary};
+use super::analyze::{input_prevout, Accounts, InputAccount};
 use super::context::TaptreeHashes;
 use super::key_resolution::{resolve_private_key, KeySource, LocalKeys};
 use super::signing::taproot_output_private_key;
@@ -58,8 +58,8 @@ enum InputKey<'a> {
     SilentPayment { account_index: u32, tweak: [u8; 32] },
 }
 
-/// What [`analyze`] found out about the outputs to silent payment codes of a PSBT, whose summary
-/// it borrows.
+/// What [`analyze`] found out about the outputs to silent payment codes of a PSBT, whose
+/// accounts it borrows.
 pub(super) struct SilentPayments<'a> {
     /// The outputs to silent payment codes, in output order.
     outputs: Vec<Recipient>,
@@ -97,7 +97,7 @@ fn eligible_key(wallet_policy: &WalletPolicy) -> Option<(&KeyExpression, bool)> 
 /// [`finalize`]).
 pub(super) fn analyze<'a>(
     psbt: &fastpsbt::Psbt,
-    summary: &'a TransactionSummary,
+    accounts: &'a Accounts,
     local_keys: &mut LocalKeys,
 ) -> Result<Option<SilentPayments<'a>>, Error> {
     let outputs = sp::recipients(psbt).map_err(|_| Error::InvalidSilentPayment)?;
@@ -128,7 +128,7 @@ pub(super) fn analyze<'a>(
             return Err(Error::SilentPaymentShareMismatch);
         }
 
-        let key = match summary.input_account(input_index) {
+        let key = match accounts.input_account(input_index) {
             InputAccount::WalletPolicy {
                 account_id,
                 wallet_policy,
