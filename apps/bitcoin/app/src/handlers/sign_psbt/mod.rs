@@ -68,7 +68,7 @@ pub async fn handle_sign_psbt(app: &mut sdk::App, psbt: &[u8]) -> Result<Respons
     app.show_spinner("Signing transaction...");
     let taptree_hashes = context::TaptreeHashes::new(psbt.inputs.len());
     let finalized = match &silent_payments {
-        Some(sp) => silent_payments::finalize(&mut psbt, &summary, sp, &taptree_hashes)?,
+        Some(sp) => silent_payments::finalize(&mut psbt, sp, &taptree_hashes)?,
         None => silent_payments::Finalized::default(),
     };
     let (signed, musig_session) =

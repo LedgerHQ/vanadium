@@ -28,7 +28,7 @@ use common::{
     bip388::{DescriptorTemplate, KeyExpression, WalletPolicy},
     errors::Error,
     fastpsbt,
-    message::{SilentPaymentOutputScript, SilentPaymentShare},
+    message::{SilentPaymentOutputScript, SilentPaymentShare, WalletPolicyCoordinates},
     silent_payments::{self as sp, Recipient},
 };
 use sdk::curve::{Secp256k1, Secp256k1Point, Secp256k1Scalar};
@@ -40,28 +40,30 @@ use super::signing::taproot_output_private_key;
 use crate::sp_keys;
 
 /// An eligible input, with the key that BIP-352 takes from it.
-struct EligibleInput {
+struct EligibleInput<'a> {
     input_index: usize,
-    key: InputKey,
+    key: InputKey<'a>,
 }
 
 /// Where the key of an eligible input comes from.
-enum InputKey {
-    /// An input of a wallet policy: its key, or for a taproot input its internal key.
+enum InputKey<'a> {
+    /// An input of a wallet policy: its key, or for a taproot input its internal key, which the
+    /// tap tree of the account `wallet_policy` at the coordinates `coords` tweaks.
     WalletPolicy {
         key_source: KeySource,
-        is_taproot: bool,
+        taproot: Option<(&'a WalletPolicy, &'a WalletPolicyCoordinates)>,
     },
     /// An output that a silent payment account received: a taproot output, whose key is
     /// `b_spend + tweak` (BIP-376).
     SilentPayment { account_index: u32, tweak: [u8; 32] },
 }
 
-/// What [`analyze`] found out about the outputs to silent payment codes of a PSBT.
-pub(super) struct SilentPayments {
+/// What [`analyze`] found out about the outputs to silent payment codes of a PSBT, whose summary
+/// it borrows.
+pub(super) struct SilentPayments<'a> {
     /// The outputs to silent payment codes, in output order.
     outputs: Vec<Recipient>,
-    eligible_inputs: Vec<EligibleInput>,
+    eligible_inputs: Vec<EligibleInput<'a>>,
 }
 
 /// The key that BIP-352 takes from an input of `wallet_policy`, and whether the input is taproot;
@@ -93,11 +95,11 @@ fn eligible_key(wallet_policy: &WalletPolicy) -> Option<(&KeyExpression, bool)> 
 /// or if the PSBT has ECDH shares or DLEQ proofs the device wouldn't compute: per-input ones, or
 /// global ones for another scan key (those for a scan key of the outputs are checked by
 /// [`finalize`]).
-pub(super) fn analyze(
+pub(super) fn analyze<'a>(
     psbt: &fastpsbt::Psbt,
-    summary: &TransactionSummary,
+    summary: &'a TransactionSummary,
     local_keys: &mut LocalKeys,
-) -> Result<Option<SilentPayments>, Error> {
+) -> Result<Option<SilentPayments<'a>>, Error> {
     let outputs = sp::recipients(psbt).map_err(|_| Error::InvalidSilentPayment)?;
     if outputs.is_empty() {
         return Ok(None);
@@ -131,6 +133,7 @@ pub(super) fn analyze(
                 account_id,
                 wallet_policy,
                 coords,
+                ..
             } => {
                 let Some((kp, is_taproot)) = eligible_key(wallet_policy) else {
                     continue;
@@ -141,7 +144,7 @@ pub(super) fn analyze(
                     .ok_or(Error::SilentPaymentInputNotHeld)?;
                 InputKey::WalletPolicy {
                     key_source,
-                    is_taproot,
+                    taproot: is_taproot.then_some((wallet_policy, coords)),
                 }
             }
             // a taproot output, that the device's account received
@@ -176,32 +179,25 @@ pub(super) fn analyze(
 /// The private key of an eligible input, as it enters the sum `a`.
 fn input_private_key(
     input: &EligibleInput,
-    summary: &TransactionSummary,
     taptree_hashes: &TaptreeHashes,
 ) -> Result<Secp256k1Scalar, Error> {
     let (key, is_taproot) = match &input.key {
         InputKey::WalletPolicy {
             key_source,
-            is_taproot,
+            taproot,
         } => {
             let hd_node = resolve_private_key(key_source)?;
-            let key = if *is_taproot {
-                let InputAccount::WalletPolicy {
-                    wallet_policy,
-                    coords,
-                    ..
-                } = summary.input_account(input.input_index)
-                else {
-                    unreachable!("the key of a wallet policy is the key of one of its inputs");
-                };
-                let taptree_hash = taptree_hashes.get(input.input_index, wallet_policy, coords)?;
-                taproot_output_private_key(&hd_node.privkey, taptree_hash)?
-            } else {
-                hd_node.privkey.clone()
+            let key = match taproot {
+                Some((wallet_policy, coords)) => {
+                    let taptree_hash =
+                        taptree_hashes.get(input.input_index, wallet_policy, coords)?;
+                    taproot_output_private_key(&hd_node.privkey, taptree_hash)?
+                }
+                None => hd_node.privkey.clone(),
             };
             (
                 Secp256k1Scalar::from_be_bytes(&key).ok_or(Error::InvalidKey)?,
-                *is_taproot,
+                taproot.is_some(),
             )
         }
         InputKey::SilentPayment {
@@ -219,13 +215,12 @@ fn input_private_key(
 
 /// The sum `a` of the private keys of the eligible inputs.
 fn sum_input_keys(
-    summary: &TransactionSummary,
     silent_payments: &SilentPayments,
     taptree_hashes: &TaptreeHashes,
 ) -> Result<Secp256k1Scalar, Error> {
     let mut a = Secp256k1Scalar::zero();
     for input in &silent_payments.eligible_inputs {
-        a = &a + &input_private_key(input, summary, taptree_hashes)?;
+        a = &a + &input_private_key(input, taptree_hashes)?;
     }
     if a.is_zero() {
         return Err(Error::InvalidSilentPayment);
@@ -367,11 +362,10 @@ pub(super) struct Finalized {
 /// Runs after the deferred checks, which prove that the inputs belong to their accounts.
 pub(super) fn finalize(
     psbt: &mut fastpsbt::Psbt,
-    summary: &TransactionSummary,
     silent_payments: &SilentPayments,
     taptree_hashes: &TaptreeHashes,
 ) -> Result<Finalized, Error> {
-    let a = sum_input_keys(summary, silent_payments, taptree_hashes)?;
+    let a = sum_input_keys(silent_payments, taptree_hashes)?;
     let a_pub = &Secp256k1::get_generator() * &a;
     let input_hash =
         sp::input_hash(&outpoints(psbt)?, &a_pub).map_err(|_| Error::InvalidSilentPayment)?;
