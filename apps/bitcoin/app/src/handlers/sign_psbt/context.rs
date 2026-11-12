@@ -8,7 +8,7 @@ use core::cell::OnceCell;
 
 use bitcoin::{sighash::SighashCache, Transaction, TxOut};
 use common::{
-    bip388::{DescriptorTemplate, KeyExpression, WalletPolicy},
+    bip388::{DescriptorTemplate, KeyExpression, SegwitVersion, WalletPolicy},
     errors::Error,
     fastpsbt,
     message::{MuSig2PartialSignature, MuSig2Pubnonce, PartialSignature, WalletPolicyCoordinates},
@@ -83,6 +83,8 @@ pub(super) struct PlaceholderCtx<'a> {
     pub(super) account_id: u32,
     pub(super) wallet_policy: &'a WalletPolicy,
     pub(super) coords: &'a WalletPolicyCoordinates,
+    /// The segwit version of the scripts of the account, which decides how the input is signed.
+    pub(super) segwit_version: SegwitVersion,
     pub(super) kp: &'a KeyExpression,
     /// `Some` for a script-path placeholder, `None` for keypath / non-taproot.
     pub(super) tapleaf_desc: Option<&'a DescriptorTemplate>,

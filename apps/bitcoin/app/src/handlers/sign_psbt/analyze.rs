@@ -68,7 +68,7 @@ pub(super) struct AccountAmounts {
 pub(super) struct TransactionSummary {
     pub(super) accounts: Vec<PsbtAccount>,
     pub(super) account_names: Vec<Option<String>>,
-    pub(super) input_coordinates: Vec<(u32, PsbtAccountCoordinates)>,
+    inputs: Vec<AnalyzedInput>,
     pub(super) account_amounts: Vec<AccountAmounts>,
     pub(super) external_outputs: Vec<ExternalOutput>,
     pub(super) inputs_total_amount: u64,
@@ -92,31 +92,36 @@ impl TransactionSummary {
 
     /// The account that input `input_index` spends from, with the input's coordinates in it.
     pub(super) fn input_account(&self, input_index: usize) -> InputAccount<'_> {
-        let (account_id, ref coords) = self.input_coordinates[input_index];
-        match (&self.accounts[account_id as usize], coords) {
+        let input = &self.inputs[input_index];
+        match (&self.accounts[input.account_id as usize], &input.kind) {
             (
                 PsbtAccount::WalletPolicy(wallet_policy),
-                PsbtAccountCoordinates::WalletPolicy(coords),
+                InputKind::WalletPolicy {
+                    coords,
+                    segwit_version,
+                },
             ) => InputAccount::WalletPolicy {
-                account_id,
+                account_id: input.account_id,
                 wallet_policy,
                 coords,
+                segwit_version: *segwit_version,
             },
-            (
-                PsbtAccount::SilentPayment(account),
-                PsbtAccountCoordinates::SilentPayment(SilentPaymentCoordinates::Tweak(tweak)),
-            ) => InputAccount::SilentPayment { account, tweak },
-            _ => unreachable!("the analysis checks the coordinates of the inputs"),
+            (PsbtAccount::SilentPayment(account), InputKind::SilentPayment { tweak }) => {
+                InputAccount::SilentPayment { account, tweak }
+            }
+            _ => unreachable!("resolve_input pairs each input with the kind of its account"),
         }
     }
 }
 
 /// The account that an input spends from, with the input's coordinates in it.
 pub(super) enum InputAccount<'a> {
+    /// A wallet policy, whose scripts are of `segwit_version`.
     WalletPolicy {
         account_id: u32,
         wallet_policy: &'a WalletPolicy,
         coords: &'a WalletPolicyCoordinates,
+        segwit_version: SegwitVersion,
     },
     /// A silent payment account, and the tweak of the output that the input spends (BIP-376).
     SilentPayment {
@@ -145,25 +150,19 @@ fn is_registered(account: &PsbtAccount, name: &str, por: &[u8; 32]) -> bool {
     }
 }
 
-/// Fails unless `coords` are coordinates of `account` that an input (if `is_input`) or an output
-/// can have. An input of a silent payment account spends an output that the account received, by
-/// its tweak; an output pays to one of its codes. An output with a tweak would pay to the account,
-/// but scanning with its scan key would never find it.
-fn check_coordinates(
+/// Fails unless `coords` are coordinates of `account` that an output can have: an output to a
+/// silent payment account pays to one of its codes. An output with a tweak would pay to the
+/// account, but scanning with its scan key would never find it.
+fn check_output_coordinates(
     account: &PsbtAccount,
     coords: &PsbtAccountCoordinates,
-    is_input: bool,
 ) -> Result<(), Error> {
     match (account, coords) {
-        (PsbtAccount::WalletPolicy(_), PsbtAccountCoordinates::WalletPolicy(_)) => Ok(()),
-        (
-            PsbtAccount::SilentPayment(_),
-            PsbtAccountCoordinates::SilentPayment(SilentPaymentCoordinates::Tweak(_)),
-        ) if is_input => Ok(()),
-        (
+        (PsbtAccount::WalletPolicy(_), PsbtAccountCoordinates::WalletPolicy(_))
+        | (
             PsbtAccount::SilentPayment(_),
             PsbtAccountCoordinates::SilentPayment(SilentPaymentCoordinates::Code { .. }),
-        ) if !is_input => Ok(()),
+        ) => Ok(()),
         _ => Err(Error::AccountCoordinatesMismatch),
     }
 }
@@ -270,31 +269,54 @@ pub(super) fn ensure_prevouts<'a>(
     cache.as_deref().ok_or(Error::MissingInputUtxo)
 }
 
-/// What one input contributes to the analysis.
-struct AnalyzedInput<'i> {
-    prevout: &'i TxOut,
-    /// A SegWit v0 input with no non-witness UTXO: its amount can't be checked against
-    /// the transaction that funded it, so the user gets warned.
-    amount_unverified: bool,
+/// An input, resolved against the account it spends from: everything that the stages after the
+/// analysis need to know about how it is spent.
+struct AnalyzedInput {
+    account_id: u32,
+    kind: InputKind,
 }
 
-/// Structural validation of a single input against the account it claims to belong to:
-/// the UTXO kinds its segwit version permits, the non-witness UTXO's txid, and the
-/// redeem/witness scripts, and for an input of a silent payment account its tweak. Checking that
-/// the account's destination is the spent script is deferred.
-fn analyze_input<'i>(
-    input: &'i fastpsbt::Input<'_>,
+/// How an input of each kind of account is spent.
+enum InputKind {
+    /// An input of a wallet policy at `coords`, whose scripts are of `segwit_version`.
+    WalletPolicy {
+        coords: WalletPolicyCoordinates,
+        segwit_version: SegwitVersion,
+    },
+    /// An input of a silent payment account, which spends the taproot output with the tweak
+    /// `tweak` that the account received (BIP-376).
+    SilentPayment { tweak: [u8; 32] },
+}
+
+impl AnalyzedInput {
+    fn segwit_version(&self) -> SegwitVersion {
+        match &self.kind {
+            InputKind::WalletPolicy { segwit_version, .. } => *segwit_version,
+            InputKind::SilentPayment { .. } => SegwitVersion::Taproot,
+        }
+    }
+}
+
+/// Resolves `input` against `account`, the account `account_id` that it claims to spend from at
+/// `coords`: fails unless these are coordinates that an input of the account can have. An input of
+/// a silent payment account spends an output that the account received, by its tweak, which other
+/// signers find in its `PSBT_IN_SP_TWEAK` (BIP-376).
+fn resolve_input(
+    input: &fastpsbt::Input<'_>,
+    account_id: u32,
     account: &PsbtAccount,
     coords: &PsbtAccountCoordinates,
-) -> Result<AnalyzedInput<'i>, Error> {
-    let segwit_version = match (account, coords) {
-        (PsbtAccount::WalletPolicy(wallet_policy), PsbtAccountCoordinates::WalletPolicy(_)) => {
-            wallet_policy
+) -> Result<AnalyzedInput, Error> {
+    let kind = match (account, coords) {
+        (
+            PsbtAccount::WalletPolicy(wallet_policy),
+            PsbtAccountCoordinates::WalletPolicy(coords),
+        ) => InputKind::WalletPolicy {
+            coords: coords.clone(),
+            segwit_version: wallet_policy
                 .get_segwit_version()
-                .map_err(|_| Error::InvalidWalletPolicy)?
-        }
-        // BIP-376: the input spends a taproot output with the tweak of its coordinates, which other
-        // signers find in its PSBT_IN_SP_TWEAK
+                .map_err(|_| Error::InvalidWalletPolicy)?,
+        },
         (
             PsbtAccount::SilentPayment(_),
             PsbtAccountCoordinates::SilentPayment(SilentPaymentCoordinates::Tweak(tweak)),
@@ -302,11 +324,29 @@ fn analyze_input<'i>(
             if input.sp_tweak != Some(tweak) {
                 return Err(Error::SilentPaymentTweakMismatch);
             }
-            SegwitVersion::Taproot
+            InputKind::SilentPayment { tweak: *tweak }
         }
         _ => return Err(Error::AccountCoordinatesMismatch),
     };
+    Ok(AnalyzedInput { account_id, kind })
+}
 
+/// What the UTXO of an input contributes to the analysis.
+struct InputUtxo<'i> {
+    prevout: &'i TxOut,
+    /// A SegWit v0 input with no non-witness UTXO: its amount can't be checked against
+    /// the transaction that funded it, so the user gets warned.
+    amount_unverified: bool,
+}
+
+/// Structural validation of a single input whose scripts are of `segwit_version`: its sighash
+/// type, the UTXO kinds its segwit version permits, the non-witness UTXO's txid, and the
+/// redeem/witness scripts. Checking that the account's destination is the spent script is
+/// deferred.
+fn check_input_utxo<'i>(
+    input: &'i fastpsbt::Input<'_>,
+    segwit_version: SegwitVersion,
+) -> Result<InputUtxo<'i>, Error> {
     // Only SIGHASH_ALL is supported, and its taproot equivalent SIGHASH_DEFAULT. Without a
     // sighash type, the device signs with SIGHASH_ALL (SIGHASH_DEFAULT for taproot).
     match (input.sighash_type, segwit_version) {
@@ -379,7 +419,7 @@ fn analyze_input<'i>(
         }
     }
 
-    Ok(AnalyzedInput {
+    Ok(InputUtxo {
         prevout,
         amount_unverified,
     })
@@ -489,7 +529,7 @@ fn internal_output(
     let account = accounts
         .get(account_id as usize)
         .ok_or(Error::InvalidAccountId)?;
-    check_coordinates(account, coords, false)?;
+    check_output_coordinates(account, coords)?;
     Ok(AnalyzedOutput::Internal(OwnershipCheck {
         account_id,
         coords: coords.clone(),
@@ -546,29 +586,27 @@ pub(super) fn analyze_transaction(
         })
         .collect::<Result<Vec<_>, Error>>()?;
 
-    for (input_index, input) in psbt.inputs.iter().enumerate() {
-        let (account_id, ref coords) = input_coordinates[input_index];
+    let mut inputs = Vec::with_capacity(psbt.inputs.len());
+    for (input, (account_id, coords)) in psbt.inputs.iter().zip(input_coordinates) {
+        let account = accounts
+            .get(account_id as usize)
+            .ok_or(Error::InvalidAccountId)?;
+        let analyzed = resolve_input(input, account_id, account, &coords)?;
 
-        if account_id as usize >= accounts.len() {
-            return Err(Error::InvalidAccountId);
-        }
-
-        let account = &accounts[account_id as usize];
-        check_coordinates(account, coords, true)?;
-
-        let analyzed = analyze_input(input, account, coords)?;
-        warn_unverified_inputs |= analyzed.amount_unverified;
+        let utxo = check_input_utxo(input, analyzed.segwit_version())?;
+        warn_unverified_inputs |= utxo.amount_unverified;
 
         ownership_checks.push(OwnershipCheck {
             account_id,
-            coords: coords.clone(),
-            expected: Destination::Script(analyzed.prevout.script_pubkey.clone()),
+            coords,
+            expected: Destination::Script(utxo.prevout.script_pubkey.clone()),
             is_input: true,
         });
 
-        let value = analyzed.prevout.value.to_sat();
+        let value = utxo.prevout.value.to_sat();
         add_amount(&mut inputs_total_amount, value)?;
         add_amount(&mut account_amounts[account_id as usize].spent, value)?;
+        inputs.push(analyzed);
     }
 
     /***** output checks (structural only — script derivation is deferred) *****/
@@ -617,7 +655,7 @@ pub(super) fn analyze_transaction(
     let summary = TransactionSummary {
         accounts,
         account_names,
-        input_coordinates,
+        inputs,
         account_amounts,
         external_outputs,
         inputs_total_amount,

@@ -152,47 +152,40 @@ fn schnorr_signature(
     })
 }
 
-/// Signs a single plain-key placeholder for one input: dispatches on the input's
-/// segwit version to produce either an ECDSA or a Schnorr partial signature, and
-/// pushes it into `ctx.out`. Mirrors the shape of [`musig::handle_musig_placeholder`].
+/// Signs a single plain-key placeholder for one input: dispatches on the segwit
+/// version of the input's account to produce either an ECDSA or a Schnorr partial
+/// signature, and pushes it into `ctx.out`. Mirrors the shape of
+/// [`musig::handle_musig_placeholder`].
 fn sign_plain_key_placeholder(
     ctx: &mut SigningCtx<'_>,
     ph: &PlaceholderCtx<'_>,
     key_source: &KeySource,
 ) -> Result<(), Error> {
-    if ph.input.witness_utxo.is_some() {
-        match ph.wallet_policy.get_segwit_version() {
-            Ok(SegwitVersion::SegwitV0) => {
-                let sig =
-                    sign_input_ecdsa(ctx.psbt, ph.input_index, &mut ctx.sighash_cache, key_source)?;
-                ctx.out.signatures.push(sig);
-            }
-            Ok(SegwitVersion::Taproot) => {
-                let leaf_hash = leaf_hash_for(ph.tapleaf_desc, ph.wallet_policy, ph.coords)?;
-                // A script-path spend signs with the untweaked leaf key, so it never
-                // looks at the tree root — don't make it pay for the walk.
-                let taptree_hash = match leaf_hash {
-                    Some(_) => None,
-                    None => ph.taptree_hash()?,
-                };
-                let prev = ensure_prevouts(&mut ctx.prevouts, ctx.psbt)?;
-                let sig = sign_input_schnorr(
-                    ph.input_index,
-                    &mut ctx.sighash_cache,
-                    prev,
-                    key_source,
-                    taptree_hash,
-                    leaf_hash,
-                    taproot_sighash_type(ph.input)?,
-                )?;
-                ctx.out.signatures.push(sig);
-            }
-            _ => return Err(Error::UnexpectedSegwitVersion),
+    let sig = match ph.segwit_version {
+        SegwitVersion::Legacy | SegwitVersion::SegwitV0 => {
+            sign_input_ecdsa(ctx.psbt, ph.input_index, &mut ctx.sighash_cache, key_source)?
         }
-    } else {
-        let sig = sign_input_ecdsa(ctx.psbt, ph.input_index, &mut ctx.sighash_cache, key_source)?;
-        ctx.out.signatures.push(sig);
-    }
+        SegwitVersion::Taproot => {
+            let leaf_hash = leaf_hash_for(ph.tapleaf_desc, ph.wallet_policy, ph.coords)?;
+            // A script-path spend signs with the untweaked leaf key, so it never
+            // looks at the tree root — don't make it pay for the walk.
+            let taptree_hash = match leaf_hash {
+                Some(_) => None,
+                None => ph.taptree_hash()?,
+            };
+            let prev = ensure_prevouts(&mut ctx.prevouts, ctx.psbt)?;
+            sign_input_schnorr(
+                ph.input_index,
+                &mut ctx.sighash_cache,
+                prev,
+                key_source,
+                taptree_hash,
+                leaf_hash,
+                taproot_sighash_type(ph.input)?,
+            )?
+        }
+    };
+    ctx.out.signatures.push(sig);
     Ok(())
 }
 
@@ -235,26 +228,28 @@ pub(super) fn sign_all_inputs(
     };
 
     for (input_index, input) in psbt.inputs.iter().enumerate() {
-        let (account_id, wallet_policy, coords) = match summary.input_account(input_index) {
-            InputAccount::WalletPolicy {
-                account_id,
-                wallet_policy,
-                coords,
-            } => (account_id, wallet_policy, coords),
-            InputAccount::SilentPayment { account, tweak } => {
-                let prevouts = ensure_prevouts(&mut ctx.prevouts, psbt)?;
-                let sig = sign_input_silent_payment(
-                    input_index,
-                    &mut ctx.sighash_cache,
-                    prevouts,
-                    account,
-                    tweak,
-                    taproot_sighash_type(input)?,
-                )?;
-                ctx.out.signatures.push(sig);
-                continue;
-            }
-        };
+        let (account_id, wallet_policy, coords, segwit_version) =
+            match summary.input_account(input_index) {
+                InputAccount::WalletPolicy {
+                    account_id,
+                    wallet_policy,
+                    coords,
+                    segwit_version,
+                } => (account_id, wallet_policy, coords, segwit_version),
+                InputAccount::SilentPayment { account, tweak } => {
+                    let prevouts = ensure_prevouts(&mut ctx.prevouts, psbt)?;
+                    let sig = sign_input_silent_payment(
+                        input_index,
+                        &mut ctx.sighash_cache,
+                        prevouts,
+                        account,
+                        tweak,
+                        taproot_sighash_type(input)?,
+                    )?;
+                    ctx.out.signatures.push(sig);
+                    continue;
+                }
+            };
 
         for (placeholder_index, (kp, tapleaf_desc)) in wallet_policy
             .descriptor_template()
@@ -268,6 +263,7 @@ pub(super) fn sign_all_inputs(
                 account_id,
                 wallet_policy,
                 coords,
+                segwit_version,
                 kp,
                 tapleaf_desc,
                 taptree_hashes,
