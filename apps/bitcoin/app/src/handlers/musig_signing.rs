@@ -483,7 +483,7 @@ pub fn sign_sighash_musig(
 
     // Confirm our own pubnonce is in the PSBT — if not, the client never
     // ran round 1 against this input/placeholder.
-    let _my_pubnonce = psbt_input
+    let my_pubnonce = psbt_input
         .get_musig2_pub_nonce(internal_pk, agg_pk, leaf)
         .map_err(|_| Error::FailedToDeserializePsbt)?
         .ok_or(Error::MissingMusigPubnonce)?;
@@ -504,8 +504,13 @@ pub fn sign_sighash_musig(
     let aggpk_xonly: [u8; 32] = agg_pk[1..]
         .try_into()
         .expect("agg_key_tweaked is 33 bytes");
-    let (secnonce, _pubnonce) =
+    let (secnonce, pubnonce) =
         musig::nonce_gen(&rand_i_j, internal_pk, &aggpk_xonly).map_err(map_musig_err)?;
+    // The aggregate nonce must contain the nonce we sign with: our pubnonce in the
+    // PSBT must be the one that this session produced in round 1.
+    if *pubnonce.as_bytes() != my_pubnonce {
+        return Err(Error::MusigPubnonceMismatch);
+    }
 
     // Partial sign.
     let tweaks_slice: &[[u8; 32]] = &per_input_info.tweaks[..per_input_info.n_tweaks];

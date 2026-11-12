@@ -725,3 +725,40 @@ fn test_handle_sign_psbt_musig_mixed_rounds_errors() {
         Some(Error::MixedMusigRounds)
     );
 }
+
+/// Round 2 with a device pubnonce in the PSBT that its session did not produce: the device must
+/// refuse to sign, as the aggregate nonce would not contain the nonce it signs with.
+#[test]
+fn test_handle_sign_psbt_musig_round2_foreign_device_pubnonce_errors() {
+    musig_signing::reset_storage_for_tests();
+
+    let wallet_policy = make_2of2_keypath_policy();
+    let mut psbt = build_musig_keypath_psbt(&wallet_policy, 17);
+    let por =
+        ProofOfRegistration::new(&wallet_policy.registration_id("Musig")).dangerous_as_bytes();
+    let accounts = [(&wallet_policy, "Musig", &por)];
+
+    // ---- Round 1 (real): the device has a session ----
+    let (device_pubnonces, _) = sign_musig(&psbt, &accounts).unwrap();
+    let device_pubnonce = &device_pubnonces[0];
+    let agg_pk = device_pubnonce.aggregate_pubkey;
+    let agg_xonly: [u8; 32] = agg_pk[1..].try_into().unwrap();
+
+    // The PSBT carries another pubnonce for the device's key.
+    let (_, foreign_pubnonce) =
+        musig_lib::nonce_gen(&[0xDE; 32], &device_pubnonce.participant_pk, &agg_xonly).unwrap();
+    assert_ne!(foreign_pubnonce.0, device_pubnonce.pubnonce);
+    let (cosigner_pk, _, cosigner_pubnonce, _) = cosigner_master_round1(&agg_xonly, &[0xAB; 32]);
+    insert_pubnonce(
+        &mut psbt,
+        &device_pubnonce.participant_pk,
+        &agg_pk,
+        &foreign_pubnonce.0,
+    );
+    insert_pubnonce(&mut psbt, &cosigner_pk, &agg_pk, &cosigner_pubnonce.0);
+
+    assert_eq!(
+        sign_musig(&psbt, &accounts).err(),
+        Some(Error::MusigPubnonceMismatch)
+    );
+}
