@@ -2,7 +2,7 @@ use common::{
     constants::{MAX_STORAGE_SLOTS, STORAGE_SLOT_SIZE},
     manifest::{Manifest, APP_NAME_MAX_LEN, APP_VERSION_MAX_LEN},
 };
-use ledger_device_sdk::NVMData;
+use ledger_device_sdk::{nvm::NvmValue, NVMData};
 
 use crate::nvm::LazyStorage;
 
@@ -25,6 +25,18 @@ pub struct VAppEntry {
     /// Storage slots for persistent data (4 slots of STORAGE_SLOT_SIZE bytes each).
     pub storage_slots: [[u8; STORAGE_SLOT_SIZE]; MAX_STORAGE_SLOTS as usize],
 }
+
+// SAFETY: `VAppEntry` is `repr(C)` and only holds byte arrays, so it has no references or
+// pointers, no padding (checked below), and every bit pattern is a valid value of it.
+unsafe impl NvmValue for VAppEntry {}
+
+const _: () = assert!(
+    core::mem::size_of::<VAppEntry>()
+        == 32
+            + APP_NAME_MAX_LEN
+            + APP_VERSION_MAX_LEN
+            + STORAGE_SLOT_SIZE * MAX_STORAGE_SLOTS as usize
+);
 
 impl VAppEntry {
     /// Creates an empty entry (sentinel value).
@@ -74,9 +86,11 @@ pub enum VAppStoreError {
 
 // Use a fixed-length array of LazyStorage for zero-initialized NVM storage.
 // Each slot can be independently initialized or cleared.
+// `nvm_data!` only accepts the SDK's own storages, so the static is placed in `.nvm_data` by hand.
 #[link_section = ".nvm_data"]
 static mut VAPP_STORE: NVMData<[LazyStorage<VAppEntry>; MAX_REGISTERED_VAPPS]> =
-    NVMData::new([LazyStorage::new(); MAX_REGISTERED_VAPPS]);
+    // SAFETY: the static is in the `.nvm_data` section.
+    unsafe { NVMData::new_unchecked([LazyStorage::new(); MAX_REGISTERED_VAPPS]) };
 
 /// The V-App store manages registered V-Apps in NVRAM.
 pub struct VAppStore;

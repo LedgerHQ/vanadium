@@ -9,8 +9,11 @@ use crate::hash::Sha256Hasher;
 use crate::nvm::LazyStorage;
 
 // This key is initialized the first time the Vanadium app is launched.
+// `nvm_data!` only accepts the SDK's own storages, so the static is placed in `.nvm_data` by hand.
 #[link_section = ".nvm_data"]
-static mut VM_AUTH_KEY: NVMData<LazyStorage<[u8; 32]>> = NVMData::new(LazyStorage::new());
+static mut VM_AUTH_KEY: NVMData<LazyStorage<[u8; 32]>> =
+    // SAFETY: the static is in the `.nvm_data` section.
+    unsafe { NVMData::new_unchecked(LazyStorage::new()) };
 
 pub struct VMAuthKey;
 
