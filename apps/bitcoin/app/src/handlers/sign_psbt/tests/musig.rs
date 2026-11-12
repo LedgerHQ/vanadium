@@ -22,7 +22,7 @@ use common::{
 use hex_literal::hex;
 use sdk::curve::{Curve, EcfpPrivateKey, EcfpPublicKey, ToPublicKey};
 
-use crate::handlers::musig_signing;
+use super::super::musig::session;
 
 use super::super::handle_sign_psbt;
 use super::super::test_utils::{device_xpub_at, prepare_as_psbtv2, DEVICE_PATH};
@@ -294,7 +294,7 @@ fn cosigner_master_round1(
 /// under the BIP-341-tweaked aggregate.
 #[test]
 fn test_handle_sign_psbt_musig_2of2_keypath_round_trip() {
-    musig_signing::reset_storage_for_tests();
+    session::reset_storage_for_tests();
 
     let address_index: u32 = 7;
     let wallet_policy = make_2of2_keypath_policy();
@@ -372,12 +372,12 @@ fn test_handle_sign_psbt_musig_2of2_keypath_round_trip() {
         .unwrap()
         .0
         .clone();
-    let info = musig_signing::compute_per_input_info(
+    let info = session::compute_per_input_info(
         wallet_policy.key_information(),
         &placeholder,
         false,
         address_index,
-        musig_signing::SpendPath::Keypath { taptree_hash: None },
+        session::SpendPath::Keypath { taptree_hash: None },
     )
     .unwrap();
     let aggnonce = musig_lib::nonce_agg(&[
@@ -427,7 +427,7 @@ fn test_handle_sign_psbt_musig_2of2_keypath_round_trip() {
 /// persistent storage and must error cleanly.
 #[test]
 fn test_handle_sign_psbt_musig_round2_without_round1_errors() {
-    musig_signing::reset_storage_for_tests();
+    session::reset_storage_for_tests();
 
     let address_index: u32 = 11;
     let wallet_policy = make_2of2_keypath_policy();
@@ -447,12 +447,12 @@ fn test_handle_sign_psbt_musig_round2_without_round1_errors() {
         .unwrap()
         .0
         .clone();
-    let info = musig_signing::compute_per_input_info(
+    let info = session::compute_per_input_info(
         wallet_policy.key_information(),
         &placeholder,
         false,
         address_index,
-        musig_signing::SpendPath::Keypath { taptree_hash: None },
+        session::SpendPath::Keypath { taptree_hash: None },
     )
     .unwrap();
     let agg_pk = info.agg_key_tweaked;
@@ -485,7 +485,7 @@ fn test_handle_sign_psbt_musig_round2_without_round1_errors() {
 /// missing → the device should error with `MissingMusigPubnonce`.
 #[test]
 fn test_handle_sign_psbt_musig_round2_missing_cosigner_pubnonce_errors() {
-    musig_signing::reset_storage_for_tests();
+    session::reset_storage_for_tests();
 
     let address_index: u32 = 13;
     let wallet_policy = make_2of2_keypath_policy();
@@ -573,12 +573,12 @@ fn cosign_and_verify(
         .unwrap()
         .0
         .clone();
-    let info = musig_signing::compute_per_input_info(
+    let info = session::compute_per_input_info(
         wallet_policy.key_information(),
         &placeholder,
         false,
         address_index,
-        musig_signing::SpendPath::Keypath { taptree_hash: None },
+        session::SpendPath::Keypath { taptree_hash: None },
     )
     .unwrap();
     let agg_xonly: [u8; 32] = info.agg_key_tweaked[1..].try_into().unwrap();
@@ -612,7 +612,7 @@ fn cosign_and_verify(
 /// so every input's pubnonce comes from the same randomness, which round 2 finds again.
 #[test]
 fn test_handle_sign_psbt_musig_two_accounts_round_trip() {
-    musig_signing::reset_storage_for_tests();
+    session::reset_storage_for_tests();
 
     let policy_a = make_2of2_keypath_policy();
     let policy_b = make_2of2_keypath_policy_at(&OTHER_DEVICE_PATH);
@@ -692,7 +692,7 @@ fn test_handle_sign_psbt_musig_two_accounts_round_trip() {
 /// get partial signatures for some inputs and pubnonces for the others, is rejected.
 #[test]
 fn test_handle_sign_psbt_musig_mixed_rounds_errors() {
-    musig_signing::reset_storage_for_tests();
+    session::reset_storage_for_tests();
 
     let wallet_policy = make_2of2_keypath_policy();
     let mut psbt = build_musig_keypath_psbt_spending(&[(&wallet_policy, 1), (&wallet_policy, 2)]);
@@ -730,7 +730,7 @@ fn test_handle_sign_psbt_musig_mixed_rounds_errors() {
 /// refuse to sign, as the aggregate nonce would not contain the nonce it signs with.
 #[test]
 fn test_handle_sign_psbt_musig_round2_foreign_device_pubnonce_errors() {
-    musig_signing::reset_storage_for_tests();
+    session::reset_storage_for_tests();
 
     let wallet_policy = make_2of2_keypath_policy();
     let mut psbt = build_musig_keypath_psbt(&wallet_policy, 17);

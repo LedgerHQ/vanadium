@@ -82,7 +82,7 @@ impl LocalKeys {
     /// plain-key signing path. If `child_steps` is `None`, the `KeySource` stops
     /// at the master xpub (no extra derivation) — this is the BIP-388 musig
     /// signing path, where the master key signs and BIP-32 derivation is folded
-    /// into `crate::handlers::musig_signing`'s session tweaks.
+    /// into the session tweaks of [`super::musig::session`].
     ///
     /// Returns `None` if:
     /// - the key has no origin info (bare xpub, can't be derived locally), or
