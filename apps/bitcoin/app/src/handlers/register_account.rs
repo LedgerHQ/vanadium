@@ -231,8 +231,7 @@ pub async fn handle_register_account(
             continue;
         }
 
-        let xpub_bytes = key_info.pubkey.encode();
-        let compressed_pubkey = &xpub_bytes[45..78];
+        let compressed_pubkey = key_info.pubkey.public_key.serialize();
 
         if compressed_pubkey == NUMS_COMPRESSED_PUBKEY {
             key_auth_names[i] = Some(String::from("dummy"));
@@ -263,7 +262,9 @@ pub async fn handle_register_account(
             let derived = EcfpPrivateKey::<Secp256k1, 32>::new(*hd_node.privkey)
                 .to_public_key()
                 .to_compressed();
-            if compressed_pubkey == derived && xpub_bytes[13..45] == hd_node.chaincode {
+            if compressed_pubkey == derived
+                && *key_info.pubkey.chain_code.as_bytes() == hd_node.chaincode
+            {
                 key_auth_names[i] = Some(String::from("our key"));
             }
         }

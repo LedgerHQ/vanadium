@@ -1,5 +1,5 @@
 use common::{
-    account::{Account, SilentPaymentCoordinates},
+    account::{Account, Destination, SilentPaymentCoordinates},
     errors::Error,
     identity,
     message::{self, Response},
@@ -79,24 +79,18 @@ pub async fn handle_get_address(
             message::AccountCoordinates::WalletPolicy(coordinates),
         ) => {
             check_proof_of_registration(wallet_policy, name, por)?;
-            let address = wallet_policy
-                .get_address(coordinates)
+            let script = wallet_policy
+                .to_script(coordinates.is_change, coordinates.address_index)
                 .map_err(|_| Error::InvalidWalletPolicy)?;
-
-            let identity_sig = match identity_index {
-                Some(i) => {
-                    // Derive the scriptPubKey to sign over
-                    let script = wallet_policy
-                        .to_script(coordinates.is_change, coordinates.address_index)
-                        .map_err(|_| Error::InvalidWalletPolicy)?;
-                    Some(compute_identity_signature(
-                        identity::MSG_TYPE_OUTPUT,
-                        script.as_bytes(),
-                        i,
-                    )?)
-                }
-                None => None,
-            };
+            // the identity key signs the scriptPubKey of the address
+            let identity_sig = identity_index
+                .map(|i| {
+                    compute_identity_signature(identity::MSG_TYPE_OUTPUT, script.as_bytes(), i)
+                })
+                .transpose()?;
+            let address = Destination::Script(script)
+                .address()
+                .map_err(|_| Error::InvalidWalletPolicy)?;
             (address, None, identity_sig)
         }
         (

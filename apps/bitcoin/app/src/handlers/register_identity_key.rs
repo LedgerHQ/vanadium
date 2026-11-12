@@ -1,5 +1,7 @@
 use common::{errors::Error, identity::IdentityKey, message::Response};
 
+use bitcoin::hex::DisplayHex;
+
 use crate::{registration, ux};
 
 async fn display_register_identity_key(app: &mut sdk::App, name: &str, pubkey_hex: &str) -> bool {
@@ -37,8 +39,6 @@ pub async fn handle_register_identity_key(
     name: &str,
     pubkey: &[u8],
 ) -> Result<Response, Error> {
-    use alloc::{format, string::String};
-
     if name.is_empty() || name.len() > u8::MAX as usize {
         return Err(Error::InvalidRequest);
     }
@@ -46,12 +46,7 @@ pub async fn handle_register_identity_key(
     let compressed: [u8; 33] = pubkey.try_into().map_err(|_| Error::InvalidKey)?;
     let identity_key = IdentityKey::new(compressed).map_err(|_| Error::InvalidKey)?;
 
-    let pubkey_hex: String = identity_key
-        .as_bytes()
-        .iter()
-        .map(|b| format!("{:02x}", b))
-        .collect();
-
+    let pubkey_hex = identity_key.as_bytes().to_lower_hex_string();
     if !display_register_identity_key(app, name, &pubkey_hex).await {
         return Err(Error::UserRejected);
     }
