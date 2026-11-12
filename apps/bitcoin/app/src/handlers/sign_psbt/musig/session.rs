@@ -409,7 +409,7 @@ pub fn compute_per_input_info(
 
             let mut out = [0u8; 33];
             out[0] = 0x02 + parity.to_u8();
-            out[1..].copy_from_slice(&tweaked_xonly.to_inner().serialize());
+            out[1..].copy_from_slice(&tweaked_xonly.to_x_only_public_key().serialize());
             (out, 3)
         }
     };

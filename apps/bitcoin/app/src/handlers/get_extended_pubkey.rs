@@ -1,5 +1,7 @@
 use alloc::{format, vec::Vec};
 
+use bitcoin::hex::DisplayHex;
+
 use common::{errors::Error, identity, message::Response};
 use sdk::curve::{EcfpPrivateKey, Secp256k1, ToPublicKey};
 
@@ -103,48 +105,23 @@ pub async fn handle_get_extended_pubkey(
     display: bool,
     identity_index: Option<u32>,
 ) -> Result<Response, Error> {
-    if bip32_path.0.len() > 256 {
-        return Err(Error::DerivationPathTooLong);
-    }
-
     // Identity signing is a property of the standard tree only.
     if identity_index.is_some() && tree != KeyTree::Standard {
         return Err(Error::InvalidParameter);
     }
 
-    let hd_node = crate::bip32::derive_hd_node(tree, &bip32_path.0)?;
-    let privkey: EcfpPrivateKey<Secp256k1, 32> = EcfpPrivateKey::new(*hd_node.privkey);
-    let pubkey = privkey.to_public_key();
-    let pubkey_bytes = pubkey.as_ref().to_bytes();
-
-    let compressed_pubkey_hex = {
-        let mut compressed = alloc::vec![pubkey_bytes[64] % 2 + 0x02];
-        compressed.extend_from_slice(&pubkey_bytes[1..33]);
-        compressed
-            .iter()
-            .map(|b| format!("{:02x}", b))
-            .collect::<alloc::string::String>()
-    };
-
-    let depth = bip32_path.0.len() as u8;
-
-    let parent_fpr: u32 = if bip32_path.0.is_empty() {
-        0
-    } else if bip32_path.0.len() == 1 {
-        crate::bip32::master_fingerprint(tree)?
-    } else {
-        let parent_node =
-            crate::bip32::derive_hd_node(tree, &bip32_path.0[..bip32_path.0.len() - 1])?;
-        let parent_privkey: EcfpPrivateKey<Secp256k1, 32> =
-            EcfpPrivateKey::new(*parent_node.privkey);
-        parent_privkey.to_public_key().fingerprint()
-    };
-
-    let child_number: u32 = if bip32_path.0.is_empty() {
-        0
-    } else {
-        bip32_path.0[bip32_path.0.len() - 1]
-    };
+    // The xpub encodes the depth in one byte.
+    let depth: u8 = bip32_path
+        .0
+        .len()
+        .try_into()
+        .map_err(|_| Error::DerivationPathTooLong)?;
+    let (hd_node, parent_fpr) =
+        crate::bip32::derive_hd_node_and_parent_fingerprint(tree, &bip32_path.0)?;
+    let compressed_pubkey = EcfpPrivateKey::<Secp256k1, 32>::new(*hd_node.privkey)
+        .to_public_key()
+        .to_compressed();
+    let child_number: u32 = bip32_path.0.last().copied().unwrap_or(0);
 
     let mut xpub = Vec::with_capacity(78);
     xpub.extend_from_slice(&BIP32_TESTNET_PUBKEY_VERSION.to_be_bytes());
@@ -152,8 +129,7 @@ pub async fn handle_get_extended_pubkey(
     xpub.extend_from_slice(&parent_fpr.to_be_bytes());
     xpub.extend_from_slice(&child_number.to_be_bytes());
     xpub.extend_from_slice(&hd_node.chaincode);
-    xpub.push(pubkey_bytes[64] % 2 + 0x02);
-    xpub.extend_from_slice(&pubkey_bytes[1..33]);
+    xpub.extend_from_slice(&compressed_pubkey);
 
     if display {
         let xpub_base58 = bitcoin::base58::encode_check(&xpub);
@@ -163,7 +139,7 @@ pub async fn handle_get_extended_pubkey(
         let value = if is_identity {
             match identity::is_identity_path(&bip32_path.0) {
                 Some(None) => &xpub_base58,
-                Some(Some(_)) => &compressed_pubkey_hex,
+                Some(Some(_)) => &compressed_pubkey.to_lower_hex_string(),
                 None => &xpub_base58,
             }
         } else {
