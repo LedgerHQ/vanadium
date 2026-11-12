@@ -1,11 +1,6 @@
-use common::{
-    errors::Error,
-    identity::IdentityKey,
-    message::Response,
-    por::{ProofOfRegistration, Registerable},
-};
+use common::{errors::Error, identity::IdentityKey, message::Response};
 
-use crate::ux;
+use crate::{registration, ux};
 
 async fn display_register_identity_key(app: &mut sdk::App, name: &str, pubkey_hex: &str) -> bool {
     use alloc::vec::Vec;
@@ -61,12 +56,10 @@ pub async fn handle_register_identity_key(
         return Err(Error::UserRejected);
     }
 
-    let id = identity_key.registration_id(name);
-    let por = ProofOfRegistration::new(&id);
-
+    let registration = registration::register(&identity_key, name);
     Ok(Response::IdentityKeyRegistered {
-        key_id: *id.as_bytes(),
-        hmac: por.dangerous_as_bytes(),
+        key_id: registration.id,
+        hmac: registration.por,
     })
 }
 

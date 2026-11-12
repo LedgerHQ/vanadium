@@ -3,11 +3,10 @@ use common::{
     errors::Error,
     identity,
     message::{self, Response},
-    por::{ProofOfRegistration, Registerable},
     script::ToScript,
 };
 
-use crate::{identity::compute_identity_signature, ux};
+use crate::{identity::compute_identity_signature, registration, ux};
 
 async fn display_address(
     app: &mut sdk::App,
@@ -60,20 +59,7 @@ fn check_proof_of_registration<T: Account>(
     name: Option<&str>,
     por: &[u8],
 ) -> Result<(), Error> {
-    // hmac should be empty or a 32 byte vector; if not, give an error, otherwise convert to Option<[u8; 32]>
-    let hmac: Option<&[u8; 32]> = match por.len() {
-        0 => None,
-        32 => Some(por.try_into().unwrap()),
-        _ => return Err(Error::InvalidProofOfRegistrationLength),
-    };
-
-    let hmac = hmac.ok_or(Error::DefaultAccountsNotSupported)?;
-
-    let id = account.registration_id(name.unwrap_or(""));
-    if ProofOfRegistration::<T>::from_bytes(*hmac) != ProofOfRegistration::new(&id) {
-        return Err(Error::InvalidProofOfRegistration);
-    }
-    Ok(())
+    registration::check_registered(account, name.unwrap_or(""), &registration::parse_por(por)?)
 }
 
 pub async fn handle_get_address(
@@ -147,7 +133,11 @@ pub async fn handle_get_address(
 
 #[cfg(test)]
 mod tests {
-    use common::{account::KeyInformation, bip388, message};
+    use common::{
+        account::KeyInformation,
+        bip388, message,
+        por::{ProofOfRegistration, Registerable},
+    };
 
     use super::*;
 

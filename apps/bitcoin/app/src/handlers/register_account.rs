@@ -3,13 +3,12 @@ use common::{
     account::{Account, SilentPaymentAccount, SilentPaymentCoordinates},
     bip388,
     errors::Error,
-    identity::{build_identity_message, IdentityKey, MSG_TYPE_XPUB},
+    identity::{build_identity_message, MSG_TYPE_XPUB},
     message::{self, Response},
-    por::{ProofOfRegistration, Registerable},
 };
 use sdk::curve::{EcfpPrivateKey, EcfpPublicKey, Secp256k1, ToPublicKey};
 
-use crate::{bip32::KeyTree, constants::NUMS_COMPRESSED_PUBKEY, sp_keys, ux};
+use crate::{bip32::KeyTree, constants::NUMS_COMPRESSED_PUBKEY, registration, sp_keys, ux};
 
 /// Shows `pairs`, the description of an account to register, for approval. Returns whether the user
 /// approved it.
@@ -129,13 +128,16 @@ async fn register_silent_payment_account(
         return Err(Error::UserRejected);
     }
 
-    let id = account.registration_id(name);
-    let por = ProofOfRegistration::new(&id);
+    Ok(account_registered(account, name))
+}
 
-    Ok(Response::AccountRegistered {
-        account_id: *id.as_bytes(),
-        hmac: por.dangerous_as_bytes(),
-    })
+/// The response to the registration of `account` with the name `name`.
+fn account_registered<T: Account>(account: &T, name: &str) -> Response {
+    let registration = registration::register(account, name);
+    Response::AccountRegistered {
+        account_id: registration.id,
+        hmac: registration.por,
+    }
 }
 
 pub async fn handle_register_account(
@@ -171,18 +173,12 @@ pub async fn handle_register_account(
                     .as_slice()
                     .try_into()
                     .map_err(|_| Error::InvalidIdentitySignature)?;
-                let ik = IdentityKey::new(pubkey).map_err(|_| Error::InvalidIdentitySignature)?;
-                let por_bytes: [u8; 32] = entry
+                let por: [u8; 32] = entry
                     .por
                     .as_slice()
                     .try_into()
                     .map_err(|_| Error::InvalidProofOfRegistrationLength)?;
-                let expected_por =
-                    ProofOfRegistration::<IdentityKey>::new(&ik.registration_id(&entry.name));
-                let actual_por = ProofOfRegistration::<IdentityKey>::from_bytes(por_bytes);
-                if actual_por != expected_por {
-                    return Err(Error::InvalidProofOfRegistration);
-                }
+                registration::registered_identity_key(pubkey, &entry.name, &por)?;
                 names.push((pubkey, entry.name.clone()));
             }
             names
@@ -277,13 +273,7 @@ pub async fn handle_register_account(
         return Err(Error::UserRejected);
     }
 
-    let id = wallet_policy.registration_id(name);
-    let por = ProofOfRegistration::new(&id);
-
-    Ok(Response::AccountRegistered {
-        account_id: *id.as_bytes(),
-        hmac: por.dangerous_as_bytes(),
-    })
+    Ok(account_registered(wallet_policy, name))
 }
 
 #[cfg(test)]
