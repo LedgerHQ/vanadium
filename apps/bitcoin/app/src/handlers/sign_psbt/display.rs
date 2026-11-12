@@ -110,21 +110,22 @@ pub(super) fn build_display_pairs(
 
     let mut pairs: Vec<TagValue> = Vec::with_capacity(n_accounts * 2 + n_external * 2 + 1);
 
-    // Accounts we're spending from (non-negative spent amount)
-    for (account_id, spent_amount) in summary.account_spent_amounts.iter().enumerate() {
+    // Accounts we're spending from (they get back at most what they spend)
+    for (account_id, amounts) in summary.account_amounts.iter().enumerate() {
         let account_description = match &summary.account_names[account_id] {
             Some(name) => format!("account: {}", name),
             None => "default account".to_string(),
         };
-        if *spent_amount >= 0 {
+        if amounts.spent >= amounts.received {
+            let spent_amount = amounts.spent - amounts.received;
             pairs.push(TagValue {
                 tag: "Spend from".into(),
                 value: account_description,
             });
-            if *spent_amount > 0 {
+            if spent_amount > 0 {
                 pairs.push(TagValue {
                     tag: "Amount".into(),
-                    value: format_amount(*spent_amount as u64, COIN_TICKER),
+                    value: format_amount(spent_amount, COIN_TICKER),
                 });
             } else {
                 pairs.push(TagValue {
@@ -135,20 +136,20 @@ pub(super) fn build_display_pairs(
         }
     }
 
-    // Accounts we're receiving to (negative spent amount)
-    for (account_id, spent_amount) in summary.account_spent_amounts.iter().enumerate() {
+    // Accounts we're receiving to (they get back more than they spend)
+    for (account_id, amounts) in summary.account_amounts.iter().enumerate() {
         let account_description = match &summary.account_names[account_id] {
             Some(name) => format!("account: {}", name),
             None => "default account".to_string(),
         };
-        if *spent_amount < 0 {
+        if amounts.received > amounts.spent {
             pairs.push(TagValue {
                 tag: "Send to".into(),
                 value: account_description,
             });
             pairs.push(TagValue {
                 tag: "Amount".into(),
-                value: format_amount(-*spent_amount as u64, COIN_TICKER),
+                value: format_amount(amounts.received - amounts.spent, COIN_TICKER),
             });
         }
     }

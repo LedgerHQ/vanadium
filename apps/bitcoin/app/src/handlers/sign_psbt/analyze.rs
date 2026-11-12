@@ -9,7 +9,7 @@
 //! It also owns [`input_prevout`], the single definition of what an input's prevout is,
 //! which the signing paths reach through [`ensure_prevouts`].
 
-use alloc::{string::String, vec, vec::Vec};
+use alloc::{string::String, vec::Vec};
 
 use common::{
     account::{Account, Destination},
@@ -26,7 +26,7 @@ use common::{
     silent_payments::{SilentPaymentAccount, SilentPaymentCode, SilentPaymentCoordinates},
 };
 
-use bitcoin::{hashes::Hash, ScriptBuf, TxOut};
+use bitcoin::{hashes::Hash, Amount, ScriptBuf, TxOut};
 use sdk::curve::EcfpPublicKey;
 
 /// A check, verified in the background task, that an input or an output belongs to the account
@@ -54,12 +54,22 @@ pub(super) struct ExternalOutput {
     pub(super) auth_name: Option<String>,
 }
 
+/// What the transaction takes from an account, with its inputs, and gives back to it, with its
+/// outputs.
+#[derive(Default)]
+pub(super) struct AccountAmounts {
+    pub(super) spent: u64,
+    pub(super) received: u64,
+}
+
 /// The result of analyzing a PSBT: lightweight data needed for UI display and signing.
+///
+/// All its amounts are at most [`Amount::MAX_MONEY`].
 pub(super) struct TransactionSummary {
     pub(super) accounts: Vec<PsbtAccount>,
     pub(super) account_names: Vec<Option<String>>,
     pub(super) input_coordinates: Vec<(u32, PsbtAccountCoordinates)>,
-    pub(super) account_spent_amounts: Vec<i64>,
+    pub(super) account_amounts: Vec<AccountAmounts>,
     pub(super) external_outputs: Vec<ExternalOutput>,
     pub(super) inputs_total_amount: u64,
     pub(super) outputs_total_amount: u64,
@@ -69,6 +79,15 @@ pub(super) struct TransactionSummary {
 impl TransactionSummary {
     pub(super) fn fee(&self) -> u64 {
         self.inputs_total_amount - self.outputs_total_amount
+    }
+
+    /// What the transaction takes from each account, net of what it gives back to it.
+    #[cfg(test)]
+    pub(super) fn net_spent_amounts(&self) -> Vec<i64> {
+        self.account_amounts
+            .iter()
+            .map(|amounts| amounts.spent as i64 - amounts.received as i64)
+            .collect()
     }
 
     /// The account that input `input_index` spends from, with the input's coordinates in it.
@@ -475,6 +494,16 @@ fn internal_output(
     }))
 }
 
+/// Adds `amount` to `total`, failing if the sum is more than all the bitcoins there can be: no
+/// valid transaction spends or creates more, and no sum of amounts can then overflow.
+fn add_amount(total: &mut u64, amount: u64) -> Result<(), Error> {
+    *total = total
+        .checked_add(amount)
+        .filter(|sum| *sum <= Amount::MAX_MONEY.to_sat())
+        .ok_or(Error::InvalidAmount)?;
+    Ok(())
+}
+
 /// Perform cheap structural validation of the PSBT and extract the data needed for
 /// UI display ([`TransactionSummary`]) and deferred cryptographic verification
 /// ([`DeferredChecks`]).
@@ -491,7 +520,9 @@ pub(super) fn analyze_transaction(
     } = read_accounts(psbt)?;
     let identity_key_names = read_identity_keys(psbt)?;
 
-    let mut account_spent_amounts: Vec<i64> = vec![0; accounts.len()];
+    let mut account_amounts: Vec<AccountAmounts> = (0..accounts.len())
+        .map(|_| AccountAmounts::default())
+        .collect();
     let mut external_outputs = Vec::new();
     let mut inputs_total_amount: u64 = 0;
     let mut outputs_total_amount: u64 = 0;
@@ -532,8 +563,8 @@ pub(super) fn analyze_transaction(
         });
 
         let value = analyzed.prevout.value.to_sat();
-        account_spent_amounts[account_id as usize] += value as i64;
-        inputs_total_amount += value;
+        add_amount(&mut inputs_total_amount, value)?;
+        add_amount(&mut account_amounts[account_id as usize].spent, value)?;
     }
 
     /***** output checks (structural only — script derivation is deferred) *****/
@@ -550,6 +581,7 @@ pub(super) fn analyze_transaction(
 
     for (output_index, output) in psbt.outputs.iter().enumerate() {
         let amount = output.amount.ok_or(Error::OutputAmountMissing)?;
+        add_amount(&mut outputs_total_amount, amount)?;
 
         match analyze_output(
             output,
@@ -558,7 +590,10 @@ pub(super) fn analyze_transaction(
             &identity_key_names,
         )? {
             AnalyzedOutput::Internal(check) => {
-                account_spent_amounts[check.account_id as usize] -= amount as i64;
+                add_amount(
+                    &mut account_amounts[check.account_id as usize].received,
+                    amount,
+                )?;
                 ownership_checks.push(check);
             }
             AnalyzedOutput::External(destination, auth_name) => {
@@ -569,8 +604,6 @@ pub(super) fn analyze_transaction(
                 });
             }
         }
-
-        outputs_total_amount += amount;
     }
 
     if outputs_total_amount > inputs_total_amount {
@@ -581,7 +614,7 @@ pub(super) fn analyze_transaction(
         accounts,
         account_names,
         input_coordinates,
-        account_spent_amounts,
+        account_amounts,
         external_outputs,
         inputs_total_amount,
         outputs_total_amount,
@@ -632,6 +665,8 @@ impl DeferredChecks {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use alloc::vec;
 
     use bitcoin::{
         consensus::serialize, hashes::Hash, Amount, ScriptBuf, Transaction, TxOut, Txid,
@@ -742,6 +777,25 @@ mod tests {
             analyze(&psbt).err(),
             Some(Error::RedeemScriptMismatchWitness)
         );
+    }
+
+    /// No amount, nor any sum of amounts, may be more than all the bitcoins there can be: the
+    /// totals would otherwise overflow, and wrap in release builds.
+    #[test]
+    fn amounts_above_max_money_are_rejected() {
+        let mut psbt = legacy_pkh_psbt();
+        let max_money = Amount::MAX_MONEY.to_sat();
+        psbt.outputs[0].insert(PSBT_OUT_AMOUNT, &[], (max_money + 1).to_le_bytes().to_vec());
+        assert_eq!(analyze(&psbt).err(), Some(Error::InvalidAmount));
+
+        psbt.outputs[0].insert(PSBT_OUT_AMOUNT, &[], u64::MAX.to_le_bytes().to_vec());
+        assert_eq!(analyze(&psbt).err(), Some(Error::InvalidAmount));
+
+        let mut sum = max_money;
+        assert!(add_amount(&mut sum, 0).is_ok());
+        assert_eq!(add_amount(&mut sum, 1).err(), Some(Error::InvalidAmount));
+        let mut sum = u64::MAX - 1;
+        assert_eq!(add_amount(&mut sum, 2).err(), Some(Error::InvalidAmount));
     }
 
     #[test]

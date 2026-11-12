@@ -125,6 +125,8 @@ pub enum Error {
     MixedMusigRounds,
     #[n(62)]
     MusigPubnonceMismatch,
+    #[n(63)]
+    InvalidAmount,
 
     // Silent payments
     #[n(48)]
@@ -244,6 +246,7 @@ impl fmt::Display for Error {
                 f,
                 "The device's MuSig2 pubnonce in the PSBT is not the one of its session"
             ),
+            InvalidAmount => write!(f, "An amount, or a sum of amounts, is above 21M bitcoins"),
 
             UnsupportedSilentPayment => write!(f, "Unsupported silent payment"),
 
