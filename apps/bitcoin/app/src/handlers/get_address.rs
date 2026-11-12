@@ -7,9 +7,7 @@ use common::{
     script::ToScript,
 };
 
-use crate::identity::compute_identity_signature;
-
-const AUTO_APPROVE: bool = cfg!(any(test, feature = "autoapprove"));
+use crate::{identity::compute_identity_signature, ux};
 
 async fn display_address(
     app: &mut sdk::App,
@@ -17,12 +15,8 @@ async fn display_address(
     label: Option<u32>,
     addr: &str,
 ) -> bool {
-    if AUTO_APPROVE {
-        return true;
-    }
-
     use alloc::{string::ToString, vec};
-    use sdk::ux::{Icon, TagValue};
+    use sdk::ux::TagValue;
 
     let mut pairs = match account_name {
         Some(account_name) => {
@@ -45,29 +39,19 @@ async fn display_address(
         tag: "Address".into(),
         value: addr.into(),
     });
-    let (intro_text, intro_subtext) = if sdk::ux::has_page_api() {
-        ("Verify Bitcoin\naddress", "")
-    } else {
-        ("Verify Bitcoin", "address")
-    };
-    let approved = app
-        .review_pairs(
-            intro_text,
-            intro_subtext,
-            &pairs,
-            "The address is correct",
-            "Confirm",
-            false,
-        )
-        .await;
-
-    if approved {
-        app.show_info(Icon::Success, "Address verified");
-    } else {
-        app.show_info(Icon::Failure, "Address rejected");
-    }
-
-    approved
+    ux::review(
+        app,
+        ux::Review {
+            intro: ux::intro("Verify Bitcoin", "address"),
+            pairs: &pairs,
+            final_text: "The address is correct",
+            button_text: "Confirm",
+            long_press: false,
+            approved: Some("Address verified"),
+            rejected: "Address rejected",
+        },
+    )
+    .await
 }
 
 /// Checks that `por` is the proof of registration of `account` with the name `name`.

@@ -5,27 +5,17 @@ use sdk::curve::{EcfpPrivateKey, Secp256k1, ToPublicKey};
 
 use crate::{
     bip32::KeyTree, constants::BIP32_TESTNET_PUBKEY_VERSION, identity::compute_identity_signature,
+    ux,
 };
 
-const AUTO_APPROVE: bool = cfg!(any(test, feature = "autoapprove"));
-
 async fn display_identity_key(app: &mut sdk::App, value: &str, index: Option<u32>) -> bool {
-    if AUTO_APPROVE {
-        return true;
-    }
-
     use alloc::vec;
-    use sdk::ux::{Icon, TagValue};
+    use sdk::ux::TagValue;
 
-    let (intro_text, intro_subtext): (alloc::string::String, alloc::string::String) = match index {
-        None => {
-            if sdk::ux::has_page_api() {
-                ("Export root\nidentity key".into(), "".into())
-            } else {
-                ("Export root".into(), "identity key".into())
-            }
-        }
+    let intro = match index {
+        None => ux::intro("Export root", "identity key"),
         Some(i) => {
+            // The two layouts break the title differently, to fit each screen.
             if sdk::ux::has_page_api() {
                 (format!("Export identity\nkey #{}", i), "".into())
             } else {
@@ -44,49 +34,37 @@ async fn display_identity_key(app: &mut sdk::App, value: &str, index: Option<u32
         value: value.into(),
     }];
 
-    let approved = app
-        .review_pairs(
-            &intro_text,
-            &intro_subtext,
-            &pairs,
-            "Verify identity key",
-            "Confirm",
-            false,
-        )
-        .await;
-    app.show_info(
-        if approved {
-            Icon::Success
-        } else {
-            Icon::Failure
+    ux::review(
+        app,
+        ux::Review {
+            intro,
+            pairs: &pairs,
+            final_text: "Verify identity key",
+            button_text: "Confirm",
+            long_press: false,
+            approved: Some("Identity key verified"),
+            rejected: "Identity key rejected",
         },
-        if approved {
-            "Identity key verified"
-        } else {
-            "Identity key rejected"
-        },
-    );
-    approved
+    )
+    .await
 }
 
 async fn display_xpub(app: &mut sdk::App, tree: KeyTree, xpub: &str, path: &[u32]) -> bool {
-    if AUTO_APPROVE {
-        return true;
-    }
-
     use alloc::{string::ToString, vec};
-    use sdk::ux::{Icon, TagValue};
+    use sdk::ux::TagValue;
 
-    let (intro_text, intro_subtext) = if tree == KeyTree::Resident {
+    let intro = if tree == KeyTree::Resident {
+        // The two layouts break the subtitle differently, to fit each screen.
         if sdk::ux::has_page_api() {
-            ("Verify Bitcoin\next. public key\n(resident)", "")
+            (
+                "Verify Bitcoin\next. public key\n(resident)".into(),
+                "".into(),
+            )
         } else {
-            ("Verify Bitcoin", "ext. pubkey (resident)")
+            ("Verify Bitcoin".into(), "ext. pubkey (resident)".into())
         }
-    } else if sdk::ux::has_page_api() {
-        ("Verify Bitcoin\nextended public key", "")
     } else {
-        ("Verify Bitcoin", "extended public key")
+        ux::intro("Verify Bitcoin", "extended public key")
     };
 
     let path_display =
@@ -103,29 +81,19 @@ async fn display_xpub(app: &mut sdk::App, tree: KeyTree, xpub: &str, path: &[u32
         },
     ];
 
-    let approved = app
-        .review_pairs(
-            intro_text,
-            intro_subtext,
-            &pairs,
-            "Verify public key",
-            "Confirm",
-            false,
-        )
-        .await;
-    app.show_info(
-        if approved {
-            Icon::Success
-        } else {
-            Icon::Failure
+    ux::review(
+        app,
+        ux::Review {
+            intro,
+            pairs: &pairs,
+            final_text: "Verify public key",
+            button_text: "Confirm",
+            long_press: false,
+            approved: Some("Public key verified"),
+            rejected: "Public key rejected",
         },
-        if approved {
-            "Public key verified"
-        } else {
-            "Public key rejected"
-        },
-    );
-    approved
+    )
+    .await
 }
 
 pub async fn handle_get_extended_pubkey(

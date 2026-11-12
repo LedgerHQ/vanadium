@@ -9,9 +9,25 @@ use common::{
 };
 use sdk::curve::{EcfpPrivateKey, EcfpPublicKey, Secp256k1, ToPublicKey};
 
-use crate::{bip32::KeyTree, constants::NUMS_COMPRESSED_PUBKEY, sp_keys};
+use crate::{bip32::KeyTree, constants::NUMS_COMPRESSED_PUBKEY, sp_keys, ux};
 
-const AUTO_APPROVE: bool = cfg!(any(test, feature = "autoapprove"));
+/// Shows `pairs`, the description of an account to register, for approval. Returns whether the user
+/// approved it.
+async fn review_registration(app: &mut sdk::App, pairs: &[sdk::ux::TagValue]) -> bool {
+    ux::review(
+        app,
+        ux::Review {
+            intro: ux::intro("Register Bitcoin", "account"),
+            pairs,
+            final_text: "Confirm registration",
+            button_text: "Register",
+            long_press: false,
+            approved: Some("Account registered"),
+            rejected: "Registration cancelled",
+        },
+    )
+    .await
+}
 
 async fn display_wallet_policy(
     app: &mut sdk::App,
@@ -20,10 +36,6 @@ async fn display_wallet_policy(
     key_auth_names: &[Option<String>],
     show_cleartext: bool,
 ) -> bool {
-    if AUTO_APPROVE {
-        return true;
-    }
-
     use alloc::{format, string::ToString, vec::Vec};
     use common::bip388::{ClearText, MAX_CONFUSION_SCORE};
     use sdk::ux::TagValue;
@@ -66,30 +78,7 @@ async fn display_wallet_policy(
         });
     }
 
-    let (intro_text, intro_subtext) = if sdk::ux::has_page_api() {
-        ("Register Bitcoin\naccount", "")
-    } else {
-        ("Register Bitcoin", "account")
-    };
-
-    let approved = app
-        .review_pairs(
-            intro_text,
-            intro_subtext,
-            &pairs,
-            "Confirm registration",
-            "Register",
-            false,
-        )
-        .await;
-
-    if approved {
-        app.show_info(sdk::ux::Icon::Success, "Account registered");
-    } else {
-        app.show_info(sdk::ux::Icon::Failure, "Registration cancelled");
-    }
-
-    approved
+    review_registration(app, &pairs).await
 }
 
 async fn display_silent_payment_account(
@@ -98,10 +87,6 @@ async fn display_silent_payment_account(
     account: &SilentPaymentAccount,
     address: &str,
 ) -> bool {
-    if AUTO_APPROVE {
-        return true;
-    }
-
     use alloc::{string::ToString, vec};
     use sdk::ux::TagValue;
 
@@ -124,30 +109,7 @@ async fn display_silent_payment_account(
         },
     ];
 
-    let (intro_text, intro_subtext) = if sdk::ux::has_page_api() {
-        ("Register Bitcoin\naccount", "")
-    } else {
-        ("Register Bitcoin", "account")
-    };
-
-    let approved = app
-        .review_pairs(
-            intro_text,
-            intro_subtext,
-            &pairs,
-            "Confirm registration",
-            "Register",
-            false,
-        )
-        .await;
-
-    if approved {
-        app.show_info(sdk::ux::Icon::Success, "Account registered");
-    } else {
-        app.show_info(sdk::ux::Icon::Failure, "Registration cancelled");
-    }
-
-    approved
+    review_registration(app, &pairs).await
 }
 
 /// Registers a silent payment account of the device. Its keys must be the device's keys for its

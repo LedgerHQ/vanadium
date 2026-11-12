@@ -11,13 +11,12 @@ use common::errors::Error;
 
 use sdk::ux::{Icon, TagValue};
 
-use crate::constants::{
-    COIN_TICKER, THRESHOLD_WARN_HIGH_FEES_AMOUNT, THRESHOLD_WARN_HIGH_FEES_PERCENT,
+use crate::{
+    constants::{COIN_TICKER, THRESHOLD_WARN_HIGH_FEES_AMOUNT, THRESHOLD_WARN_HIGH_FEES_PERCENT},
+    ux,
 };
 
 use super::analyze::{Review, ReviewedAccount};
-
-const AUTO_APPROVE: bool = cfg!(any(test, feature = "autoapprove"));
 
 /// A warning shown, and approved, before the transaction itself.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -68,87 +67,51 @@ fn high_fee_percent(review: &Review) -> Option<u64> {
 pub(super) async fn show_review(app: &mut sdk::App, plan: &ReviewPlan) -> bool {
     for warning in &plan.warnings {
         let approved = match warning {
-            Warning::UnverifiedInputs => display_warning_unverified_inputs(app).await,
-            Warning::HighFee { percent } => display_warning_high_fee(app, *percent).await,
+            Warning::UnverifiedInputs => {
+                ux::confirm(
+                    app,
+                    "Unverified inputs",
+                    "Some inputs could not be verified.\nReject if you're not sure.",
+                )
+                .await
+            }
+            Warning::HighFee { percent } => {
+                ux::confirm(
+                    app,
+                    "High fees",
+                    &format!("Transaction fee fraction is higher than {}%", percent),
+                )
+                .await
+            }
         };
         if !approved {
             return false;
         }
     }
-    if !display_transaction(app, &plan.pairs).await {
-        show_transaction_rejected(app);
-        return false;
-    }
-    true
-}
-
-async fn display_warning_high_fee(app: &mut sdk::App, fee_percent: u64) -> bool {
-    if AUTO_APPROVE {
-        return true;
-    }
-    app.show_confirm_reject(
-        "High fees",
-        &format!("Transaction fee fraction is higher than {}%", fee_percent),
-        "Continue",
-        "Reject",
-    )
-    .await
-}
-
-async fn display_warning_unverified_inputs(app: &mut sdk::App) -> bool {
-    if AUTO_APPROVE {
-        return true;
-    }
-    app.show_confirm_reject(
-        "Unverified inputs",
-        "Some inputs could not be verified.\nReject if you're not sure.",
-        "Continue",
-        "Reject",
-    )
-    .await
-}
-
-async fn display_transaction(app: &mut sdk::App, pairs: &[TagValue]) -> bool {
-    if AUTO_APPROVE {
-        return true;
-    }
-
-    // message on speculos or real device
 
     let button_text = if sdk::ux::has_page_api() {
         "Hold to sign"
     } else {
         "Confirm"
     };
-
-    let (intro_text, intro_subtext) = if sdk::ux::has_page_api() {
-        ("Review transaction\nto send Bitcoin", "")
-    } else {
-        ("Review transaction", "to send Bitcoin")
-    };
-    app.review_pairs(
-        intro_text,
-        intro_subtext,
-        pairs,
-        "Sign transaction",
-        button_text,
-        true,
+    // "Transaction signed" is only shown once the transaction is.
+    ux::review(
+        app,
+        ux::Review {
+            intro: ux::intro("Review transaction", "to send Bitcoin"),
+            pairs: &plan.pairs,
+            final_text: "Sign transaction",
+            button_text,
+            long_press: true,
+            approved: None,
+            rejected: "Transaction rejected",
+        },
     )
     .await
 }
 
-fn show_transaction_rejected(app: &mut sdk::App) {
-    if AUTO_APPROVE {
-        return;
-    }
-    app.show_info(Icon::Failure, "Transaction rejected");
-}
-
 pub(super) fn show_transaction_signed(app: &mut sdk::App) {
-    if AUTO_APPROVE {
-        return;
-    }
-    app.show_info(Icon::Success, "Transaction signed");
+    ux::info(app, Icon::Success, "Transaction signed");
 }
 
 const SATS_PER_BTC: u64 = 100_000_000;

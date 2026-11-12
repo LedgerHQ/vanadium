@@ -5,15 +5,11 @@ use common::{
     por::{ProofOfRegistration, Registerable},
 };
 
-const AUTO_APPROVE: bool = cfg!(any(test, feature = "autoapprove"));
+use crate::ux;
 
 async fn display_register_identity_key(app: &mut sdk::App, name: &str, pubkey_hex: &str) -> bool {
-    if AUTO_APPROVE {
-        return true;
-    }
-
     use alloc::vec::Vec;
-    use sdk::ux::{Icon, TagValue};
+    use sdk::ux::TagValue;
 
     let mut pairs = Vec::with_capacity(2);
 
@@ -26,29 +22,19 @@ async fn display_register_identity_key(app: &mut sdk::App, name: &str, pubkey_he
         value: pubkey_hex.into(),
     });
 
-    let (intro_text, intro_subtext) = if sdk::ux::has_page_api() {
-        ("Register\nidentity key", "")
-    } else {
-        ("Register", "identity key")
-    };
-    let approved = app
-        .review_pairs(
-            intro_text,
-            intro_subtext,
-            &pairs,
-            "Confirm registration",
-            "Register",
-            false,
-        )
-        .await;
-
-    if approved {
-        app.show_info(Icon::Success, "Identity key registered");
-    } else {
-        app.show_info(Icon::Failure, "Registration cancelled");
-    }
-
-    approved
+    ux::review(
+        app,
+        ux::Review {
+            intro: ux::intro("Register", "identity key"),
+            pairs: &pairs,
+            final_text: "Confirm registration",
+            button_text: "Register",
+            long_press: false,
+            approved: Some("Identity key registered"),
+            rejected: "Registration cancelled",
+        },
+    )
+    .await
 }
 
 pub async fn handle_register_identity_key(
