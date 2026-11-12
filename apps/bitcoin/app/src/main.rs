@@ -8,6 +8,7 @@ mod handlers;
 mod identity;
 mod resident_key;
 mod sp_keys;
+mod ux;
 
 use handlers::*;
 
