@@ -19,7 +19,6 @@ pub enum PsbtIdAuthError {
     MalformedEntry,
     InvalidNameLength,
     InvalidUtf8,
-    InvalidSignatureLength,
 }
 
 /// A registered identity key entry stored in the global PSBT section.

@@ -190,21 +190,15 @@ fn check_output_coordinates(
 }
 
 fn read_accounts(psbt: &fastpsbt::Psbt) -> Result<DeclaredAccounts, Error> {
-    let accounts = psbt
-        .get_accounts()
-        .map_err(|_| Error::FailedToGetAccounts)?;
+    let accounts = psbt.get_accounts()?;
 
     let mut names = Vec::with_capacity(accounts.len());
     let mut proofs = Vec::with_capacity(accounts.len());
     for account_id in 0..accounts.len() {
-        let name = psbt
-            .get_account_name(account_id as u32)
-            .map_err(|_| Error::FailedToGetAccounts)?;
+        let name = psbt.get_account_name(account_id as u32)?;
         names.push(name);
 
-        let por = psbt
-            .get_account_proof_of_registration(account_id as u32)
-            .map_err(|_| Error::FailedToGetAccounts)?;
+        let por = psbt.get_account_proof_of_registration(account_id as u32)?;
         let por = por.ok_or(Error::DefaultAccountsNotSupported)?;
         proofs.push(registration::parse_por(&por)?);
     }
@@ -220,9 +214,7 @@ fn read_accounts(psbt: &fastpsbt::Psbt) -> Result<DeclaredAccounts, Error> {
 /// one's proof of registration, and returns the compressed-pubkey → name lookup that
 /// output auth proofs resolve against.
 fn read_identity_keys(psbt: &fastpsbt::Psbt) -> Result<Vec<([u8; 33], String)>, Error> {
-    let registered_identity_keys = psbt
-        .get_registered_identity_keys()
-        .map_err(|_| Error::InvalidIdentitySignature)?;
+    let registered_identity_keys = psbt.get_registered_identity_keys()?;
 
     let mut identity_key_names: Vec<([u8; 33], String)> =
         Vec::with_capacity(registered_identity_keys.len());
@@ -467,10 +459,7 @@ fn analyze_output(
     // they can't apply to it.
     let destination = match output.sp_v0_info {
         Some(sp_v0_info) => {
-            let has_auth_proofs = !output
-                .get_auth_proofs()
-                .map_err(|_| Error::InvalidIdentitySignature)?
-                .is_empty();
+            let has_auth_proofs = !output.get_auth_proofs()?.is_empty();
             if has_auth_proofs {
                 return Err(Error::UnsupportedSilentPayment);
             }
@@ -489,9 +478,7 @@ fn analyze_output(
         None => {
             let auth_name = match &destination {
                 Destination::Script(script) => {
-                    let proofs = output
-                        .get_auth_proofs()
-                        .map_err(|_| Error::InvalidIdentitySignature)?;
+                    let proofs = output.get_auth_proofs()?;
                     verify_auth_proofs(script, proofs, identity_key_names)?
                 }
                 Destination::SilentPaymentCode(_) => None,
@@ -508,15 +495,14 @@ fn verify_auth_proofs(
     proofs: Vec<OutputAuthProof>,
     identity_key_names: &[([u8; 33], String)],
 ) -> Result<Option<String>, Error> {
-    let msg = build_identity_message(MSG_TYPE_OUTPUT, script.as_bytes())
-        .map_err(|_| Error::InvalidIdentitySignature)?;
+    let msg = build_identity_message(MSG_TYPE_OUTPUT, script.as_bytes())?;
     let mut first_auth_name: Option<String> = None;
     for proof in proofs {
         match proof {
             OutputAuthProof::IdentitySignature { pubkey, sig } => {
                 // Verify the Schnorr signature against the output scriptPubKey.
                 EcfpPublicKey::<sdk::curve::Secp256k1, 32>::from_compressed(&pubkey)
-                    .map_err(|_| Error::InvalidIdentitySignature)?
+                    .map_err(|_| Error::InvalidIdentityKey)?
                     .schnorr_verify(&msg, &sig)
                     .map_err(|_| Error::InvalidIdentitySignature)?;
                 // Look up the registered name for this pubkey
@@ -598,8 +584,7 @@ pub(super) fn analyze_transaction(psbt: &fastpsbt::Psbt) -> Result<Analysis, Err
         .iter()
         .map(|input| {
             input
-                .get_account_coordinates()
-                .map_err(|_| Error::FailedToGetAccounts)?
+                .get_account_coordinates()?
                 .ok_or(Error::ExternalInputsNotSupported)
         })
         .collect::<Result<Vec<_>, Error>>()?;
@@ -634,11 +619,7 @@ pub(super) fn analyze_transaction(psbt: &fastpsbt::Psbt) -> Result<Analysis, Err
     let output_coordinates: Vec<Option<(u32, PsbtAccountCoordinates)>> = psbt
         .outputs
         .iter()
-        .map(|output| {
-            output
-                .get_account_coordinates()
-                .map_err(|_| Error::FailedToGetAccounts)
-        })
+        .map(|output| Ok(output.get_account_coordinates()?))
         .collect::<Result<Vec<_>, Error>>()?;
 
     for (output_index, output) in psbt.outputs.iter().enumerate() {

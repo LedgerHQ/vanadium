@@ -41,7 +41,7 @@ pub fn registered_identity_key(
     name: &str,
     por: &[u8; 32],
 ) -> Result<IdentityKey, Error> {
-    let identity_key = IdentityKey::new(pubkey).map_err(|_| Error::InvalidIdentitySignature)?;
+    let identity_key = IdentityKey::new(pubkey).map_err(|_| Error::InvalidIdentityKey)?;
     check_registered(&identity_key, name, por)?;
     Ok(identity_key)
 }

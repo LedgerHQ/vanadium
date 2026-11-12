@@ -106,7 +106,7 @@ impl MusigSigningState {
             let _ = session_pop(&self.id)?;
             let rand_root: [u8; 32] = sdk::rand::random_bytes(32)
                 .try_into()
-                .map_err(|_| Error::StorageError)?;
+                .map_err(|_| Error::RandomGenerationFailed)?;
             self.round = Round::One(PsbtSession {
                 id: self.id,
                 rand_root,
