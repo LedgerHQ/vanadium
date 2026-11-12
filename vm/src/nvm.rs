@@ -1,4 +1,4 @@
-use ledger_device_sdk::nvm::{AlignedStorage, SingleStorage};
+use ledger_device_sdk::nvm::{AlignedStorage, NvmValue, SingleStorage};
 
 const STORAGE_VALID: u8 = 0xa5;
 
@@ -23,9 +23,11 @@ const STORAGE_VALID: u8 = 0xa5;
 /// use ledger_device_sdk::NVMData;
 /// use crate::nvm::LazyStorage;
 ///
+/// // `nvm_data!` only accepts the SDK's own storages, so the static is placed
+/// // in `.nvm_data` by hand.
 /// #[link_section=".nvm_data"]
 /// static mut DATA: NVMData<LazyStorage<[u8; 32]>> =
-///     NVMData::new(LazyStorage::new());
+///     unsafe { NVMData::new_unchecked(LazyStorage::new()) };
 ///
 /// // Later in code:
 /// let mut data = unsafe { DATA.get_mut() };
@@ -34,28 +36,22 @@ const STORAGE_VALID: u8 = 0xa5;
 /// }
 /// let value = data.get_ref();
 /// ```
+///
+/// `T` must be [`NvmValue`]: every bit pattern is a valid `T`, so the zeroed value of an
+/// uninitialized storage, and a value torn by an interrupted update, can be read back.
 #[derive(Copy, Clone)]
-pub struct LazyStorage<T> {
+pub struct LazyStorage<T: NvmValue> {
     flag: AlignedStorage<u8>,
     value: AlignedStorage<T>,
 }
 
-impl<T> LazyStorage<T> {
+impl<T: NvmValue> LazyStorage<T> {
     /// Create an uninitialized `LazyStorage<T>` with all-zero binary representation.
     ///
     /// This is a const fn that can be used in static initializers. The flag
     /// starts at 0 (uninitialized) and the value is zero-initialized.
-    ///
-    /// # Safety
-    ///
-    /// This function requires T to have a valid all-zero bit pattern representation.
-    /// Most primitive types and arrays satisfy this requirement.
-    pub const fn new() -> LazyStorage<T>
-    where
-        T: Copy,
-    {
-        // SAFETY: We rely on the fact that zeroed memory is a valid representation
-        // for T. This is true for most types but should be documented.
+    pub const fn new() -> LazyStorage<T> {
+        // SAFETY: every bit pattern, all zeroes included, is a valid `T: NvmValue`.
         unsafe {
             LazyStorage {
                 flag: AlignedStorage::new(0),
@@ -114,18 +110,11 @@ impl<T> LazyStorage<T> {
     /// 2. Value is zeroed
     ///
     /// After calling this method, `is_initialized()` will return false.
-    ///
-    /// # Safety
-    ///
-    /// This function requires T to have a valid all-zero bit pattern representation,
-    /// same as the `new()` constructor.
-    pub fn clear(&mut self)
-    where
-        T: Copy,
-    {
+    pub fn clear(&mut self) {
         // First invalidate the flag
         self.flag.update(&0);
         // Then zero the value
+        // SAFETY: every bit pattern, all zeroes included, is a valid `T: NvmValue`.
         unsafe {
             self.value.update(&core::mem::zeroed());
         }
