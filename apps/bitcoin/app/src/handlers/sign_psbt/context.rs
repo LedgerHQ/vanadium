@@ -14,6 +14,8 @@ use common::{
     message::{MuSig2PartialSignature, MuSig2Pubnonce, PartialSignature, WalletPolicyCoordinates},
 };
 
+use crate::handlers::musig_signing::MusigSigningState;
+
 use super::key_resolution::LocalKeys;
 use super::sighash::taptree_hash_for;
 
@@ -55,7 +57,8 @@ impl TaptreeHashes {
 }
 
 /// State shared by every input of one signing pass: the PSBT, the caches that all
-/// sighashes draw on, the local master fingerprints, and the accumulating output.
+/// sighashes draw on, the local master fingerprints, the MuSig2 session, and the
+/// accumulating output.
 ///
 /// Both signing paths take this by `&mut` and reach into individual fields, which lets
 /// them hold the prevouts and the sighash cache borrowed at the same time.
@@ -66,6 +69,8 @@ pub(super) struct SigningCtx<'a> {
     /// all share it.
     pub(super) prevouts: Option<Vec<TxOut>>,
     pub(super) local_keys: LocalKeys,
+    /// The MuSig2 session of the pass, which all its MuSig2 placeholders share.
+    pub(super) musig: MusigSigningState,
     pub(super) out: SignedInputs,
 }
 
@@ -81,8 +86,6 @@ pub(super) struct PlaceholderCtx<'a> {
     pub(super) kp: &'a KeyExpression,
     /// `Some` for a script-path placeholder, `None` for keypath / non-taproot.
     pub(super) tapleaf_desc: Option<&'a DescriptorTemplate>,
-    /// Binds MuSig2 session state to this (wallet policy, transaction) pair.
-    pub(super) session_id: [u8; 32],
     /// Backs [`Self::taptree_hash`].
     pub(super) taptree_hashes: &'a TaptreeHashes,
 }

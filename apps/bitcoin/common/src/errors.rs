@@ -121,6 +121,8 @@ pub enum Error {
     MissingMusigSession,
     #[n(47)]
     MissingMusigPubnonce,
+    #[n(61)]
+    MixedMusigRounds,
 
     // Silent payments
     #[n(48)]
@@ -231,6 +233,10 @@ impl fmt::Display for Error {
             MissingMusigPubnonce => write!(
                 f,
                 "MuSig2 round 2 requires this device's pubnonce in the PSBT but it is missing"
+            ),
+            MixedMusigRounds => write!(
+                f,
+                "The PSBT has the MuSig2 pubnonces of some inputs only: run a single round"
             ),
 
             UnsupportedSilentPayment => write!(f, "Unsupported silent payment"),

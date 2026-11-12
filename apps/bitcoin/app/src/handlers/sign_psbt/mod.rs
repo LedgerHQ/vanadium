@@ -24,8 +24,6 @@ mod tests;
 
 use common::{errors::Error, fastpsbt, message::Response};
 
-use crate::handlers::musig_signing::{self, MusigSigningState};
-
 pub async fn handle_sign_psbt(app: &mut sdk::App, psbt: &[u8]) -> Result<Response, Error> {
     app.show_spinner("Processing...");
 
@@ -73,18 +71,12 @@ pub async fn handle_sign_psbt(app: &mut sdk::App, psbt: &[u8]) -> Result<Respons
         Some(sp) => silent_payments::finalize(&mut psbt, &summary, sp, &taptree_hashes)?,
         None => silent_payments::Finalized::default(),
     };
-    let mut musig_state = MusigSigningState::default();
-    let signed = signing::sign_all_inputs(
-        &psbt,
-        &summary,
-        local_keys,
-        &taptree_hashes,
-        &mut musig_state,
-    )?;
+    let (signed, musig_session) =
+        signing::sign_all_inputs(&psbt, &summary, local_keys, &taptree_hashes)?;
 
     // Persist the round-1 session, if any, only after the signing pass has
     // completed successfully — partial failures must leave no stale session.
-    musig_signing::commit(&musig_state)?;
+    musig_session.commit()?;
 
     display::show_transaction_signed(app);
 

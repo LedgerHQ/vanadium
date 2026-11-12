@@ -14,7 +14,7 @@ use bitcoin::{
 use common::{
     bip388::{KeyInformation, KeyOrigin, WalletPolicy},
     errors::Error,
-    message::Response,
+    message::{MuSig2PartialSignature, MuSig2Pubnonce, Response},
     musig as musig_lib,
     por::{ProofOfRegistration, Registerable},
     script::ToScript,
@@ -25,7 +25,7 @@ use sdk::curve::{Curve, EcfpPrivateKey, EcfpPublicKey, ToPublicKey};
 use crate::handlers::musig_signing;
 
 use super::super::handle_sign_psbt;
-use super::super::test_utils::{device_xpub, prepare_as_psbtv2, DEVICE_PATH};
+use super::super::test_utils::{device_xpub_at, prepare_as_psbtv2, DEVICE_PATH};
 
 /// A PSBT for `tr(musig(@0,@1)/**)` whose participant xpubs the device
 /// doesn't control. The musig branch should fire (no longer silently
@@ -149,13 +149,18 @@ fn cosigner_xpub(secp: &Secp256k1<bitcoin::secp256k1::All>) -> Xpub {
 /// cosigner xpub. The exact origin path doesn't matter as long as the
 /// device can re-derive it locally.
 pub(super) fn make_2of2_keypath_policy() -> WalletPolicy {
+    make_2of2_keypath_policy_at(&DEVICE_PATH)
+}
+
+/// Like [`make_2of2_keypath_policy`], with the device's key at `path`.
+fn make_2of2_keypath_policy_at(path: &[u32]) -> WalletPolicy {
     let secp = Secp256k1::new();
     let standard_fpr = sdk::curve::Secp256k1::get_master_fingerprint();
     let key_info_0 = KeyInformation {
-        pubkey: device_xpub(),
+        pubkey: device_xpub_at(path),
         origin_info: Some(KeyOrigin {
             fingerprint: standard_fpr,
-            derivation_path: DEVICE_PATH.iter().map(|&n| ChildNumber::from(n)).collect(),
+            derivation_path: path.iter().map(|&n| ChildNumber::from(n)).collect(),
         }),
     };
     let key_info_1 = KeyInformation {
@@ -170,21 +175,28 @@ pub(super) fn make_2of2_keypath_policy() -> WalletPolicy {
 /// witness UTXO scriptPubKey is derived via the wallet policy itself so
 /// `analyze_transaction` accepts the PSBT.
 pub(super) fn build_musig_keypath_psbt(wallet_policy: &WalletPolicy, address_index: u32) -> Psbt {
+    build_musig_keypath_psbt_spending(&[(wallet_policy, address_index)])
+}
+
+/// Like [`build_musig_keypath_psbt`], with one input for each `(wallet policy, address index)`
+/// of `spends`, in order.
+fn build_musig_keypath_psbt_spending(spends: &[(&WalletPolicy, u32)]) -> Psbt {
     let secp = Secp256k1::new();
-    let expected_script = wallet_policy.to_script(false, address_index).unwrap();
 
     let unsigned_tx = Transaction {
         version: transaction::Version::TWO,
         lock_time: absolute::LockTime::ZERO,
-        input: vec![TxIn {
-            previous_output: OutPoint {
-                txid: Txid::from_byte_array([0x42; 32]),
-                vout: 0,
-            },
-            script_sig: bitcoin::ScriptBuf::new(),
-            sequence: Sequence::ENABLE_RBF_NO_LOCKTIME,
-            witness: bitcoin::Witness::new(),
-        }],
+        input: (0..spends.len())
+            .map(|vout| TxIn {
+                previous_output: OutPoint {
+                    txid: Txid::from_byte_array([0x42; 32]),
+                    vout: vout as u32,
+                },
+                script_sig: bitcoin::ScriptBuf::new(),
+                sequence: Sequence::ENABLE_RBF_NO_LOCKTIME,
+                witness: bitcoin::Witness::new(),
+            })
+            .collect(),
         output: vec![bitcoin::TxOut {
             value: Amount::from_sat(50_000),
             script_pubkey: bitcoin::ScriptBuf::from_bytes(
@@ -193,34 +205,36 @@ pub(super) fn build_musig_keypath_psbt(wallet_policy: &WalletPolicy, address_ind
         }],
     };
     let mut psbt = Psbt::from_unsigned_tx(unsigned_tx).unwrap();
-    psbt.inputs[0].witness_utxo = Some(bitcoin::TxOut {
-        value: Amount::from_sat(60_000),
-        script_pubkey: expected_script,
-    });
+    for (input, (wallet_policy, address_index)) in psbt.inputs.iter_mut().zip(spends) {
+        input.witness_utxo = Some(bitcoin::TxOut {
+            value: Amount::from_sat(60_000),
+            script_pubkey: wallet_policy.to_script(false, *address_index).unwrap(),
+        });
 
-    // Inject the BIP-373 tap_bip32_derivation entry for the BIP-32-tweaked
-    // aggregate, keyed by its xonly key and tagged with the aggregate
-    // xpub's BIP-32 fingerprint.
-    let participant_xpubs: Vec<Xpub> = wallet_policy
-        .key_information()
-        .iter()
-        .map(|ki| ki.pubkey)
-        .collect();
-    let agg_xpub = musig_lib::aggregate_xpub(&participant_xpubs).unwrap();
-    let path = vec![
-        ChildNumber::Normal { index: 0 },
-        ChildNumber::Normal {
-            index: address_index,
-        },
-    ];
-    let agg_child = agg_xpub
-        .derive_pub(&secp, &path.iter().copied().collect::<DerivationPath>())
-        .unwrap();
-    let agg_xonly: [u8; 32] = agg_child.public_key.x_only_public_key().0.serialize();
-    psbt.inputs[0].tap_key_origins.insert(
-        bitcoin::secp256k1::XOnlyPublicKey::from_slice(&agg_xonly).unwrap(),
-        (vec![], (agg_xpub.fingerprint(), DerivationPath::from(path))),
-    );
+        // Inject the BIP-373 tap_bip32_derivation entry for the BIP-32-tweaked
+        // aggregate, keyed by its xonly key and tagged with the aggregate
+        // xpub's BIP-32 fingerprint.
+        let participant_xpubs: Vec<Xpub> = wallet_policy
+            .key_information()
+            .iter()
+            .map(|ki| ki.pubkey)
+            .collect();
+        let agg_xpub = musig_lib::aggregate_xpub(&participant_xpubs).unwrap();
+        let path = vec![
+            ChildNumber::Normal { index: 0 },
+            ChildNumber::Normal {
+                index: *address_index,
+            },
+        ];
+        let agg_child = agg_xpub
+            .derive_pub(&secp, &path.iter().copied().collect::<DerivationPath>())
+            .unwrap();
+        let agg_xonly: [u8; 32] = agg_child.public_key.x_only_public_key().0.serialize();
+        input.tap_key_origins.insert(
+            bitcoin::secp256k1::XOnlyPublicKey::from_slice(&agg_xonly).unwrap(),
+            (vec![], (agg_xpub.fingerprint(), DerivationPath::from(path))),
+        );
+    }
 
     psbt
 }
@@ -234,10 +248,21 @@ fn insert_pubnonce(
     agg_pk: &[u8; 33],
     pubnonce: &[u8; 66],
 ) {
+    insert_pubnonce_at(psbt, 0, participant_pk, agg_pk, pubnonce)
+}
+
+/// Like [`insert_pubnonce`], into input `input_index`.
+fn insert_pubnonce_at(
+    psbt: &mut Psbt,
+    input_index: usize,
+    participant_pk: &[u8; 33],
+    agg_pk: &[u8; 33],
+    pubnonce: &[u8; 66],
+) {
     let mut keydata = Vec::with_capacity(66);
     keydata.extend_from_slice(participant_pk);
     keydata.extend_from_slice(agg_pk);
-    psbt.inputs[0].unknown.insert(
+    psbt.inputs[input_index].unknown.insert(
         bitcoin::psbt::raw::Key {
             type_value: 0x1B,
             key: keydata,
@@ -499,4 +524,204 @@ fn test_handle_sign_psbt_musig_round2_missing_cosigner_pubnonce_errors() {
         &prepare_as_psbtv2(&psbt, &accounts),
     ));
     assert_eq!(result, Err(Error::MissingMusigPubnonce));
+}
+
+/// Another path of a device key, for a second MuSig2 account in the same PSBT.
+const OTHER_DEVICE_PATH: [u32; 4] = [0x80000030, 0x80000001, 0x80000001, 0x80000002];
+
+/// Runs `handle_sign_psbt` on `psbt` with `accounts`, and returns the MuSig2 pubnonces and
+/// partial signatures of the response.
+fn sign_musig(
+    psbt: &Psbt,
+    accounts: &[(&WalletPolicy, &str, &[u8; 32])],
+) -> Result<(Vec<MuSig2Pubnonce>, Vec<MuSig2PartialSignature>), Error> {
+    match sdk::executor::block_on(handle_sign_psbt(
+        &mut sdk::App::singleton(),
+        &prepare_as_psbtv2(psbt, accounts),
+    ))? {
+        Response::PsbtSigned {
+            signatures,
+            musig_pubnonces,
+            musig_partial_sigs,
+            ..
+        } => {
+            assert!(
+                signatures.is_empty(),
+                "no plain placeholders ⇒ no signatures"
+            );
+            Ok((musig_pubnonces, musig_partial_sigs))
+        }
+        _ => panic!("Expected PsbtSigned"),
+    }
+}
+
+/// Completes, with the hot cosigner whose round-1 randomness is `cosigner_rand`, the key-path
+/// MuSig2 signature of `sighash` for an input of `wallet_policy` at `address_index`, and checks
+/// that it verifies under the input's aggregate key.
+fn cosign_and_verify(
+    wallet_policy: &WalletPolicy,
+    address_index: u32,
+    sighash: &[u8; 32],
+    device_pubnonce: &MuSig2Pubnonce,
+    device_psig: &MuSig2PartialSignature,
+    cosigner_rand: &[u8; 32],
+) {
+    let placeholder = wallet_policy
+        .descriptor_template()
+        .placeholders()
+        .next()
+        .unwrap()
+        .0
+        .clone();
+    let info = musig_signing::compute_per_input_info(
+        wallet_policy.key_information(),
+        &placeholder,
+        false,
+        address_index,
+        musig_signing::SpendPath::Keypath { taptree_hash: None },
+    )
+    .unwrap();
+    let agg_xonly: [u8; 32] = info.agg_key_tweaked[1..].try_into().unwrap();
+    let (_, cosigner_secnonce, cosigner_pubnonce, cosigner_sk) =
+        cosigner_master_round1(&agg_xonly, cosigner_rand);
+    let aggnonce = musig_lib::nonce_agg(&[
+        musig_lib::PubNonce(device_pubnonce.pubnonce),
+        cosigner_pubnonce,
+    ])
+    .unwrap();
+    let sctx = musig_lib::SessionContext {
+        aggnonce: &aggnonce,
+        pubkeys: &info.keys,
+        tweaks: &info.tweaks[..info.n_tweaks],
+        is_xonly: &info.is_xonly[..info.n_tweaks],
+        msg: sighash,
+    };
+    let cosigner_psig = musig_lib::sign(cosigner_secnonce, &cosigner_sk, &sctx).unwrap();
+    let final_sig =
+        musig_lib::partial_sig_agg(&sctx, &[device_psig.signature, cosigner_psig]).unwrap();
+
+    let mut verifier_pk = [0x02; 33];
+    verifier_pk[1..].copy_from_slice(&agg_xonly);
+    EcfpPublicKey::<sdk::curve::Secp256k1, 32>::from_compressed(&verifier_pk)
+        .unwrap()
+        .schnorr_verify(sighash, &final_sig)
+        .expect("aggregated MuSig2 Schnorr signature must verify");
+}
+
+/// Two MuSig2 accounts in the same PSBT, with interleaved inputs: one signing pass is one session,
+/// so every input's pubnonce comes from the same randomness, which round 2 finds again.
+#[test]
+fn test_handle_sign_psbt_musig_two_accounts_round_trip() {
+    musig_signing::reset_storage_for_tests();
+
+    let policy_a = make_2of2_keypath_policy();
+    let policy_b = make_2of2_keypath_policy_at(&OTHER_DEVICE_PATH);
+    let spends = [(&policy_a, 1), (&policy_b, 2), (&policy_a, 3)];
+    let mut psbt = build_musig_keypath_psbt_spending(&spends);
+    let por_a = ProofOfRegistration::new(&policy_a.registration_id("Musig A")).dangerous_as_bytes();
+    let por_b = ProofOfRegistration::new(&policy_b.registration_id("Musig B")).dangerous_as_bytes();
+    let accounts = [
+        (&policy_a, "Musig A", &por_a),
+        (&policy_b, "Musig B", &por_b),
+    ];
+
+    // ---- Round 1 ----
+    let (device_pubnonces, psigs) = sign_musig(&psbt, &accounts).unwrap();
+    assert!(psigs.is_empty());
+    let input_indices: Vec<u32> = device_pubnonces.iter().map(|p| p.input_index).collect();
+    assert_eq!(input_indices, [0, 1, 2]);
+
+    let cosigner_rand = |input_index: u32| [0xA0 + input_index as u8; 32];
+    for pubnonce in &device_pubnonces {
+        let input_index = pubnonce.input_index as usize;
+        let agg_pk = &pubnonce.aggregate_pubkey;
+        let agg_xonly: [u8; 32] = agg_pk[1..].try_into().unwrap();
+        let (cosigner_pk, _, cosigner_pubnonce, _) =
+            cosigner_master_round1(&agg_xonly, &cosigner_rand(pubnonce.input_index));
+        insert_pubnonce_at(
+            &mut psbt,
+            input_index,
+            &pubnonce.participant_pk,
+            agg_pk,
+            &pubnonce.pubnonce,
+        );
+        insert_pubnonce_at(
+            &mut psbt,
+            input_index,
+            &cosigner_pk,
+            agg_pk,
+            &cosigner_pubnonce.0,
+        );
+    }
+
+    // ---- Round 2 ----
+    let (pubnonces, device_psigs) = sign_musig(&psbt, &accounts).unwrap();
+    assert!(pubnonces.is_empty());
+    assert_eq!(device_psigs.len(), spends.len());
+
+    let prevouts: Vec<TxOut> = psbt
+        .inputs
+        .iter()
+        .map(|input| input.witness_utxo.clone().unwrap())
+        .collect();
+    let mut cache = SighashCache::new(&psbt.unsigned_tx);
+    for (input_index, (device_psig, (wallet_policy, address_index))) in
+        device_psigs.iter().zip(&spends).enumerate()
+    {
+        assert_eq!(device_psig.input_index as usize, input_index);
+        let sighash: [u8; 32] = cache
+            .taproot_key_spend_signature_hash(
+                input_index,
+                &Prevouts::All(&prevouts),
+                TapSighashType::Default,
+            )
+            .unwrap()
+            .to_byte_array();
+        cosign_and_verify(
+            wallet_policy,
+            *address_index,
+            &sighash,
+            &device_pubnonces[input_index],
+            device_psig,
+            &cosigner_rand(input_index as u32),
+        );
+    }
+}
+
+/// A signing pass runs a single round: a PSBT with the pubnonces of some inputs only, which would
+/// get partial signatures for some inputs and pubnonces for the others, is rejected.
+#[test]
+fn test_handle_sign_psbt_musig_mixed_rounds_errors() {
+    musig_signing::reset_storage_for_tests();
+
+    let wallet_policy = make_2of2_keypath_policy();
+    let mut psbt = build_musig_keypath_psbt_spending(&[(&wallet_policy, 1), (&wallet_policy, 2)]);
+    let por =
+        ProofOfRegistration::new(&wallet_policy.registration_id("Musig")).dangerous_as_bytes();
+    let accounts = [(&wallet_policy, "Musig", &por)];
+
+    let (device_pubnonces, _) = sign_musig(&psbt, &accounts).unwrap();
+    assert_eq!(device_pubnonces.len(), 2);
+
+    // Only the first input gets the pubnonces of round 1.
+    let pubnonce = &device_pubnonces[0];
+    let agg_xonly: [u8; 32] = pubnonce.aggregate_pubkey[1..].try_into().unwrap();
+    let (cosigner_pk, _, cosigner_pubnonce, _) = cosigner_master_round1(&agg_xonly, &[0xAB; 32]);
+    insert_pubnonce(
+        &mut psbt,
+        &pubnonce.participant_pk,
+        &pubnonce.aggregate_pubkey,
+        &pubnonce.pubnonce,
+    );
+    insert_pubnonce(
+        &mut psbt,
+        &cosigner_pk,
+        &pubnonce.aggregate_pubkey,
+        &cosigner_pubnonce.0,
+    );
+
+    assert_eq!(
+        sign_musig(&psbt, &accounts).err(),
+        Some(Error::MixedMusigRounds)
+    );
 }

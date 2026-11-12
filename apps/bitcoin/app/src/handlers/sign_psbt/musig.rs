@@ -8,17 +8,39 @@
 use alloc::vec::Vec;
 
 use bitcoin::hashes::Hash;
-use common::errors::Error;
+use common::{account::Account, errors::Error, psbt::PsbtAccount};
 use sdk::curve::{EcfpPrivateKey, ToPublicKey};
 
-use crate::handlers::musig_signing::{self, MusigSigningState, SpendPath};
+use crate::handlers::musig_signing::{self, SpendPath};
 
-use super::analyze::ensure_prevouts;
+use super::analyze::{ensure_prevouts, TransactionSummary};
 use super::context::{PlaceholderCtx, SigningCtx};
 use super::key_resolution::{resolve_private_key, KeySource};
 use super::sighash::{
     compute_taproot_sighash, is_taproot_policy, leaf_hash_for, taproot_sighash_type,
 };
+
+/// The MuSig2 session id of the signing pass of the transaction `unsigned_tx_id`: it binds the
+/// session to the transaction and to the ids of the accounts that have a `musig()` key.
+pub(super) fn session_id(summary: &TransactionSummary, unsigned_tx_id: &[u8; 32]) -> [u8; 32] {
+    let musig_account_ids: Vec<[u8; 32]> = summary
+        .accounts
+        .iter()
+        .zip(&summary.account_names)
+        .filter_map(|(account, name)| match account {
+            PsbtAccount::WalletPolicy(wallet_policy)
+                if wallet_policy
+                    .descriptor_template()
+                    .placeholders()
+                    .any(|(kp, _)| kp.is_musig()) =>
+            {
+                Some(wallet_policy.get_id(name.as_deref().unwrap_or("")))
+            }
+            _ => None,
+        })
+        .collect();
+    musig_signing::compute_psbt_session_id(unsigned_tx_id, &musig_account_ids)
+}
 
 /// Handles a single `musig(...)` placeholder for one PSBT input. Pushes either
 /// a round-1 pubnonce or a round-2 partial signature into `out`, *for each*
@@ -26,7 +48,6 @@ use super::sighash::{
 pub(super) fn handle_musig_placeholder(
     ctx: &mut SigningCtx<'_>,
     ph: &PlaceholderCtx<'_>,
-    musig_state: &mut MusigSigningState,
 ) -> Result<(), Error> {
     // musig() can only appear inside tr() per BIP-388; this rejects anything else. It
     // only inspects the descriptor's kind, so it is free — the tree root itself is
@@ -106,7 +127,7 @@ pub(super) fn handle_musig_placeholder(
 
         if !my_pubnonce_in_psbt {
             // Round 1: yield the device's pubnonce.
-            let session = musig_signing::round1_initialize(&ph.session_id, musig_state)?;
+            let session = ctx.musig.round1()?;
             let data = musig_signing::produce_pubnonce(
                 &info,
                 &internal_pk,
@@ -127,8 +148,7 @@ pub(super) fn handle_musig_placeholder(
                 leaf_hash,
                 taproot_sighash_type(ph.input)?,
             )?;
-            let session = musig_signing::round2_initialize(&ph.session_id, musig_state)?
-                .ok_or(Error::MissingMusigSession)?;
+            let session = ctx.musig.round2()?;
             let data = musig_signing::sign_sighash_musig(
                 &info,
                 &internal_pk,
