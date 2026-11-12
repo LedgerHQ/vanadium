@@ -49,6 +49,14 @@ pub fn parse_wallet_policy(
 }
 
 #[tokio::test]
+async fn test_get_version() {
+    let mut setup = setup().await;
+
+    let version = setup.client.get_version().await.unwrap();
+    assert_eq!(version, "0.1.0");
+}
+
+#[tokio::test]
 async fn test_get_fingerprint() {
     let mut setup = setup().await;
 

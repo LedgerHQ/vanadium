@@ -135,6 +135,22 @@ impl<'a> BitcoinClient {
         }
     }
 
+    /// The version of the app.
+    pub async fn get_version(&mut self) -> Result<String, BitcoinClientError> {
+        let msg = minicbor::to_vec(&Request::GetVersion).map_err(|_| {
+            BitcoinClientError::GenericError("Failed to serialize GetVersion request".to_string())
+        })?;
+
+        let response_raw = self.send_message(&msg).await?;
+        match Self::parse_response(&response_raw).await? {
+            Response::Version { version } => Ok(version),
+            e => Err(BitcoinClientError::InvalidResponse(format!(
+                "Invalid response: {:?}",
+                e
+            ))),
+        }
+    }
+
     pub async fn get_master_fingerprint(
         &mut self,
         tree: message::KeyTree,

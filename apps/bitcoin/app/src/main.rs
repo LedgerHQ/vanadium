@@ -23,7 +23,7 @@ async fn handle_request(
     request: &Request,
 ) -> Result<Response, common::errors::Error> {
     match request {
-        Request::GetVersion => todo!(),
+        Request::GetVersion => Ok(handle_get_version()),
         Request::Exit => sdk::exit(0),
         Request::GetMasterFingerprint { tree } => handle_get_master_fingerprint(app, *tree),
         Request::GetExtendedPubkey {

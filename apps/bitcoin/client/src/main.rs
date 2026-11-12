@@ -50,6 +50,7 @@ impl From<CliKeyTree> for common::message::KeyTree {
 #[derive(Subcommand, Debug)]
 #[clap(rename_all = "snake_case")]
 enum CliCommand {
+    GetVersion,
     GetFingerprint {
         #[clap(long, value_enum, default_value_t = CliKeyTree::Standard)]
         tree: CliKeyTree,
@@ -344,6 +345,9 @@ async fn handle_cli_command(
     cli: &Cli,
 ) -> Result<(), BitcoinClientError> {
     match &cli.command {
+        CliCommand::GetVersion => {
+            println!("{}", bitcoin_client.get_version().await?);
+        }
         CliCommand::GetFingerprint { tree } => {
             let fpr = bitcoin_client.get_master_fingerprint((*tree).into()).await?;
             println!("{:08x}", fpr);
