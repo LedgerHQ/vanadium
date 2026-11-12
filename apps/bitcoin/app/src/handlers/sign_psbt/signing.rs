@@ -5,7 +5,6 @@
 use alloc::vec::Vec;
 
 use bitcoin::{
-    bip32::ChildNumber,
     hashes::Hash,
     key::{Keypair, TapTweak},
     sighash::SighashCache,
@@ -39,11 +38,7 @@ fn sign_input_ecdsa(
 
     let hd_node = resolve_private_key(key_source)?;
     let privkey: EcfpPrivateKey<sdk::curve::Secp256k1, 32> = EcfpPrivateKey::new(*hd_node.privkey);
-    let pubkey = privkey.to_public_key();
-    let pubkey_uncompressed = pubkey.as_ref().to_bytes();
-    let mut pubkey_compressed = Vec::with_capacity(33);
-    pubkey_compressed.push(2 + pubkey_uncompressed[64] % 2);
-    pubkey_compressed.extend_from_slice(&pubkey_uncompressed[1..33]);
+    let pubkey_compressed = privkey.to_public_key().to_compressed().to_vec();
 
     let mut signature = privkey
         .ecdsa_sign_hash(sighash.as_ref())
@@ -284,21 +279,10 @@ pub(super) fn sign_all_inputs(
             }
 
             // ===== plain key path =====
-            let key_index = kp
-                .plain_key_index()
-                .expect("kp must be plain because not musig");
-            let key_info = &wallet_policy.key_information()[key_index as usize];
-            let change_step: ChildNumber = if !coords.is_change {
-                kp.num1.into()
-            } else {
-                kp.num2.into()
-            };
-            let address_index: ChildNumber = coords.address_index.into();
-            let Some(key_source) = ctx.local_keys.resolve(
-                key_info,
-                (account_id, key_index),
-                Some((change_step, address_index)),
-            ) else {
+            let Some(key_source) =
+                ctx.local_keys
+                    .resolve_plain(account_id, wallet_policy, kp, coords)
+            else {
                 continue;
             };
 

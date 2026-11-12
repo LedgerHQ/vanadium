@@ -4,11 +4,14 @@
 use alloc::vec::Vec;
 
 use bitcoin::bip32::ChildNumber;
-use common::{bip388::KeyInformation, errors::Error};
-use sdk::curve::{Curve, EcfpPrivateKey, HDPrivNode, ToPublicKey};
+use common::{
+    bip388::{KeyExpression, KeyInformation, WalletPolicy},
+    errors::Error,
+    message::WalletPolicyCoordinates,
+};
+use sdk::curve::{EcfpPrivateKey, HDPrivNode, ToPublicKey};
 
-use crate::bip32::KeyTree;
-use crate::resident_key::{derive_resident_hd_node, get_resident_master_fingerprint};
+use crate::bip32::{self, KeyTree};
 
 /// Identifies how the signing private key should be obtained: a key tree and a
 /// full BIP-32 derivation path relative to that tree's master.
@@ -17,24 +20,12 @@ pub(super) struct KeySource {
     pub(super) path: Vec<ChildNumber>,
 }
 
-fn derive_hd_node(
-    tree: KeyTree,
-    path: &[u32],
-) -> Result<HDPrivNode<sdk::curve::Secp256k1, 32>, Error> {
-    match tree {
-        KeyTree::Standard => {
-            sdk::curve::Secp256k1::derive_hd_node(path).map_err(|_| Error::KeyDerivationFailed)
-        }
-        KeyTree::Resident => derive_resident_hd_node(path),
-    }
-}
-
 /// Resolves a `KeySource` into an `HDPrivNode` containing the final private key.
 pub(super) fn resolve_private_key(
     key_source: &KeySource,
 ) -> Result<HDPrivNode<sdk::curve::Secp256k1, 32>, Error> {
     let path: Vec<u32> = key_source.path.iter().map(|&x| x.into()).collect();
-    derive_hd_node(key_source.tree, &path)
+    bip32::derive_hd_node(key_source.tree, &path)
 }
 
 /// The device's two key trees, and which wallet-policy keys have been found to live in
@@ -53,10 +44,31 @@ pub(super) struct LocalKeys {
 impl LocalKeys {
     pub(super) fn new() -> Result<Self, Error> {
         Ok(Self {
-            standard_fpr: sdk::curve::Secp256k1::get_master_fingerprint(),
-            resident_fpr: get_resident_master_fingerprint()?,
+            standard_fpr: bip32::master_fingerprint(KeyTree::Standard)?,
+            resident_fpr: bip32::master_fingerprint(KeyTree::Resident)?,
             seen: Vec::new(),
         })
+    }
+
+    /// The [`KeySource`] of the plain key expression `kp` of the account `account_id`, whose
+    /// wallet policy is `wallet_policy`, at the coordinates `coords`: the key's full path, down to
+    /// the coordinates.
+    ///
+    /// Returns `None` if `kp` is a `musig()`, or for the cases of [`Self::resolve`].
+    pub(super) fn resolve_plain(
+        &mut self,
+        account_id: u32,
+        wallet_policy: &WalletPolicy,
+        kp: &KeyExpression,
+        coords: &WalletPolicyCoordinates,
+    ) -> Option<KeySource> {
+        let key_index = kp.plain_key_index()?;
+        let [change_step, address_index] = coords.child_steps(kp);
+        self.resolve(
+            &wallet_policy.key_information()[key_index as usize],
+            (account_id, key_index),
+            Some((change_step.into(), address_index.into())),
+        )
     }
 
     /// Identifies whether `key_info` refers to a locally-controlled key (Standard
@@ -120,7 +132,7 @@ impl LocalKeys {
             .iter()
             .map(|&s| u32::from(s))
             .collect();
-        let claim_node = derive_hd_node(tree, &master_path_u32).ok()?;
+        let claim_node = bip32::derive_hd_node(tree, &master_path_u32).ok()?;
         let derived_pubkey = EcfpPrivateKey::<sdk::curve::Secp256k1, 32>::new(*claim_node.privkey)
             .to_public_key()
             .to_compressed();
@@ -140,6 +152,7 @@ mod tests {
 
     use bitcoin::bip32::ChainCode;
     use common::bip388::KeyOrigin;
+    use sdk::curve::Curve;
 
     use super::super::test_utils::{device_xpub, DEVICE_PATH};
 

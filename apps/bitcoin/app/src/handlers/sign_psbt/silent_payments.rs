@@ -135,16 +135,9 @@ pub(super) fn analyze(
                 let Some((kp, is_taproot)) = eligible_key(wallet_policy) else {
                     continue;
                 };
-                let key_index = kp
-                    .plain_key_index()
-                    .ok_or(Error::SilentPaymentInputNotHeld)?;
-                let change_step = if coords.is_change { kp.num2 } else { kp.num1 };
+                // a `musig()` key is never fully the device's
                 let key_source = local_keys
-                    .resolve(
-                        &wallet_policy.key_information()[key_index as usize],
-                        (account_id, key_index),
-                        Some((change_step.into(), coords.address_index.into())),
-                    )
+                    .resolve_plain(account_id, wallet_policy, kp, coords)
                     .ok_or(Error::SilentPaymentInputNotHeld)?;
                 InputKey::WalletPolicy {
                     key_source,
@@ -245,9 +238,14 @@ fn outpoints(psbt: &fastpsbt::Psbt) -> Result<Vec<OutPoint>, Error> {
     psbt.inputs
         .iter()
         .map(|input| {
+            let txid = input
+                .previous_txid
+                .ok_or(Error::FailedUnsignedTransaction)?;
             Ok(OutPoint {
-                txid: Txid::from_byte_array(*input.previous_txid.ok_or(Error::InvalidParameter)?),
-                vout: input.output_index.ok_or(Error::InvalidParameter)?,
+                txid: Txid::from_byte_array(*txid),
+                vout: input
+                    .output_index
+                    .ok_or(Error::MissingPreviousOutputIndex)?,
             })
         })
         .collect()
