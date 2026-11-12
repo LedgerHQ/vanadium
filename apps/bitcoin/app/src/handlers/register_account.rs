@@ -1,4 +1,4 @@
-use alloc::{string::String, vec::Vec};
+use alloc::{string::String, vec, vec::Vec};
 use common::{
     account::{Account, SilentPaymentAccount, SilentPaymentCoordinates},
     bip388,
@@ -230,15 +230,13 @@ pub async fn handle_register_account(
 
     // Verify Schnorr signatures over cosigner xpubs and resolve signer names per key.
     let n = wallet_policy.key_information().len();
-    let mut key_auth_names: Vec<Option<String>> = Vec::with_capacity(n);
-    for _ in 0..n {
-        key_auth_names.push(None);
-    }
+    let mut key_auth_names: Vec<Option<String>> = vec![None; n];
     if let Some(signatures) = key_signatures {
+        // `signatures[i]` is for key `i`: a list of another length was built for other keys
+        if signatures.len() != n {
+            return Err(Error::InvalidKeySignatureCount);
+        }
         for (i, sig_opt) in signatures.iter().enumerate() {
-            if i >= n {
-                break;
-            }
             if let Some(sig) = sig_opt {
                 let identity_pubkey: [u8; 33] = sig
                     .identity_pubkey
@@ -376,6 +374,32 @@ mod tests {
                 // can't really test the hmac here, so we duplicate the app's logic
                 hmac: ProofOfRegistration::new(&expected_account_id).dangerous_as_bytes(),
             })
+        );
+    }
+
+    /// There is one entry of `key_signatures` per key, signed or not.
+    #[test]
+    fn test_register_account_key_signatures_count() {
+        let account = make_account(
+            "wpkh(@0/**)",
+            &["[f5acc2fd/84'/1'/0']tpubDCtKfsNyRhULjZ9XMS4VKKtVcPdVDi8MKUbcSD9MJDyjRu1A2ND5MiipozyyspBT9bg8upEp7a8EAgFxNxXn1d7QkdbL52Ty5jiSLcxPt1P"],
+        );
+        let register = |key_signatures: &[Option<message::IdentitySignature>]| {
+            sdk::executor::block_on(handle_register_account(
+                &mut sdk::App::singleton(),
+                "My Test Account",
+                &account,
+                None,
+                Some(key_signatures),
+                false,
+            ))
+        };
+
+        assert!(register(&[None]).is_ok());
+        assert_eq!(register(&[]), Err(Error::InvalidKeySignatureCount));
+        assert_eq!(
+            register(&[None, None]),
+            Err(Error::InvalidKeySignatureCount)
         );
     }
 
