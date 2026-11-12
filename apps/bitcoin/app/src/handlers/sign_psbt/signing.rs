@@ -12,17 +12,13 @@ use bitcoin::{
     TapLeafHash, TapNodeHash, TapSighashType, Transaction, TxOut,
 };
 use common::{
-    account::{Account, SilentPaymentAccount},
-    bip388::SegwitVersion,
-    errors::Error,
-    fastpsbt,
-    message::PartialSignature,
-    silent_payments as sp,
+    account::SilentPaymentAccount, bip388::SegwitVersion, errors::Error, fastpsbt,
+    message::PartialSignature, silent_payments as sp,
 };
 use sdk::curve::{EcfpPrivateKey, Secp256k1Scalar, ToPublicKey};
 use zeroize::Zeroizing;
 
-use crate::handlers::musig_signing::{self, MusigSigningState};
+use crate::handlers::musig_signing::MusigSigningState;
 use crate::sp_keys;
 
 use super::analyze::{ensure_prevouts, InputAccount, TransactionSummary};
@@ -216,13 +212,15 @@ fn sign_plain_key_placeholder(
 ///
 /// `local_keys` and `taptree_hashes` carry what earlier stages already learned about the
 /// inputs' keys and tap trees.
+///
+/// Also returns the MuSig2 session of the pass, which the caller must commit once the
+/// whole signing pass succeeded.
 pub(super) fn sign_all_inputs(
     psbt: &fastpsbt::Psbt,
     summary: &TransactionSummary,
     local_keys: LocalKeys,
     taptree_hashes: &TaptreeHashes,
-    musig_state: &mut MusigSigningState,
-) -> Result<SignedInputs, Error> {
+) -> Result<(SignedInputs, MusigSigningState), Error> {
     let unsigned_tx = psbt
         .unsigned_tx()
         .map_err(|_| Error::FailedUnsignedTransaction)?;
@@ -233,6 +231,7 @@ pub(super) fn sign_all_inputs(
         sighash_cache: SighashCache::new(unsigned_tx),
         prevouts: None,
         local_keys,
+        musig: MusigSigningState::new(musig::session_id(summary, &unsigned_tx_id)),
         out: SignedInputs {
             signatures: Vec::with_capacity(psbt.inputs.len()),
             musig_pubnonces: Vec::new(),
@@ -262,14 +261,6 @@ pub(super) fn sign_all_inputs(
             }
         };
 
-        // (wallet, tx) → 32-byte session id, used to bind MuSig2 session
-        // state to a specific (wallet policy, transaction) pair.
-        let account_name = summary.account_names[account_id as usize]
-            .as_deref()
-            .unwrap_or("");
-        let wallet_id = wallet_policy.get_id(account_name);
-        let session_id = musig_signing::compute_psbt_session_id(&wallet_id, &unsigned_tx_id);
-
         for (placeholder_index, (kp, tapleaf_desc)) in wallet_policy
             .descriptor_template()
             .placeholders()
@@ -284,12 +275,11 @@ pub(super) fn sign_all_inputs(
                 coords,
                 kp,
                 tapleaf_desc,
-                session_id,
                 taptree_hashes,
             };
 
             if kp.is_musig() {
-                musig::handle_musig_placeholder(&mut ctx, &ph, musig_state)?;
+                musig::handle_musig_placeholder(&mut ctx, &ph)?;
                 continue;
             }
 
@@ -316,5 +306,5 @@ pub(super) fn sign_all_inputs(
         }
     }
 
-    Ok(ctx.out)
+    Ok((ctx.out, ctx.musig))
 }

@@ -6,13 +6,15 @@
 //! - Slot [`MUSIG_SESSION_ID_SLOT`] (= 1): 32-byte session id.
 //! - Slot [`MUSIG_SESSION_RAND_SLOT`] (= 2): 32-byte root randomness.
 //!
-//! Lifecycle (mirroring the C ref):
+//! One signing pass is one session, whose id binds it to the transaction and to the PSBT's
+//! MuSig2 accounts (see [`compute_psbt_session_id`]), and runs a single round for all of its
+//! MuSig2 placeholders. Lifecycle (mirroring the C ref):
 //! - Round 1 generates a fresh `rand_root` in volatile state. It is persisted
-//!   only by [`commit`], which the caller must invoke at the *end* of a
-//!   successful round-1 signing pass.
+//!   only by [`MusigSigningState::commit`], which the caller must invoke at the
+//!   *end* of a successful round-1 signing pass.
 //! - Round 2 retrieves and atomically deletes the persistent session via
-//!   [`round2_initialize`]. Subsequent calls within the same signing pass reuse
-//!   the volatile copy.
+//!   [`MusigSigningState::round2`]. Subsequent calls within the same signing pass
+//!   reuse the volatile copy.
 //!
 //! Capacity (1 concurrent session) is a deliberate constraint of the initial
 //! implementation; expanding to N sessions only requires a slot-pair scan and
@@ -47,19 +49,24 @@ pub struct PsbtSession {
     pub rand_root: [u8; 32],
 }
 
-impl PsbtSession {
-    /// A session is "initialized" once its id is non-zero. The all-zero id is
-    /// reserved to mean "no session"; an honest PSBT will never collide.
-    pub fn is_initialized(&self) -> bool {
-        self.id != [0u8; 32]
-    }
+/// Volatile state of one signing pass: its session id, and the round it runs. Mirrors the C
+/// `musig_signing_state_t`.
+#[derive(Debug)]
+pub struct MusigSigningState {
+    id: [u8; 32],
+    round: Round,
 }
 
-/// Volatile per-signing-call state. Mirrors the C `musig_signing_state_t`.
-#[derive(Debug, Default)]
-pub struct MusigSigningState {
-    pub round1: PsbtSession,
-    pub round2: PsbtSession,
+/// The round that a signing pass runs, which the first MuSig2 placeholder that the device holds a
+/// key of decides.
+#[derive(Debug)]
+enum Round {
+    Undecided,
+    /// Producing pubnonces, from a fresh `rand_root` that [`MusigSigningState::commit`] persists.
+    One(PsbtSession),
+    /// Producing partial signatures, with the session that round 1 persisted, which is already
+    /// deleted from storage.
+    Two(PsbtSession),
 }
 
 /// `SHA-256(rand_root || input_index_be || placeholder_index_be)`.
@@ -81,61 +88,70 @@ pub fn compute_rand_i_j(
     out
 }
 
-/// Initializes / returns the round-1 session for the given `id`.
-///
-/// If a persisted session with this id exists, it is deleted (we assume the
-/// client retried round 1, e.g. because the pubnonces returned earlier never
-/// reached the cosigners; we start fresh and discard the stale entry).
-///
-/// On first invocation for an id during this signing pass, generates a fresh
-/// `rand_root`. Subsequent invocations with the same id reuse the volatile
-/// state — this is what guarantees that all `(input, placeholder)` pairs in a
-/// single signing pass share one root randomness.
-pub fn round1_initialize<'a>(
-    id: &[u8; 32],
-    state: &'a mut MusigSigningState,
-) -> Result<&'a PsbtSession, Error> {
-    // Drop any stale persisted session with the same id.
-    let _ = session_pop(id)?;
-
-    if state.round1.id != *id {
-        let rand: [u8; 32] = sdk::rand::random_bytes(32)
-            .try_into()
-            .map_err(|_| Error::StorageError)?;
-        state.round1.id = *id;
-        state.round1.rand_root = rand;
-    }
-    Ok(&state.round1)
-}
-
-/// Retrieves the round-2 session for the given `id`, deleting it from
-/// persistent storage on first read.
-///
-/// Returns `Ok(None)` if no persisted session matches the id: the PSBT
-/// contains pubnonces but the device has no record of generating them.
-pub fn round2_initialize<'a>(
-    id: &[u8; 32],
-    state: &'a mut MusigSigningState,
-) -> Result<Option<&'a PsbtSession>, Error> {
-    if state.round2.id != *id {
-        match session_pop(id)? {
-            Some(s) => state.round2 = s,
-            None => return Ok(None),
+impl MusigSigningState {
+    /// The state of a signing pass whose session id is `id`.
+    pub fn new(id: [u8; 32]) -> Self {
+        Self {
+            id,
+            round: Round::Undecided,
         }
     }
-    Ok(Some(&state.round2))
-}
 
-/// Persists the round-1 session, if any, to permanent storage.
-///
-/// Must be called exactly once at the end of a successful round-1 signing pass.
-/// Must *not* be called if the pass aborted: the stale `rand_root` would be
-/// unrecoverable garbage for the (legitimate) client's eventual round 2.
-pub fn commit(state: &MusigSigningState) -> Result<(), Error> {
-    if state.round1.is_initialized() {
-        write_session_to_storage(&state.round1)?;
+    /// The round-1 session of this pass, for a placeholder whose pubnonce the device must produce.
+    ///
+    /// The first call generates a fresh `rand_root`; the following ones reuse it, which is what
+    /// guarantees that all `(input, placeholder)` pairs of a pass share one root randomness. It
+    /// deletes a persisted session with the same id, if any: we assume the client retried round 1,
+    /// e.g. because the pubnonces returned earlier never reached the cosigners.
+    ///
+    /// Fails with [`Error::MixedMusigRounds`] if this pass already runs round 2.
+    pub fn round1(&mut self) -> Result<&PsbtSession, Error> {
+        if let Round::Undecided = self.round {
+            let _ = session_pop(&self.id)?;
+            let rand_root: [u8; 32] = sdk::rand::random_bytes(32)
+                .try_into()
+                .map_err(|_| Error::StorageError)?;
+            self.round = Round::One(PsbtSession {
+                id: self.id,
+                rand_root,
+            });
+        }
+        match &self.round {
+            Round::One(session) => Ok(session),
+            _ => Err(Error::MixedMusigRounds),
+        }
     }
-    Ok(())
+
+    /// The round-2 session of this pass, for a placeholder whose pubnonce is in the PSBT.
+    ///
+    /// The first call reads the persisted session and deletes it from storage, so that it is
+    /// never used twice; the following ones reuse the volatile copy.
+    ///
+    /// Fails with [`Error::MissingMusigSession`] if no persisted session has this pass's id: the
+    /// PSBT contains pubnonces but the device has no record of generating them. Fails with
+    /// [`Error::MixedMusigRounds`] if this pass already runs round 1.
+    pub fn round2(&mut self) -> Result<&PsbtSession, Error> {
+        if let Round::Undecided = self.round {
+            let session = session_pop(&self.id)?.ok_or(Error::MissingMusigSession)?;
+            self.round = Round::Two(session);
+        }
+        match &self.round {
+            Round::Two(session) => Ok(session),
+            _ => Err(Error::MixedMusigRounds),
+        }
+    }
+
+    /// Persists the round-1 session, if this pass ran round 1.
+    ///
+    /// Must be called exactly once at the end of a successful signing pass.
+    /// Must *not* be called if the pass aborted: the stale `rand_root` would be
+    /// unrecoverable garbage for the (legitimate) client's eventual round 2.
+    pub fn commit(&self) -> Result<(), Error> {
+        if let Round::One(session) = &self.round {
+            write_session_to_storage(session)?;
+        }
+        Ok(())
+    }
 }
 
 // =============================================================================
@@ -297,24 +313,31 @@ pub struct PerInputInfo {
 // Round 1 / round 2 outputs are emitted directly as wire types from
 // [`common::message`] — no conversion needed at the handler boundary.
 
-// BIP-388 PSBT-session-id tagged hash. Binding the session to both the wallet
-// policy and the transaction ensures distinct PSBTs / wallets never collide on
-// the persistent session slot — accidental collisions would force a Round 2
-// failure, but never key compromise (mirrors the C ref's invariant).
+// PSBT-session-id tagged hash. Binding the session to both the transaction and
+// its MuSig2 accounts ensures distinct PSBTs never collide on the persistent
+// session slot — accidental collisions would force a Round 2 failure, but never
+// key compromise (mirrors the C ref's invariant).
 sha256t_hash_newtype! {
     pub struct PsbtSessionIdTag = hash_str("PsbtSessionId");
     pub struct PsbtSessionIdHash(_);
 }
 
-/// `tagged_hash("PsbtSessionId", wallet_id || tx_id)`.
+/// `tagged_hash("PsbtSessionId", tx_id || account_ids[0] || account_ids[1] || ...)`.
 ///
-/// `wallet_id` is the wallet policy's account id (the BIP-388 hash of the
-/// canonical wallet policy serialization, including its name). `tx_id` is the
-/// unsigned transaction's txid, which uniquely identifies the PSBT contents.
-pub fn compute_psbt_session_id(wallet_id: &[u8; 32], tx_id: &[u8; 32]) -> [u8; 32] {
+/// `tx_id` is the unsigned transaction's txid, which uniquely identifies the
+/// PSBT contents. `account_ids` are the account ids (the hash of the account's
+/// serialization, including its name) of the PSBT's accounts that have a
+/// MuSig2 key, in account order.
+///
+/// The session is per PSBT rather than per account: the device stores a single
+/// session, and every `(input, placeholder)` pair of the PSBT is distinct, so
+/// one `rand_root` serves them all.
+pub fn compute_psbt_session_id(tx_id: &[u8; 32], account_ids: &[[u8; 32]]) -> [u8; 32] {
     let mut e = PsbtSessionIdHash::engine();
-    e.input(wallet_id);
     e.input(tx_id);
+    for account_id in account_ids {
+        e.input(account_id);
+    }
     PsbtSessionIdHash::from_engine(e).to_byte_array()
 }
 
@@ -567,31 +590,29 @@ mod tests {
     }
 
     /// Round 1 produces a fresh rand_root and caches it for subsequent calls
-    /// with the same id during the same signing pass.
+    /// during the same signing pass.
     #[test]
-    fn round1_initialize_caches_rand_root() {
+    fn round1_caches_rand_root() {
         storage::reset();
-        let mut state = MusigSigningState::default();
+        let mut state = MusigSigningState::new(ID_A);
 
-        let s1 = round1_initialize(&ID_A, &mut state).unwrap();
-        let rand1 = s1.rand_root;
+        let rand1 = state.round1().unwrap().rand_root;
         assert_ne!(rand1, [0u8; 32], "rand_root must be initialized");
 
-        // Second call with the same id keeps the same rand_root.
-        let s2 = round1_initialize(&ID_A, &mut state).unwrap();
-        assert_eq!(s2.rand_root, rand1);
+        // A second call keeps the same rand_root.
+        assert_eq!(state.round1().unwrap().rand_root, rand1);
 
-        // A different id triggers fresh randomness.
-        let s3 = round1_initialize(&ID_B, &mut state).unwrap();
-        assert_ne!(s3.rand_root, rand1);
+        // Another pass gets fresh randomness.
+        let mut state2 = MusigSigningState::new(ID_A);
+        assert_ne!(state2.round1().unwrap().rand_root, rand1);
     }
 
     /// Until `commit`, nothing is persisted.
     #[test]
     fn round1_does_not_persist_before_commit() {
         storage::reset();
-        let mut state = MusigSigningState::default();
-        let _ = round1_initialize(&ID_A, &mut state).unwrap();
+        let mut state = MusigSigningState::new(ID_A);
+        let _ = state.round1().unwrap();
 
         assert!(storage::is_slot_empty(MUSIG_SESSION_ID_SLOT).unwrap());
         assert!(storage::is_slot_empty(MUSIG_SESSION_RAND_SLOT).unwrap());
@@ -602,38 +623,42 @@ mod tests {
     #[test]
     fn round1_commit_then_round2_pop() {
         storage::reset();
-        let mut state = MusigSigningState::default();
-        let rand_root_at_commit = {
-            let s = round1_initialize(&ID_A, &mut state).unwrap();
-            s.rand_root
-        };
-        commit(&state).unwrap();
+        let mut state = MusigSigningState::new(ID_A);
+        let rand_root_at_commit = state.round1().unwrap().rand_root;
+        state.commit().unwrap();
 
         // Round 2 in a fresh signing pass.
-        let mut state2 = MusigSigningState::default();
-        let s = round2_initialize(&ID_A, &mut state2).unwrap().unwrap();
-        assert_eq!(s.rand_root, rand_root_at_commit);
+        let mut state2 = MusigSigningState::new(ID_A);
+        assert_eq!(state2.round2().unwrap().rand_root, rand_root_at_commit);
 
         // The persistent slots are now zero.
         assert!(storage::is_slot_empty(MUSIG_SESSION_ID_SLOT).unwrap());
         assert!(storage::is_slot_empty(MUSIG_SESSION_RAND_SLOT).unwrap());
 
         // A second round 2 in another fresh state finds nothing.
-        let mut state3 = MusigSigningState::default();
-        assert!(round2_initialize(&ID_A, &mut state3).unwrap().is_none());
+        let mut state3 = MusigSigningState::new(ID_A);
+        assert_eq!(state3.round2().err(), Some(Error::MissingMusigSession));
     }
 
-    /// Round 2 on a never-persisted id returns `None`.
+    /// Round 2 on a never-persisted id fails.
     #[test]
-    fn round2_missing_session_returns_none() {
+    fn round2_missing_session_fails() {
         storage::reset();
-        let mut state = MusigSigningState::default();
-        assert!(round2_initialize(&ID_A, &mut state).unwrap().is_none());
+        write_session_to_storage(&PsbtSession {
+            id: ID_B,
+            rand_root: [0x99u8; 32],
+        })
+        .unwrap();
+
+        let mut state = MusigSigningState::new(ID_A);
+        assert_eq!(state.round2().err(), Some(Error::MissingMusigSession));
+        // The session of another id is left alone.
+        assert!(!storage::is_slot_empty(MUSIG_SESSION_ID_SLOT).unwrap());
     }
 
-    /// Within the same signing pass, repeated round 2 lookups for the same id
-    /// reuse the volatile cached session even though the persistent slot was
-    /// already cleared.
+    /// Within the same signing pass, repeated round 2 lookups reuse the
+    /// volatile cached session even though the persistent slot was already
+    /// cleared.
     #[test]
     fn round2_caches_after_first_pop() {
         storage::reset();
@@ -644,21 +669,20 @@ mod tests {
         })
         .unwrap();
 
-        let mut state = MusigSigningState::default();
-        let r1 = round2_initialize(&ID_A, &mut state).unwrap().unwrap().rand_root;
+        let mut state = MusigSigningState::new(ID_A);
+        let r1 = state.round2().unwrap().rand_root;
         assert_eq!(r1, [0x99u8; 32]);
         // Persistent slots are now empty.
         assert!(storage::is_slot_empty(MUSIG_SESSION_ID_SLOT).unwrap());
 
-        // Second call with the same id still works via the volatile cache.
-        let r2 = round2_initialize(&ID_A, &mut state).unwrap().unwrap().rand_root;
-        assert_eq!(r1, r2);
+        // A second call still works via the volatile cache.
+        assert_eq!(state.round2().unwrap().rand_root, r1);
     }
 
-    /// `round1_initialize` deletes a stale persisted session with the same id
-    /// (per the C ref's "client retried round 1" handling).
+    /// `round1` deletes a stale persisted session with the same id (per the C
+    /// ref's "client retried round 1" handling).
     #[test]
-    fn round1_initialize_drops_stale_persistent() {
+    fn round1_drops_stale_persistent() {
         storage::reset();
         write_session_to_storage(&PsbtSession {
             id: ID_A,
@@ -666,21 +690,48 @@ mod tests {
         })
         .unwrap();
 
-        let mut state = MusigSigningState::default();
-        let s = round1_initialize(&ID_A, &mut state).unwrap();
+        let mut state = MusigSigningState::new(ID_A);
         // The fresh rand_root differs from the stale one.
-        assert_ne!(s.rand_root, [0x55u8; 32]);
+        assert_ne!(state.round1().unwrap().rand_root, [0x55u8; 32]);
         // And the persistent storage has been wiped.
         assert!(storage::is_slot_empty(MUSIG_SESSION_ID_SLOT).unwrap());
     }
 
-    /// `commit` is a no-op when no round-1 session was created (e.g. the
-    /// signing pass involved no musig placeholders).
+    /// A signing pass runs one round: once it has run one, it refuses the other.
     #[test]
-    fn commit_noop_on_empty_state() {
+    fn a_pass_runs_a_single_round() {
         storage::reset();
-        let state = MusigSigningState::default();
-        commit(&state).unwrap();
+        let mut state = MusigSigningState::new(ID_A);
+        let _ = state.round1().unwrap();
+        assert_eq!(state.round2().err(), Some(Error::MixedMusigRounds));
+
+        write_session_to_storage(&PsbtSession {
+            id: ID_A,
+            rand_root: [0x99u8; 32],
+        })
+        .unwrap();
+        let mut state = MusigSigningState::new(ID_A);
+        let _ = state.round2().unwrap();
+        assert_eq!(state.round1().err(), Some(Error::MixedMusigRounds));
+    }
+
+    /// `commit` is a no-op when no round-1 session was created: the signing
+    /// pass involved no musig placeholders, or ran round 2.
+    #[test]
+    fn commit_noop_without_round1() {
+        storage::reset();
+        let state = MusigSigningState::new(ID_A);
+        state.commit().unwrap();
+        assert!(storage::is_slot_empty(MUSIG_SESSION_ID_SLOT).unwrap());
+
+        write_session_to_storage(&PsbtSession {
+            id: ID_A,
+            rand_root: [0x99u8; 32],
+        })
+        .unwrap();
+        let mut state = MusigSigningState::new(ID_A);
+        let _ = state.round2().unwrap();
+        state.commit().unwrap();
         assert!(storage::is_slot_empty(MUSIG_SESSION_ID_SLOT).unwrap());
     }
 
@@ -699,19 +750,26 @@ mod tests {
     #[test]
     fn compute_psbt_session_id_is_deterministic_and_distinct() {
         let w1: [u8; 32] = [0x11; 32];
-        let t1: [u8; 32] = [0x22; 32];
-        let id_a = compute_psbt_session_id(&w1, &t1);
-        let id_b = compute_psbt_session_id(&w1, &t1);
-        assert_eq!(id_a, id_b);
-
-        // Changing either input changes the output.
         let w2: [u8; 32] = [0x33; 32];
-        let id_c = compute_psbt_session_id(&w2, &t1);
-        assert_ne!(id_a, id_c);
+        let t1: [u8; 32] = [0x22; 32];
+        let id_a = compute_psbt_session_id(&t1, &[w1]);
+        assert_eq!(id_a, compute_psbt_session_id(&t1, &[w1]));
 
+        // Changing the transaction, or the accounts, changes the output.
         let t2: [u8; 32] = [0x44; 32];
-        let id_d = compute_psbt_session_id(&w1, &t2);
-        assert_ne!(id_a, id_d);
+        let others = [
+            compute_psbt_session_id(&t2, &[w1]),
+            compute_psbt_session_id(&t1, &[w2]),
+            compute_psbt_session_id(&t1, &[w1, w2]),
+            compute_psbt_session_id(&t1, &[w2, w1]),
+            compute_psbt_session_id(&t1, &[]),
+        ];
+        for (i, other) in others.iter().enumerate() {
+            assert_ne!(id_a, *other);
+            for other2 in &others[i + 1..] {
+                assert_ne!(other, other2);
+            }
+        }
     }
 
     fn make_musig_keypath_policy() -> WalletPolicy {

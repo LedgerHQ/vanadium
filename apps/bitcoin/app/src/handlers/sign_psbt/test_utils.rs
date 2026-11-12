@@ -82,15 +82,20 @@ pub(super) const DEVICE_PATH: [u32; 4] = [0x80000030, 0x80000001, 0x80000000, 0x
 /// Builds the device's xpub at [`DEVICE_PATH`] by re-deriving from the host-side SDK's
 /// master.
 pub(super) fn device_xpub() -> Xpub {
-    let node = sdk::curve::Secp256k1::derive_hd_node(&DEVICE_PATH).unwrap();
+    device_xpub_at(&DEVICE_PATH)
+}
+
+/// Builds the device's xpub at `path` by re-deriving from the host-side SDK's master.
+pub(super) fn device_xpub_at(path: &[u32]) -> Xpub {
+    let node = sdk::curve::Secp256k1::derive_hd_node(path).unwrap();
     let compressed = EcfpPrivateKey::<sdk::curve::Secp256k1, 32>::new(*node.privkey)
         .to_public_key()
         .to_compressed();
     Xpub {
         network: bitcoin::NetworkKind::Test,
-        depth: 4,
+        depth: path.len() as u8,
         parent_fingerprint: bitcoin::bip32::Fingerprint::default(),
-        child_number: ChildNumber::Hardened { index: 2 },
+        child_number: ChildNumber::from(*path.last().unwrap()),
         public_key: bitcoin::secp256k1::PublicKey::from_slice(&compressed).unwrap(),
         chain_code: ChainCode::from(node.chaincode),
     }
