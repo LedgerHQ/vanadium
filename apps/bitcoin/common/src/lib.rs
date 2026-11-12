@@ -10,6 +10,7 @@ pub mod identity;
 pub mod key_expression;
 pub mod message;
 pub mod musig;
+pub mod network;
 pub mod por;
 pub mod psbt;
 pub mod script;

@@ -11,9 +11,8 @@ use sdk::curve::{Secp256k1, Secp256k1Point, Secp256k1Scalar};
 use super::{decode_spscan, encode_spscan, labeled_spend_key, SilentPaymentCode};
 use crate::account::{Account, AccountCoordinates, Destination};
 use crate::errors::Error;
+use crate::network::SPSCAN_HRP;
 
-/// The human-readable part of the BIP-392 keys of the accounts, for the test networks.
-const SPSCAN_HRP: &str = "tspscan";
 
 /// A silent payment account: the BIP-352 account `account_index` of a wallet, with its scan
 /// private key `b_scan` and its spend public key `B_spend`.

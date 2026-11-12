@@ -12,9 +12,10 @@ pub use crate::bip388::{
     DescriptorTemplate, KeyExpression, KeyExpressionType, KeyInformation, TapTree, WalletPolicy,
 };
 use crate::por::{Registerable, RegistrationId};
-use bitcoin::{params::Params, Address, ScriptBuf};
+use bitcoin::{Address, ScriptBuf};
 
 use crate::errors::Error;
+use crate::network;
 use crate::script::ToScript;
 use crate::silent_payments::SilentPaymentCode;
 pub use crate::silent_payments::{SilentPaymentAccount, SilentPaymentCoordinates};
@@ -58,11 +59,11 @@ impl Destination {
     /// a silent payment code.
     pub fn address(&self) -> Result<String, Error> {
         match self {
-            Destination::Script(script) => Address::from_script(script, Params::TESTNET4)
+            Destination::Script(script) => Address::from_script(script, network::ADDRESS_PARAMS)
                 .map(|address| address.to_string())
                 .map_err(|_| Error::AddressFromScriptFailed),
             Destination::SilentPaymentCode(code) => code
-                .to_address("tsp")
+                .to_address(network::SP_HRP)
                 .map_err(|_| Error::InvalidSilentPayment),
         }
     }

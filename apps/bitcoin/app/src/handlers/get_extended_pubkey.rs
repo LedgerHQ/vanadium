@@ -2,13 +2,10 @@ use alloc::{format, vec::Vec};
 
 use bitcoin::hex::DisplayHex;
 
-use common::{errors::Error, identity, message::Response};
+use common::{errors::Error, identity, message::Response, network};
 use sdk::curve::{EcfpPrivateKey, Secp256k1, ToPublicKey};
 
-use crate::{
-    bip32::KeyTree, constants::BIP32_TESTNET_PUBKEY_VERSION, identity::compute_identity_signature,
-    ux,
-};
+use crate::{bip32::KeyTree, identity::compute_identity_signature, ux};
 
 async fn display_identity_key(app: &mut sdk::App, value: &str, index: Option<u32>) -> bool {
     use alloc::vec;
@@ -124,7 +121,7 @@ pub async fn handle_get_extended_pubkey(
     let child_number: u32 = bip32_path.0.last().copied().unwrap_or(0);
 
     let mut xpub = Vec::with_capacity(78);
-    xpub.extend_from_slice(&BIP32_TESTNET_PUBKEY_VERSION.to_be_bytes());
+    xpub.extend_from_slice(&network::BIP32_PUBKEY_VERSION.to_be_bytes());
     xpub.push(depth);
     xpub.extend_from_slice(&parent_fpr.to_be_bytes());
     xpub.extend_from_slice(&child_number.to_be_bytes());

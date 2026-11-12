@@ -1,10 +1,7 @@
 use crate::bip32::KeyTree;
 use common::message::Response;
 
-pub fn handle_get_master_fingerprint(
-    _app: &mut sdk::App,
-    tree: KeyTree,
-) -> Result<Response, common::errors::Error> {
+pub fn handle_get_master_fingerprint(tree: KeyTree) -> Result<Response, common::errors::Error> {
     let fpr = crate::bip32::master_fingerprint(tree)?;
     Ok(Response::MasterFingerprint { fingerprint: fpr })
 }
@@ -15,8 +12,7 @@ mod tests {
 
     #[test]
     fn test_handle_get_master_fingerprint_standard() {
-        let response =
-            handle_get_master_fingerprint(&mut sdk::App::singleton(), KeyTree::Standard).unwrap();
+        let response = handle_get_master_fingerprint(KeyTree::Standard).unwrap();
         assert_eq!(
             response,
             Response::MasterFingerprint {
@@ -27,8 +23,7 @@ mod tests {
 
     #[test]
     fn test_handle_get_master_fingerprint_resident() {
-        let response =
-            handle_get_master_fingerprint(&mut sdk::App::singleton(), KeyTree::Resident).unwrap();
+        let response = handle_get_master_fingerprint(KeyTree::Resident).unwrap();
         assert_eq!(
             response,
             Response::MasterFingerprint {
