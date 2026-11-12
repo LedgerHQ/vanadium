@@ -6,6 +6,7 @@ mod bip32;
 mod constants;
 mod handlers;
 mod identity;
+mod registration;
 mod resident_key;
 mod sp_keys;
 mod ux;

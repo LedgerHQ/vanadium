@@ -12,13 +12,12 @@
 use alloc::{string::String, vec::Vec};
 
 use common::{
-    account::{Account, Destination},
+    account::Destination,
     bip388::{SegwitVersion, WalletPolicy},
     errors::Error,
     fastpsbt,
-    identity::{build_identity_message, IdentityKey, MSG_TYPE_OUTPUT},
+    identity::{build_identity_message, MSG_TYPE_OUTPUT},
     message::WalletPolicyCoordinates,
-    por::{ProofOfRegistration, Registerable},
     psbt::{
         OutputAuthProof, PsbtAccount, PsbtAccountCoordinates, PsbtAccountGlobalRead,
         PsbtAccountInputRead, PsbtAccountOutputRead, PsbtIdAuthGlobalRead, PsbtOutputAuthRead,
@@ -28,6 +27,8 @@ use common::{
 
 use bitcoin::{hashes::Hash, Amount, Script, ScriptBuf, TxOut};
 use sdk::curve::EcfpPublicKey;
+
+use crate::registration;
 
 /// A check, verified in the background task, that an input or an output belongs to the account
 /// it claims: the account's destination at its coordinates must be the input's or output's.
@@ -163,13 +164,11 @@ struct DeclaredAccounts {
 
 /// Whether `por` is the proof of registration of `account` with the name `name`.
 fn is_registered(account: &PsbtAccount, name: &str, por: &[u8; 32]) -> bool {
-    fn check<T: Account>(account: &T, name: &str, por: &[u8; 32]) -> bool {
-        ProofOfRegistration::<T>::from_bytes(*por)
-            == ProofOfRegistration::new(&account.registration_id(name))
-    }
     match account {
-        PsbtAccount::WalletPolicy(wallet_policy) => check(wallet_policy, name, por),
-        PsbtAccount::SilentPayment(account) => check(account, name, por),
+        PsbtAccount::WalletPolicy(wallet_policy) => {
+            registration::is_registered(wallet_policy, name, por)
+        }
+        PsbtAccount::SilentPayment(account) => registration::is_registered(account, name, por),
     }
 }
 
@@ -207,10 +206,7 @@ fn read_accounts(psbt: &fastpsbt::Psbt) -> Result<DeclaredAccounts, Error> {
             .get_account_proof_of_registration(account_id as u32)
             .map_err(|_| Error::FailedToGetAccounts)?;
         let por = por.ok_or(Error::DefaultAccountsNotSupported)?;
-        proofs.push(
-            por.try_into()
-                .map_err(|_| Error::InvalidProofOfRegistrationLength)?,
-        );
+        proofs.push(registration::parse_por(&por)?);
     }
 
     Ok(DeclaredAccounts {
@@ -231,12 +227,7 @@ fn read_identity_keys(psbt: &fastpsbt::Psbt) -> Result<Vec<([u8; 33], String)>, 
     let mut identity_key_names: Vec<([u8; 33], String)> =
         Vec::with_capacity(registered_identity_keys.len());
     for rik in &registered_identity_keys {
-        let ik = IdentityKey::new(rik.pubkey).map_err(|_| Error::InvalidIdentitySignature)?;
-        let expected_por = ProofOfRegistration::<IdentityKey>::new(&ik.registration_id(&rik.name));
-        let actual_por = ProofOfRegistration::<IdentityKey>::from_bytes(rik.por);
-        if actual_por != expected_por {
-            return Err(Error::InvalidProofOfRegistration);
-        }
+        registration::registered_identity_key(rik.pubkey, &rik.name, &rik.por)?;
         identity_key_names.push((rik.pubkey, rik.name.clone()));
     }
 
