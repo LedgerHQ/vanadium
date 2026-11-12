@@ -7,13 +7,13 @@ use alloc::{
     vec::Vec,
 };
 
-use common::{errors::Error, fastpsbt};
+use common::errors::Error;
 
 use sdk::ux::{Icon, TagValue};
 
 use crate::constants::COIN_TICKER;
 
-use super::analyze::TransactionSummary;
+use super::analyze::{Review, ReviewedAccount};
 
 const AUTO_APPROVE: bool = cfg!(any(test, feature = "autoapprove"));
 
@@ -95,71 +95,58 @@ fn format_amount(value: u64, ticker: &str) -> String {
     format!("{}.{:08} {}", whole_part, fractional_part, ticker)
 }
 
+/// The description of an account on the review screen.
+fn account_description(account: &ReviewedAccount) -> String {
+    match &account.name {
+        Some(name) => format!("account: {}", name),
+        None => "default account".to_string(),
+    }
+}
+
 /// Build the `TagValue` pairs shown to the user during transaction review.
 ///
-/// An external output shows the address of its destination: an output to a silent payment code
-/// shows the address of the code, as its script, if the PSBT has one, is only checked against the
-/// code after the review.
-pub(super) fn build_display_pairs(
-    psbt: &fastpsbt::Psbt,
-    summary: &TransactionSummary,
-) -> Result<Vec<TagValue>, Error> {
-    let fee = summary.fee();
-    let n_accounts = summary.accounts.len();
-    let n_external = summary.external_outputs.len();
+/// An account that no input or output uses isn't shown. An external output shows the address of
+/// its destination: an output to a silent payment code shows the address of the code, as its
+/// script, if the PSBT has one, is only checked against the code after the review.
+pub(super) fn build_display_pairs(review: &Review) -> Result<Vec<TagValue>, Error> {
+    let n_accounts = review.accounts.len();
+    let n_external = review.external_outputs.len();
 
     let mut pairs: Vec<TagValue> = Vec::with_capacity(n_accounts * 2 + n_external * 2 + 1);
 
+    let used_accounts = || review.accounts.iter().filter(|account| account.is_used);
+
     // Accounts we're spending from (they get back at most what they spend)
-    for (account_id, amounts) in summary.account_amounts.iter().enumerate() {
-        let account_description = match &summary.account_names[account_id] {
-            Some(name) => format!("account: {}", name),
-            None => "default account".to_string(),
-        };
-        if amounts.spent >= amounts.received {
-            let spent_amount = amounts.spent - amounts.received;
-            pairs.push(TagValue {
-                tag: "Spend from".into(),
-                value: account_description,
-            });
-            if spent_amount > 0 {
-                pairs.push(TagValue {
-                    tag: "Amount".into(),
-                    value: format_amount(spent_amount, COIN_TICKER),
-                });
+    for account in used_accounts().filter(|account| account.spent >= account.received) {
+        pairs.push(TagValue {
+            tag: "Spend from".into(),
+            value: account_description(account),
+        });
+        let spent_amount = account.spent - account.received;
+        pairs.push(TagValue {
+            tag: "Amount".into(),
+            value: if spent_amount > 0 {
+                format_amount(spent_amount, COIN_TICKER)
             } else {
-                pairs.push(TagValue {
-                    tag: "Amount".into(),
-                    value: "0 (self-transfer)".to_string(),
-                });
-            }
-        }
+                "0 (self-transfer)".to_string()
+            },
+        });
     }
 
     // Accounts we're receiving to (they get back more than they spend)
-    for (account_id, amounts) in summary.account_amounts.iter().enumerate() {
-        let account_description = match &summary.account_names[account_id] {
-            Some(name) => format!("account: {}", name),
-            None => "default account".to_string(),
-        };
-        if amounts.received > amounts.spent {
-            pairs.push(TagValue {
-                tag: "Send to".into(),
-                value: account_description,
-            });
-            pairs.push(TagValue {
-                tag: "Amount".into(),
-                value: format_amount(amounts.received - amounts.spent, COIN_TICKER),
-            });
-        }
+    for account in used_accounts().filter(|account| account.received > account.spent) {
+        pairs.push(TagValue {
+            tag: "Send to".into(),
+            value: account_description(account),
+        });
+        pairs.push(TagValue {
+            tag: "Amount".into(),
+            value: format_amount(account.received - account.spent, COIN_TICKER),
+        });
     }
 
     // External outputs (show address, prefixed with identity key name if auth proof present)
-    for external in &summary.external_outputs {
-        let output_index = external.output_index;
-        let amount = psbt.outputs[output_index]
-            .amount
-            .ok_or(Error::OutputAmountMissing)?;
+    for external in &review.external_outputs {
         let address = external.destination.address()?;
 
         let address_value = if let Some(ref name) = external.auth_name {
@@ -170,23 +157,23 @@ pub(super) fn build_display_pairs(
                 format!("{}:{}", name, address)
             }
         } else {
-            format!("{}", address)
+            address
         };
 
         pairs.push(TagValue {
-            tag: format!("Output {}", output_index),
+            tag: format!("Output {}", external.output_index),
             value: address_value,
         });
         pairs.push(TagValue {
             tag: "Amount".into(),
-            value: format_amount(amount, COIN_TICKER),
+            value: format_amount(external.amount, COIN_TICKER),
         });
     }
 
     // Fee
     pairs.push(TagValue {
         tag: "Fee".to_string(),
-        value: format_amount(fee, COIN_TICKER),
+        value: format_amount(review.fee(), COIN_TICKER),
     });
 
     Ok(pairs)
@@ -196,8 +183,17 @@ pub(super) fn build_display_pairs(
 mod tests {
     use super::*;
 
+    use common::{fastpsbt, psbt::PsbtV2};
+
     use super::super::analyze::analyze_transaction;
     use super::super::test_utils::legacy_pkh_psbt;
+
+    /// The review of `psbt`, serialized the way the handler receives it.
+    fn review(psbt: &PsbtV2) -> Review {
+        let serialized = psbt.serialize();
+        let parsed = fastpsbt::Psbt::parse(&serialized).unwrap();
+        analyze_transaction(&parsed).unwrap().review
+    }
 
     #[test]
     fn format_amount_pads_the_fractional_part() {
@@ -212,13 +208,11 @@ mod tests {
     /// included. It used to be rendered as a raw satoshi count under the same ticker.
     #[test]
     fn fee_is_shown_in_whole_coins() {
-        let serialized = legacy_pkh_psbt().serialize();
-        let parsed = fastpsbt::Psbt::parse(&serialized).unwrap();
-        let (summary, _) = analyze_transaction(&parsed).unwrap();
+        let review = review(&legacy_pkh_psbt());
 
-        assert_eq!(summary.fee(), 200);
+        assert_eq!(review.fee(), 200);
 
-        let pairs = build_display_pairs(&parsed, &summary).unwrap();
+        let pairs = build_display_pairs(&review).unwrap();
         let fee = pairs.iter().find(|p| p.tag == "Fee").expect("no Fee pair");
         assert_eq!(fee.value, "0.00000200 TEST");
     }
@@ -227,16 +221,43 @@ mod tests {
     /// screen reads consistently top to bottom.
     #[test]
     fn spend_and_output_amounts_are_shown_in_whole_coins() {
-        let serialized = legacy_pkh_psbt().serialize();
-        let parsed = fastpsbt::Psbt::parse(&serialized).unwrap();
-        let (summary, _) = analyze_transaction(&parsed).unwrap();
-
-        let pairs = build_display_pairs(&parsed, &summary).unwrap();
+        let pairs = build_display_pairs(&review(&legacy_pkh_psbt())).unwrap();
         let tags: Vec<&str> = pairs.iter().map(|p| p.tag.as_str()).collect();
         assert_eq!(tags, ["Spend from", "Amount", "Output 0", "Amount", "Fee"]);
 
         assert_eq!(pairs[0].value, "account: My legacy account #0");
         assert_eq!(pairs[1].value, "0.01000000 TEST"); // 1_000_000 sat in
         assert_eq!(pairs[3].value, "0.00999800 TEST"); // 999_800 sat out
+    }
+
+    /// An account that the PSBT declares, but that no input or output uses, is not shown: it
+    /// used to be shown as a self-transfer.
+    #[test]
+    fn unused_accounts_are_not_shown() {
+        use common::{
+            bip388::WalletPolicy,
+            por::{ProofOfRegistration, Registerable},
+            psbt::{PsbtAccount, PsbtAccountGlobalWrite},
+        };
+
+        let mut psbt = legacy_pkh_psbt();
+        let unused = WalletPolicy::new(
+            "wpkh(@0/**)",
+            vec!["[f5acc2fd/84'/1'/0']tpubDCtKfsNyRhULjZ9XMS4VKKtVcPdVDi8MKUbcSD9MJDyjRu1A2ND5MiipozyyspBT9bg8upEp7a8EAgFxNxXn1d7QkdbL52Ty5jiSLcxPt1P".try_into().unwrap()],
+        )
+        .unwrap();
+        let por = ProofOfRegistration::new(&unused.registration_id("Unused")).dangerous_as_bytes();
+        psbt.set_account(1, PsbtAccount::from(&unused)).unwrap();
+        psbt.set_account_name(1, "Unused").unwrap();
+        psbt.set_account_proof_of_registration(1, &por).unwrap();
+
+        let review = review(&psbt);
+        assert_eq!(review.accounts.len(), 2);
+        assert!(!review.accounts[1].is_used);
+
+        let pairs = build_display_pairs(&review).unwrap();
+        let tags: Vec<&str> = pairs.iter().map(|p| p.tag.as_str()).collect();
+        assert_eq!(tags, ["Spend from", "Amount", "Output 0", "Amount", "Fee"]);
+        assert_eq!(pairs[0].value, "account: My legacy account #0");
     }
 }

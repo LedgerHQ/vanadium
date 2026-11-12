@@ -14,7 +14,7 @@ pub(super) mod session;
 
 use session::SpendPath;
 
-use super::analyze::{ensure_prevouts, TransactionSummary};
+use super::analyze::{ensure_prevouts, Accounts};
 use super::context::{PlaceholderCtx, SigningCtx};
 use super::key_resolution::{resolve_private_key, KeySource};
 use super::sighash::{
@@ -23,19 +23,19 @@ use super::sighash::{
 
 /// The MuSig2 session id of the signing pass of the transaction `unsigned_tx_id`: it binds the
 /// session to the transaction and to the ids of the accounts that have a `musig()` key.
-pub(super) fn session_id(summary: &TransactionSummary, unsigned_tx_id: &[u8; 32]) -> [u8; 32] {
-    let musig_account_ids: Vec<[u8; 32]> = summary
+pub(super) fn session_id(accounts: &Accounts, unsigned_tx_id: &[u8; 32]) -> [u8; 32] {
+    let musig_account_ids: Vec<[u8; 32]> = accounts
         .accounts
         .iter()
-        .zip(&summary.account_names)
-        .filter_map(|(account, name)| match account {
+        .enumerate()
+        .filter_map(|(account_id, account)| match account {
             PsbtAccount::WalletPolicy(wallet_policy)
                 if wallet_policy
                     .descriptor_template()
                     .placeholders()
                     .any(|(kp, _)| kp.is_musig()) =>
             {
-                Some(wallet_policy.get_id(name.as_deref().unwrap_or("")))
+                Some(wallet_policy.get_id(accounts.name(account_id)))
             }
             _ => None,
         })

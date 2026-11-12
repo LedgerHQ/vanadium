@@ -20,7 +20,7 @@ use zeroize::Zeroizing;
 use super::musig::session::MusigSigningState;
 use crate::sp_keys;
 
-use super::analyze::{ensure_prevouts, InputAccount, TransactionSummary};
+use super::analyze::{ensure_prevouts, Accounts, InputAccount};
 use super::context::{PlaceholderCtx, SignedInputs, SigningCtx, TaptreeHashes};
 use super::key_resolution::{resolve_private_key, KeySource, LocalKeys};
 use super::musig;
@@ -205,7 +205,7 @@ fn sign_plain_key_placeholder(
 /// whole signing pass succeeded.
 pub(super) fn sign_all_inputs(
     psbt: &fastpsbt::Psbt,
-    summary: &TransactionSummary,
+    accounts: &Accounts,
     local_keys: LocalKeys,
     taptree_hashes: &TaptreeHashes,
 ) -> Result<(SignedInputs, MusigSigningState), Error> {
@@ -219,7 +219,7 @@ pub(super) fn sign_all_inputs(
         sighash_cache: SighashCache::new(unsigned_tx),
         prevouts: None,
         local_keys,
-        musig: MusigSigningState::new(musig::session_id(summary, &unsigned_tx_id)),
+        musig: MusigSigningState::new(musig::session_id(accounts, &unsigned_tx_id)),
         out: SignedInputs {
             signatures: Vec::with_capacity(psbt.inputs.len()),
             musig_pubnonces: Vec::new(),
@@ -229,7 +229,7 @@ pub(super) fn sign_all_inputs(
 
     for (input_index, input) in psbt.inputs.iter().enumerate() {
         let (account_id, wallet_policy, coords, segwit_version) =
-            match summary.input_account(input_index) {
+            match accounts.input_account(input_index) {
                 InputAccount::WalletPolicy {
                     account_id,
                     wallet_policy,

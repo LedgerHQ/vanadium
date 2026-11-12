@@ -642,14 +642,14 @@ fn test_pay_to_silent_payment_codes() {
     // the review shows the addresses of the codes
     let raw = fx.psbt.serialize();
     let parsed = fastpsbt::Psbt::parse(&raw).unwrap();
-    let (summary, _) = analyze_transaction(&parsed).unwrap();
-    let external: Vec<usize> = summary
+    let review = analyze_transaction(&parsed).unwrap().review;
+    let external: Vec<usize> = review
         .external_outputs
         .iter()
         .map(|output| output.output_index)
         .collect();
     assert_eq!(external, [0, 1, 2, 3]);
-    let pairs = build_display_pairs(&parsed, &summary).unwrap();
+    let pairs = build_display_pairs(&review).unwrap();
     let output_0 = pairs.iter().find(|p| p.tag == "Output 0").unwrap();
     assert_eq!(output_0.value, code(11, 12).to_address("tsp").unwrap());
     assert!(output_0.value.starts_with("tsp1q"));
@@ -933,8 +933,8 @@ fn test_spend_from_silent_payment_account() {
     // the review shows what each account spends
     let raw = fx.psbt.serialize();
     let parsed = fastpsbt::Psbt::parse(&raw).unwrap();
-    let (summary, _) = analyze_transaction(&parsed).unwrap();
-    assert_eq!(summary.net_spent_amounts(), [10_000, 80_000]);
+    let review = analyze_transaction(&parsed).unwrap().review;
+    assert_eq!(review.net_spent_amounts(), [10_000, 80_000]);
 
     let checked = check(&fx, sign(&fx.psbt).unwrap());
     assert_eq!(checked.signatures.len(), 3);
@@ -1012,10 +1012,10 @@ fn test_silent_payment_change() {
     // the review shows the payment, and the change in what the account spends
     let raw = fx.psbt.serialize();
     let parsed = fastpsbt::Psbt::parse(&raw).unwrap();
-    let (summary, _) = analyze_transaction(&parsed).unwrap();
-    assert_eq!(summary.net_spent_amounts(), [20_000, 21_000]);
-    assert_eq!(summary.external_outputs.len(), 1);
-    assert_eq!(summary.external_outputs[0].output_index, 0);
+    let review = analyze_transaction(&parsed).unwrap().review;
+    assert_eq!(review.net_spent_amounts(), [20_000, 21_000]);
+    assert_eq!(review.external_outputs.len(), 1);
+    assert_eq!(review.external_outputs[0].output_index, 0);
 
     // one share for the recipient's scan key, one for the account's
     let checked = check(&fx, sign(&fx.psbt).unwrap());

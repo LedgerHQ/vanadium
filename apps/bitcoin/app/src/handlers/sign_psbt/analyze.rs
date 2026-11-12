@@ -1,10 +1,10 @@
 //! PSBT structural analysis and deferred cryptographic verification.
 //!
 //! [`analyze_transaction`] performs cheap structural validation of the PSBT and
-//! extracts the data needed both for UI display ([`TransactionSummary`]) and for the
-//! expensive checks in [`DeferredChecks::verify`] (proof-of-registration and script
-//! derivation), which the caller runs concurrently with the approval UI via
-//! `app.spawn_task`.
+//! extracts the data needed for UI display ([`Review`]), for the stages after the
+//! review ([`Accounts`]), and for the expensive checks in [`DeferredChecks::verify`]
+//! (proof-of-registration and script derivation), which the caller runs concurrently
+//! with the approval UI via `app.spawn_task`.
 //!
 //! It also owns [`input_prevout`], the single definition of what an input's prevout is,
 //! which the signing paths reach through [`ensure_prevouts`].
@@ -46,37 +46,45 @@ pub(super) struct DeferredChecks {
     ownership_checks: Vec<OwnershipCheck>,
 }
 
+/// The result of [`analyze_transaction`].
+pub(super) struct Analysis {
+    pub(super) accounts: Accounts,
+    pub(super) review: Review,
+    pub(super) deferred_checks: DeferredChecks,
+}
+
 /// An output that pays to none of the PSBT's accounts.
 pub(super) struct ExternalOutput {
     pub(super) output_index: usize,
+    pub(super) amount: u64,
     pub(super) destination: Destination,
     /// `Some(name)` if the output carries a valid id_auth proof from a registered identity key.
     pub(super) auth_name: Option<String>,
 }
 
-/// What the transaction takes from an account, with its inputs, and gives back to it, with its
-/// outputs.
-#[derive(Default)]
-pub(super) struct AccountAmounts {
+/// An account of the PSBT, as the review shows it: what the transaction takes from it, with its
+/// inputs, and gives back to it, with its outputs.
+pub(super) struct ReviewedAccount {
+    pub(super) name: Option<String>,
     pub(super) spent: u64,
     pub(super) received: u64,
+    /// Whether any input or output of the transaction is the account's.
+    pub(super) is_used: bool,
 }
 
-/// The result of analyzing a PSBT: lightweight data needed for UI display and signing.
+/// What the review of the transaction shows.
 ///
 /// All its amounts are at most [`Amount::MAX_MONEY`].
-pub(super) struct TransactionSummary {
-    pub(super) accounts: Vec<PsbtAccount>,
-    pub(super) account_names: Vec<Option<String>>,
-    inputs: Vec<AnalyzedInput>,
-    pub(super) account_amounts: Vec<AccountAmounts>,
+pub(super) struct Review {
+    /// The accounts, in the order of the PSBT.
+    pub(super) accounts: Vec<ReviewedAccount>,
     pub(super) external_outputs: Vec<ExternalOutput>,
     pub(super) inputs_total_amount: u64,
     pub(super) outputs_total_amount: u64,
     pub(super) warn_unverified_inputs: bool,
 }
 
-impl TransactionSummary {
+impl Review {
     pub(super) fn fee(&self) -> u64 {
         self.inputs_total_amount - self.outputs_total_amount
     }
@@ -84,10 +92,25 @@ impl TransactionSummary {
     /// What the transaction takes from each account, net of what it gives back to it.
     #[cfg(test)]
     pub(super) fn net_spent_amounts(&self) -> Vec<i64> {
-        self.account_amounts
+        self.accounts
             .iter()
-            .map(|amounts| amounts.spent as i64 - amounts.received as i64)
+            .map(|account| account.spent as i64 - account.received as i64)
             .collect()
+    }
+}
+
+/// The accounts of the PSBT, and the account that each of its inputs spends from: what the
+/// deferred checks, silent payments and signing need.
+pub(super) struct Accounts {
+    pub(super) accounts: Vec<PsbtAccount>,
+    pub(super) names: Vec<Option<String>>,
+    inputs: Vec<AnalyzedInput>,
+}
+
+impl Accounts {
+    /// The name of the account `account_id`, the empty one for an account without a name.
+    pub(super) fn name(&self, account_id: usize) -> &str {
+        self.names[account_id].as_deref().unwrap_or("")
     }
 
     /// The account that input `input_index` spends from, with the input's coordinates in it.
@@ -132,7 +155,7 @@ pub(super) enum InputAccount<'a> {
 
 /// The accounts a PSBT declares in its global section, with their names and the raw
 /// proofs of registration whose validation is deferred.
-struct Accounts {
+struct DeclaredAccounts {
     accounts: Vec<PsbtAccount>,
     names: Vec<Option<String>>,
     proofs: Vec<[u8; 32]>,
@@ -167,7 +190,7 @@ fn check_output_coordinates(
     }
 }
 
-fn read_accounts(psbt: &fastpsbt::Psbt) -> Result<Accounts, Error> {
+fn read_accounts(psbt: &fastpsbt::Psbt) -> Result<DeclaredAccounts, Error> {
     let accounts = psbt
         .get_accounts()
         .map_err(|_| Error::FailedToGetAccounts)?;
@@ -190,7 +213,7 @@ fn read_accounts(psbt: &fastpsbt::Psbt) -> Result<Accounts, Error> {
         );
     }
 
-    Ok(Accounts {
+    Ok(DeclaredAccounts {
         accounts,
         names,
         proofs,
@@ -549,23 +572,27 @@ fn add_amount(total: &mut u64, amount: u64) -> Result<(), Error> {
 }
 
 /// Perform cheap structural validation of the PSBT and extract the data needed for
-/// UI display ([`TransactionSummary`]) and deferred cryptographic verification
-/// ([`DeferredChecks`]).
+/// UI display ([`Review`]), for the stages after the review ([`Accounts`]), and for
+/// deferred cryptographic verification ([`DeferredChecks`]).
 ///
 /// Expensive operations (proof-of-registration validation, script derivation) are NOT
 /// performed here — they are deferred to [`DeferredChecks::verify`].
-pub(super) fn analyze_transaction(
-    psbt: &fastpsbt::Psbt,
-) -> Result<(TransactionSummary, DeferredChecks), Error> {
-    let Accounts {
+pub(super) fn analyze_transaction(psbt: &fastpsbt::Psbt) -> Result<Analysis, Error> {
+    let DeclaredAccounts {
         accounts,
-        names: account_names,
+        names,
         proofs: account_proofs,
     } = read_accounts(psbt)?;
     let identity_key_names = read_identity_keys(psbt)?;
 
-    let mut account_amounts: Vec<AccountAmounts> = (0..accounts.len())
-        .map(|_| AccountAmounts::default())
+    let mut reviewed_accounts: Vec<ReviewedAccount> = names
+        .iter()
+        .map(|name| ReviewedAccount {
+            name: name.clone(),
+            spent: 0,
+            received: 0,
+            is_used: false,
+        })
         .collect();
     let mut external_outputs = Vec::new();
     let mut inputs_total_amount: u64 = 0;
@@ -605,7 +632,9 @@ pub(super) fn analyze_transaction(
 
         let value = utxo.prevout.value.to_sat();
         add_amount(&mut inputs_total_amount, value)?;
-        add_amount(&mut account_amounts[account_id as usize].spent, value)?;
+        let reviewed = &mut reviewed_accounts[account_id as usize];
+        add_amount(&mut reviewed.spent, value)?;
+        reviewed.is_used = true;
         inputs.push(analyzed);
     }
 
@@ -632,15 +661,15 @@ pub(super) fn analyze_transaction(
             &identity_key_names,
         )? {
             AnalyzedOutput::Internal(check) => {
-                add_amount(
-                    &mut account_amounts[check.account_id as usize].received,
-                    amount,
-                )?;
+                let reviewed = &mut reviewed_accounts[check.account_id as usize];
+                add_amount(&mut reviewed.received, amount)?;
+                reviewed.is_used = true;
                 ownership_checks.push(check);
             }
             AnalyzedOutput::External(destination, auth_name) => {
                 external_outputs.push(ExternalOutput {
                     output_index,
+                    amount,
                     destination,
                     auth_name,
                 });
@@ -652,35 +681,33 @@ pub(super) fn analyze_transaction(
         return Err(Error::InputsLessThanOutputs);
     }
 
-    let summary = TransactionSummary {
-        accounts,
-        account_names,
-        inputs,
-        account_amounts,
-        external_outputs,
-        inputs_total_amount,
-        outputs_total_amount,
-        warn_unverified_inputs,
-    };
-
-    Ok((
-        summary,
-        DeferredChecks {
+    Ok(Analysis {
+        accounts: Accounts {
+            accounts,
+            names,
+            inputs,
+        },
+        review: Review {
+            accounts: reviewed_accounts,
+            external_outputs,
+            inputs_total_amount,
+            outputs_total_amount,
+            warn_unverified_inputs,
+        },
+        deferred_checks: DeferredChecks {
             account_proofs,
             ownership_checks,
         },
-    ))
+    })
 }
 
 impl DeferredChecks {
     /// Runs the expensive checks. The caller drives this on a background task so it
     /// overlaps with the approval UI, yielding between checks to stay responsive.
-    pub(super) async fn verify(&self, summary: &TransactionSummary) -> Result<(), Error> {
-        let accounts = &summary.accounts;
-
+    pub(super) async fn verify(&self, accounts: &Accounts) -> Result<(), Error> {
         // Verify proof-of-registration for each account
-        for (account_id, account) in accounts.iter().enumerate() {
-            let account_name = summary.account_names[account_id].as_deref().unwrap_or("");
+        for (account_id, account) in accounts.accounts.iter().enumerate() {
+            let account_name = accounts.name(account_id);
             if !is_registered(account, account_name, &self.account_proofs[account_id]) {
                 return Err(Error::InvalidProofOfRegistration);
             }
@@ -689,7 +716,8 @@ impl DeferredChecks {
 
         // Verify that each input/output has the account's destination at its coordinates
         for check in &self.ownership_checks {
-            let destination = accounts[check.account_id as usize].destination(&check.coords)?;
+            let destination =
+                accounts.accounts[check.account_id as usize].destination(&check.coords)?;
             if destination != check.expected {
                 return Err(if check.is_input {
                     Error::InputScriptMismatch
@@ -718,7 +746,7 @@ mod tests {
     use super::super::test_utils::{legacy_pkh_psbt, segwit_wpkh_psbt, serialize_as_psbtv2};
 
     /// Runs the analysis over a PSBT fixture, serialized the way the handler receives it.
-    fn analyze(psbt: &PsbtV2) -> Result<(TransactionSummary, DeferredChecks), Error> {
+    fn analyze(psbt: &PsbtV2) -> Result<Analysis, Error> {
         let serialized = psbt.serialize();
         let parsed = fastpsbt::Psbt::parse(&serialized).unwrap();
         analyze_transaction(&parsed)
@@ -735,14 +763,18 @@ mod tests {
     /// to the one thing that test changes.
     #[test]
     fn unmodified_fixtures_are_accepted() {
-        let (summary, checks) = analyze(&legacy_pkh_psbt()).unwrap();
-        assert_eq!(summary.inputs_total_amount, 1_000_000);
+        let Analysis {
+            review,
+            deferred_checks: checks,
+            ..
+        } = analyze(&legacy_pkh_psbt()).unwrap();
+        assert_eq!(review.inputs_total_amount, 1_000_000);
         // One input belonging to the account; the single output is external.
         assert_eq!(checks.ownership_checks.len(), 1);
         assert!(checks.ownership_checks[0].is_input);
-        assert_eq!(summary.external_outputs.len(), 1);
-        assert_eq!(summary.external_outputs[0].output_index, 0);
-        assert!(!summary.warn_unverified_inputs);
+        assert_eq!(review.external_outputs.len(), 1);
+        assert_eq!(review.external_outputs[0].output_index, 0);
+        assert!(!review.warn_unverified_inputs);
 
         assert!(analyze(&segwit_wpkh_psbt()).is_ok());
     }
@@ -881,8 +913,8 @@ mod tests {
         let mut psbt = segwit_wpkh_psbt();
         psbt.inputs[0].remove(PSBT_IN_NON_WITNESS_UTXO, &[]);
 
-        let (summary, _) = analyze(&psbt).unwrap();
-        assert!(summary.warn_unverified_inputs);
+        let review = analyze(&psbt).unwrap().review;
+        assert!(review.warn_unverified_inputs);
     }
 
     #[test]
