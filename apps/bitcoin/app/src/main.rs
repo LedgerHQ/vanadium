@@ -27,7 +27,7 @@ async fn handle_request(
     match request {
         Request::GetVersion => Ok(handle_get_version()),
         Request::Exit => sdk::exit(0),
-        Request::GetMasterFingerprint { tree } => handle_get_master_fingerprint(app, *tree),
+        Request::GetMasterFingerprint { tree } => handle_get_master_fingerprint(*tree),
         Request::GetExtendedPubkey {
             tree,
             path,
@@ -80,24 +80,25 @@ async fn handle_request(
     }
 }
 
+/// The request that `request` encodes, which must have no trailing bytes.
+fn decode_request(request: &[u8]) -> Result<Request, common::errors::Error> {
+    let mut decoder = minicbor::Decoder::new(request);
+    let decoded = decoder
+        .decode::<Request>()
+        .map_err(|_| common::errors::Error::InvalidRequest)?;
+    if decoder.position() != request.len() {
+        return Err(common::errors::Error::InvalidRequest);
+    }
+    Ok(decoded)
+}
+
 #[sdk::handler]
 async fn process_message(app: &mut App, request: &[u8]) -> Vec<u8> {
-    let mut decoder = minicbor::Decoder::new(request);
-    let Ok(decoded_request) = decoder.decode::<Request>() else {
-        return minicbor::to_vec(&Response::Error {
-            error: common::errors::Error::InvalidRequest,
-        })
-        .unwrap();
+    let response = match decode_request(request) {
+        Ok(request) => handle_request(app, &request).await,
+        Err(error) => Err(error),
     };
-    if decoder.position() != request.len() {
-        return minicbor::to_vec(&Response::Error {
-            error: common::errors::Error::InvalidRequest,
-        })
-        .unwrap();
-    }
-    let response = handle_request(app, &decoded_request)
-        .await
-        .unwrap_or_else(|error| Response::Error { error });
+    let response = response.unwrap_or_else(|error| Response::Error { error });
     minicbor::to_vec(&response).unwrap()
 }
 

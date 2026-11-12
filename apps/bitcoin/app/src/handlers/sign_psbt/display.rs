@@ -11,8 +11,10 @@ use common::errors::Error;
 
 use sdk::ux::{Icon, TagValue};
 
+use common::network::COIN_TICKER;
+
 use crate::{
-    constants::{COIN_TICKER, THRESHOLD_WARN_HIGH_FEES_AMOUNT, THRESHOLD_WARN_HIGH_FEES_PERCENT},
+    constants::{THRESHOLD_WARN_HIGH_FEES_AMOUNT, THRESHOLD_WARN_HIGH_FEES_PERCENT},
     ux,
 };
 

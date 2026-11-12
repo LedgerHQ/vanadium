@@ -2,7 +2,7 @@
 //! `m/352'/1'/n'/1'/0` and the spend key at `m/352'/1'/n'/0'/0`, in the standard tree (coin type 1,
 //! for the test networks).
 
-use common::{account::SilentPaymentAccount, errors::Error};
+use common::{account::SilentPaymentAccount, errors::Error, network::COIN_TYPE};
 use sdk::curve::{Secp256k1, Secp256k1Scalar};
 
 use crate::bip32::{derive_hd_node, KeyTree};
@@ -14,7 +14,7 @@ fn derive(account_index: u32, branch: u32) -> Result<Secp256k1Scalar, Error> {
     if account_index >= H {
         return Err(Error::InvalidParameter);
     }
-    let path = [352 | H, 1 | H, account_index | H, branch | H, 0];
+    let path = [352 | H, COIN_TYPE | H, account_index | H, branch | H, 0];
     let hd_node = derive_hd_node(KeyTree::Standard, &path)?;
     Secp256k1Scalar::from_be_bytes(&hd_node.privkey).ok_or(Error::KeyDerivationFailed)
 }
