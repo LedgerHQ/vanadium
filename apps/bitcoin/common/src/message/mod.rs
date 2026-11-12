@@ -177,7 +177,8 @@ pub enum Request {
         #[n(2)]
         registered_identities: Option<Vec<RegisteredIdentityEntry>>,
         /// Optional per-key Schnorr signatures over the cosigner xpubs.
-        /// `key_signatures[i]` covers `keys_info[i]`; `None` means unsigned.
+        /// `key_signatures[i]` covers `keys_info[i]`; `None` means unsigned. If present, it has
+        /// one entry per key.
         #[n(3)]
         key_signatures: Option<Vec<Option<IdentitySignature>>>,
         /// If true and the descriptor template's confusion score is at most
