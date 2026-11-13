@@ -86,15 +86,20 @@ fn add(sum: Option<Secp256k1Point>, p: Secp256k1Point) -> Option<Secp256k1Point>
     })
 }
 
-/// The script of the output that an input spends.
-fn prevout_script(input: &Input) -> ScriptBuf {
+/// The script of the output that an input spends, from its witness UTXO or else from its
+/// non-witness UTXO.
+fn spent_script(input: &Input) -> Option<ScriptBuf> {
     if let Some(txout) = input.get_witness_utxo().unwrap() {
-        return txout.script_pubkey.clone();
+        return Some(txout.script_pubkey.clone());
     }
-    let tx = input.get_non_witness_utxo().unwrap().expect("a prevout");
-    tx.output[input.output_index.unwrap() as usize]
-        .script_pubkey
-        .clone()
+    let tx = input.get_non_witness_utxo().unwrap()?;
+    let txout = tx.output.get(input.output_index? as usize)?;
+    Some(txout.script_pubkey.clone())
+}
+
+/// The script of the output that an input spends, which the input must give.
+fn prevout_script(input: &Input) -> ScriptBuf {
+    spent_script(input).expect("a prevout")
 }
 
 /// Whether an input is eligible: its prevout is P2PKH, P2WPKH, P2SH-P2WPKH, or P2TR without
@@ -237,8 +242,8 @@ fn input_eligibility(psbt: &Psbt) -> Result<(), String> {
         return Ok(());
     }
     for (i, input) in psbt.inputs.iter().enumerate() {
-        if let Some(txout) = input.get_witness_utxo().unwrap() {
-            let spk = txout.script_pubkey.as_bytes();
+        if let Some(spk) = spent_script(input) {
+            let spk = spk.as_bytes();
             let segwit_v2_or_more = (4..=42).contains(&spk.len())
                 && (0x52..=0x60).contains(&spk[0])
                 && spk[1] as usize == spk.len() - 2;
@@ -404,5 +409,5 @@ fn bip375_vectors() {
         }
     }
 
-    assert_eq!((valid.len(), invalid.len()), (20, 23));
+    assert_eq!((valid.len(), invalid.len()), (20, 24));
 }

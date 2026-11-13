@@ -463,7 +463,18 @@ fn check(fx: &Fixture, response: Response) -> Checked {
         .map(|txin| txin.previous_output)
         .collect();
     let codes: Vec<SilentPaymentCode> = recipients.iter().map(|r| r.code.clone()).collect();
-    let expected = sp::create_outputs(a, &outpoints, &codes).unwrap();
+    // BIP-375 gives the outputs to a scan key their k in the order of their codes, sorted
+    // lexicographically, with ties broken by output index
+    let mut order: Vec<usize> = (0..codes.len()).collect();
+    order.sort_by_key(|&i| (codes[i].to_bytes(), recipients[i].output_index));
+    let sorted_codes: Vec<SilentPaymentCode> = order.iter().map(|&i| codes[i].clone()).collect();
+    let mut expected = vec![[0u8; 32]; codes.len()];
+    for (&i, x) in order
+        .iter()
+        .zip(sp::create_outputs(a, &outpoints, &sorted_codes).unwrap())
+    {
+        expected[i] = x;
+    }
     assert_eq!(sp_output_scripts.len(), recipients.len());
     let mut tx = fx.tx.clone();
     for ((script, recipient), x) in sp_output_scripts.iter().zip(&recipients).zip(&expected) {
@@ -627,7 +638,7 @@ fn test_pay_to_silent_payment_codes() {
             },
         ],
         &[
-            // two codes with the same scan key, which get k = 0 and k = 1, and another scan key
+            // two codes with the same scan key, which share the k counter, and another scan key
             Out::Code(code(11, 12), 40_000),
             Out::Script(
                 ScriptBuf::new_p2wpkh(&WPubkeyHash::from_byte_array([2; 20])),
@@ -656,6 +667,37 @@ fn test_pay_to_silent_payment_codes() {
 
     let checked = check(&fx, sign(&fx.psbt).unwrap());
     assert_eq!(checked.signatures.len(), 4);
+}
+
+/// The outputs to the same scan key get their k in the order of their codes, sorted, with ties
+/// broken by output index (BIP-375), whatever the order of the outputs.
+#[test]
+fn test_k_follows_the_sorted_codes() {
+    let segwit = segwit_policy();
+    let (low, high) = match code(11, 12).to_bytes() < code(11, 13).to_bytes() {
+        true => (code(11, 12), code(11, 13)),
+        false => (code(11, 13), code(11, 12)),
+    };
+    let fx = fixture(
+        &[Spend {
+            policy: &segwit,
+            index: 2,
+            amount: 100_000,
+            kind: Kind::SingleKey,
+        }],
+        &[
+            Out::Code(high.clone(), 30_000),
+            Out::Code(low, 30_000),
+            Out::Code(high, 30_000),
+        ],
+    );
+    let ks: Vec<u32> = sp::recipients(&fastpsbt::Psbt::parse(&fx.psbt.serialize()).unwrap())
+        .unwrap()
+        .iter()
+        .map(|recipient| recipient.k)
+        .collect();
+    assert_eq!(ks, [1, 0, 2]);
+    check(&fx, sign(&fx.psbt).unwrap());
 }
 
 /// An input that BIP-352 doesn't count, like a `wsh()` multisig, doesn't enter the shares, and
@@ -771,6 +813,45 @@ fn test_segwit_version_above_1() {
         PSBT_IN_WITNESS_UTXO,
         &[],
         bitcoin::consensus::serialize(&utxo),
+    );
+    assert_eq!(sign(&fx.psbt), Err(Error::SilentPaymentSegwitVersion));
+}
+
+/// BIP-375: no input may spend a segwit version above 1, even if only its non-witness UTXO shows
+/// the spent script, as for a `pkh()` input.
+#[test]
+fn test_segwit_version_above_1_in_non_witness_utxo() {
+    let legacy = policy("pkh(@0/**)", &[LEGACY_KEY]);
+    let mut fx = fixture(
+        &[Spend {
+            policy: &legacy,
+            index: 2,
+            amount: 100_000,
+            kind: Kind::SingleKey,
+        }],
+        &[Out::Code(code(11, 12), 90_000)],
+    );
+    let input = &mut fx.psbt.inputs[0];
+    let mut prev_tx: Transaction =
+        bitcoin::consensus::deserialize(input.get(PSBT_IN_NON_WITNESS_UTXO, &[]).unwrap()).unwrap();
+    let output_index = u32::from_le_bytes(
+        input
+            .get(PSBT_IN_OUTPUT_INDEX, &[])
+            .unwrap()
+            .try_into()
+            .unwrap(),
+    );
+    prev_tx.output[output_index as usize].script_pubkey =
+        ScriptBuf::from_bytes([&[0x52, 0x20][..], &[7; 32]].concat());
+    input.insert(
+        PSBT_IN_NON_WITNESS_UTXO,
+        &[],
+        bitcoin::consensus::serialize(&prev_tx),
+    );
+    input.insert(
+        PSBT_IN_PREVIOUS_TXID,
+        &[],
+        prev_tx.compute_txid().to_byte_array().to_vec(),
     );
     assert_eq!(sign(&fx.psbt), Err(Error::SilentPaymentSegwitVersion));
 }

@@ -42,7 +42,7 @@ BIP-375 also lets each signer add the shares of its own inputs, with a DLEQ proo
 
 ### The order of the outputs to the same scan key
 
-The `k` of each output among the outputs to the same scan key counts them in **output order**, as the reference validator and the test vectors of BIP-375 v0.1.2 do. The text of BIP-375 instead asks to sort the codes of each scan key lexicographically, but its own test vectors only pass in output order. The rule is in `common::silent_payments::recipients`, the one place to change should BIP-375 settle on its text.
+The `k` of each output among the outputs to the same scan key follows BIP-375: the codes are sorted lexicographically, with ties broken by output index, whatever the order of the outputs. The rule is in `common::silent_payments::recipients`.
 
 ## Silent payment accounts
 
