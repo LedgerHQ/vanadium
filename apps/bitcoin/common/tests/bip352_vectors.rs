@@ -364,6 +364,6 @@ fn bip352_vectors() {
         }
     }
     // every test of the file was checked
-    assert_eq!((sending, receiving), (28, 29));
+    assert_eq!((sending, receiving), (29, 30));
     assert!(found > 2323, "the K_max vectors find {found} outputs");
 }
